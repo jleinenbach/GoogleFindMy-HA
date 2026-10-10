@@ -295,14 +295,20 @@ async def test_single_timer_across_multiple_setups(
     hass = _Hass()
     monkeypatch.setattr(gfm, "_ensure_runtime_imports", lambda: None)
 
-    counts = {"later": 0, "interval": 0}
+    counts = {"later": 0, "interval": 0, "url_refresh": 0}
 
     def _fake_later(_hass: Any, _delay: Any, _cb: Any) -> Any:
         counts["later"] += 1
         return lambda: None
 
     def _fake_interval(_hass: Any, _cb: Any, _interval: Any) -> Any:
-        counts["interval"] += 1
+        # `_async_ensure_restart_required_check` arms two independent timers:
+        # the restart watchdog and the daily map-URL refresh. Counting them
+        # apart keeps this test about the watchdog.
+        if getattr(_cb, "__name__", "") == "_scheduled_refresh":
+            counts["url_refresh"] += 1
+        else:
+            counts["interval"] += 1
         return lambda: None
 
     monkeypatch.setattr(gfm, "async_call_later", _fake_later)
@@ -316,6 +322,7 @@ async def test_single_timer_across_multiple_setups(
 
     assert counts["later"] == 1
     assert counts["interval"] == 1
+    assert counts["url_refresh"] == 1  # armed once as well, not once per setup
     assert bucket["restart_check_registered"] is True
     assert callable(bucket["restart_check_initial_unsub"])
     assert callable(bucket["restart_check_unsub"])
@@ -402,14 +409,20 @@ async def test_ensure_rearms_watchdog_after_teardown(
     """
 
     hass = _Hass()
-    counts = {"later": 0, "interval": 0}
+    counts = {"later": 0, "interval": 0, "url_refresh": 0}
 
     def _fake_later(_hass: Any, _delay: Any, _cb: Any) -> Any:
         counts["later"] += 1
         return lambda: None
 
     def _fake_interval(_hass: Any, _cb: Any, _interval: Any) -> Any:
-        counts["interval"] += 1
+        # `_async_ensure_restart_required_check` arms two independent timers:
+        # the restart watchdog and the daily map-URL refresh. Counting them
+        # apart keeps this test about the watchdog.
+        if getattr(_cb, "__name__", "") == "_scheduled_refresh":
+            counts["url_refresh"] += 1
+        else:
+            counts["interval"] += 1
         return lambda: None
 
     monkeypatch.setattr(gfm, "async_call_later", _fake_later)

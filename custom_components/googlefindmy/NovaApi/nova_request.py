@@ -30,7 +30,6 @@ import binascii
 import contextvars
 import logging
 import random
-import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -83,32 +82,11 @@ from ..const import (
 )
 
 if TYPE_CHECKING:
-    from bs4 import BeautifulSoup as _BeautifulSoupType
     from homeassistant.core import HomeAssistant
 else:
-    _BeautifulSoupType = Any
     HomeAssistant = Any
 
-_beautiful_soup_factory: Callable[[str, str], _BeautifulSoupType] | None
-try:
-    from bs4 import BeautifulSoup as _bs_factory
-except (
-    ImportError
-):  # pragma: no cover - optional dependency, covered via fallback branch
-    _beautiful_soup_factory = None
-    _BS4_AVAILABLE = False
-else:
-    _beautiful_soup_factory = cast(
-        "Callable[[str, str], _BeautifulSoupType]", _bs_factory
-    )
-    _BS4_AVAILABLE = True
-
 _LOGGER = logging.getLogger(__name__)
-
-if not _BS4_AVAILABLE:
-    _LOGGER.debug(
-        "BeautifulSoup4 not installed, error response beautification disabled."
-    )
 
 # --- Retry constants ---
 NOVA_MAX_RETRIES = 6
@@ -249,106 +227,99 @@ def _compute_delay(attempt: int, retry_after: str | None) -> float:
     return min(delay, NOVA_MAX_RETRY_AFTER_S)
 
 
-# --- PII Redaction ---
+# --- Error response description ---
 
-_RE_BEARER = re.compile(r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", re.I)
-_RE_EMAIL = re.compile(r"([A-Za-z0-9._%+-])([A-Za-z0-9._%+-]*)(@[^,\s]+)")
-_RE_HEX16 = re.compile(r"\b[0-9a-fA-F]{16,}\b")
-
-
-def _redact(s: str) -> str:
-    """Redact sensitive information from a string for safe logging."""
-    s = _RE_BEARER.sub("Bearer <redacted>", s)
-    s = _RE_EMAIL.sub(r"\1***\3", s)
-    s = _RE_HEX16.sub("<hex-redacted>", s)
-    return s
-
-
-_ERROR_SNIPPET_MAX = 512
-
-
-def _beautify_text(resp_text: str) -> str:
-    """Return a human-readable snippet of a response body for logging purposes."""
-
-    if not resp_text:
-        return ""
-
-    if _BS4_AVAILABLE and _beautiful_soup_factory is not None:
-        try:
-            soup = _beautiful_soup_factory(resp_text, "html.parser")
-            # Extract from <body> only to avoid duplicating <title> content
-            node = soup.body if soup.body else soup
-            text_raw = node.get_text(separator=" ", strip=True)
-            text = str(text_raw)
-        except Exception as err:  # pragma: no cover - defensive logging path
-            _LOGGER.debug(
-                "Failed to parse error response body via BeautifulSoup: %s", err
-            )
-        else:
-            if text:
-                return text[:_ERROR_SNIPPET_MAX]
-
-    return resp_text[:_ERROR_SNIPPET_MAX]
+# google.rpc.Code, the closed enum behind `Status.code`; the name is the
+# diagnostic, the server-supplied `message` is free text and stays out of
+# the record (AGENTS.md section 5: raw API payloads are never logged).
+_RPC_CODE_NAMES: dict[int, str] = {
+    0: "OK",
+    1: "CANCELLED",
+    2: "UNKNOWN",
+    3: "INVALID_ARGUMENT",
+    4: "DEADLINE_EXCEEDED",
+    5: "NOT_FOUND",
+    6: "ALREADY_EXISTS",
+    7: "PERMISSION_DENIED",
+    8: "RESOURCE_EXHAUSTED",
+    9: "FAILED_PRECONDITION",
+    10: "ABORTED",
+    11: "OUT_OF_RANGE",
+    12: "UNIMPLEMENTED",
+    13: "INTERNAL",
+    14: "UNAVAILABLE",
+    15: "DATA_LOSS",
+    16: "UNAUTHENTICATED",
+}
 
 
-def _decode_error_response(content: bytes, http_status: int) -> str:
-    """Decode a Google API error response using smart fallback.
+def _classify_error_body(content: bytes) -> str:
+    """Content class of a non-protobuf error body: html, json, text or binary.
 
-    Google's Nova API returns errors in google.rpc.Status Protobuf format,
-    not as HTML/text. This function attempts to decode the Protobuf first,
-    falling back to text/HTML parsing for load balancer errors.
+    The class is what a load-balancer or maintenance page carries as a
+    diagnostic; its text echoes request parameters and is never logged.
+    Decided on the first non-blank byte, so a stray non-UTF-8 byte deep in
+    an HTML page or a run of leading whitespace does not change the class.
+    No `error-marker` class as in `fcmregister._describe_body`: the
+    `Error=CODE` line is the format of the Android auth endpoints, Nova
+    answers with google.rpc.Status, HTML or plain text.
+    """
+    head = content.lstrip()[:1]
+    if not head:
+        return "empty"
+    if head == b"<":
+        return "html"
+    if head in (b"{", b"["):
+        return "json"
+    probe = content.lstrip()[:64]
+    try:
+        probe.decode("utf-8")
+    except UnicodeDecodeError as err:
+        # A multi-byte character cut by the probe's edge is text, not binary:
+        # the undecodable run then reaches the end of the probe.
+        if err.end != len(probe):
+            return "binary"
+    return "text"
 
-    Args:
-        content: Raw response body bytes.
-        http_status: HTTP status code for context.
 
-    Returns:
-        Human-readable error message for logging.
+def _describe_error_response(content: bytes, http_status: int) -> str:
+    """Describe a Google API error response without quoting it.
 
-    Strategy:
-        1. Try to parse as google.rpc.Status Protobuf (primary)
-        2. Fall back to text/HTML parsing (for load balancer errors, etc.)
+    Google's Nova API returns errors as google.rpc.Status protobuf; load
+    balancers answer with HTML or text. The record names the HTTP status and,
+    for a Status, the RPC code by name plus the size of its message and the
+    number of detail messages; for anything else the content class and the
+    byte count. The body itself, the Status message included, is
+    server-supplied text and never reaches the log or an exception message
+    (AGENTS.md section 5; Auth AGENTS.md "Logging").
     """
     if not content:
         return f"HTTP {http_status} (empty response body)"
 
-    # --- Strategy 1: Try google.rpc.Status Protobuf decoding ---
     if _RPC_STATUS_AVAILABLE and RpcStatus is not None:
         try:
             status = RpcStatus()
             status.ParseFromString(content)
-
-            # Check if we got meaningful data (code or message present)
             if status.code or status.message:
-                rpc_code = status.code if status.code else http_status
-                rpc_message = (
-                    status.message if status.message else "No message provided"
+                code_name = _RPC_CODE_NAMES.get(status.code, "UNRECOGNIZED")
+                return (
+                    f"HTTP {http_status} - RPC {status.code} {code_name}, "
+                    f"message {len(status.message)} chars, "
+                    f"{len(status.details)} detail message(s)"
                 )
-
-                # Log details if present (for debugging)
-                if status.details:
-                    _LOGGER.debug(
-                        "RpcStatus contains %d detail message(s)", len(status.details)
-                    )
-
-                return f"HTTP {http_status} - RPC {rpc_code}: {rpc_message}"
         except ProtobufDecodeError:
-            # Not a valid Protobuf - fall through to text/HTML parsing
+            # Not a valid Protobuf - fall through to the content class
             _LOGGER.debug(
                 "Response body is not a valid google.rpc.Status Protobuf, "
-                "falling back to text parsing"
+                "falling back to content classification"
             )
         except Exception as exc:
             # Unexpected error during Protobuf parsing - log and fall through
             _LOGGER.debug("Unexpected error during RpcStatus decoding: %s", exc)
 
-    # --- Strategy 2: Fall back to text/HTML parsing ---
-    # This handles load balancer errors, maintenance pages, etc.
-    try:
-        text = content.decode(errors="ignore")
-        return _beautify_text(text) or f"HTTP {http_status} (non-decodable response)"
-    except Exception:
-        return f"HTTP {http_status} (failed to decode response body)"
+    return (
+        f"HTTP {http_status} body={_classify_error_body(content)}, {len(content)} bytes"
+    )
 
 
 # --- Custom Exceptions ---
@@ -384,14 +355,20 @@ class NovaError(Exception):
 
 
 class NovaAuthError(NovaError):
-    """Raised on 4xx client errors after retries.
+    """Raised on every non-retryable 4xx client error after retries.
 
-    This is the base class for authentication errors. It may be transient
-    (e.g., temporary 401 after token refresh due to backend propagation delay)
-    or permanent (e.g., AAS token invalidated by Google).
+    The name is narrower than the type. This is the base class for
+    authentication errors, but the transport raises it for any 4xx that
+    ``HTTP_RETRY_ELIGIBLE`` does not cover, which is every one except 408 and
+    429. Do NOT read the type as a verdict on the credentials: ask
+    :func:`is_credential_rejection`, which is what every handler in this
+    integration does. It may be transient (e.g., temporary 401 after token
+    refresh due to backend propagation delay) or permanent (e.g., AAS token
+    invalidated by Google).
 
     Attributes:
-        status: HTTP status code (typically 401 or 403).
+        status: HTTP status code. Any non-retryable 4xx: 401 and 403 name the
+            credentials, 400, 404, 405, 409 and 422 name a rejected request.
         detail: Human-readable error detail.
         is_permanent: If True, re-authentication is required. If False,
             the error may resolve on its own in subsequent poll cycles.
@@ -420,6 +397,52 @@ class NovaAuthPermanentError(NovaAuthError):
 
     def __init__(self, status: int, detail: str | None = None):
         super().__init__(status, detail, is_permanent=True)
+
+
+_CREDENTIAL_REJECTION_STATUSES = frozenset({401, 403})
+
+
+def is_credential_rejection(err: NovaAuthError) -> bool:
+    """Answer whether this NovaAuthError really names a credential problem.
+
+    The type is wider than its name. This module raises it for EVERY
+    non-retryable 4xx (see the raise below the HTTP_RETRY_ELIGIBLE branch,
+    whose own comment names "403 Forbidden, 404 Not Found"), and
+    HTTP_RETRY_ELIGIBLE holds no 4xx besides 408 and 429, so 400, 404, 405,
+    409 and 422 all arrive as "auth". A 401 that survived the refresh
+    sequence is raised separately with is_permanent=True, which leaves 403
+    as the only plain credential rejection a handler sees.
+
+    Reading the type alone therefore tells a user with a deleted device to
+    check their sign-in. Every handler in this integration branches on THIS
+    predicate instead; api._classify_nova_auth_error is its sound-path
+    adapter. Keep them in step when either moves.
+
+    Permanence outranks the status: NovaAuthPermanentError exists to say
+    "re-authentication is definitively required", so it stays a credential
+    rejection whatever status it carries.
+
+    An error without a readable status keeps the conservative verdict. That
+    case is a test double or a future subclass, not an observed server
+    answer, and the conservative reading of a type named "auth" is auth.
+
+    Args:
+        err: The error the transport raised.
+
+    Returns:
+        True when the refusal names the credentials (permanent, 401, 403, or
+        no readable status), False for every other client rejection.
+
+    The doctest form is deliberately avoided here: `pyproject.toml` does not
+    pass `--doctest-modules`, so a `>>>` block would read like a verified
+    assurance while never running. The behaviour is pinned by
+    `tests/test_nova_request.py` instead, which asserts among other rows that a
+    `NovaAuthError(404, "gone")` yields False.
+    """
+    if getattr(err, "is_permanent", False):
+        return True
+    status = getattr(err, "status", None)
+    return status is None or status in _CREDENTIAL_REJECTION_STATUSES
 
 
 class NovaRateLimitError(NovaError):
@@ -674,7 +697,7 @@ class TTLPolicy:
     # ADM tokens typically last 1-4 hours.
     MIN_TTL_FOR_LEARNING_SEC = 300  # 5 minutes
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0917
         self,
         username: str,
         logger: logging.Logger,
@@ -1340,7 +1363,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
 
     Raises:
         ValueError: if the hex_payload is invalid or username is unavailable.
-        NovaAuthError: on 4xx client errors.
+        NovaAuthError: on non-retryable 4xx client errors; use
+            is_credential_rejection to tell a credential rejection from a
+            rejected request.
         NovaRateLimitError: on 429 errors after all retries.
         NovaHTTPError: on 5xx server errors after all retries.
         NovaError: on other unrecoverable errors like network issues after retries.
@@ -1544,7 +1569,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         return cast(bytes, content).hex()
 
                     # Decode error response: try Protobuf first, then text/HTML
-                    text_snippet = _redact(_decode_error_response(content, status))
+                    text_snippet = _describe_error_response(content, status)
 
                     if status == HTTP_UNAUTHORIZED:
                         # 401 Retry Sequence (OAuth → AAS → ADM token chain):
@@ -1750,6 +1775,21 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     # Non-retryable errors: distinguish between client (4xx) and server (5xx)
                     # - 4xx: Client errors (e.g., 403 Forbidden, 404 Not Found) → NovaAuthError
                     # - 5xx: Server errors (e.g., 501 Not Implemented, 505) → NovaHTTPError
+                    #
+                    # This raise is why the type name is wider than its content:
+                    # 400, 404, 405, 409 and 422 all leave here as "auth".
+                    # Consumers MUST call is_credential_rejection instead of
+                    # reading the type. Splitting a separate exception class off
+                    # here would let the typing carry the truth, but it is a
+                    # behaviour change of its own. Measured over the AST: ten
+                    # try blocks catch this class. Eight carry a broad
+                    # `except Exception` in the same block and would swallow a
+                    # new class under a name that hides the status; the two
+                    # sound-request handlers catch it in a tuple with no broad
+                    # handler at all, so there a new class would propagate
+                    # uncaught instead. Two opposite failure modes, which is why
+                    # the follow-up needs an exhaustiveness test over
+                    # NovaError.__subclasses__() before it is attempted.
                     if status >= HTTP_INTERNAL_SERVER_ERROR:
                         raise NovaHTTPError(status, text_snippet)
                     raise NovaAuthError(status, text_snippet)

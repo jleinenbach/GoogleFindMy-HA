@@ -28,11 +28,6 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
-try:  # Home Assistant 2025.5+: attribute constant exposed
-    from homeassistant.const import ATTR_ENTRY_ID
-except ImportError:  # pragma: no cover - forward compatibility for HA < 2025.5
-    ATTR_ENTRY_ID = "entry_id"
-
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
@@ -47,12 +42,28 @@ from .const import (
     SERVICE_STOP_SOUND,
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
+    PlaySoundOutcome,
+    StopSoundOutcome,
     map_token_hex_digest,
     map_token_secret_seed,
     service_device_identifier,
 )
+from .coordinator.helpers.registry import (
+    OwnershipIntent,
+    detect_device_registry_capabilities,
+    device_owning_entry_ids,
+    execute_ownership_plan,
+    extract_subentry_links,
+    plan_device_ownership,
+    read_device_ownership,
+    resolve_device_by_identifiers,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Service field name of ``rebuild_registry`` (see ``services.yaml``); Home
+# Assistant core has no ``ATTR_ENTRY_ID`` constant in ``homeassistant.const``.
+ATTR_ENTRY_ID: str = "entry_id"
 
 try:
     from homeassistant.exceptions import ConfigEntryError
@@ -108,40 +119,101 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         _LOGGER.warning("Device registry cleanup skipped: No entries bucket found.")
         return
 
+    capability_cache: dict[int, Any] = {}
+
+    def _registry_capabilities(update_call: Any) -> Any:
+        """Return the capability profile for ``update_call``, probed once.
+
+        The contract calls this choice one that is "made once, behind a
+        signature probe" (``docs/AI_DEPRECATIONS_GUIDE.md``, section VI), and
+        the coordinator caches it for the same reason. Without the cache this
+        service runs ``inspect.signature`` once per device of every entry.
+        """
+        key = id(update_call)
+        cached = capability_cache.get(key)
+        if cached is None:
+            cached = detect_device_registry_capabilities(update_call)
+            capability_cache[key] = cached
+        return cached
+
     def _detach_hub_link_from_device(
         device_id: str,
         *,
+        device: Any,
         context_label: str,
         error_log_template: str,
     ) -> bool:
-        """Remove the hub link from ``device_id`` with legacy kwarg support."""
+        """Give up this entry's hub link on ``device_id``.
+
+        The intent is DETACH on the hub link, that is the link of a device
+        sitting directly on the config entry rather than in one of its
+        subentries. ``plan_device_ownership`` turns it into the keywords the
+        installed core understands; this function never names them. See
+        ``AGENTS.md``, "Registry updates", and ``docs/AI_DEPRECATIONS_GUIDE.md``,
+        section VI.
+
+        ``device`` is not optional and not a convenience. From Core 2026.8 a
+        device has a single owning entry, so giving that entry up removes the
+        device and every entity on it. The planner therefore refuses to act on
+        an ownership state it cannot read, and the device entry is where that
+        state is read from. Both call sites already hold it.
+
+        Args:
+            device_id: The device to detach.
+            device: The device registry entry for ``device_id``.
+            context_label: What the device is, for the debug log.
+            error_log_template: Log template taking (entry_id, device_id, error).
+
+        Returns:
+            True when the detach was carried out or the core had nothing to do,
+            False when the registry call failed.
+        """
+
+        update_call = getattr(dev_reg, "async_update_device", None)
+        if not callable(update_call):  # pragma: no cover - defensive guard
+            _LOGGER.error(
+                error_log_template,
+                entry_id,
+                device_id,
+                "device registry has no async_update_device",
+            )
+            return False
+
+        # Unknown ownership and "owned by nobody" are two different statements,
+        # and on a single-owner core the difference decides between a refusal
+        # and a deletion. ``read_device_ownership`` draws that line and carries
+        # the reasoning about the two half-known shapes.
+        current = read_device_ownership(device)
 
         try:
-            dev_reg.async_update_device(
-                device_id,
-                remove_config_entry_id=entry_id,
-                remove_config_subentry_id=None,
+            plan = plan_device_ownership(
+                OwnershipIntent.DETACH,
+                caps=_registry_capabilities(update_call),
+                device_id=device_id,
+                entry_id=entry_id,
+                # Named rather than omitted so the intent is readable here. On
+                # the DETACH path the two are equivalent: the planner maps an
+                # omitted argument onto ``None`` right away. The distinction
+                # carries weight on the legacy MOVE path, not on this one.
+                detach_subentry_id=None,
+                current=current,
             )
-        except TypeError as err:
-            if "remove_config_subentry_id" not in str(err):
-                _LOGGER.error(error_log_template, entry_id, device_id, err)
-                return False
+        except ValueError as err:
+            # The planner refuses to guess. Reported, never attempted.
+            _LOGGER.error(error_log_template, entry_id, device_id, err)
+            return False
+
+        if not plan:
             _LOGGER.debug(
-                "[%s] Hub Cleanup: Retrying device registry update for %s %s without remove_config_subentry_id after %s",
+                "[%s] Hub Cleanup: %s %s does not sit on the hub link; nothing to detach",
                 entry_id,
                 context_label,
                 device_id,
-                err,
             )
-            try:
-                dev_reg.async_update_device(
-                    device_id,
-                    remove_config_entry_id=entry_id,
-                )
-            except Exception as retry_err:  # pragma: no cover - defensive guard
-                _LOGGER.error(error_log_template, entry_id, device_id, retry_err)
-                return False
             return True
+
+        try:
+            execute_ownership_plan(dev_reg, plan)
         except Exception as err:  # pragma: no cover - defensive guard
             _LOGGER.error(error_log_template, entry_id, device_id, err)
             return False
@@ -238,44 +310,16 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         return set()
 
     def _entry_links_for_device(device: Any, target_entry_id: str) -> set[str | None]:
-        """Return normalized subentry identifiers for ``target_entry_id``."""
+        """Return normalized subentry identifiers for ``target_entry_id``.
+
+        Delegates to the shared accessor, which reads the scalar ownership
+        fields before the ``config_entries_subentries`` shim that Core 2026.10
+        reports on every read.
+        """
 
         if not isinstance(target_entry_id, str) or not target_entry_id:
             return set()
-
-        mapping_obj = getattr(device, "config_entries_subentries", None)
-        normalized: set[str | None] = set()
-        if isinstance(mapping_obj, Mapping):
-            raw_links = mapping_obj.get(target_entry_id)
-            if isinstance(raw_links, str):
-                normalized.add(raw_links)
-            elif isinstance(raw_links, Iterable) and not isinstance(
-                raw_links, (str, bytes)
-            ):
-                for candidate in raw_links:
-                    if isinstance(candidate, str):
-                        normalized.add(candidate)
-                    elif candidate is None:
-                        normalized.add(None)
-            elif raw_links is None and target_entry_id in mapping_obj:
-                normalized.add(None)
-
-        if not normalized:
-            fallback = getattr(device, "config_subentry_id", None)
-            if isinstance(fallback, str):
-                normalized.add(fallback)
-            elif fallback is None:
-                linked_entries = getattr(device, "config_entries", None)
-                if isinstance(linked_entries, Iterable):
-                    for candidate_entry_id in linked_entries:
-                        if (
-                            isinstance(candidate_entry_id, str)
-                            and candidate_entry_id == target_entry_id
-                        ):
-                            normalized.add(None)
-                            break
-
-        return normalized
+        return extract_subentry_links(device, target_entry_id)
 
     processed_coordinators = 0
     seen_coordinators: set[int] = set()
@@ -345,11 +389,15 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             continue
 
         entry_id = entry.entry_id
-        _LOGGER.info("[%s] Hub Cleanup: Processing entry '%s'", entry_id, entry.title)
+        # The entry title is never logged: the config flow sets it to the account
+        # e-mail. The entry ID identifies the entry just as well.
+        _LOGGER.info("[%s] Hub Cleanup: Processing entry", entry_id)
 
         # 1. Find the correct Service Device ID
         service_device_ident = service_device_identifier(entry_id)
-        service_device = dev_reg.async_get_device(identifiers={service_device_ident})
+        service_device = resolve_device_by_identifiers(
+            dev_reg, (service_device_ident,), entry_id=entry_id
+        )
         service_device_id = getattr(service_device, "id", None)
         service_meta = None
         get_metadata = getattr(coordinator, "get_subentry_metadata", None)
@@ -372,8 +420,8 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             # Try to ensure it exists before continuing
             try:
                 coordinator._ensure_service_device_exists()
-                service_device = dev_reg.async_get_device(
-                    identifiers={service_device_ident}
+                service_device = resolve_device_by_identifiers(
+                    dev_reg, (service_device_ident,), entry_id=entry_id
                 )
                 service_device_id = getattr(service_device, "id", None)
                 if not service_device_id:
@@ -409,6 +457,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             )
             if _detach_hub_link_from_device(
                 service_device_id,
+                device=service_device,
                 context_label="service device",
                 error_log_template="[%s] Hub Cleanup: Failed to detach hub entry from service device %s: %s",
             ):
@@ -491,7 +540,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
         # 3. Find and remove orphaned devices
         devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
-        cleaned_devices_entry = 1 if service_cleanup_applied else 0
+        entry_cleaned_devices = 1 if service_cleanup_applied else 0
 
         for device in devices_for_entry:
             if device is None or not hasattr(device, "id"):
@@ -502,36 +551,30 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             # Check if the device is correctly linked to the tracker subentry
-            tracker_linked_entry_ids: set[str] = set()
-            device_subentry_mapping = getattr(device, "config_entries_subentries", None)
-            if isinstance(device_subentry_mapping, Mapping):
-                for (
-                    mapped_entry_id,
-                    mapped_subentries,
-                ) in device_subentry_mapping.items():
-                    normalized_entry_id = str(mapped_entry_id)
-                    if not normalized_entry_id:
-                        continue
+            # One accessor for every core: the owning entries come from the
+            # scalar ``config_entry_id`` where it exists (2026.8+) and from the
+            # legacy set below that, and the subentry links per entry come from
+            # ``extract_subentry_links``. Neither reads the
+            # ``config_entries_subentries`` shim that Core 2026.10 reports.
+            # Only a real subentry id can confirm a tracker link; ``None`` in
+            # the link set is the hub link and must not match a missing id.
+            tracker_linked_entry_ids: set[str] = (
+                {
+                    owner_entry_id
+                    for owner_entry_id in device_owning_entry_ids(device)
+                    if owner_entry_id
+                    and correct_tracker_subentry_id
+                    in extract_subentry_links(device, owner_entry_id)
+                }
+                if isinstance(correct_tracker_subentry_id, str)
+                and correct_tracker_subentry_id
+                else set()
+            )
 
-                    normalized_subentries: set[str] = set()
-                    if isinstance(mapped_subentries, str):
-                        if mapped_subentries:
-                            normalized_subentries = {mapped_subentries}
-                    elif isinstance(mapped_subentries, Iterable):
-                        normalized_subentries = {
-                            candidate
-                            for candidate in mapped_subentries
-                            if isinstance(candidate, str) and candidate
-                        }
-
-                    if correct_tracker_subentry_id in normalized_subentries:
-                        tracker_linked_entry_ids.add(normalized_entry_id)
-
-            raw_links: set[str] = getattr(device, "config_entries", set()) or set()
             linked_entry_ids = {
-                str(link_entry_id)
-                for link_entry_id in raw_links
-                if isinstance(link_entry_id, str) and link_entry_id
+                link_entry_id
+                for link_entry_id in device_owning_entry_ids(device)
+                if link_entry_id
             }
 
             has_hub_link = entry_id in linked_entry_ids
@@ -581,18 +624,19 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 )
             if _detach_hub_link_from_device(
                 device.id,
+                device=device,
                 context_label="device",
                 error_log_template="[%s] Hub Cleanup: Failed to detach hub entry from device %s: %s",
             ):
-                cleaned_devices_entry += 1
+                entry_cleaned_devices += 1
 
-        if cleaned_devices_entry > 0:
+        if entry_cleaned_devices > 0:
             _LOGGER.info(
                 "[%s] Hub Cleanup: Removed %d orphaned device links.",
                 entry_id,
-                cleaned_devices_entry,
+                entry_cleaned_devices,
             )
-            cleaned_devices_total += cleaned_devices_entry
+            cleaned_devices_total += entry_cleaned_devices
 
     _LOGGER.info(
         "Device registry cleanup phase complete. Removed %d total orphaned device links.",
@@ -799,7 +843,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         dev_reg = dr.async_get(hass)
         dev = dev_reg.async_get(device_id)
         if dev:
-            for entry_id in dev.config_entries:
+            for entry_id in device_owning_entry_ids(dev):
                 entry = _entry_for_id(hass, entry_id)
                 # Prefer entry.runtime_data (2026 standard), then entries bucket.
                 runtime = getattr(entry, "runtime_data", None)
@@ -885,14 +929,46 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             )
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
-            ok = await runtime.coordinator.async_play_sound(canonical_id)
-            if not ok:
-                placeholders = {"device_id": str(raw_device_id)}
+            outcome = await runtime.coordinator.async_play_sound(canonical_id)
+            placeholders = {"device_id": str(raw_device_id)}
+            if outcome is PlaySoundOutcome.SUPPRESSED:
                 raise _service_validation_error(
                     "Play sound suppressed for device '{device_id}'".format(
                         **placeholders
                     ),
-                    translation_key="play_sound_failed",
+                    # NOT play_sound_failed: that template carries an {error}
+                    # placeholder this call site cannot fill, so HA would render
+                    # the literal "{error}" (it formats under suppress(KeyError)).
+                    # Same defect class as the stop path, same fix.
+                    translation_key="play_sound_suppressed",
+                    translation_placeholders=placeholders,
+                )
+            if outcome is not PlaySoundOutcome.ACCEPTED:
+                # Closed set, closed handling, and written in the negative form
+                # for the same reason the stop path is: the safe default here is
+                # failure. A value from outside the enum -- a bool from a stale
+                # test double, a member added later without visiting this site --
+                # must not be reported to the user as a ring that started.
+                #
+                # FAILED and that stray value share one message on purpose. The
+                # play path has exactly two user-facing outcomes, and the
+                # difference between them is what the user should DO: wait, or
+                # look at the log and act. An unknown value belongs to the
+                # second group; splitting it off would need a third message in
+                # eleven files that says the same thing. The contract breach
+                # itself is not silent, it goes to the log below.
+                if outcome is not PlaySoundOutcome.FAILED:
+                    # No device id: AGENTS.md section 5 forbids logging them, and
+                    # this line adds nothing by naming one -- the breach is in the
+                    # coordinator's contract, not in a particular tracker.
+                    _LOGGER.error(
+                        "async_play_sound returned %r, which is not a "
+                        "PlaySoundOutcome; reporting it as a failure",
+                        outcome,
+                    )
+                raise _service_validation_error(
+                    "Play sound for '{device_id}' was rejected".format(**placeholders),
+                    translation_key="play_sound_rejected",
                     translation_placeholders=placeholders,
                 )
         except ServiceValidationError:
@@ -930,24 +1006,69 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "Stop sound request UUID for '{device_id}' is invalid ({request_uuid}).".format(
                     **placeholders
                 ),
-                translation_key="stop_sound_failed",
+                # Own key, not `stop_sound_failed`: that template carries an
+                # `{error}` placeholder this call site cannot fill, and HA
+                # swallows the resulting KeyError, leaving the user with the raw
+                # template. Same defect the suppressed-stop branch already
+                # avoids; fixed here as a class, not as an instance.
+                translation_key="stop_sound_invalid_uuid",
                 translation_placeholders=placeholders,
             )
-        request_uuid: str | None
-        if request_uuid_raw is None:
-            request_uuid = None
-        else:
-            request_uuid = request_uuid_raw
+        # Blank is normalised to None one layer down, in
+        # `coordinator.async_stop_sound`, so that every caller of that method
+        # (not just this handler) gets the cached-key fallback.
+        request_uuid: str | None = request_uuid_raw
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
-            ok = await runtime.coordinator.async_stop_sound(canonical_id, request_uuid)
-            if not ok:
-                placeholders = {"device_id": str(raw_device_id)}
+            outcome = await runtime.coordinator.async_stop_sound(
+                canonical_id, request_uuid
+            )
+            placeholders = {"device_id": str(raw_device_id)}
+            if outcome is StopSoundOutcome.SUPPRESSED:
                 raise _service_validation_error(
                     "Stop sound suppressed for device '{device_id}'".format(
                         **placeholders
                     ),
-                    translation_key="stop_sound_failed",
+                    translation_key="stop_sound_suppressed",
+                    translation_placeholders=placeholders,
+                )
+            if outcome is StopSoundOutcome.FAILED:
+                # Distinct from SUPPRESSED, and not by distance travelled:
+                # auth failures, 401/403, server rejections, rate limits,
+                # network errors, empty replies AND a missing action token all
+                # arrive here, because none of them is answered by waiting a
+                # moment. SUPPRESSED is reserved for the one condition that is
+                # -- a push transport that has not come up yet. See
+                # StopSoundOutcome.FAILED for the full rule. So this branch
+                # gets its own message and points at the log, which does carry
+                # the specific cause.
+                raise _service_validation_error(
+                    "Stop sound for '{device_id}' was rejected".format(**placeholders),
+                    translation_key="stop_sound_rejected",
+                    translation_placeholders=placeholders,
+                )
+            if outcome is StopSoundOutcome.UNCORRELATED:
+                # Submitted, but nothing proves an effect: reporting plain
+                # success here would be misinformation (BSkando#195).
+                raise _service_validation_error(
+                    "Stop sound for '{device_id}' could not be matched to a "
+                    "running ring; it may keep playing.".format(**placeholders),
+                    translation_key="stop_sound_uncorrelated",
+                    translation_placeholders=placeholders,
+                )
+            if outcome is not StopSoundOutcome.CANCELLED:
+                # Closed set, closed handling. Silence here would mean that any
+                # value outside the enum -- a bool from a stale test double, a
+                # future member added without visiting this site -- is reported
+                # to the user as a successful stop. That is the BSkando#195
+                # failure mode reintroduced by omission, so the default is an
+                # error, not success.
+                raise _service_validation_error(
+                    "Stop sound for '{device_id}' returned an unknown outcome "
+                    "({outcome}); treating it as unproven.".format(
+                        outcome=outcome, **placeholders
+                    ),
+                    translation_key="stop_sound_uncorrelated",
                     translation_placeholders=placeholders,
                 )
         except ServiceValidationError:
@@ -1133,7 +1254,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     prefix = f"{entry_id}:"
                     if ident_str.startswith(prefix):
                         ident_str = ident_str[len(prefix) :]
-                elif ":" in ident_str:
+                elif ":" in ident_str:  # pragma: no cover - no caller reaches it
+                    # Unreachable since the scan asks per config entry: the only
+                    # caller always passes a key of ``entries_by_id``, which is
+                    # never empty. Kept for a caller that does not know the
+                    # owner, of which there is none today; measured, not assumed
+                    # (``grep -n _canonical_identifier`` finds one call site).
                     candidate, remainder = ident_str.split(":", 1)
                     if candidate in entries_by_id:
                         ident_str = remainder
@@ -1144,45 +1270,57 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
         dev_reg = dr.async_get(hass)
         updated_count = 0
-        for device in getattr(dev_reg, "devices", {}).values():
-            identifiers: set[tuple[str, str]] = (
-                getattr(device, "identifiers", set()) or set()
-            )
-            if not any(domain == DOMAIN for domain, _ in identifiers):
-                continue
+        seen_device_ids: set[str] = set()
+        # Ask per entry instead of scanning the whole registry. Two things
+        # change with that, both deliberate. The owning entry is now read from
+        # the query rather than guessed from the device: the previous loop took
+        # the first of ``config_entries`` that was ours and otherwise the first
+        # one at all, so a device owned by a foreign integration could be given
+        # one of our map URLs signed with a token seeded from that foreign entry
+        # id. And a device that carries our identifier while belonging to no
+        # GoogleFindMy entry is no longer touched at all; it is registry
+        # residue, not one of our devices. ``async_entries_for_config_entry``
+        # exists unchanged at tag ``2025.9.1`` and at ``2026.9.0``, so this
+        # needs no capability switch.
+        for owner_entry_id in entries_by_id:
+            for device in dr.async_entries_for_config_entry(dev_reg, owner_entry_id):
+                # Below 2026.8 a device can hang on two of our entries at once.
+                # The first entry asked wins, and its prefix is the one
+                # ``_canonical_identifier`` strips. The choice was arbitrary
+                # before as well (set iteration order), so this is not a change
+                # in outcome, only in determinism.
+                if device.id in seen_device_ids:
+                    continue
+                seen_device_ids.add(device.id)
 
-            if _device_is_service(device):
-                continue
-
-            config_entry_ids = list(getattr(device, "config_entries", None) or [])
-            owner_entry_id: str | None = None
-            for candidate in config_entry_ids:
-                candidate_str = str(candidate)
-                if candidate_str in entries_by_id:
-                    owner_entry_id = candidate_str
-                    break
-                if owner_entry_id is None:
-                    owner_entry_id = candidate_str
-
-            canonical_id = _canonical_identifier(device, owner_entry_id)
-            if not canonical_id:
-                continue
-
-            auth_token = _token_for_entry(owner_entry_id)
-            new_config_url = (
-                f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
-            )
-            dev_reg.async_update_device(
-                device_id=device.id,
-                configuration_url=new_config_url,
-            )
-            updated_count += 1
-            if ctx.get("redact_url_token"):
-                _LOGGER.debug(
-                    "Updated URL for device %s: %s",
-                    device.name_by_user or device.name,
-                    ctx["redact_url_token"](new_config_url),
+                identifiers: set[tuple[str, str]] = (
+                    getattr(device, "identifiers", set()) or set()
                 )
+                if not any(domain == DOMAIN for domain, _ in identifiers):
+                    continue
+
+                if _device_is_service(device):
+                    continue
+
+                canonical_id = _canonical_identifier(device, owner_entry_id)
+                if not canonical_id:
+                    continue
+
+                auth_token = _token_for_entry(owner_entry_id)
+                new_config_url = (
+                    f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
+                )
+                dev_reg.async_update_device(
+                    device_id=device.id,
+                    configuration_url=new_config_url,
+                )
+                updated_count += 1
+                if ctx.get("redact_url_token"):
+                    _LOGGER.debug(
+                        "Updated URL for device %s: %s",
+                        device.name_by_user or device.name,
+                        ctx["redact_url_token"](new_config_url),
+                    )
 
         _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
@@ -1254,8 +1392,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     missing_devices.append(device_id)
                     continue
 
-                config_entries = getattr(device, "config_entries", None) or []
-                _extend_target_entries(str(entry_id) for entry_id in config_entries)
+                _extend_target_entries(device_owning_entry_ids(device))
 
             if missing_devices:
                 _LOGGER.warning(

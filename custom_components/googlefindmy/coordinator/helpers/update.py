@@ -216,7 +216,7 @@ def calculate_presence_ttl(
     return max(2 * effective_interval, min_ttl)
 
 
-def is_poll_cycle_due(
+def is_poll_cycle_due(  # noqa: PLR0917
     elapsed: float,
     effective_interval: float,
     predictive_block: bool,

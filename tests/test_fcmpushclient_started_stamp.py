@@ -52,5 +52,38 @@ async def test_login_success_stamps_started_monotonic() -> None:
     slim._reset_error_count.assert_called_once_with(ErrorType.LOGIN)  # type: ignore[attr-defined]
 
 
+@pytest.mark.asyncio
+async def test_login_error_log_omits_server_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A login error is logged by code and type; the server text stays out.
+
+    `ErrorInfo.message` is free text from the server (Auth AGENTS.md,
+    "Logging": raw error text and response bodies stay out of the record).
+    """
+    import logging
+
+    slim = FcmMessageSlim()
+    slim._try_increment_error_count = Mock(return_value=False)  # type: ignore[attr-defined]
+    msg = LoginResponse()
+    msg.id = "login-1"
+    msg.error.code = 401
+    msg.error.type = "auth"
+    msg.error.message = (
+        "rejected token dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7s"
+    )
+
+    with caplog.at_level(logging.ERROR, logger=slim.logger.name):
+        await slim._handle_message(msg)  # type: ignore[arg-type]
+
+    records = [
+        r.getMessage() for r in caplog.records if "login error" in r.getMessage()
+    ]
+    assert records == ["Received login error response: code=401 type=auth"]
+    text = msg.error.message
+    assert all(text[i : i + 8] not in caplog.text for i in range(0, len(text) - 7))
+    slim._try_increment_error_count.assert_called_once_with(ErrorType.LOGIN)  # type: ignore[attr-defined]
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

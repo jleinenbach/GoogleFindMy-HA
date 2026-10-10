@@ -22,6 +22,10 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
+from custom_components.googlefindmy.coordinator.helpers.registry import (
+    resolve_device_by_identifiers,
+)
+from tests.conftest import import_coordinator_consumers
 
 try:
     from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -66,6 +70,10 @@ async def _patch_integration_runtime(  # noqa: PLR0915
     binary_sensor_module = importlib.import_module(
         "custom_components.googlefindmy.binary_sensor"
     )
+    # Import every module that copies GoogleFindMyCoordinator before the first
+    # patch below, so none of them can capture the stub through a lazy first
+    # import inside the patch window (see tests/AGENTS.md).
+    import_coordinator_consumers()
 
     monkeypatch.setattr(integration, "async_setup", AsyncMock(return_value=True))
     monkeypatch.setattr(integration, "CONFIG_SCHEMA", lambda config: {})
@@ -327,7 +335,16 @@ async def test_devices_and_entities_registered(  # noqa: PLR0913, PLR0915
             DOMAIN,
             f"{entry.entry_id}:{tracker_subentry_id}:{device['id']}",
         )
-        device_entry = device_registry.async_get_device({identifier})
+        # async_get_device is deprecated since Core 2026.8: identifiers are no
+        # longer unique across config entries. The scoped lookup asks the
+        # question this assertion actually means -- is the device registered
+        # *for this entry* -- and it is what the assertion checked all along.
+        # Through the shared resolver, not ``async_get_device_by_identifier``
+        # directly: that method arrives in 2026.8, and this test also runs on
+        # the declared minimum (the ``declared floor`` axis of ``ci.yml``).
+        device_entry = resolve_device_by_identifiers(
+            device_registry, (identifier,), entry_id=entry.entry_id
+        )
         assert device_entry is not None, f"Device {device['id']} missing from registry"
         assert device_entry.entry_type != dr.DeviceEntryType.SERVICE
 
@@ -342,7 +359,9 @@ async def test_devices_and_entities_registered(  # noqa: PLR0913, PLR0915
     assert tracker_entities, "Tracker entities should be registered for devices"
 
     service_identifier = service_device_identifier(entry.entry_id)
-    service_device = device_registry.async_get_device({service_identifier})
+    service_device = resolve_device_by_identifiers(
+        device_registry, (service_identifier,), entry_id=entry.entry_id
+    )
     assert service_device is not None, "Integration service device missing"
     assert service_device.entry_type == dr.DeviceEntryType.SERVICE
 

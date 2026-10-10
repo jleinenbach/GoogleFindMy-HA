@@ -2,6 +2,7 @@
 __pycache__/
 pytest_output.log
 .coverage
+.coverage.*
 .wheelhouse/
 .bootstrap/
 node_modules/
@@ -10,5 +11,11 @@ node_modules/
 .hypothesis/
 jscpd-report/
 coverage.xml
-.venv/
+.venv
 .plans/
+
+# pip-audit run artifacts. .github/workflows/pip-audit.yml regenerates both
+# from poetry.lock on every run and nothing reads a committed copy; a stale
+# committed export only feeds Dependabot versions the lock no longer carries.
+/poetry-requirements.txt
+/audit.json

@@ -8,13 +8,37 @@
     "step": {
       "user": {
         "title": "Google Find My Device – Anmeldung",
-        "description": "Wähle deine Anmeldemethode. Methode 1 wird empfohlen, wenn du GoogleFindMyTools mit Chrome auf einem Rechner ausführen kannst.",
+        "description": "Wähle, wie du dich anmelden möchtest. GoogleFindMyTools secrets.json passt, wenn du diese Datei schon hast oder GoogleFindMyTools selbst mit Chrome auf einem Rechner ausführen kannst.",
         "data": {
           "auth_method": "Anmeldemethode"
         }
       },
+      "found_local_bundle": {
+        "title": "Vorhandene Zugangsdaten gefunden",
+        "description": "Auf diesem System liegt bereits eine Zugangsdaten-Datei für {email}:\n\n`{bundle_path}` (zuletzt geschrieben vor {bundle_age})\n\nImportiere sie jetzt, um die Einrichtung ohne erneute Google-Anmeldung abzuschließen.",
+        "data": {
+          "use_found_bundle": "Gefundene Zugangsdaten importieren"
+        },
+        "data_description": {
+          "use_found_bundle": "Lass die Option aktiviert, um die oben angezeigte Datei zu importieren. Schalte sie aus, um stattdessen selbst eine Anmeldemethode zu wählen."
+        }
+      },
+      "discovery_confirm": {
+        "title": "Zugangsdaten für Google Find My Device gefunden",
+        "description": "Für {email} wurden Zugangsdaten gefunden.\n\nFahre fort, um sie in Home Assistant zu verwenden. Ist das Konto bereits eingerichtet, wirst du vorher gefragt, bevor etwas ersetzt wird."
+      },
+      "discovery_overwrite": {
+        "title": "Gespeicherte Zugangsdaten ersetzen?",
+        "description": "{email} ist in Home Assistant bereits eingerichtet, und soeben wurde eine neue Zugangsdaten-Datei gefunden.\n\nBeim Ersetzen werden die neuen Zugangsdaten in den vorhandenen Eintrag geschrieben und der Eintrag wird neu geladen. Lehnst du ab, bleibt der Eintrag unverändert.",
+        "data": {
+          "overwrite_credentials": "Gespeicherte Zugangsdaten ersetzen"
+        },
+        "data_description": {
+          "overwrite_credentials": "Lass die Option aktiviert, wenn du dich gerade neu angemeldet hast. Schalte sie aus, um die Zugangsdaten zu behalten, die Home Assistant derzeit verwendet."
+        }
+      },
       "secrets_json": {
-        "title": "Methode 1: GoogleFindMyTools secrets.json",
+        "title": "GoogleFindMyTools secrets.json",
         "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs-Tokens zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.",
         "data": {
           "secrets_json": "Inhalt der secrets.json"
@@ -48,7 +72,8 @@
         "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt).\n\nHinweis: Die Konto-E-Mail-Adresse ist für diese erneute Authentifizierung fest vorgegeben; um ein anderes Konto zu nutzen, entferne die Integration und füge sie neu hinzu.",
         "data": {
           "secrets_json": "Neue secrets.json (vollständiger Inhalt)"
-        }
+        },
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migration abgeschlossen",
@@ -72,6 +97,8 @@
     },
     "abort": {
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
+      "credentials_updated": "Die gespeicherten Zugangsdaten für dieses Konto wurden durch die gefundenen ersetzt.",
+      "credentials_kept": "Die gespeicherten Zugangsdaten wurden behalten. Es wurde nichts geändert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
       "dependency_not_ready": "Google Find My Device-Abhängigkeiten sind nicht installiert. Installiere die Anforderungen und versuche es erneut.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
@@ -90,9 +117,9 @@
   "config_subentries": {
     "hub": {
       "title": "Google Find My Device Hub",
-      "entry_type": "Hub feature group",
+      "entry_type": "Hub-Featuregruppe",
       "initiate_flow": {
-        "user": "Add hub feature group"
+        "user": "Hub-Featuregruppe hinzufügen"
       },
       "step": {
         "user": {
@@ -109,9 +136,9 @@
     },
     "service": {
       "title": "Google Find Hub Dienst",
-      "entry_type": "Service feature group",
+      "entry_type": "Dienst-Funktionsgruppe",
       "initiate_flow": {
-        "user": "Add service feature group"
+        "user": "Dienst-Funktionsgruppe hinzufügen"
       },
       "step": {
         "user": {
@@ -128,9 +155,9 @@
     },
     "core_tracking": {
       "title": "Google Find My Geräte",
-      "entry_type": "Device feature group",
+      "entry_type": "Geräte-Funktionsgruppe",
       "initiate_flow": {
-        "user": "Add device feature group"
+        "user": "Geräte-Funktionsgruppe hinzufügen"
       },
       "step": {
         "user": {
@@ -238,7 +265,7 @@
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
+          "subentry": "Wende Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows findest du im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "settings": {
@@ -251,34 +278,38 @@
           "show_location_age": "Attribut für Standortalter anzeigen",
           "speed_gate_enabled": "Unmögliche Standortsprünge verwerfen",
           "roundtrip_confirm_enabled": "Legitime Rückkehrbewegungen wiederherstellen",
+          "accuracy_gate_enabled": "Groben Fix verwerfen, der einen besseren verdrängen würde",
           "google_home_filter_enabled": "Google-Home-Geräte filtern",
           "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
           "enable_stats_entities": "Statistik-Entitäten erstellen",
           "delete_caches_on_remove": "Caches beim Entfernen löschen",
           "map_view_token_expiration": "Ablauf von Kartenansicht-Tokens aktivieren",
           "contributor_mode": "Modus für Standortmeldungen",
-          "subentry": "Funktionsgruppe"
+          "subentry": "Funktionsgruppe",
+          "secrets_extra_watch_paths": "Zusätzliche secrets.json-Überwachungspfade (einer pro Zeile)"
         },
         "data_description": {
           "stale_threshold": "Nach dieser Zeit (in Sekunden) ohne Standortaktualisierung wird der Tracker-Status unbekannt. Verwende die Entität 'Letzter Standort', um immer die letzte bekannte Position zu sehen. Standard: 1800 (30 Minuten).",
           "show_location_age": "Wenn aktiviert (Standard), wird jeder Tracker-Entität ein 'location_age'-Attribut (auf 1 Minute gerundet) hinzugefügt. Deaktivieren, um alle Datenbank-Schreibvorgänge für stationäre Geräte zu eliminieren. Das absolute 'last_seen'-Attribut und sensor.*_last_seen-Entitäten sind immer verfügbar.",
           "speed_gate_enabled": "Wenn aktiviert (Standard), wird ein Standort-Fix verworfen, der eine physikalisch unmögliche Geschwindigkeit erfordern würde (zum Beispiel eine Crowd-Meldung, die den Tracker binnen Sekunden hunderte Kilometer entfernt verortet), statt einen Teleport auszulösen. Eigene GPS-Meldungen passieren immer. Nur deaktivieren, wenn legitime schnelle Bewegungen fälschlich verworfen werden.",
           "roundtrip_confirm_enabled": "Wenn aktiviert (Standard), wird eine Crowd-Meldung, die das Geschwindigkeits-Gate als Teleport verwerfen würde, stattdessen akzeptiert, sofern sie innerhalb von etwa 15 Minuten wieder nahe der Position landet, die kurz vor einem zuvor akzeptierten weiten Sprung galt. So wird eine legitime Rückkehrbewegung wiederhergestellt, statt den Tracker an der entfernten Position stranden zu lassen. Greift ausschließlich dort, wo das Geschwindigkeits-Gate sonst verwerfen würde. Deaktivieren, wenn der Tracker zwischen zwei Orten hin- und herspringt.",
+          "accuracy_gate_enabled": "Wenn aktiviert (Standard), wird ein eingehender Standort-Fix verworfen, sofern er deutlich außerhalb des Unsicherheitskreises der zwischengespeicherten Position liegt, mindestens viermal ungenauer ist als sie, mindestens 200 m grob ist und diese zwischengespeicherte Position zugleich zuverlässig und noch frisch ist. Ohne bessere Alternative wird nie etwas verworfen: bei einem Kaltstart oder wenn die zwischengespeicherte Position unzuverlässig oder veraltet ist, wird ein grober Fix immer akzeptiert. Das verhindert, dass eine weiträumige Crowd-Meldung den Tracker verschiebt und ihn - weil Home Assistant den Genauigkeitsradius als Zonentoleranz verwendet - fälschlich als zu Hause meldet. Nur deaktivieren, wenn der Verdacht besteht, dass dieses Gate selbst ein Problem verursacht.",
           "delete_caches_on_remove": "Löscht zwischengespeicherte Tokens und Gerätemetadaten, wenn dieser Eintrag entfernt wird.",
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
           "contributor_mode": "Lege fest, wie dein Gerät zum Google-Netzwerk beiträgt (standardmäßig Alle Bereiche für Crowdsourcing oder nur stark frequentierte Bereiche).",
-          "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
+          "subentry": "Speichere diese Optionen in der ausgewählten Funktionsgruppe. Beispiele findest du unter [Subeinträge und Funktionsgruppen]({subentries_docs_url}).",
+          "secrets_extra_watch_paths": "Optional. Zusätzliche absolute Pfade zu secrets.json-Dateien, die die Integration zur automatischen Übernahme überwachen soll, einer pro Zeile. Leer lassen, um nur die Standardorte zu überwachen."
         }
       },
       "visibility": {
         "title": "Gerätesichtbarkeit",
-        "description": "Stelle zuvor ignorierte Geräte wieder her, damit sie erneut sichtbar sind. Wähle ein oder mehrere Geräte aus und speichere.",
+        "description": "Stelle zuvor ignorierte Geräte wieder her, damit sie erneut sichtbar sind. Wähle ein oder mehrere Geräte aus und speichere. Ein ignoriertes Gerät wird samt seinen Entitäten aus Home Assistant entfernt. Beim Wiederherstellen wird die Integration deshalb neu geladen, um sie neu anzulegen; währenddessen sind alle Entitäten dieses Kontos kurz nicht verfügbar.",
         "data": {
           "unignore_devices": "Geräte wiederherstellen",
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
+          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise findest du im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "repairs": {
@@ -323,6 +354,7 @@
     },
     "abort": {
       "reconfigure_successful": "Neukonfiguration erfolgreich.",
+      "credentials_saved_not_reloaded": "Zugangsdaten gespeichert. Der Eintrag konnte nicht neu geladen werden; die Daten werden mit seiner nächsten erfolgreichen Einrichtung wirksam.",
       "no_ignored_devices": "Es gibt keine ignorierten Geräte, die wiederhergestellt werden können.",
       "no_semantic_locations": "Es sind keine semantischen Orte konfiguriert.",
       "repairs_no_subentries": "Es sind keine Funktionsgruppen zur Reparatur vorhanden.",
@@ -719,19 +751,19 @@
     },
     "fcm_connection_stuck": {
       "title": "FCM Push-Verbindung fehlgeschlagen",
-      "description": "Die Hintergrundverbindung zu Google ist blockiert.\n\n1. Ist der ausgehende **TCP Port 5228** in Ihrer Firewall freigegeben?\n2. Falls das Netzwerk okay ist: Erneuern Sie bitte Ihre `secrets.json` (Token könnte teilweise ungültig sein)."
+      "description": "Die Hintergrundverbindung zu Google ist blockiert.\n\n1. Ist der ausgehende **TCP Port 5228** in deiner Firewall freigegeben?\n2. Falls das Netzwerk okay ist: Erneuere bitte deine `secrets.json` (Token könnte teilweise ungültig sein)."
     },
     "fcm_reauth_required": {
-      "title": "Google Find My Device push needs re-authentication",
+      "title": "Google Find My Device Push muss neu authentifiziert werden",
       "fix_flow": {
         "step": {
           "confirm": {
-            "title": "Re-authenticate Google Find My Device",
-            "description": "The background push connection to Google failed for an extended period and could not recover on its own. This usually means the stored push credentials were revoked or rotated (for example after a Google password change, or when requests arrive from a new IP address or region). Less commonly, outgoing **TCP port 5228** is blocked by a firewall.\n\nSelect **Submit** to re-authenticate this account. Your device identity is preserved. If the problem persists afterwards, make sure port 5228 is allowed and regenerate your `secrets.json`."
+            "title": "Google Find My Device neu authentifizieren",
+            "description": "Die Hintergrund-Push-Verbindung zu Google ist über einen längeren Zeitraum fehlgeschlagen und konnte sich nicht von selbst erholen. Das bedeutet meist, dass die gespeicherten Push-Anmeldedaten widerrufen oder erneuert wurden (zum Beispiel nach einer Änderung deines Google-Passworts oder wenn Anfragen von einer neuen IP-Adresse oder Region kommen). Seltener wird der ausgehende **TCP-Port 5228** von einer Firewall blockiert.\n\nWähle **Absenden**, um dieses Konto neu zu authentifizieren. Deine Geräteidentität bleibt erhalten. Falls das Problem danach weiterhin besteht, stelle sicher, dass Port 5228 erlaubt ist, und erstelle deine `secrets.json` neu."
           }
         },
         "abort": {
-          "reauth_started": "Re-authentication has been started. Finish signing in to restore the background push connection. This repair stays open until the connection recovers, so the prompt is not lost if the sign-in is interrupted."
+          "reauth_started": "Die erneute Authentifizierung wurde gestartet. Schließe die Anmeldung ab, um die Hintergrund-Push-Verbindung wiederherzustellen. Diese Reparatur bleibt geöffnet, bis die Verbindung wiederhergestellt ist, damit der Hinweis nicht verloren geht, falls die Anmeldung unterbrochen wird."
         }
       }
     },
@@ -748,16 +780,16 @@
       "description": "Dieses Google-Konto (**{email}**) wird bereits von einem anderen Eintrag verwendet:\n\n{entries}\n\nDeaktiviere oder entferne doppelte Einträge, sodass pro Konto nur eine Instanz aktiv bleibt, und lade anschließend die Integration neu (oder starte Home Assistant neu)."
     },
     "cache_purged": {
-      "title": "Authentication cache cleared",
-      "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
+      "title": "Authentifizierungs-Cache geleert",
+      "description": "Der gespeicherte Authentifizierungs-Cache für **{entry_title}** war unlesbar und wurde geleert. Wähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden und den Zugriff wiederherzustellen."
     },
     "fcm_short_run_crash_loop": {
       "title": "FCM-Push-Abbruchschleife erkannt",
-      "description": "Der FCM-Push-Client trennt die Verbindung wiederholt innerhalb weniger Sekunden nach dem Verbindungsaufbau (Short-Run-Crash-Schleife). Üblicherweise wird das durch eine persistente, nicht dekodierbare Push-Nachricht in der eingehenden Warteschlange ausgelöst.\n\n1. Laden Sie die Integration neu, um den Laufzustand zurückzusetzen.\n2. Falls das Problem erneut auftritt: Erneuern Sie Ihre `secrets.json` (Google könnte Anmeldedaten rotiert haben)."
+      "description": "Der FCM-Push-Client trennt die Verbindung wiederholt innerhalb weniger Sekunden nach dem Verbindungsaufbau (Short-Run-Crash-Schleife). Üblicherweise wird das durch eine persistente, nicht dekodierbare Push-Nachricht in der eingehenden Warteschlange ausgelöst.\n\n1. Lade die Integration neu, um den Laufzustand zurückzusetzen.\n2. Falls das Problem erneut auftritt: Erneuere deine `secrets.json` (Google könnte Anmeldedaten rotiert haben)."
     },
     "restart_required": {
       "title": "Neustart von Home Assistant zum Abschluss des Updates erforderlich",
-      "description": "Google Find My Hub wurde auf der Festplatte auf Version {installed_version} aktualisiert, aber Home Assistant führt weiterhin Version {running_version} aus. Starten Sie Home Assistant neu, um die installierte Version zu aktivieren.\n\nEin Neuladen der Integration genügt nicht: Ein vollständiger Neustart von Home Assistant ist erforderlich."
+      "description": "Google Find My Hub wurde auf der Festplatte auf Version {installed_version} aktualisiert, aber Home Assistant führt weiterhin Version {running_version} aus. Starte Home Assistant neu, um die installierte Version zu aktivieren.\n\nEin Neuladen der Integration genügt nicht: Ein vollständiger Neustart von Home Assistant ist erforderlich."
     }
   },
   "exceptions": {
@@ -773,8 +805,26 @@
     "play_sound_failed": {
       "message": "Tonwiedergabe auf {device_id} fehlgeschlagen: {error}"
     },
+    "play_sound_rejected": {
+      "message": "Play Sound für {device_id} konnte nicht gestartet werden. Der Log-Eintrag zu diesem Versuch nennt den Grund; meist ist es eine abgelaufene Anmeldung, ein fehlendes Token, ein Server- oder Netzwerkfehler oder eine Ratenbegrenzung."
+    },
+    "play_sound_suppressed": {
+      "message": "Play Sound für {device_id} wurde nicht gesendet. Home Assistant kann das Gerät gerade nicht erreichen; versuche es gleich noch einmal."
+    },
     "stop_sound_failed": {
       "message": "Tonstopp auf {device_id} fehlgeschlagen: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound für {device_id} wurde nicht gesendet: Die Anfrage-UUID muss Text sein, übergeben wurde aber {request_uuid}."
+    },
+    "stop_sound_rejected": {
+      "message": "Stop Sound für {device_id} konnte nicht abgeschlossen werden. Der Log-Eintrag zu diesem Versuch nennt den Grund; meist ist es eine abgelaufene Anmeldung, ein fehlendes Token, ein Server- oder Netzwerkfehler oder eine Ratenbegrenzung."
+    },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound für {device_id} wurde nicht gesendet. Home Assistant kann das Gerät gerade nicht erreichen; versuche es gleich noch einmal."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound für {device_id} wurde gesendet, konnte aber dem laufenden Klingeln nicht zugeordnet werden: Das Klingeln wurde anderswo gestartet, oder der hier vorliegende Schlüssel ist zu alt, um dafür einzustehen. Google kann den Stopp möglicherweise nicht zuordnen, das Gerät klingelt dann weiter. Drücke die Taste am Tracker oder warte, bis das Klingeln von selbst endet."
     },
     "missing_token_cache": {
       "message": "Token-Cache fehlt. Bitte den eintragsbezogenen TokenCache übergeben (z. B. entry.runtime_data.token_cache)."
@@ -797,6 +847,11 @@
       "options": {
         "high_traffic": "Nur stark frequentierte Bereiche",
         "in_all_areas": "Alle Bereiche (Crowdsourcing)"
+      }
+    },
+    "auth_method": {
+      "options": {
+        "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }
   }

@@ -8,13 +8,37 @@
     "step": {
       "user": {
         "title": "Google Find My Device – Aanmelding",
-        "description": "Kies je aanmeldingsmethode. Methode 1 wordt aanbevolen als je GoogleFindMyTools met Chrome kunt uitvoeren op een computer.",
+        "description": "Kies hoe je je wilt aanmelden. GoogleFindMyTools secrets.json past als je dat bestand al hebt of GoogleFindMyTools zelf met Chrome op een computer kunt uitvoeren.",
         "data": {
           "auth_method": "Aanmeldingsmethode"
         }
       },
+      "found_local_bundle": {
+        "title": "Bestaande inloggegevens gevonden",
+        "description": "Er staat al een bestand met inloggegevens voor {email} op dit systeem:\n\n`{bundle_path}` (laatst geschreven {bundle_age} geleden)\n\nImporteer het nu om de installatie af te ronden zonder opnieuw bij Google aan te melden.",
+        "data": {
+          "use_found_bundle": "Gevonden inloggegevens importeren"
+        },
+        "data_description": {
+          "use_found_bundle": "Laat dit aan staan om het bestand hierboven te importeren. Zet het uit om zelf een aanmeldmethode te kiezen."
+        }
+      },
+      "discovery_confirm": {
+        "title": "Inloggegevens voor Google Find My Device gevonden",
+        "description": "Er zijn inloggegevens gevonden voor {email}.\n\nGa verder om ze in Home Assistant te gebruiken. Is het account al ingesteld, dan wordt het je eerst gevraagd voordat er iets wordt vervangen."
+      },
+      "discovery_overwrite": {
+        "title": "Opgeslagen inloggegevens vervangen?",
+        "description": "{email} is al ingesteld in Home Assistant en er is zojuist een nieuw bestand met inloggegevens gevonden.\n\nBij vervangen worden de nieuwe inloggegevens naar het bestaande item geschreven en wordt het opnieuw geladen. Als je weigert, blijft het item precies zoals het is.",
+        "data": {
+          "overwrite_credentials": "Opgeslagen inloggegevens vervangen"
+        },
+        "data_description": {
+          "overwrite_credentials": "Laat dit aan staan als je je zojuist opnieuw hebt aangemeld. Zet het uit om de inloggegevens te behouden die Home Assistant nu gebruikt."
+        }
+      },
       "secrets_json": {
-        "title": "Methode 1: GoogleFindMyTools secrets.json",
+        "title": "GoogleFindMyTools secrets.json",
         "description": "Voer GoogleFindMyTools (Chrome) uit om authenticatietokens te genereren en plak vervolgens de volledige inhoud van het Auth/secrets.json-bestand hieronder.",
         "data": {
           "secrets_json": "Inhoud van secrets.json-bestand"
@@ -45,10 +69,11 @@
       },
       "reauth_confirm": {
         "title": "Opnieuw authenticeren",
-        "description": "Je inloggegevens voor **{email}** lijken ongeldig of verlopen te zijn. Geef hieronder nieuwe inloggegevens op.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren).\n\nOpmerking: Het account-e-mailadres staat vast voor deze herauthenticatie; om een ander account te gebruiken, verwijder de integratie en voeg deze opnieuw toe.",
+        "description": "Je inloggegevens voor **{email}** lijken ongeldig of verlopen te zijn. Geef hieronder nieuwe inloggegevens op.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren).\n\nLet op: het account-e-mailadres ligt vast voor deze herauthenticatie; om een ander account te gebruiken, verwijder je de integratie en voeg je deze opnieuw toe.",
         "data": {
           "secrets_json": "Nieuwe secrets.json (volledige inhoud)"
-        }
+        },
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migratie voltooid",
@@ -72,6 +97,8 @@
     },
     "abort": {
       "already_configured": "Google Find My Device is al geconfigureerd.",
+      "credentials_updated": "De opgeslagen inloggegevens voor dit account zijn vervangen door de gevonden gegevens.",
+      "credentials_kept": "De opgeslagen inloggegevens zijn behouden. Er is niets gewijzigd.",
       "cannot_connect": "Kan geen verbinding maken met Google Find My Device.",
       "dependency_not_ready": "Google Find My Device-afhankelijkheden zijn niet geïnstalleerd. Installeer de vereisten en probeer het opnieuw.",
       "invalid_discovery_info": "De discovery-payload was ongeldig. Controleer de inloggegevens en probeer het opnieuw.",
@@ -232,13 +259,13 @@
       },
       "credentials": {
         "title": "Inloggegevens bijwerken (optioneel)",
-        "description": "Werk je inloggegevens bij. Bestaande waarden worden om veiligheidsredenen niet getoond.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren).\n\nNa het verzenden worden de inloggegevens gevalideerd en opgeslagen; de integratie wordt opnieuw geladen zonder je entiteitsnamen te wijzigen.",
+        "description": "Werk je inloggegevens bij. Bestaande waarden worden om veiligheidsredenen niet getoond.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren).\n\nZodra je verzendt, worden de inloggegevens gevalideerd en opgeslagen; de integratie wordt opnieuw geladen zonder je entiteitsnamen te wijzigen.",
         "data": {
           "new_secrets_json": "Nieuwe secrets.json (volledige inhoud)",
           "subentry": "Functiegroep"
         },
         "data_description": {
-          "subentry": "Pas inloggegevensupdates toe op de geselecteerde functiegroep. Bekijk de [Subentries en functiegroepen]({subentries_docs_url}) handleiding voor workflow-details."
+          "subentry": "Pas de inloggegevensupdates toe op de geselecteerde functiegroep. Raadpleeg de gids [Subentries en functiegroepen]({subentries_docs_url}) voor details over de werkwijze."
         }
       },
       "settings": {
@@ -249,30 +276,34 @@
           "device_poll_delay": "Apparaat-pollingvertraging (s)",
           "stale_threshold": "Verouderingsdrempel (s)",
           "show_location_age": "Locatie-leeftijd attribuut weergeven",
-          "speed_gate_enabled": "Reject impossible location jumps",
-          "roundtrip_confirm_enabled": "Recover legitimate return trips",
+          "speed_gate_enabled": "Onmogelijke locatiesprongen weigeren",
+          "roundtrip_confirm_enabled": "Legitieme retourritten herstellen",
+          "accuracy_gate_enabled": "Onnauwkeurige locatie negeren die een betere zou verdringen",
           "google_home_filter_enabled": "Google Home-apparaten filteren",
           "google_home_filter_keywords": "Filtertrefwoorden (kommagescheiden)",
           "enable_stats_entities": "Statistiekentiteiten aanmaken",
           "delete_caches_on_remove": "Caches verwijderen bij verwijderen item",
           "map_view_token_expiration": "Kaartweergave-tokenverloopdatum inschakelen",
           "contributor_mode": "Locatiebijdragermodus",
-          "subentry": "Functiegroep"
+          "subentry": "Functiegroep",
+          "secrets_extra_watch_paths": "Extra secrets.json-controlepaden (één per regel)"
         },
         "data_description": {
           "stale_threshold": "Wanneer een locatie ouder is dan deze drempel (in seconden), wordt de trackerstatus 'onbekend'. Gebruik de entiteit 'Laatste locatie' om altijd de laatst bekende positie te zien. Standaard: 1800 (30 minuten).",
           "show_location_age": "Wanneer ingeschakeld (standaard), wordt een 'location_age'-attribuut (afgerond op 1 minuut) toegevoegd aan elke tracker-entiteit. Schakel uit om alle database-schrijfacties voor stationaire apparaten te elimineren. Het absolute 'last_seen'-attribuut en sensor.*_last_seen-entiteiten zijn altijd beschikbaar.",
-          "speed_gate_enabled": "When enabled (default), a location fix that would require physically impossible speed (for example a crowd-sourced report placing the tracker hundreds of km away within seconds) is rejected instead of teleporting the tracker. Own GPS reports always pass. Disable only if legitimate fast movements are being dropped.",
-          "roundtrip_confirm_enabled": "When enabled (default), a crowd fix that the speed gate would reject as a teleport is accepted instead if it lands back near the position from just before an earlier accepted long jump, within about 15 minutes. This recovers a legitimate return trip rather than leaving the tracker stranded at the far position. It only ever applies where the speed gate would otherwise reject. Disable if you see the tracker flapping between two places.",
+          "speed_gate_enabled": "Wanneer ingeschakeld (standaard) wordt een locatiebepaling die een fysiek onmogelijke snelheid zou vereisen (bijvoorbeeld een crowdsourced rapport dat de tracker binnen enkele seconden honderden km verderop plaatst) geweigerd in plaats van de tracker te teleporteren. Eigen GPS-rapporten worden altijd doorgelaten. Schakel dit alleen uit als legitieme snelle bewegingen worden genegeerd.",
+          "roundtrip_confirm_enabled": "Wanneer ingeschakeld (standaard) wordt een crowd-locatiebepaling die de snelheidsfilter als teleportatie zou weigeren, toch geaccepteerd als deze weer dicht bij de positie van vlak vóór een eerder geaccepteerde lange sprong terechtkomt, binnen ongeveer 15 minuten. Dit herstelt een legitieme retourrit in plaats van de tracker achter te laten op de verre positie. Het geldt alleen daar waar de snelheidsfilter anders zou weigeren. Schakel dit uit als je ziet dat de tracker heen en weer springt tussen twee plaatsen.",
+          "accuracy_gate_enabled": "Wanneer dit is ingeschakeld (standaard), wordt een binnenkomende locatie genegeerd als die duidelijk buiten de onzekerheidscirkel van de opgeslagen positie valt, minstens vier keer onnauwkeuriger is dan die, minstens 200 m onnauwkeurig is en die opgeslagen positie zowel betrouwbaar als recent is. Er wordt nooit iets genegeerd zonder een beter alternatief: een onnauwkeurige locatie wordt altijd geaccepteerd bij een koude start, of wanneer de opgeslagen positie onbetrouwbaar of verouderd is. Zo verplaatst een ruime melding uit het netwerk de tracker niet en meldt Home Assistant hem niet ten onrechte als thuis, doordat het de nauwkeurigheidsstraal als zonetolerantie gebruikt. Schakel dit alleen uit als je vermoedt dat deze controle zelf een probleem veroorzaakt.",
           "delete_caches_on_remove": "Verwijder gecachete tokens en apparaatmetadata wanneer dit item wordt verwijderd.",
           "map_view_token_expiration": "Indien ingeschakeld, verlopen kaartweergavetokens na 1 week. Indien uitgeschakeld (standaard), verlopen tokens niet.",
           "contributor_mode": "Kies hoe je apparaat bijdraagt aan het Google-netwerk (standaard Alle gebieden voor crowdsourced rapportage, of alleen drukbezochte gebieden).",
-          "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen]({subentries_docs_url}) voor voorbeelden."
+          "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen]({subentries_docs_url}) voor voorbeelden.",
+          "secrets_extra_watch_paths": "Optioneel. Extra absolute paden naar secrets.json-bestanden die de integratie moet bewaken voor automatische overname, één per regel. Laat leeg om alleen de standaardlocaties te bewaken."
         }
       },
       "visibility": {
         "title": "Apparaatzichtbaarheid",
-        "description": "Herstel eerder genegeerde apparaten om ze weer zichtbaar te maken. Selecteer een of meer apparaten om te herstellen en op te slaan.",
+        "description": "Herstel eerder genegeerde apparaten om ze weer zichtbaar te maken. Selecteer een of meer apparaten om te herstellen en op te slaan. Als je een apparaat negeert, wordt het samen met zijn entiteiten uit Home Assistant verwijderd. Bij het herstellen wordt de integratie daarom opnieuw geladen om ze opnieuw aan te maken; ondertussen zijn alle entiteiten van dit account korte tijd niet beschikbaar.",
         "data": {
           "unignore_devices": "Apparaten om te herstellen",
           "subentry": "Functiegroep"
@@ -323,6 +354,7 @@
     },
     "abort": {
       "reconfigure_successful": "Herconfiguratie geslaagd.",
+      "credentials_saved_not_reloaded": "Inloggegevens opgeslagen. De invoer kon niet opnieuw worden geladen; ze worden van kracht bij de volgende geslaagde installatie ervan.",
       "no_ignored_devices": "Er zijn geen genegeerde apparaten om te herstellen.",
       "no_semantic_locations": "Er zijn geen semantische locaties geconfigureerd.",
       "repairs_no_subentries": "Er zijn geen subentries om te repareren.",
@@ -722,16 +754,16 @@
       "description": "De achtergrondverbinding met Google is geblokkeerd.\n\n1. Is uitgaande **TCP-poort 5228** toegestaan in je firewall?\n2. Als het netwerk in orde is, probeer dan je `secrets.json` opnieuw te genereren (inloggegevens zijn mogelijk gesplitst/ingetrokken)."
     },
     "fcm_reauth_required": {
-      "title": "Google Find My Device push needs re-authentication",
+      "title": "Google Find My Device-push vereist herauthenticatie",
       "fix_flow": {
         "step": {
           "confirm": {
-            "title": "Re-authenticate Google Find My Device",
-            "description": "The background push connection to Google failed for an extended period and could not recover on its own. This usually means the stored push credentials were revoked or rotated (for example after a Google password change, or when requests arrive from a new IP address or region). Less commonly, outgoing **TCP port 5228** is blocked by a firewall.\n\nSelect **Submit** to re-authenticate this account. Your device identity is preserved. If the problem persists afterwards, make sure port 5228 is allowed and regenerate your `secrets.json`."
+            "title": "Google Find My Device opnieuw authenticeren",
+            "description": "De achtergrond-pushverbinding met Google is gedurende langere tijd mislukt en kon niet vanzelf herstellen. Dit betekent meestal dat de opgeslagen push-inloggegevens zijn ingetrokken of geroteerd (bijvoorbeeld na een wijziging van je Google-wachtwoord, of wanneer verzoeken binnenkomen vanaf een nieuw IP-adres of een nieuwe regio). Minder vaak wordt uitgaande **TCP-poort 5228** geblokkeerd door een firewall.\n\nSelecteer **Verzenden** om dit account opnieuw te authenticeren. De identiteit van je apparaat blijft behouden. Als het probleem daarna aanhoudt, zorg er dan voor dat poort 5228 is toegestaan en genereer je `secrets.json` opnieuw."
           }
         },
         "abort": {
-          "reauth_started": "Re-authentication has been started. Finish signing in to restore the background push connection. This repair stays open until the connection recovers, so the prompt is not lost if the sign-in is interrupted."
+          "reauth_started": "De herauthenticatie is gestart. Rond het aanmelden af om de achtergrond-pushverbinding te herstellen. Deze reparatie blijft open totdat de verbinding is hersteld, zodat de melding niet verloren gaat als het aanmelden wordt onderbroken."
         }
       }
     },
@@ -748,8 +780,8 @@
       "description": "Dit Google-account (**{email}**) is al geconfigureerd door een ander item:\n\n{entries}\n\nSchakel het dubbele item uit of verwijder het zodat er slechts één item per account actief blijft, en herlaad vervolgens de integratie (of herstart Home Assistant)."
     },
     "cache_purged": {
-      "title": "Authentication cache cleared",
-      "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
+      "title": "Authenticatiecache gewist",
+      "description": "De opgeslagen authenticatiecache voor **{entry_title}** was onleesbaar en is gewist. Selecteer **Opnieuw configureren** op de integratiekaart om je opnieuw aan te melden en de toegang te herstellen."
     },
     "fcm_short_run_crash_loop": {
       "title": "FCM Push crash-lus gedetecteerd",
@@ -773,8 +805,26 @@
     "play_sound_failed": {
       "message": "Kan geluid niet afspelen op {device_id}: {error}"
     },
+    "play_sound_rejected": {
+      "message": "Play Sound voor {device_id} kon niet worden gestart. De logregel van deze poging noemt de reden; meestal is dat een verlopen aanmelding, een ontbrekend token, een server- of netwerkfout, of een snelheidslimiet."
+    },
+    "play_sound_suppressed": {
+      "message": "Play Sound voor {device_id} is niet verzonden. Home Assistant kan het apparaat op dit moment niet bereiken; probeer het zo meteen opnieuw."
+    },
     "stop_sound_failed": {
       "message": "Kan geluid niet stoppen op {device_id}: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound voor {device_id} is niet verzonden: de request-UUID moet tekst zijn, maar {request_uuid} werd meegegeven."
+    },
+    "stop_sound_rejected": {
+      "message": "Stop Sound voor {device_id} kon niet worden voltooid. De logregel van deze poging noemt de reden; meestal is dat een verlopen aanmelding, een ontbrekend token, een server- of netwerkfout, of een snelheidslimiet."
+    },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound voor {device_id} is niet verzonden. Home Assistant kan het apparaat op dit moment niet bereiken; probeer het zo meteen opnieuw."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound voor {device_id} is verzonden, maar kon niet aan het lopende belsignaal worden gekoppeld: het is elders gestart, of de sleutel die deze installatie heeft is te oud om voor in te staan. Google kan de stop mogelijk niet koppelen, dus het apparaat kan blijven afspelen. Druk op de knop op de tracker of wacht tot het belsignaal vanzelf stopt."
     },
     "missing_token_cache": {
       "message": "Tokencache ontbreekt. Geef de item-specifieke TokenCache op (bijvoorbeeld entry.runtime_data.token_cache)."
@@ -797,6 +847,11 @@
       "options": {
         "high_traffic": "Alleen drukke gebieden",
         "in_all_areas": "Alle gebieden (crowdsourcing)"
+      }
+    },
+    "auth_method": {
+      "options": {
+        "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }
   }

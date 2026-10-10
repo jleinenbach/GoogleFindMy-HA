@@ -133,8 +133,20 @@ class TestBuildLegacyDeviceRegistryKwargs:
     """Tests for build_legacy_device_registry_kwargs function.
 
     RISK: Home Assistant version compatibility.
-    Modern HA uses add_config_entry_id/add_config_subentry_id.
-    Legacy HA uses config_entry_id/config_subentry_id.
+
+    Scope: this renaming branch serves registry doubles, not supported cores.
+    The declared minimum, tag 2025.9.1, already ships the ``add_*`` spelling on
+    ``async_update_device`` (``homeassistant/helpers/device_registry.py``, line
+    1014 in that tag), so the rename predates the minimum rather than bridging
+    to it. What *is* live on the minimum is the ownership branch that emits the
+    ``add_*``/``remove_*`` quadruple.
+
+    These tests pin the behaviour of *this translator*, not the Core API. The
+    four ownership kwargs are deprecated from 2026.8 and stop working in
+    2027.8; a device now belongs to exactly one config entry and subentry.
+    Nothing here should be read as "this is how to talk to a current Core" --
+    see AGENTS.md, the bullet starting ``Registry updates **must not** pass``,
+    for that.
     """
 
     def test_add_config_entry_id_renamed(self) -> None:
@@ -869,18 +881,22 @@ class TestExtractSubentryLinks:
         result = extract_subentry_links(device, "entry1")
         assert result == {"subentry1", "subentry2", None}
 
-    def test_handles_non_collection_raw_links(self) -> None:
-        """Should handle non-collection raw_links (not None, not Collection)."""
+    def test_handles_lone_string_raw_links(self) -> None:
+        """A lone string value is one link (``agents/typing_guidance/AGENTS.md``).
+
+        It used to fall through to ``config_subentry_id``; the local copies in
+        ``services.py`` and ``coordinator/registry.py`` already read it as one
+        link, and both now delegate to this helper.
+        """
         device = Mock()
         device.config_entries_subentries = {
-            "entry1": "string_not_collection",  # String is excluded by check
+            "entry1": "string_not_collection",
         }
         device.config_subentry_id = "fallback"
         device.config_entries = {"entry1"}
 
         result = extract_subentry_links(device, "entry1")
-        # Falls through to fallback since string is not valid Collection
-        assert result == {"fallback"}
+        assert result == {"string_not_collection"}
 
 
 class TestHasSubentryLink:

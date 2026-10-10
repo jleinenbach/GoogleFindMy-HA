@@ -1,9 +1,11 @@
 name: hassfest (auto-fix)
 
+# PR-only on purpose: `main` is validated (blocking) by the `hassfest` job in
+# ci.yml, and the `main` branch rules are meant to reject a GITHUB_TOKEN push of
+# an auto-sort commit (changes to `main` come through a pull request), so the
+# push leg is dropped rather than left to fail.
 on:
   pull_request:
-  push:
-    branches: [ main ]
 
 permissions:
   contents: write
@@ -12,22 +14,24 @@ jobs:
   hassfest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
       - name: Run hassfest (may rewrite manifest)
         id: hassfest
+        # Tracks the upstream branch on purpose (no maintained release tag); see AGENTS.md, Action pinning.
         uses: home-assistant/actions/hassfest@master
         continue-on-error: true
 
       - name: Commit hassfest auto-sorts (if any)
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7.2.0
         with:
           commit_message: "chore(hassfest): auto-sort manifest keys"
           file_pattern: "custom_components/**/manifest.json"
 
       - name: Re-run hassfest
+        # Tracks the upstream branch on purpose (no maintained release tag); see AGENTS.md, Action pinning.
         uses: home-assistant/actions/hassfest@master

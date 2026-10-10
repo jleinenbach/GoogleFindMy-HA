@@ -6,7 +6,7 @@ import importlib.util
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -22,8 +22,12 @@ pytest_plugins = ("pytest_homeassistant_custom_component",)
 from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: E402
 
 if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers import entity_registry as er
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
 
 @pytest.fixture(autouse=True)
@@ -484,3 +488,66 @@ async def test_entity_recovery_manager_recovers_missing_entities(
 
     recovered_binary = {entity.unique_id for entity in added_entities["binary_sensor"]}
     assert recovered_binary == {binary_ids[1]}
+
+
+@pytest.mark.asyncio
+async def test_entity_recovery_manager_owner_comes_from_platform(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ownership is read from ``RegistryEntry.platform`` only.
+
+    ``RegistryEntry`` has no ``integration_domain`` field on any supported
+    core, so an entry that carries one must not be counted as ours when its
+    ``platform`` names another integration. An entry without ``platform`` is
+    already scoped to this config entry and therefore counts as ours.
+    """
+
+    import custom_components.googlefindmy as integration
+    from custom_components.googlefindmy.const import DOMAIN
+    from tests.helpers.config_entries_stub import make_config_entry
+
+    registry_entries = (
+        SimpleNamespace(domain="sensor", platform=DOMAIN, unique_id="uid-own"),
+        SimpleNamespace(
+            domain="sensor",
+            integration_domain=DOMAIN,
+            platform="other_integration",
+            unique_id="uid-foreign",
+        ),
+        SimpleNamespace(domain="sensor", unique_id="uid-no-platform"),
+    )
+    monkeypatch.setattr(
+        integration,
+        "_iter_config_entry_entities",
+        lambda _registry, _entry_id: registry_entries,
+    )
+
+    requested: list[set[str]] = []
+
+    def _factory(missing: set[str]) -> list[Any]:
+        requested.append(set(missing))
+        return [SimpleNamespace(unique_id=uid) for uid in sorted(missing)]
+
+    added: list[str] = []
+
+    def _add_entities(entities: Sequence[Any], _update: bool = False) -> None:
+        added.extend(entity.unique_id for entity in entities)
+
+    # The recovery manager only reads ``entry_id`` from the entry and stores
+    # the coordinator without using it, so test doubles stand in for both.
+    manager = integration.EntityRecoveryManager(
+        hass,
+        cast("ConfigEntry[Any]", make_config_entry(entry_id="entry-owner-check")),
+        cast("GoogleFindMyCoordinator", SimpleNamespace()),
+    )
+    manager.register_sensor_platform(
+        expected_unique_ids=lambda: {"uid-own", "uid-foreign", "uid-no-platform"},
+        entity_factory=_factory,
+        add_entities=cast("AddEntitiesCallback", _add_entities),
+    )
+
+    await manager.async_recover_missing_entities()
+
+    assert requested == [{"uid-foreign"}]
+    assert added == ["uid-foreign"]

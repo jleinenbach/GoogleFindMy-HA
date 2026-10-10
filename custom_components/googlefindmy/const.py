@@ -11,6 +11,9 @@ import hashlib
 import math
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from enum import StrEnum
+from types import MappingProxyType
 from typing import Final, Literal
 
 # --------------------------------------------------------------------------------------
@@ -31,7 +34,295 @@ CONFIG_ENTRY_VERSION: int = 2
 # NOTE: no ": str" annotation on purpose -- semantic-release's version_variables
 # regex only matches `NAME = "x"`, not `NAME: str = "x"`. Re-adding the annotation
 # would silently skip this file on the automated version bump.
-INTEGRATION_VERSION = "1.7.14.1"
+INTEGRATION_VERSION = "1.7.15.19"
+
+# --------------------------------------------------------------------------------------
+# Sound dispatch outcome (API -> coordinator boundary)
+# --------------------------------------------------------------------------------------
+
+
+class SoundDispatchOutcome(StrEnum):
+    """Why a sound command did or did not reach Google, as classified by ``api.py``.
+
+    ``api.py`` already reaches nine distinct exits (missing action token, empty
+    submitter reply, HTTP 200, NovaAuthError, HTTP 401/403, other HTTP status,
+    rate limit, network error, unexpected exception). Until this type existed,
+    all of them collapsed into a single ``False``, and the coordinator had no
+    choice but to read that ``False`` as "the push transport is broken". A server
+    saying no and a network that never answered then produced the same 90-second
+    cooldown and the same ``FcmStatus.DEGRADED``. This is the same failure class
+    ``StopSoundOutcome`` documents one layer up: a bool cannot carry the state
+    space.
+
+    Only ``TRANSPORT_FAILED`` justifies a push cooldown. Only ``ACCEPTED`` proves
+    that the credentials worked.
+
+    See IRR-CA-SOUND-FAILURE-CLASS in ``docs/PLAY_SOUND_ARCHITECTURE.md`` for the
+    per-member "may a caller arm a push cooldown" table this type carries, and
+    IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN for the qualifier on the stop
+    path. There the readiness gate lets a stop through a running window when the
+    stop carries our own fresh cancel key, so a window armed by a play cannot
+    lock out a stop this integration can correlate; and when such a stop then
+    fails on the transport, the cooldown is reported through
+    ``_note_stop_transport_problem_without_extending()``, which puts a window
+    that was already running back instead of restarting it, so a stop cannot
+    feed the window it just broke through.
+    """
+
+    ACCEPTED = "accepted"
+    """Nova answered HTTP 200. Acceptance of the submission, not proof of a ring.
+
+    See IRR-CA-NO-RING-CONFIRMATION in ``docs/PLAY_SOUND_ARCHITECTURE.md``.
+    """
+
+    REJECTED_AUTH = "rejected_auth"
+    """The server answered and refused on credentials: HTTP 401 or 403.
+
+    The transport worked. A cooldown would mislabel an expired sign-in as a
+    network outage and hide it behind a self-clearing timer.
+
+    The criterion is the STATUS, not the exception type. ``NovaAuthError`` is
+    raised for every non-retryable 4xx (its own docstring says "every
+    non-retryable 4xx client error", and ``HTTP_RETRY_ELIGIBLE`` holds no 4xx
+    besides 408 and 429), so
+    reading the type alone filed a deleted device under "check your sign-in".
+    ``NovaAuthPermanentError`` and any error flagged ``is_permanent`` belong
+    here whatever their status: they say re-authentication is required.
+    """
+
+    REJECTED_RATE_LIMIT = "rejected_rate_limit"
+    """The server answered HTTP 429. The transport worked; only the pace was wrong."""
+
+    REJECTED_SERVER = "rejected_server"
+    """The server answered and refused for any other reason.
+
+    Covers 5xx, a Nova logic error, and the non-credential client rejections --
+    400, 404, 405, 409, 422 -- that arrive as ``NovaAuthError`` despite naming
+    no credential problem. The enum has no ``REJECTED_CLIENT`` member because
+    no consumer branches on the distinction; what the two share, and what the
+    name is chosen for, is that the SERVER answered, so the transport worked
+    and no cooldown may be armed. For an HTTP refusal the log line names the
+    status; a Nova logic error carries no HTTP status (the request was a 200)
+    and its log line names the payload error code instead.
+    """
+
+    TRANSPORT_FAILED = "transport_failed"
+    """No usable answer was obtained: DNS, connect refused/timeout, disconnect,
+    read timeout, or a NovaError leaving the transport after its retries.
+
+    This is the ONLY outcome that justifies arming the push cooldown.
+    """
+
+    NOT_SENT = "not_sent"
+    """A local precondition failed before any transport was used (no action token).
+
+    Neither the server nor the network said anything, so neither may be blamed.
+    """
+
+    INTERNAL_ERROR = "internal_error"
+    """This integration failed on its own: an unexpected exception, or a contract
+    violation such as an empty reply from the submitter.
+
+    Classifying such a bug as a network outage is what this type was written to
+    stop; it is logged with a traceback and never arms the cooldown.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class PlaySoundResult:
+    """Result of ``api.async_play_sound``: a classification plus the cancel key.
+
+    ``cancel_key`` is non-None in exactly the cases where the device may be
+    ringing and a later Stop needs the handle: an accepted command, or a failure
+    that latched dispatch (``NovaError.dispatched``). Read ``cancel_key`` ONLY for
+    the question "may the device be ringing"; read ``outcome`` for every question
+    about the cause. Deriving the cause from the key is the out-of-band channel
+    this type replaces.
+    """
+
+    outcome: SoundDispatchOutcome
+    cancel_key: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        """Return True when Nova accepted the submission (HTTP 200)."""
+        return self.outcome is SoundDispatchOutcome.ACCEPTED
+
+
+# --------------------------------------------------------------------------------------
+# Stop Sound outcome
+# --------------------------------------------------------------------------------------
+
+
+class StopSoundOutcome(StrEnum):
+    """Outcome of a Stop Sound attempt.
+
+    Four states, because the state space is genuinely four-valued and a bool
+    cannot carry it: a stop that was submitted without a cancel key is neither a
+    success (nothing proves it reached a ring) nor a rejection (the server did
+    accept the submission). Collapsing the middle state into ``True`` is what
+    made the integration report success for a ring that kept playing
+    (BSkando#195).
+
+    The two failure states are kept apart for the same reason the middle state
+    exists: they differ in what the user has to do about them. ``SUPPRESSED``
+    clears itself and is answered by waiting; ``FAILED`` may need credentials, a
+    network, or patience with a rate limit. One message cannot advise on both
+    without misleading half its readers.
+
+    They are NOT told apart by how far the request travelled. Both contain a
+    member that never left the machine -- see ``FAILED`` on
+    ``SoundDispatchOutcome.NOT_SENT`` -- and reading "did it reach the wire"
+    as the criterion is what makes a missing action token look suppressible.
+
+    Note that even ``CANCELLED`` means "submitted with a correlated cancel key",
+    not "the device stopped". Nova returns no parsable ExecuteActionResponse, so
+    no reply of the cloud API can prove an effect on the device; see
+    ``docs/PLAY_SOUND_ARCHITECTURE.md`` and IRR-CA-NO-RING-CONFIRMATION.
+    """
+
+    CANCELLED = "cancelled"
+    """Submitted WITH a cancel key whose correlation this integration can prove.
+
+    Proof means the key is our own, still fresh, cached Play Sound handle. A key
+    supplied by the caller qualifies only when it IS that handle; an arbitrary
+    string is a claim we cannot check and yields ``UNCORRELATED`` instead.
+    """
+
+    UNCORRELATED = "uncorrelated"
+    """Submitted without a provably correlated key; the effect may be nil.
+
+    Covers both "no key at all" and "a key we cannot vouch for". Both leave the
+    server unable to match the stop to a running ring, so both are reported to
+    the user rather than silently counted as success.
+    """
+
+    SUPPRESSED = "suppressed"
+    """Never sent, because this integration declined to send it.
+
+    Today the sole cause is a push transport that is not ready yet. The command
+    never reached the network, the condition is local and transient, and the
+    only useful advice is to retry shortly.
+
+    "Never sent" alone does not qualify: ``SoundDispatchOutcome.NOT_SENT`` (the
+    readiness gate let the command through, but no action token was to be had)
+    never leaves the machine either and is filed under ``FAILED``. The dividing
+    line is the remedy, not the distance travelled -- see ``FAILED``.
+    """
+
+    FAILED = "failed"
+    """The attempt was made, and it did not succeed.
+
+    Covers every way it can die once this integration has committed to making
+    it: authentication failure, HTTP 401/403, a server rejection, a rate limit,
+    a network error, an empty reply -- and the missing action token, which
+    never reaches the wire.
+
+    That last member is why this docstring does not read "handed to the
+    transport". ``SoundDispatchOutcome.NOT_SENT`` is filed here rather than
+    under ``SUPPRESSED`` because the two failure states are told apart by the
+    REMEDY they call for, not by how far the request travelled. ``SUPPRESSED``
+    means "the push transport is not up yet, try again in a moment", and it is
+    reached only by the readiness gate saying so. ``NOT_SENT`` is what the gate
+    could NOT see: it inspects the receiver's state (``is_push_ready``) while
+    the token is fetched separately (``_get_fcm_token_for_action``), so a
+    command the gate waved through can still find no action token. That is a
+    setup or credential problem far more often than a moment's patience, and
+    the advice such a user needs is the one ``stop_sound_rejected`` already
+    gives -- "an expired sign-in, a missing token, a server or network error,
+    or a rate limit", plus a look at the log. Re-authentication is the usual
+    remedy across this member, which is why "try again in a moment" would be
+    wrong for most of it. Routing ``NOT_SENT`` to ``SUPPRESSED`` would answer a
+    missing token with an unbounded "try again shortly".
+    """
+
+
+# --------------------------------------------------------------------------------------
+# Play Sound outcome (coordinator -> service boundary)
+# --------------------------------------------------------------------------------------
+
+
+class PlaySoundOutcome(StrEnum):
+    """Outcome of a Play Sound attempt, as classified by the coordinator.
+
+    Three states, told apart by the REMEDY they call for -- the same dividing
+    line ``StopSoundOutcome`` draws, and for the same reason: one message
+    cannot advise both the user who only has to wait and the user who has to
+    act. Before this type existed the play path returned a plain ``bool``, so
+    six unrelated conditions -- a push cooldown that clears itself after ninety
+    seconds, a device that cannot ring at all, a missing action token, a server
+    rejection, a rate limit and a bug of our own -- reached the service handler
+    as one ``False`` and were answered with one message that had to list every
+    possibility and point at the log. See IRR-CA-PLAY-REMEDY-SPLIT.
+
+    This is deliberately NOT ``SoundDispatchOutcome``. That type is the verdict
+    of ``api.py`` on a command that was handed to it, and the coordinator holds
+    three states it never produces: the local readiness gate declining to send,
+    a ``ConfigEntryAuthFailed`` from an ``api`` implementation that raises it
+    (the one in this repository does not on the sound paths; the handler is
+    defensive, because ``api`` is a Protocol), and a failure in this method's
+    own body around the call. Passing the API type through the coordinator
+    would leave those three without a truthful value. The layers keep their own
+    vocabulary; the mapping between them lives in ``async_play_sound``.
+
+    There is no analogue to ``StopSoundOutcome.UNCORRELATED`` here. Nova returns
+    no parsable ExecuteActionResponse, so no reply proves the device rang -- but
+    that caveat holds for EVERY accepted play, not for a subset, and it is
+    already stated once in IRR-CA-NO-RING-CONFIRMATION rather than encoded as a
+    fourth member.
+    """
+
+    ACCEPTED = "accepted"
+    """Nova took the command.
+
+    "Accepted" is a statement about the submission, not about the device: no
+    reply of the cloud API can prove a ring started (IRR-CA-NO-RING-CONFIRMATION).
+    """
+
+    SUPPRESSED = "suppressed"
+    """Never sent, because a local condition that clears itself said no.
+
+    Exactly one condition qualifies today, and it is narrower than "the gate
+    said no": an active push cooldown, reached only while this integration does
+    not yet know whether the device can ring at all. ``can_play_sound`` answers
+    a known capability first and never consults the cooldown for such a device,
+    and its remaining branches end optimistically -- an unknown device is waved
+    through, not suppressed. So the cooldown is the whole of it, it passes on
+    its own within ninety seconds, and "try again in a moment" is the whole of
+    the advice.
+
+    A device whose capability says it cannot ring does NOT qualify, however
+    local that verdict is: waiting never changes it. It is filed under
+    ``FAILED`` -- the dividing line is the remedy, not where the decision was
+    taken.
+    """
+
+    FAILED = "failed"
+    """The attempt was made or refused, and waiting is not the answer.
+
+    Covers everything ``SUPPRESSED`` does not: a device that cannot ring, a
+    missing action token, an expired sign-in, a server rejection, a rate limit,
+    a network error, and a bug of this integration's own.
+
+    Two of these deserve a word, because both look like patience cases and are
+    not. A rate limit does pass with time, but it is filed here for symmetry
+    with ``StopSoundOutcome.FAILED``, whose docstring names it explicitly; two
+    sibling paths sorting the same condition differently would be worse than
+    one blunt edge, and the user message names the rate limit. And
+    ``SoundDispatchOutcome.NOT_SENT`` never reaches the wire either, yet a
+    missing action token is a setup or credential problem far more often than a
+    moment's patience.
+
+    Note what this member does NOT claim. An authentication rejection arrives
+    here as part of ``REJECTED_AUTH``, which also carries a plain HTTP 403 --
+    and 403 is an authorization verdict that a server must return even for a
+    resource that does not exist (Google AIP-193). Reading it as "your sign-in
+    expired" would tell the owner of a deleted device to check their
+    credentials, which is the misreading ``is_credential_rejection`` already
+    removed once. The user-facing message therefore names the log as the carrier
+    of the specific cause instead of guessing at it.
+    """
+
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
@@ -64,6 +355,165 @@ DATA_SUBENTRY_KEY: str = "subentry_key"
 SUBENTRY_TYPE_SERVICE: str = "service"
 SUBENTRY_TYPE_HUB: str = "hub"
 SUBENTRY_TYPE_TRACKER: str = "tracker"
+# Subentry types that never carry ``visible_device_ids``. Five consumers depend
+# on this set -- through four literal ``in`` comparisons, because two of them
+# share one predicate -- so the offering, the indexing and the writing side
+# cannot drift apart:
+# the options flow refuses them as assignment targets
+# (``config_flow._accepts_device_assignment``); the feature sync refuses them
+# as write *targets* for the tracker group and folds them onto the service key
+# instead (``config_flow._canonical_core_key_of``); the runtime index folds
+# them the same way and exempts their ids from its *in-memory* assignment
+# bookkeeping, leaving both the stored subentry and that group's own
+# allow-list alone (``coordinator/subentry.py``); and two write sinks
+# refuse them, the manager's ``update_visible_device_ids`` and the
+# visibility write-back in ``async_setup_entry``, which bypasses the manager
+# and therefore needs its own guard (both in ``__init__.py``).
+NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
+    {SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB}
+)
+# The *key* axis of the same judgement, shared for the same reason the type
+# axis is: ``config_flow._accepts_device_assignment`` reads the group key
+# before the type, and a second spelling of that set on the writing side is
+# exactly the drift ``LITERAL_CORE_KEY_OWNER`` below was extracted to prevent.
+# The two axes are not redundant: a subentry can be managed under a non-device
+# key while its type says nothing useful, and only the key catches that.
+NON_DEVICE_SUBENTRY_KEYS: frozenset[str] = frozenset({SERVICE_SUBENTRY_KEY})
+# The type that *literally* owns each core key, as opposed to folding onto it.
+# ``hub`` folds onto ``SERVICE_SUBENTRY_KEY`` for the assignment predicate, the
+# feature sync and the runtime index, but the entity platforms match
+# ``subentry_type == "service"`` literally (``known_ids_for_subentry_type``), so
+# the two are not interchangeable. Where both answer for the same key, this
+# table decides which one keeps it, and it lives here rather than in one of the
+# consumers because the config flow (``_resolve_existing``, the stale-subentry
+# sweep), the runtime index (``coordinator/subentry.py``) and the runtime
+# manager (``ConfigEntrySubEntryManager._candidate_score`` in ``__init__.py``)
+# must rank the same pair identically: a slot won on one side and lost on
+# another is exactly the drift the shared set above exists to prevent. Sharing
+# the *definition* is the point; each consumer keeps its own reader, and they
+# spell the order differently -- the flow and the index rank "lower wins", the
+# manager "higher wins" -- so only the *relative* order of the fields is
+# shared, not the tuples themselves. The manager was the one site that did not
+# read this table; it does now.
+#
+# "Identically" is deliberately about those shared fields and not about the
+# whole tuple, because one difference survives and hiding it would make this
+# comment the drift it warns against: the manager breaks a full tie on the raw
+# ``subentry_id`` where the index uses the sanitised, provisional-filtered one
+# -- the same flow/index difference named further down, now inherited by a
+# third reader.
+#
+# A second difference is gone rather than named, and the reason it lasted is
+# worth more than the field it removed. The manager carried two provenance
+# fields (entry match, unique-id substring) *behind* the shared ones, and
+# "behind" was argued to make them harmless. It does not: the contract's last
+# criterion is the lowest identifier, so a field between "identifier presence"
+# and that tie-break still decides pairs the contract wanted decided by id.
+# The reachability argument that kept them was inverted, not merely
+# optimistic. It read "it takes a subentry ``unique_id`` without the entry id,
+# which no writer in ``custom_components/`` produces". True of a wrongly
+# *shaped* identifier, irrelevant to the pair that actually diverged, whose
+# left operand is ``unique_id=None`` -- absence needs no writer. The core
+# loads the field with ``subentry_data.get("unique_id")`` and defaults it to
+# ``None`` in ``ConfigSubentryFlow.async_create_entry``. How long the shape
+# lasts is a *window* rather than a permanent state, and an earlier draft of
+# this paragraph said "never repaired", which is the same kind of overreach:
+# the subentry write-backs pass an existing value through unchanged, but
+# ``_async_sync_feature_subentries`` assigns ``f"{entry_id}-{key}"`` to the
+# core subentry it resolved, so the next options-flow pass normally does
+# repair it. The window is entry load to next flow run, which the runtime
+# index and the visibility write-back both sit inside. Both fields are
+# removed; the manager's tuple is the three shared fields and nothing else.
+#
+# Two asymmetries stay beyond the rank, named so the next reader does not take
+# "must rank the same pair identically" for more than it says. The rank block
+# no longer covers only the service key -- it covers both core keys -- but the
+# two *folds* still differ, and the rank cannot repair a disagreement about
+# which subentries reach a key at all. The two sides therefore agree on
+# ``core_tracking`` exactly where both folds land there, which is the parked
+# shape (a ``tracker`` storing the service key), pinned by
+# ``::test_ap4_the_manager_and_the_index_agree_on_the_tracker_slot``. They stay
+# asymmetric where only the manager folds: for a legacy per-account key and for
+# a ``hub`` storing ``core_tracking``, the manager names the stored subentry
+# while the index names its synthetic placeholder -- measured, not inferred, so
+# do not read ``managed_subentries["core_tracking"]`` as "the subentry the
+# index describes" without checking the type.
+#
+# Within the manager itself, ``_candidate_score`` is the only reader of this
+# table. ``_async_adopt_existing_unique_id`` is not: it takes the first match
+# (``break``). Neither is ``_deduplicate_subentries``, and that is a correction
+# rather than a standing fact -- a type rank against this table sat in its
+# ``_select_canonical`` for two stages of PR #1236, and the version of this
+# paragraph written then described that rank as the resting shape. It is gone.
+# What ``_select_canonical`` sorts on is identifier *presence*, then the
+# identifier itself, then the iteration index, then the ``subentry_id``: the
+# index is the third field, not the fourth, and no type is compared anywhere in
+# that tuple.
+#
+# Why it went is worth keeping, because it is the argument against putting one
+# back. On the ``unique_id`` axis the two fields above the index tie by
+# construction -- the candidates are grouped *by* ``unique_id`` -- so the
+# survivor was whichever subentry the entry happened to yield first and the
+# loser went to ``async_remove_subentry``, registry bindings included. The
+# production shape reaching that axis is a ``hub`` and a ``service`` sharing
+# ``f"{entry_id}-service"``. Ranking the literal key owner first made that
+# deterministic rather than random, which on an irreversible path fixes the
+# noise and not the deletion: it turned the foreign type into the *reliable*
+# loser. What fixes the deletion is the guard on the removal itself, and it
+# compares the full ``(group_key, subentry_type)`` identity -- the same pair the
+# group axis keys on -- so a candidate differing in *either* half is spared
+# entirely instead of merely ranked below. A type-only form of that guard was
+# the stage in between and had a victim of its own: two ``tracker`` groups with
+# distinct keys sharing one identifier read as duplicate copies, though several
+# tracker groups are a supported shape. With the full identity compared, every
+# foreign candidate is spared and the rank therefore decides nothing at all --
+# measured over all 19 683 three-subentry shapes and a 19 987-shape sample of
+# four- and five-subentry ones, not reasoned about -- and a ranking field on a
+# removal path that decides nothing still reads as load-bearing to the next
+# reader. The guard's own halves are graded in
+# ``tests/test_subentry_manager_registry_resolution.py``: narrowing it back to
+# the type comparison kills three tests, neutralising it entirely kills nine.
+#
+# The absence of the rank has an observer of its own, and it needs one for a
+# specific reason: putting the field back changes no behaviour any test can
+# see. Measured -- with it reinstated, all 130 *behavioural* tests across
+# ``test_subentry_manager_registry_resolution.py`` and
+# ``test_coordinator_subentry_visibility.py`` stay green (the count is the
+# one before the ratchet below was added, which is the state the
+# measurement describes), which is precisely
+# the property that made three separate paragraphs (this one, and both scoped
+# ``AGENTS.md`` files) drift into describing an intermediate stage as the
+# implementation. ``::test_select_canonical_ranks_no_subentry_type`` freezes
+# the tuple's field count and rejects any read of ``subentry_type`` or this
+# table anywhere in ``_sort_key``, its body included, so a rank computed into a
+# local above the ``return`` does not slip past it either.
+#
+# Mind the direction when comparing, and note that the sites do not split two
+# against one: the flow and the index rank "lower wins" while
+# ``_candidate_score`` alone spells it "higher wins"
+# (``candidate_score > existing_score``). A rank tuple copied from either of the
+# first two into that method, or the other way round, has to be inverted; one
+# copied between the first two does not. ``_select_canonical`` is deliberately
+# absent from that list: it picks with ``min``, but it ranks no type, so it is
+# not a fourth reader of this table and a tuple must not be copied into it.
+#
+# On the ``(group_key, subentry_type)`` axis the type is part of the grouping
+# key, so no type rank could discriminate there in the first place. That axis
+# still keeps the *higher* identifier of a pair whose lower one carries
+# ``unique_id=None`` -- the opposite of what the rankers above pick for it --
+# and it still *removes* the loser, with ``async_sync`` calling it
+# unconditionally before anything else. That remainder is tracked as ``B16`` in
+# ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, where the input shape is measured
+# rather than assumed.
+# Read-only on purpose: unlike the plain ``dict`` constants elsewhere in this
+# module, this one is imported by two packages at once, and an in-place mutation
+# in either would silently reach the other.
+LITERAL_CORE_KEY_OWNER: Mapping[str, str] = MappingProxyType(
+    {
+        SERVICE_SUBENTRY_KEY: SUBENTRY_TYPE_SERVICE,
+        TRACKER_SUBENTRY_KEY: SUBENTRY_TYPE_TRACKER,
+    }
+)
 SERVICE_SUBENTRY_TRANSLATION_KEY: str = SERVICE_SUBENTRY_KEY
 TRACKER_SUBENTRY_TRANSLATION_KEY: str = TRACKER_SUBENTRY_KEY
 
@@ -104,6 +554,13 @@ DATA_AAS_TOKEN: str = "aas_token"  # AAS token (TokenCache key; not in entry.dat
 CONF_GOOGLE_EMAIL: str = "google_email"  # helper key when individual tokens are used
 DATA_SECRET_BUNDLE: str = "secrets_data"  # full GoogleFindMyTools secrets.json content
 DATA_AUTH_METHOD: str = "auth_method"  # "secrets_json" | "individual_tokens"
+# Credential keys an account may or may not carry. Credentials that replace
+# existing ones express "this account has no bundle / no AAS token any more" by
+# leaving the key out, which is why every surface that writes credentials has to
+# be able to *remove* them (config_flow._merge_credential_updates) and why the
+# credential seed in async_setup_entry must not recover them from the cache
+# behind a removal's back.
+OPTIONAL_CREDENTIAL_KEYS: tuple[str, ...] = (DATA_SECRET_BUNDLE, DATA_AAS_TOKEN)
 
 # Options (user-changeable): stored in config_entry.options
 # (tracked_devices removed in Step 2; device inclusion is managed via HA device enable/disable)
@@ -123,6 +580,7 @@ OPT_STALE_THRESHOLD: str = "stale_threshold"
 OPT_SHOW_LOCATION_AGE: str = "show_location_age"
 OPT_SPEED_GATE_ENABLED: str = "speed_gate_enabled"
 OPT_ROUNDTRIP_CONFIRM: str = "roundtrip_confirm_enabled"
+OPT_ACCURACY_GATE_ENABLED: str = "accuracy_gate_enabled"
 # Legacy option key - kept for reading old configurations, no longer used
 OPT_STALE_THRESHOLD_ENABLED: str = "stale_threshold_enabled"
 
@@ -144,6 +602,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_SHOW_LOCATION_AGE,
     OPT_SPEED_GATE_ENABLED,
     OPT_ROUNDTRIP_CONFIRM,
+    OPT_ACCURACY_GATE_ENABLED,
 )
 
 # Keys which may exist historically in entry.data and should be soft-copied to entry.options
@@ -287,6 +746,21 @@ ROUND_TRIP_TTL_S: int = 900
 # own constant (not an alias) so it stays one-line adjustable.
 ROUND_TRIP_ANCHOR_RADIUS_M: float = 200.0
 
+# Accuracy gate (#216, and the core of #211). A coarse crowd fix must not
+# displace a better, still-fresh position, and must not trip Home Assistant's
+# zone logic: the reported accuracy radius is the TOLERANCE of the zone
+# assignment (zone/__init__.py: ``zone_dist - zone_radius < radius``), so a
+# 460 m fix 346 m away from a 32 m home zone is published as "home".
+#
+# Deliberately a switch, not a numeric field. The predecessor option
+# ``min_accuracy_threshold`` (default 100 m, range 25-500) was an absolute
+# threshold and was removed one day after it shipped ("causing too many
+# problems", 47a18cc5). Its default sat right ON the median reported FMDN
+# accuracy (94-148 m, Boettger et al., PoPETs 2025(4), Tab. 5+6), so it
+# discarded about half of all genuine reports. The comparative rule below has
+# no such failure mode: it never discards without a better alternative.
+DEFAULT_ACCURACY_GATE_ENABLED: bool = True
+
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
 CONTRIBUTOR_MODE_IN_ALL_AREAS: str = "in_all_areas"
 DEFAULT_CONTRIBUTOR_MODE: str = CONTRIBUTOR_MODE_IN_ALL_AREAS
@@ -314,6 +788,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_SHOW_LOCATION_AGE: DEFAULT_SHOW_LOCATION_AGE,
     OPT_SPEED_GATE_ENABLED: DEFAULT_SPEED_GATE_ENABLED,
     OPT_ROUNDTRIP_CONFIRM: DEFAULT_ROUNDTRIP_CONFIRM,
+    OPT_ACCURACY_GATE_ENABLED: DEFAULT_ACCURACY_GATE_ENABLED,
 }
 
 # -------------------- Options schema versioning (lightweight) --------------------
@@ -497,6 +972,9 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
         "type": "bool",
     },
     OPT_ROUNDTRIP_CONFIRM: {
+        "type": "bool",
+    },
+    OPT_ACCURACY_GATE_ENABLED: {
         "type": "bool",
     },
     # OPT_IGNORED_DEVICES is intentionally omitted: it is managed by a dedicated
@@ -712,6 +1190,11 @@ def map_token_hex_digest(seed: str) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
+# Options key holding an optional list of *additional* ``secrets.json`` paths the
+# discovery watcher observes on top of the default ``Auth/secrets.json``.
+SECRETS_EXTRA_WATCH_PATHS: str = "secrets_extra_watch_paths"
+
+
 __all__ = [
     "DOMAIN",
     "INTEGRATION_VERSION",
@@ -727,12 +1210,16 @@ __all__ = [
     "SUBENTRY_TYPE_SERVICE",
     "SUBENTRY_TYPE_HUB",
     "SUBENTRY_TYPE_TRACKER",
+    "NON_DEVICE_SUBENTRY_TYPES",
+    "NON_DEVICE_SUBENTRY_KEYS",
+    "LITERAL_CORE_KEY_OWNER",
     "service_device_identifier",
     "CONF_OAUTH_TOKEN",
     "DATA_AAS_TOKEN",
     "CONF_GOOGLE_EMAIL",
     "DATA_SECRET_BUNDLE",
     "DATA_AUTH_METHOD",
+    "OPTIONAL_CREDENTIAL_KEYS",
     "OPT_IGNORED_DEVICES",
     "OPT_LOCATION_POLL_INTERVAL",
     "OPT_DEVICE_POLL_DELAY",
@@ -748,12 +1235,14 @@ __all__ = [
     "OPT_SHOW_LOCATION_AGE",
     "OPT_SPEED_GATE_ENABLED",
     "OPT_ROUNDTRIP_CONFIRM",
+    "OPT_ACCURACY_GATE_ENABLED",
     "OPT_STALE_THRESHOLD_ENABLED",
     "MIGRATE_DATA_KEYS_TO_OPTIONS",
     "UPDATE_INTERVAL",
     "DEFAULT_SPEED_GATE_ENABLED",
     "DEFAULT_MAX_PLAUSIBLE_SPEED_MPS",
     "DEFAULT_ROUNDTRIP_CONFIRM",
+    "DEFAULT_ACCURACY_GATE_ENABLED",
     "ROUND_TRIP_TTL_S",
     "ROUND_TRIP_ANCHOR_RADIUS_M",
     "DEFAULT_LOCATION_POLL_INTERVAL",
@@ -819,4 +1308,5 @@ __all__ = [
     "WEEK_SECONDS",
     "map_token_secret_seed",
     "map_token_hex_digest",
+    "SECRETS_EXTRA_WATCH_PATHS",
 ]

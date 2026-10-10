@@ -49,12 +49,14 @@ from typing import Any
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 from .gpsoauth_loader import (
     GpsoauthModule,
+    classify_gpsoauth_error,
     load_gpsoauth_exceptions,
     require_gpsoauth,
 )
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
+from .log_safety import describe_exception, exception_origin
 from .token_cache import TokenCache
 from .username_provider import username_string
 
@@ -85,10 +87,13 @@ def _clip(value: object, limit: int = 200) -> str:
 
 
 def _summarize_response(obj: Mapping[str, Any] | object) -> str:
-    """Summarize a gpsoauth response without leaking sensitive data."""
+    """Summarize a gpsoauth response without leaking sensitive data.
+
+    Type and key count only: the key names are part of the server response
+    and the message is logged one hop later (AGENTS.md R-1).
+    """
     if isinstance(obj, Mapping):
-        keys = ", ".join(sorted(map(str, obj.keys())))
-        return f"dict(keys=[{keys}])"
+        return f"dict(key_count={len(obj)})"
     return f"{type(obj).__name__}"
 
 
@@ -216,8 +221,9 @@ async def _get_or_generate_android_id(
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Skipping cache write for android_id derived from FCM bundle; persistence failed",
-                exc_info=err,
+                "Skipping cache write for android_id derived from FCM bundle; persistence failed (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
             )
         return android_id
 
@@ -232,7 +238,9 @@ async def _get_or_generate_android_id(
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to persist generated android_id: %s", _clip(err))
+        _LOGGER.debug(
+            "Failed to persist generated android_id: %s", describe_exception(err)
+        )
     return android_id
 
 
@@ -277,16 +285,17 @@ async def _exchange_oauth_for_aas(
         resp = await loop.run_in_executor(None, _run)
     except Exception as err:  # noqa: BLE001
         if gpsoauth_exceptions and isinstance(err, gpsoauth_exceptions.AuthError):
-            # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw exception
-            # text out of the log message; surface a sanitized ``error_kind``
-            # via ``extra`` and preserve traceback context via ``exc_info``.
+            # Per Auth/AGENTS.md (logging guardrails): keep raw exception
+            # text out of the record; surface a sanitized ``error_kind`` via
+            # ``extra`` and the type plus frame instead of a traceback.
             _LOGGER.warning(
-                "gpsoauth authentication error.",
+                "gpsoauth authentication error. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
                 extra={
                     "user": _mask_email_for_logs(username),
                     "error_kind": "auth_error",
                 },
-                exc_info=err,
             )
             new_err = RuntimeError("gpsoauth authentication failed (kind=auth_error)")
             new_err.error_kind = "auth_error"  # type: ignore[attr-defined]
@@ -306,21 +315,23 @@ async def _exchange_oauth_for_aas(
             wrapped_msg = "gpsoauth exchange failed (kind=exchange_error)"
             log_level = _LOGGER.error
         log_level(
-            "gpsoauth exchange failed unexpectedly.",
+            "gpsoauth exchange failed unexpectedly (%s at %s).",
+            describe_exception(err),
+            exception_origin(err),
             extra={
                 "user": _mask_email_for_logs(username),
                 "error_kind": wrapped_kind,
             },
-            exc_info=err,
         )
         new_err = RuntimeError(wrapped_msg)
         new_err.error_kind = wrapped_kind  # type: ignore[attr-defined]
         raise new_err from err
 
+    # Key count, not key names: the mapping is the server response.
     _LOGGER.debug(
-        "gpsoauth exchange response received: type=%s, keys=%s",
+        "gpsoauth exchange response received: type=%s, key_count=%s",
         type(resp).__name__,
-        list(resp.keys()) if isinstance(resp, dict) else "N/A",
+        len(resp) if isinstance(resp, dict) else "N/A",
     )
 
     if not isinstance(resp, dict) or not resp:
@@ -330,25 +341,30 @@ async def _exchange_oauth_for_aas(
     if "Token" not in resp:
         error_value = resp.get("Error", "") if isinstance(resp, dict) else ""
         error_details = resp.get("ErrorDetails", "") if isinstance(resp, dict) else ""
-        resp_keys = list(resp.keys()) if isinstance(resp, dict) else "N/A"
-        # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw gpsoauth
+        key_count = len(resp) if isinstance(resp, dict) else 0
+        # Per Auth/AGENTS.md (logging guardrails): keep raw gpsoauth
         # response bodies (esp. ``ErrorDetails``) out of the log message;
         # surface only sanitized flags/keys via ``extra``. The gpsoauth
-        # ``Error`` field is a small closed set (e.g. ``NeedsBrowser``,
-        # ``BadAuthentication``) and is exposed as ``error_kind``.
+        # ``Error`` field is a documented closed set (``BadAuthentication``,
+        # ``NeedsBrowser``, ...); only a documented code is exposed as
+        # ``error_kind``, any other value is server text and is sized.
+        # The kind travels on the raised error (attribute and ``kind=``), and
+        # ``async_get_aas_token`` logs it from there via ``describe_exception``.
+        # It is not copied into ``extra``: Home Assistant's log format does not
+        # print ``extra`` fields, so the copy was redundant (Auth AGENTS.md).
+        classified = classify_gpsoauth_error(error_value)
+        error_kind = classified or "(none)"
         _LOGGER.warning(
-            "gpsoauth response missing token (user=%s, keys=%d)",
+            "gpsoauth response missing the AAS result field (user=%s, keys=%d)",
             _mask_email_for_logs(username),
-            len(resp_keys) if isinstance(resp_keys, list) else 0,
+            key_count,
             extra={
                 "error_field_present": bool(error_value),
-                "error_kind": (str(error_value)[:32] if error_value else None),
                 "details_present": bool(error_details),
-                "response_keys": resp_keys,
+                "response_key_count": key_count,
                 "user": _mask_email_for_logs(username),
             },
         )
-        error_kind = str(error_value)[:32] if error_value else "(none)"
         new_err = RuntimeError(
             f"Missing 'Token' in gpsoauth response (kind={error_kind})"
         )
@@ -398,7 +414,19 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
     if oauth_token:
         reason = _disqualifies_oauth_for_exchange(oauth_token)
         if reason:
-            _LOGGER.warning("Ignoring value from '%s': %s.", CONF_OAUTH_TOKEN, reason)
+            # Fixed text instead of ``reason``: the record carries no value
+            # derived from the OAuth slot. Name the JWT case only when it is
+            # the one that applied, so a new filter reason cannot be mislabelled.
+            if _looks_like_jwt(oauth_token):
+                _LOGGER.warning(
+                    "Ignoring the configured OAuth value: it looks like a JWT "
+                    "(possibly an installation or ID token), not an OAuth token."
+                )
+            else:
+                _LOGGER.warning(
+                    "Ignoring the configured OAuth value: the negative filter "
+                    "disqualifies it for the AAS exchange."
+                )
             oauth_token = None  # Force fallback path
 
     # 2) Fallback: scan ADM tokens if no explicit OAuth token exists or it was disqualified
@@ -408,13 +436,17 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                 "No username available; please ensure the account e-mail is configured."
             )
         _LOGGER.debug(
-            "Cached value for '%s' already looks like an AAS token; reusing without gpsoauth.exchange_token.",
-            CONF_OAUTH_TOKEN,
+            "The configured OAuth value already has the AAS form; reusing it "
+            "without gpsoauth.exchange_token."
         )
         try:
             await cache.set(DATA_AAS_TOKEN, oauth_token)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Failed to persist cached AAS token shortcut.", exc_info=err)
+            _LOGGER.debug(
+                "Failed to persist the cached AAS shortcut. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
+            )
         return oauth_token
 
     if not oauth_token:
@@ -468,7 +500,8 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
             await cache.set(username_string, resp["Email"])
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist normalized username from gpsoauth: %s", _clip(err)
+                "Failed to persist normalized username from gpsoauth: %s",
+                describe_exception(err),
             )
 
     return str(resp["Token"])
@@ -534,28 +567,32 @@ async def async_get_aas_token(
                 if not retryable:
                     if retry_num > 0:
                         _LOGGER.error(
-                            "AAS token: generation failed (retry %d/%d). No more retries. "
+                            "AAS retrieval failed (retry %d/%d). No more retries. "
                             "Error: %s",
                             retry_num,
                             max_retries,
-                            exc,
+                            describe_exception(exc),
                         )
                     else:
-                        _LOGGER.error("AAS token: generation failed. Error: %s", exc)
+                        _LOGGER.error(
+                            "AAS retrieval failed. Error: %s",
+                            describe_exception(exc),
+                        )
                     break
 
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "AAS token: generation failed. Error: %s. Retrying...", exc
+                        "AAS retrieval failed. Error: %s. Retrying...",
+                        describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
-                        "AAS token: generation failed (retry %d/%d). Error: %s. "
+                        "AAS retrieval failed (retry %d/%d). Error: %s. "
                         "Retrying in %.0fs...",
                         retry_num,
                         max_retries,
-                        exc,
+                        describe_exception(exc),
                         sleep_s,
                     )
                 await asyncio.sleep(sleep_s)
@@ -577,7 +614,10 @@ async def async_get_aas_token(
                     extra={"user": _mask_email_for_logs(username_val)},
                 )
             except Exception as err:  # noqa: BLE001 - defensive cache write
-                _LOGGER.debug("Failed to record AAS issuance timestamp: %s", err)
+                _LOGGER.debug(
+                    "Failed to record AAS issuance timestamp: %s",
+                    describe_exception(err),
+                )
 
     return token
 

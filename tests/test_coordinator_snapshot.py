@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +16,7 @@ from custom_components.googlefindmy.coordinator import (
     _as_ha_attributes,
     _sync_get_last_gps_from_history,
 )
+from custom_components.googlefindmy.coordinator import main as coordinator_main
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
 from tests.helpers.config_entries_stub import make_config_entry
 
@@ -334,3 +337,157 @@ async def test_snapshot_current_state_carries_accuracy_estimated_flag(
     assert entry["status"] == "Using current state"
     assert entry["accuracy"] == pytest.approx(200.0)
     assert entry["accuracy_estimated"] is True
+
+
+# --------------------------------------------------------------------------- #
+# AGENTS.md section 5 (b): records that can repeat unattended keep the         #
+# entity_id / device name out of INFO and above (a count, an index or a class  #
+# (b) identifier stands in its place) and carry it only at DEBUG.              #
+# --------------------------------------------------------------------------- #
+
+
+class _MigratingEntityRegistry(_DummyEntityRegistry):
+    """Registry stub whose ``async_update_entity`` migrates or fails."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__()
+        self.fail = fail
+        self.updated: list[tuple[str, dict[str, object]]] = []
+
+    def async_update_entity(self, entity_id: str, **changes: object) -> None:
+        if self.fail:
+            raise ValueError(
+                f"Unique id '{changes.get('new_unique_id')}' is already in use "
+                f"by '{entity_id}'"
+            )
+        self.updated.append((entity_id, dict(changes)))
+
+
+def _records_at_or_above(
+    caplog: pytest.LogCaptureFixture, level: int
+) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno >= level]
+
+
+def _snapshot_coordinator(hass: SimpleNamespace) -> GoogleFindMyCoordinator:
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass
+    coordinator.allow_history_fallback = False
+    coordinator._device_location_data = {}
+    coordinator.location_poll_interval = 30
+    coordinator.config_entry = make_config_entry(entry_id="entry-1")
+    return coordinator
+
+
+@pytest.mark.asyncio
+async def test_history_fallback_warnings_carry_index_not_entity_id(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Both history-fallback WARNINGs name the device by index; the
+    entity_id and the user-provided name move to DEBUG siblings."""
+
+    entity_id = "device_tracker.googlefindmy_device_42"
+    entity_registry = _DummyEntityRegistry()
+    entity_registry.add("device_tracker", DOMAIN, "entry-1:device-42", entity_id)
+    monkeypatch.setattr(
+        coordinator_registry.er, "async_get", lambda hass: entity_registry
+    )
+    recorder = SimpleNamespace(async_add_executor_job=AsyncMock(return_value=None))
+    monkeypatch.setattr(coordinator_main, "get_recorder", lambda hass: recorder)
+
+    coordinator = _snapshot_coordinator(SimpleNamespace(states=_DummyStates()))
+    coordinator.allow_history_fallback = True
+    caplog.set_level(logging.DEBUG)
+
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
+    )
+
+    assert result[0]["status"] == "Waiting for location poll"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert all("device 1 of 1" in r.getMessage() for r in warnings)
+    assert all(
+        entity_id not in r.getMessage() and "Pixel 8" not in r.getMessage()
+        for r in _records_at_or_above(caplog, logging.INFO)
+    )
+    debug_siblings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG
+        and entity_id in r.getMessage()
+        and "Pixel 8" in r.getMessage()
+    ]
+    assert len(debug_siblings) == 2
+
+
+@pytest.mark.asyncio
+async def test_tracker_unique_id_migration_info_keeps_entity_id_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The unique_id migration INFO (polling path, repeats until it succeeds)
+    names both unique_ids (class b) and nothing else."""
+
+    entity_id = "device_tracker.googlefindmy_device_42"
+    entity_registry = _MigratingEntityRegistry()
+    entity_registry.add("device_tracker", DOMAIN, "entry-1:device-42", entity_id)
+    monkeypatch.setattr(
+        coordinator_registry.er, "async_get", lambda hass: entity_registry
+    )
+    coordinator = _snapshot_coordinator(SimpleNamespace(states=_DummyStates()))
+    caplog.set_level(logging.DEBUG)
+
+    await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
+    )
+
+    assert entity_registry.updated, "migration path was not exercised"
+    infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("Migrating tracker entity" in r.getMessage() for r in infos)
+    assert all(
+        entity_id not in r.getMessage() and "Pixel 8" not in r.getMessage()
+        for r in _records_at_or_above(caplog, logging.INFO)
+    )
+    assert any(
+        r.levelno == logging.DEBUG
+        and "Migrating tracker entity" in r.getMessage()
+        and entity_id in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_tracker_unique_id_migration_error_keeps_entity_id_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failing migration (repeats on every poll while the ValueError
+    persists) logs the ERROR without the entity_id, also when the registry's
+    own error text names it; the text stays available at DEBUG."""
+
+    entity_id = "device_tracker.googlefindmy_device_42"
+    entity_registry = _MigratingEntityRegistry(fail=True)
+    entity_registry.add("device_tracker", DOMAIN, "entry-1:device-42", entity_id)
+    monkeypatch.setattr(
+        coordinator_registry.er, "async_get", lambda hass: entity_registry
+    )
+    coordinator = _snapshot_coordinator(SimpleNamespace(states=_DummyStates()))
+    caplog.set_level(logging.DEBUG)
+
+    await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
+    )
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "Failed to migrate tracker entity" in errors[0].getMessage()
+    assert "rejected the new unique_id" in errors[0].getMessage()
+    assert all(
+        entity_id not in r.getMessage() and "Pixel 8" not in r.getMessage()
+        for r in _records_at_or_above(caplog, logging.INFO)
+    )
+    assert any(
+        r.levelno == logging.DEBUG
+        and "already in use" in r.getMessage()
+        and entity_id in r.getMessage()
+        for r in caplog.records
+    )

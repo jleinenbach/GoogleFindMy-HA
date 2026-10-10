@@ -12,6 +12,7 @@ from homeassistant.core import ServiceCall
 from homeassistant.helpers.network import NoURLAvailableError
 
 from custom_components.googlefindmy import const, services
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _StubServices:
@@ -60,6 +61,20 @@ class _StubDeviceRegistry:
     def __init__(self, devices: dict[str, SimpleNamespace]) -> None:
         self.devices = devices
         self.updated: dict[str, str] = {}
+
+    def async_entries_for_config_entry(
+        self, config_entry_id: str
+    ) -> list[SimpleNamespace]:
+        """Return the devices owned by ``config_entry_id``.
+
+        The service asks per entry rather than scanning the whole registry, so
+        the double has to answer the same question core answers.
+        """
+        return [
+            device
+            for device in self.devices.values()
+            if config_entry_id in getattr(device, "config_entries", ())
+        ]
 
     def async_update_device(self, *, device_id: str, configuration_url: str) -> None:
         self.updated[device_id] = configuration_url
@@ -160,6 +175,142 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(
         "ha-dev-2": f"{base_url}/api/googlefindmy/map/beta-serial?token={expected_entry_two_token}",
     }
     assert "ha-service" not in device_registry.updated
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_uses_the_queried_entry_not_the_device_shim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owning entry comes from the query, not from the device's own list.
+
+    The device lists ``entry-2`` first and is answered for the ``entry-1``
+    query; the token must be ``entry-1``'s.
+
+    What this does **not** show is a difference to the code before AP-13. That
+    code walked ``config_entries`` and stopped at the first member that was one
+    of ours, so it picked ``entry-1`` here as well. The case where the two really
+    part company is the one in
+    ``test_refresh_device_urls_ignores_a_device_owned_by_a_foreign_entry``. This
+    test pins the *source* of the owner id, which is what a later refactor is
+    most likely to swap back.
+    """
+    fake_now = 1_209_600
+    base_url = "https://example.test"
+
+    entry_one = make_config_entry(entry_id="entry-1", data={}, options={})
+    entry_one.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
+    config_entries = _StubConfigEntries([entry_one])
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = config_entries
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+
+    devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            # A list rather than a set: the order has to be observable for the
+            # assertion below to mean anything.
+            config_entries=["entry-2", "entry-1"],
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
+    monkeypatch.setattr(services.time, "time", lambda: fake_now)
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
+
+    expected = const.map_token_hex_digest(
+        const.map_token_secret_seed("ha-uuid", "entry-1", False)
+    )
+    foreign = const.map_token_hex_digest(
+        const.map_token_secret_seed("ha-uuid", "entry-2", False)
+    )
+    assert device_registry.updated["ha-dev-1"].endswith(f"?token={expected}")
+    assert foreign not in device_registry.updated["ha-dev-1"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_ignores_a_device_owned_by_a_foreign_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device carrying our identifier but owned by nobody of ours is left alone.
+
+    This is the behaviour AP-13 changed. The registry-wide scan it replaced took
+    the first member of ``DeviceEntry.config_entries`` when none of them was one
+    of ours, and then signed the map URL with a token seeded from that foreign
+    entry id. Asking per config entry cannot reach such a device at all, which is
+    the point: it is registry residue, not one of ours.
+    """
+    fake_now = 1_209_600
+    base_url = "https://example.test"
+
+    entry_one = make_config_entry(entry_id="entry-1", data={}, options={})
+    entry_one.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
+    config_entries = _StubConfigEntries([entry_one])
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = config_entries
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+
+    devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(const.DOMAIN, "device-alpha")},
+            config_entries=["foreign-entry"],
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
+    monkeypatch.setattr(services.time, "time", lambda: fake_now)
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
+
+    assert device_registry.updated == {}
 
 
 def test_refresh_device_urls_skips_when_base_url_missing(
@@ -282,3 +433,79 @@ def test_refresh_device_urls_skips_when_base_url_is_none(
 
     assert device_registry.updated == {}
     assert devices["ha-dev-1"].configuration_url == "https://existing.test"
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_visits_a_shared_device_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device hanging on two of our entries is written once, not twice.
+
+    Below Core 2026.8 a device can belong to several config entries at the same
+    time, so the per-entry query returns it once per entry. The first entry asked
+    wins, which is also the entry whose prefix ``_canonical_identifier`` strips.
+    """
+    fake_now = 1_209_600
+    base_url = "https://example.test"
+
+    entry_one = make_config_entry(entry_id="entry-1", data={}, options={})
+    entry_one.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
+    entry_two = make_config_entry(entry_id="entry-2", data={}, options={})
+    entry_two.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
+    config_entries = _StubConfigEntries([entry_one, entry_two])
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = config_entries
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+
+    devices = {
+        "ha-shared": SimpleNamespace(
+            id="ha-shared",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            config_entries=["entry-1", "entry-2"],
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+        ),
+        # No identifier of ours: owned by one of our entries, but not one of our
+        # devices. The domain filter has to keep it out.
+        "ha-foreign": SimpleNamespace(
+            id="ha-foreign",
+            identifiers={("other_domain", "whatever")},
+            config_entries=["entry-1"],
+            serial_number=None,
+            name="Foreign",
+            name_by_user=None,
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
+    monkeypatch.setattr(services.time, "time", lambda: fake_now)
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
+
+    expected = const.map_token_hex_digest(
+        const.map_token_secret_seed("ha-uuid", "entry-1", False)
+    )
+    assert device_registry.updated == {
+        "ha-shared": f"{base_url}/api/googlefindmy/map/device-alpha?token={expected}"
+    }

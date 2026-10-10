@@ -7,7 +7,7 @@ import asyncio
 import base64
 import importlib
 import sys
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from types import ModuleType, SimpleNamespace
 from typing import Any, TypeVar, cast
 
@@ -19,7 +19,7 @@ from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
 )
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.const import DOMAIN
-from tests.helpers import drain_loop
+from tests.helpers import drain_loop, run_loop_until
 
 _T = TypeVar("_T")
 
@@ -329,6 +329,21 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
 
         monkeypatch.setattr(receiver, "_process_background_update", capture_process)
 
+        # Count finished notification handlers instead of sleeping a fixed
+        # time: the handler awaits an executor job, which can take longer than
+        # any fixed budget on a loaded runner, and the second check below
+        # asserts an absence, which is only meaningful once the handler has run.
+        handled: list[str] = []
+        original_handler = receiver._handle_notification_async
+
+        async def counting_handler(entry_id: str, payload: Mapping[str, Any]) -> None:
+            try:
+                await original_handler(entry_id, payload)
+            finally:
+                handled.append(entry_id)
+
+        monkeypatch.setattr(receiver, "_handle_notification_async", counting_handler)
+
         coord_one = DummyCoordinator("entry-one")
         coord_two = DummyCoordinator("entry-two")
 
@@ -349,8 +364,7 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
         envelope = {"data": {"com.google.android.apps.adm.FCM_PAYLOAD": payload}}
 
         receiver._on_notification("entry-one", envelope, None, None)
-        # P0 fix: give async handler time to execute
-        loop.run_until_complete(asyncio.sleep(0.01))
+        run_loop_until(loop, lambda: len(handled) >= 1, description="first handler run")
 
         assert seen_routes
 
@@ -359,8 +373,9 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
         receiver.unregister_coordinator(coord_one)
 
         receiver._on_notification("entry-one", envelope, None, None)
-        # P0 fix: give async handler time to execute
-        loop.run_until_complete(asyncio.sleep(0.01))
+        run_loop_until(
+            loop, lambda: len(handled) >= 2, description="second handler run"
+        )
 
         assert seen_routes == []
         assert "token-one" not in receiver._token_to_entries
@@ -508,3 +523,73 @@ def test_register_coordinator_exposes_cache_and_tracks_push_updates(
         ("device-1", {"latitude": 1.0, "longitude": 2.0, "last_updated": 1234.0})
     ]
     assert coord.push_calls == [["device-1"]]
+
+
+@pytest.mark.asyncio
+async def test_unrouted_push_debug_record_omits_payload_bytes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A push without a registered callback logs its length, never its bytes.
+
+    `AGENTS.md` section 5: raw API payloads are never logged. The record used
+    to carry `hex_prefix=` with 60 bytes of the push; the byte count is the
+    diagnostic, the content is the payload.
+    """
+    import hashlib
+    import logging
+
+    receiver = FcmReceiverHA()
+    raw = b"".join(hashlib.sha256(f"push-{i}".encode()).digest() for i in range(4))
+    hex_string = raw.hex()
+    payload = {
+        "data": {
+            "com.google.android.apps.adm.FCM_PAYLOAD": base64.b64encode(raw).decode(
+                "ascii"
+            )
+        }
+    }
+
+    async def _canonic(_hex: str) -> str:
+        return "canonic-id-0123456789"
+
+    monkeypatch.setattr(receiver, "_extract_canonic_id_async", _canonic)
+    caplog.set_level(logging.DEBUG)
+
+    await receiver._handle_notification_async("entry-1", payload)
+
+    text = caplog.text
+    assert hex_string not in text
+    assert all(
+        hex_string[i : i + 8] not in text for i in range(0, len(hex_string) - 7)
+    ), "a window of the push payload reached the log"
+    assert any(
+        "has no registered callback" in record.getMessage()
+        and f"payload_len={len(hex_string)}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_token_routing_debug_record_omits_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The routing update names entries and a count, never a token prefix.
+
+    `AGENTS.md` section 5: tokens are never logged. Eight characters of the
+    push token used to reach the DEBUG record.
+    """
+    import logging
+
+    receiver = FcmReceiverHA()
+    token = "dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"
+    caplog.set_level(logging.DEBUG)
+
+    receiver._update_token_routing(token, {"entry-a", "entry-b"})
+
+    messages = [
+        r.getMessage() for r in caplog.records if "push routing" in r.getMessage()
+    ]
+    assert messages, "routing record missing"
+    assert "entry-a,entry-b" in messages[0]
+    assert all(token[i : i + 8] not in caplog.text for i in range(0, len(token) - 7)), (
+        "a window of the push token reached the log"
+    )

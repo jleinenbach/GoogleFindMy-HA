@@ -11,7 +11,30 @@ backend and exposes a small, HA-oriented API surface:
 Token/Auth handling (Step 5.1-D):
 - **401/403 (auth failures)** raised by Nova helpers are mapped to
   `homeassistant.exceptions.ConfigEntryAuthFailed` so the *coordinator* can
-  trigger HA’s re-auth UX and Repairs issue workflow.
+  trigger HA’s re-auth UX and Repairs issue workflow. One documented
+  asymmetry: the per-device location path converts only a PERMANENT auth
+  failure (and an HTTP 401/403). A plain non-permanent 403 is re-raised as
+  `NovaAuthError` on purpose, because the polling coordinator counts
+  consecutive transient auth failures and escalates at its own threshold
+  rather than on the first occurrence.
+  Every handler branches on the STATUS, via
+  `NovaApi.nova_request.is_credential_rejection`: permanent first, then 401/403,
+  an unreadable status keeps the conservative verdict. That matters because the
+  transport raises `NovaAuthError` for every non-retryable 4xx (400, 404, 405,
+  409, 422 included), so a type check reads "device not found" as "your sign-in
+  expired". A non-credential rejection therefore leaves the device list as
+  `UpdateFailed`, and the location request passes the error on to its callers,
+  whose own branches skip the device without touching the re-auth machinery. It
+  is deliberately NOT collapsed to an empty result. That began as protection
+  against a second defect, now fixed: both callers used to read a non-raising
+  return as proof that the credentials work and cleared the auth state before
+  they checked for emptiness, so a permanently rejected tracker masked a real
+  401 on another tracker. Those resets sit behind the empty guard since
+  (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`); passing the error on stays right
+  because a rejection is a failure and an empty dict cannot say so. `_classify_nova_auth_error` is the sound-path adapter over the
+  same predicate. Still open, stated so it is not mistaken for coverage: the
+  transport keeps raising a type named "auth" for all of them, so a future
+  handler that reads the type instead of the predicate repeats the defect.
 - **gpsoauth/ADM failures** (e.g., "BadAuthentication", "Missing 'Token' in gpsoauth")
   are normalized to `ConfigEntryAuthFailed` as well, even if they bubble up as a
   `RuntimeError`/`ValueError` rather than a `NovaAuthError`.
@@ -43,6 +66,8 @@ from .const import (
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DEFAULT_CONTRIBUTOR_MODE,
+    PlaySoundResult,
+    SoundDispatchOutcome,
 )
 from .NovaApi import nova_request
 from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
@@ -51,6 +76,7 @@ from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     any_real_location_record,
 )
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
     get_location_data_for_device,
 )
 from .NovaApi.ExecuteAction.PlaySound.start_sound_request import (
@@ -68,6 +94,7 @@ from .NovaApi.nova_request import (
     NovaLogicError,
     NovaProtobufDecodeError,
     NovaRateLimitError,
+    is_credential_rejection,
 )
 from .NovaApi.util import generate_random_uuid
 from .ProtoDecoders.decoder import (
@@ -103,24 +130,51 @@ def _short_err(e: Exception | str) -> str:
     return msg
 
 
-def _cancel_key_after_failure(
-    err: NovaError, request_uuid: str
-) -> tuple[bool, str | None]:
-    """Decide the Play-Sound cancel-key fate for a non-accepted command.
+def _classify_nova_auth_error(err: NovaAuthError) -> SoundDispatchOutcome:
+    """Name who refused when the transport raised ``NovaAuthError``.
+
+    The criterion lives in ``nova_request.is_credential_rejection``; this is
+    only its sound-path adapter. That predicate carries the full reasoning:
+    the type is wider than its name, permanence outranks the status, and an
+    unreadable status keeps the conservative verdict.
+
+    ``REJECTED_AUTH`` is for a refusal "on credentials: HTTP 401 or 403", so a
+    missing device or a malformed request belongs in ``REJECTED_SERVER``, which
+    names the non-credential client rejections alongside the 5xx. Do NOT
+    re-derive the status test here: a second copy is exactly how the two sound
+    handlers and the four other handlers drifted apart in the first place.
+    """
+    if is_credential_rejection(err):
+        return SoundDispatchOutcome.REJECTED_AUTH
+    return SoundDispatchOutcome.REJECTED_SERVER
+
+
+def _play_result_after_failure(
+    err: NovaError, request_uuid: str, outcome: SoundDispatchOutcome
+) -> PlaySoundResult:
+    """Build the Play Sound result for a non-accepted command.
+
+    Two independent facts are carried, and they must not be confused. ``outcome``
+    names WHO refused: the server, the network, or this integration. ``cancel_key``
+    answers only "may the device be ringing", which the transport latches onto the
+    error (``NovaError.dispatched``) at its retry-loop choke point. Before this
+    type existed, the second fact was the only one that survived the boundary, and
+    the coordinator had to reconstruct the first from it, which is why a server
+    rejection and a dead network both ended up as a push transport problem.
 
     A raised ``NovaError`` is never an acceptance (the submitter returns a tuple
-    only on HTTP 200), so ``success`` is always ``False``. The cancel key is
-    preserved ONLY when the failure latched dispatch (``err.dispatched``): some
-    attempt in the retry sequence reached the wire, so the device may already be
-    ringing and a later Stop needs the key. Pure rejections (401/403/5xx/429
+    only on HTTP 200). The cancel key is preserved ONLY when the failure latched
+    dispatch (``err.dispatched``): some attempt in the retry sequence reached the
+    wire, so the device may already be ringing and a later Stop needs the key.
+    Pure rejections (401/403/5xx/429
     with no wire-reaching attempt) and provable pre-dispatch failures inherit
     ``dispatched is False`` and drop the key, so they can never overwrite a
     previous, possibly still-ringing play's valid cancel key. Centralizing the
     decision here keeps every non-acceptance exit on one rule instead of
-    re-deriving it per ``except`` handler. See ``NovaError.dispatched`` and
-    IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+    re-deriving it per ``except`` handler. See ``NovaError.dispatched``,
+    IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY and IRR-CA-SOUND-FAILURE-CLASS.
     """
-    return (False, request_uuid if err.dispatched else None)
+    return PlaySoundResult(outcome, cancel_key=request_uuid if err.dispatched else None)
 
 
 # Backward-compatible export for tests and legacy call sites.
@@ -234,7 +288,15 @@ class GoogleFindMyAPIProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
     ) -> dict[str, Any]:
         """Request location for a specific device (async).
 
-        Returns location data dict or empty dict on failure.
+        Returns location data on success and an empty dict on a transient
+        failure. `ConfigEntryAuthFailed` is raised only where re-auth must
+        start at once: an HTTP 401/403 (`NovaHTTPError`), or a PERMANENT Nova
+        auth failure. Every other `NovaAuthError` is re-raised unchanged --
+        including a plain, non-permanent credential rejection such as a 403,
+        which the polling coordinator counts against its own threshold instead
+        of prompting on the first occurrence. Callers must therefore classify
+        a `NovaAuthError` with `nova_request.is_credential_rejection` rather
+        than assume the type already means "credentials rejected".
         """
         ...
 
@@ -266,17 +328,20 @@ class GoogleFindMyAPIProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
         """Stop playing sound on the device (sync wrapper)."""
         ...
 
-    async def async_play_sound(self, device_id: str) -> tuple[bool, str | None]:
+    async def async_play_sound(self, device_id: str) -> PlaySoundResult:
         """Play a sound on the device (async).
 
-        Returns (success, request_uuid) tuple.
+        Returns the classification and the cancel key; see PlaySoundResult.
         """
         ...
 
     async def async_stop_sound(
         self, device_id: str, request_uuid: str | None = None
-    ) -> bool:
-        """Stop playing sound on the device (async)."""
+    ) -> SoundDispatchOutcome:
+        """Stop playing sound on the device (async).
+
+        Returns the classification; see SoundDispatchOutcome.
+        """
         ...
 
 
@@ -1071,6 +1136,21 @@ class GoogleFindMyAPI:
             raise UpdateFailed(_short_err(err)) from err
 
         except NovaAuthError as err:
+            # Branch on the STATUS, never on the type. The transport raises this
+            # class for every non-retryable 4xx, so a deleted device or a
+            # malformed request arrived here as "your sign-in expired" and
+            # produced an immediate re-auth prompt with no threshold in front of
+            # it. A non-credential rejection is a server-side refusal and takes
+            # the same exit as a 5xx one branch up: UpdateFailed,
+            # ApiStatus.ERROR, no reauth reason, no Repairs issue.
+            if not is_credential_rejection(err):
+                _LOGGER.warning(
+                    "Device list rejected by the server (HTTP %s): %s",
+                    getattr(err, "status", "unknown"),
+                    _short_err(err),
+                )
+                raise UpdateFailed(_short_err(err)) from err
+
             # Mirror the location path's base handler: a permanent credential
             # failure (NovaAuthPermanentError subclass, or a base NovaAuthError
             # flagged is_permanent=True after token refresh) must record the
@@ -1211,8 +1291,32 @@ class GoogleFindMyAPI:
         relevant location record from the response.
 
         **Auth mapping (5.1-D):**
-            - If `NovaAuthError` or `NovaHTTPError` with status 401/403 occurs,
-              raise `ConfigEntryAuthFailed` so the coordinator can start re-auth.
+            - `ConfigEntryAuthFailed` is raised ONLY where re-auth must start
+              immediately, without a threshold in front of it: a `NovaHTTPError`
+              with status 401/403, or a PERMANENT Nova auth failure (the
+              `NovaAuthPermanentError` subclass, or a base `NovaAuthError`
+              flagged `is_permanent=True` after the refresh sequence).
+            - A plain, NON-permanent credential rejection -- in practice a 403,
+              since a 401 that survives the refresh arrives flagged permanent --
+              is re-raised as `NovaAuthError`, NOT converted. That is deliberate:
+              the polling coordinator counts consecutive transient auth failures
+              and escalates only at its own threshold, so converting here would
+              prompt the user on the first occurrence. This asymmetry is the one
+              difference to the device-list handler, which converts every
+              credential rejection because it has no such counter behind it.
+            - Any OTHER `NovaAuthError` is the server refusing the request, not
+              the credentials -- a device removed from the account, a malformed
+              body -- and is re-raised unchanged. It is deliberately NOT turned
+              into an empty result: a return WITH CONTENT is what both callers
+              read as "the credentials worked", and they clear the account auth
+              state on it. An empty return no longer reaches those resets -- they
+              sit behind the empty guard -- but collapsing a rejection into `{}`
+              would still be wrong, because a failure that presents as an idle
+              device is indistinguishable from a healthy idle device. Only a
+              transient/5xx failure returns `{}`.
+            - Because the previous two bullets BOTH arrive as `NovaAuthError`,
+              the type alone never tells a caller which one it holds. Every
+              caller must ask `nova_request.is_credential_rejection`.
             - Rate limit / other server issues are treated as transient and return `{}`.
 
         Args:
@@ -1220,8 +1324,62 @@ class GoogleFindMyAPI:
             device_name: The human-readable name of the device for logging.
 
         Returns:
-            A dictionary containing the best available location data for the device.
-            Returns an empty dictionary on failure.
+            A dictionary containing the best available location data for the
+            device, or an empty dictionary on a transient failure (5xx, rate
+            limit, timeout).
+
+            A return WITH CONTENT means the credentials were accepted, and both
+            callers rely on that: they clear the account auth state on it. An
+            EMPTY return means only that nothing raised. Callers must not read it
+            as proof -- four pre-accept failures still arrive this way, and so
+            does every healthy idle BLE tag. Since
+            `PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF` both callers check for
+            emptiness first, and in the poll loop an empty result counts merely
+            as "this request was not refused", which is enough to break a streak
+            of credential rejections and deliberately not enough to clear the
+            auth state.
+
+            That reliance is only as sound as the layer below. It holds exactly
+            to the extent that a request which never got past this integration's
+            ACCEPT POINT raises rather than returning empty -- see
+            `LocationRequestNotAcceptedError`
+            below. Those raise sites now exist: a 5xx, a 429, a network error and
+            a failed FCM registration leave `location_request.py` as that
+            exception, not through this exit. What still arrives here as an empty
+            list is what the layer below vouches for as ACCEPTED, which is not
+            the same as healthy, and is deliberately NOT a closed list: the idle
+            BLE tag; the post-accept branches of the locate flow (the
+            unexpected-device mismatch, and any error the outer surfacing handler
+            catches once the accept line has been passed); and every failure the
+            FCM callback absorbs on its own, which is a fully-catching layer of
+            its own after that line -- an unreadable push, a decode failure, a
+            push for another device. Reading an empty result as "healthy" was the
+            defect; reading it as "one of exactly three things" would be the next
+            one.
+
+        Raises:
+            ConfigEntryAuthFailed: Re-auth must start at once -- an HTTP 401/403
+                (`NovaHTTPError`), or a permanent Nova auth failure. The
+                coordinator starts re-authentication.
+            NovaAuthError: Everything else the transport raised under that name,
+                re-raised unchanged. Two distinct cases share this exit: a
+                NON-permanent credential rejection (403), which the polling
+                coordinator counts toward its own threshold, and a server-side
+                refusal of this request (a non-retryable 4xx such as 400/404/422)
+                that says nothing about the credentials. Callers MUST tell them
+                apart with `nova_request.is_credential_rejection`; the type does
+                not, and reading the type is the defect this contract exists to
+                prevent.
+            LocationRequestNotAcceptedError: The locate request never got past this
+                integration's accept point (which a 429 and a 5xx also miss, having
+                reached the server and been answered). Re-raised unchanged so the
+                accepted-versus-
+                failed outcome survives this boundary instead of being flattened
+                into `{}` and reconstructed downstream once the evidence is gone.
+                It claims a POSITION in the request flow, never a cause, so it is
+                NOT an auth verdict: a request that was not accepted says nothing
+                about the credentials, and this exit must not be folded into the
+                auth mapping above.
         """
 
         # Register cache provider for multi-entry support
@@ -1304,6 +1462,57 @@ class GoogleFindMyAPI:
             raise exc from err
 
         except NovaAuthError as err:
+            # Branch on the STATUS, never on the type. Same criterion as the
+            # device-list handler and the two sound handlers; see
+            # nova_request.is_credential_rejection.
+            if not is_credential_rejection(err):
+                # The server refused the REQUEST, not the credentials: a device
+                # removed from the account, a malformed body. Pass it through so
+                # each caller can take its own non-auth exit; both of them have a
+                # branch for exactly this status.
+                #
+                # Do NOT collapse this to `return {}`. That was the first attempt
+                # and it traded one defect for another. The first reason is now
+                # history and is kept as such: a non-raising return used to be
+                # what both callers read as positive proof that the sign-in
+                # works. coordinator/polling.py cleared the auth state and reset
+                # the transient-auth counter, and coordinator/locate.py cleared
+                # the auth state, each BEFORE looking at whether the result was
+                # empty, so a permanently rejected tracker wiped a real 401 from
+                # another tracker in every cycle. Both resets now sit BEHIND the
+                # empty guard (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`), so an
+                # empty return cannot reach them any more.
+                #
+                # The other half of the reason outlives that fix and is why this
+                # still raises: a client rejection is a failure, and `{}` is the
+                # shape of a healthy idle tag. Handing the caller that shape
+                # hands it a result it cannot classify -- no `cycle_failed`,
+                # nothing for the post-loop guard to count -- and ending exactly
+                # that ambiguity is what the raise sites exist for.
+                #
+                # The 5xx branch below still returns {}. It no longer clears
+                # anything, and measured it is not reached at all any more:
+                # `get_location_data_for_device` converts the 5xx and the 429
+                # into `LocationRequestNotAcceptedError` itself
+                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`), and its broad
+                # handler re-raises only before the accept line and returns []
+                # after it -- so no `NovaHTTPError` leaves that layer. The sync
+                # wrapper is no exception: it calls this very method. The branch
+                # stays as the guard for the day that conversion moves or goes.
+                #
+                # DEBUG, not WARNING: both callers already log a WARNING naming
+                # the device, so a WARNING here would print the same event twice
+                # per device per poll cycle. This line exists for the sync
+                # wrapper, which has no handler behind it.
+                _LOGGER.debug(
+                    "Client error (HTTP %s) while getting location for %s (%s): %s",
+                    getattr(err, "status", "unknown"),
+                    device_name,
+                    device_id,
+                    _short_err(err),
+                )
+                raise
+
             # Transient auth failure - may self-heal in subsequent poll cycles.
             # Re-raise so coordinator can track consecutive failures before triggering reauth.
             if err.is_permanent:
@@ -1403,6 +1612,37 @@ class GoogleFindMyAPI:
             # `except Exception` below would otherwise turn it into an empty result,
             # hiding the transient from the coordinator. Analog to the A1
             # `except DecryptionError: raise` guard above.
+            raise
+
+        except LocationRequestNotAcceptedError:
+            # The locate request never got past this integration's accept point (no FCM
+            # token, a failed FCM registration, a 429, a 5xx, a network error, an
+            # unclassified Nova failure, or a surfacing error before the accept
+            # line). This layer must stay transparent for it, exactly like the two
+            # guards above: the broad `except Exception` below would turn it back
+            # into `return {}`, and an empty dict is precisely the evidence loss
+            # the signal exists to prevent. That one handler is the whole reason
+            # this branch exists -- `except RuntimeError` in between never sees the
+            # type, whose base is `Exception` and deliberately NOT `RuntimeError`
+            # (see the class docstring). Placement is therefore load-bearing
+            # against the broad handler specifically: being LAST would make this
+            # branch unreachable, while sitting anywhere ahead of it suffices.
+            #
+            # Note what this pass-through does NOT do: it does not classify. The
+            # signal names a POSITION in the request flow, never a cause, so the
+            # auth mapping documented above is untouched by it -- an unreachable
+            # server says nothing about the credentials.
+            #
+            # This receiver was installed one step BEFORE the seven raise sites in
+            # `location_request.py` existed. The order is deliberate, though not
+            # for the reason it is tempting to state: with NO receiver anywhere,
+            # a sender-first step would have been INERT rather than dangerous,
+            # because the broad `except Exception` below flattens the signal to
+            # `{}` before any coordinator sees it. The danger is the half-wired
+            # state -- this pass-through present and the coordinator's not: the
+            # signal then reaches the poll loop's broad per-device handler, which
+            # sets both `cycle_failed` and `last_exception`, and a single 5xx on a
+            # single tracker would mark every entity of the account unavailable.
             raise
 
         except RuntimeError as err:
@@ -1550,11 +1790,15 @@ class GoogleFindMyAPI:
     def play_sound(self, device_id: str) -> bool:
         """Thin sync wrapper around async_play_sound for non-HA contexts.
 
+        The classification is deliberately dropped here: this entry point exists
+        for CLI use and has no consumer that could act on it. HA callers use
+        ``async_play_sound`` and read ``PlaySoundResult.outcome``.
+
         Args:
             device_id: The canonical ID of the device.
 
         Returns:
-            True if the command was sent successfully, False otherwise.
+            True if Nova accepted the command (HTTP 200), False otherwise.
         """
         result = self._run_sync_helper(
             lambda: self.async_play_sound(device_id),
@@ -1562,19 +1806,22 @@ class GoogleFindMyAPI:
                 "play_sound() called inside an active event loop; use async_play_sound()."
             ),
             context=f"play sound on {device_id}",
-            default=(False, None),
+            default=PlaySoundResult(SoundDispatchOutcome.INTERNAL_ERROR),
         )
-        success, _request_uuid = cast(tuple[bool, str | None], result)
-        return success
+        return cast(PlaySoundResult, result).accepted
 
     def stop_sound(self, device_id: str, request_uuid: str | None = None) -> bool:
         """Thin sync wrapper around async_stop_sound for non-HA contexts.
+
+        The classification is deliberately dropped here, for the same reason as in
+        ``play_sound``: this entry point is for CLI use. HA callers use
+        ``async_stop_sound`` and read the ``SoundDispatchOutcome``.
 
         Args:
             device_id: The canonical ID of the device.
 
         Returns:
-            True if the command was sent successfully, False otherwise.
+            True if Nova accepted the command (HTTP 200), False otherwise.
         """
         result = self._run_sync_helper(
             lambda: self.async_stop_sound(device_id, request_uuid),
@@ -1582,36 +1829,45 @@ class GoogleFindMyAPI:
                 "stop_sound() called inside an active event loop; use async_stop_sound()."
             ),
             context=f"stop sound on {device_id}",
-            default=False,
+            default=SoundDispatchOutcome.INTERNAL_ERROR,
         )
-        return cast(bool, result)
+        return cast(SoundDispatchOutcome, result) is SoundDispatchOutcome.ACCEPTED
 
     # ---------- Play/Stop Sound (async; HA-first) ----------
-    async def async_play_sound(self, device_id: str) -> tuple[bool, str | None]:
+    async def async_play_sound(self, device_id: str) -> PlaySoundResult:
         """Send a 'Play Sound' command to a device (async path for HA).
 
         Auth mapping note:
-            If an auth error occurs here, we log and return False (service call context),
-            since re-auth is primarily driven by the coordinator’s data update path.
+            A credential rejection here is logged and returned as REJECTED_AUTH
+            (service call context), since re-auth is primarily driven by the
+            coordinator’s data update path. "Credential rejection" means the
+            STATUS says so (401/403) or the error is flagged permanent, not
+            merely that the transport raised ``NovaAuthError`` -- that type also
+            carries 400, 404 and the other non-retryable 4xx, which return
+            REJECTED_SERVER. See ``_classify_nova_auth_error``.
 
         Args:
             device_id: The canonical ID of the device.
 
         Returns:
-            A tuple `(success, request_uuid)` where `success` indicates whether the
-            command was *accepted* (HTTP 200) and `request_uuid` captures the
-            client-generated cancel key. The UUID is generated locally *before*
+            A `PlaySoundResult` carrying two independent facts. `outcome` names who
+            refused (see `SoundDispatchOutcome`); only `TRANSPORT_FAILED` describes
+            a broken push transport, and only that value may make a caller arm a
+            cooldown. `cancel_key` captures the client-generated cancel key and
+            answers one question only: may the device be ringing. Never derive the
+            cause from the key -- that out-of-band inference is what this type
+            removes. The UUID is generated locally *before*
             dispatch. It is returned (non-None) in two cases where the device may
             be ringing and a later Stop needs the key:
-              1. Acceptance — the server answered 200. `success` is True.
+              1. Acceptance — the server answered 200, `outcome` is `ACCEPTED`.
               2. Post-dispatch ambiguity — a network failure occurred at or after
                  the request reached the wire (server disconnect, read timeout,
                  payload error), so the play may have started even though no 200
-                 was read. `success` is False, but the key is preserved.
+                 was read. `outcome` is not `ACCEPTED`, but the key is preserved.
             Every failure that provably never reached the wire — no FCM token,
             missing cache, username/payload/token resolution, connection setup
             (DNS/connect refused/connect timeout) — and every explicit server
-            rejection (401/403/4xx/5xx/429) returns `(False, None)` so it cannot
+            rejection (401/403/4xx/5xx/429) returns a null `cancel_key` so it cannot
             overwrite a still-valid cancel key of a previous, possibly still-ringing
             play. The sole exception is a rejection/HTTP-status exit whose retry
             sequence latched dispatch on an *earlier* wire-reaching attempt: there
@@ -1619,13 +1875,25 @@ class GoogleFindMyAPI:
             ringing. The pre-/post-dispatch split is classified in-band on the
             raised NovaError (`NovaError.dispatched`), stamped uniformly at the
             transport's retry-loop choke point for every exit. See
-            IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY. On the Stop side the drop branch
+            is additionally bound to "the cancel key was our own and fresh", so
+            a foreign key passed in by a service call never evicts our handle.
+
+            `ACCEPTED` means Nova accepted the submission (HTTP 200). This is
+            NOT a confirmation that the device received or executed the command: no
+            ExecuteActionResponse schema exists and no FCM callback is
+            registered for sound, so nothing on this path can observe the ring.
+            See IRR-CA-NO-RING-CONFIRMATION in
+            docs/PLAY_SOUND_ARCHITECTURE.md.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
         if not token:
-            # PRE-dispatch: nothing was sent, so there is no cancel key to keep.
-            return (False, None)
+            # PRE-dispatch: no transport was used at all, so there is no cancel key
+            # to keep and neither the server nor the network may be blamed.
+            # NOT_SENT keeps the caller from arming a push cooldown for a missing
+            # local token.
+            return PlaySoundResult(SoundDispatchOutcome.NOT_SENT)
         # Generate the cancel key locally *before* dispatch so it is in scope on
         # every path. Acceptance is still derived structurally from the submitter's
         # return contract: it returns a result tuple exclusively on an HTTP 200 and
@@ -1660,35 +1928,61 @@ class GoogleFindMyAPI:
                 )
                 # Defensive: the submitter returns a tuple on every accepted (200)
                 # command and re-raises otherwise, so None is not an expected
-                # outcome. Treat the unconfirmed result conservatively — drop the
-                # key rather than risk overwriting a previous play's valid one.
-                return (False, None)
+                # outcome. That is a broken contract on our side, not an outage:
+                # INTERNAL_ERROR, never TRANSPORT_FAILED. Treat the unconfirmed
+                # result conservatively — drop the key rather than risk overwriting
+                # a previous play's valid one.
+                return PlaySoundResult(SoundDispatchOutcome.INTERNAL_ERROR)
 
             response_hex, _response_uuid = result
             _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
+            # Byte count only: the body is never parsed
+            # (docs/PLAY_SOUND_ARCHITECTURE.md) and raw API payloads are never
+            # logged (AGENTS.md section 5).
             _LOGGER.debug(
-                "Play Sound Nova response for %s (uuid=%s): %d bytes: %s",
+                "Play Sound Nova response for %s (uuid=%s): %d bytes",
                 device_id,
                 request_uuid[:8] if request_uuid else "none",
                 len(response_hex) // 2 if response_hex else 0,
-                response_hex[:200] if response_hex else "(empty)",
             )
-            return (True, request_uuid)
+            return PlaySoundResult(
+                SoundDispatchOutcome.ACCEPTED, cancel_key=request_uuid
+            )
 
         except NovaAuthError as err:
-            _LOGGER.error(
-                "Authentication failed while playing sound on %s: %s",
-                device_id,
-                _short_err(err),
-            )
+            # The server answered and refused: never a transport failure, so an
+            # expired sign-in is not hidden behind a self-clearing 90-second
+            # cooldown. WHICH refusal it was is decided by the status, not by
+            # the exception type; see _classify_nova_auth_error.
+            outcome = _classify_nova_auth_error(err)
+            if outcome is SoundDispatchOutcome.REJECTED_AUTH:
+                _LOGGER.error(
+                    "Authentication failed while playing sound on %s: %s",
+                    device_id,
+                    _short_err(err),
+                )
+            else:
+                _LOGGER.warning(
+                    "Client error (HTTP %s) while playing sound on %s: %s",
+                    getattr(err, "status", "unknown"),
+                    device_id,
+                    _short_err(err),
+                )
             # A raised error is never an acceptance (the submitter returns a tuple
             # only on a 200). Keep the cancel key only if an earlier attempt
-            # latched dispatch (err.dispatched): a pure 401/403 rejection with no
+            # latched dispatch (err.dispatched): a pure rejection with no
             # wire-reaching attempt drops it, so it can never overwrite a
             # previous, possibly still-ringing play's valid key.
-            return _cancel_key_after_failure(err, request_uuid)
+            return _play_result_after_failure(err, request_uuid, outcome)
 
         except NovaHTTPError as err:
+            # Non-acceptance (401/403/5xx/other): drop the key UNLESS an earlier
+            # attempt latched dispatch — a prior attempt that reached the server
+            # (a post-send network failure, or a 5xx/429 status read) may already
+            # be ringing. err.dispatched carries that sticky sequence latch
+            # (stamped at the transport's retry-loop choke point). Either way the
+            # server answered, so the transport worked and the outcome names the
+            # server, never the network.
             if getattr(err, "status", None) in (401, 403):
                 _LOGGER.error(
                     "Authentication failed (HTTP %s) while playing sound on %s: %s",
@@ -1696,19 +1990,18 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-            else:
-                _LOGGER.warning(
-                    "Server error (%s) while playing sound on %s: %s",
-                    err.status,
-                    device_id,
-                    _short_err(err),
+                return _play_result_after_failure(
+                    err, request_uuid, SoundDispatchOutcome.REJECTED_AUTH
                 )
-            # Non-acceptance (401/403/5xx/other): drop the key UNLESS an earlier
-            # attempt latched dispatch — a prior attempt that reached the server
-            # (a post-send network failure, or a 5xx/429 status read) may already
-            # be ringing. err.dispatched carries that sticky sequence latch
-            # (stamped at the transport's retry-loop choke point).
-            return _cancel_key_after_failure(err, request_uuid)
+            _LOGGER.warning(
+                "Server error (%s) while playing sound on %s: %s",
+                err.status,
+                device_id,
+                _short_err(err),
+            )
+            return _play_result_after_failure(
+                err, request_uuid, SoundDispatchOutcome.REJECTED_SERVER
+            )
 
         except NovaRateLimitError as err:
             _LOGGER.warning(
@@ -1716,8 +2009,40 @@ class GoogleFindMyAPI:
             )
             # Same rule as the other non-acceptances: a rate-limited final attempt
             # never rang, but if a *prior* attempt reached the wire the latch
-            # (err.dispatched) preserves the key.
-            return _cancel_key_after_failure(err, request_uuid)
+            # (err.dispatched) preserves the key. The server answered; only the
+            # pace was wrong, so this is neither an outage nor a credential
+            # problem and gets its own value.
+            return _play_result_after_failure(
+                err, request_uuid, SoundDispatchOutcome.REJECTED_RATE_LIMIT
+            )
+
+        except NovaProtobufDecodeError as err:
+            # A 200 whose body we could not decode. The transport delivered; the
+            # payload broke on our side of the contract, so it is our bug, not an
+            # outage. Caught BEFORE `except NovaError` on purpose: that handler
+            # would otherwise classify it as TRANSPORT_FAILED and arm a cooldown
+            # for a decoding defect.
+            _LOGGER.error(
+                "Undecodable Play Sound response for %s: %s",
+                device_id,
+                _short_err(err),
+                exc_info=True,
+            )
+            return _play_result_after_failure(
+                err, request_uuid, SoundDispatchOutcome.INTERNAL_ERROR
+            )
+
+        except NovaLogicError as err:
+            # HTTP 200 with an error code in the payload: the server answered and
+            # refused (unknown device, permission denied at API level). Same
+            # ordering rationale as above -- `except NovaError` would blame the
+            # network for a decision the server made.
+            _LOGGER.warning(
+                "Play Sound refused by Nova for %s: %s", device_id, _short_err(err)
+            )
+            return _play_result_after_failure(
+                err, request_uuid, SoundDispatchOutcome.REJECTED_SERVER
+            )
 
         except NovaError as err:
             # A network failure wrapped by async_nova_request after its retries,
@@ -1726,9 +2051,9 @@ class GoogleFindMyAPI:
             # any attempt may have been processed by the server (a post-send
             # network failure, or a 5xx/429 status read), the play may already be
             # ringing, so keep the cancel key; a provable pre-connect failure
-            # never rang, so drop it. Other
-            # subclasses (NovaLogicError, NovaProtobufDecodeError) inherit
-            # dispatched=False and keep the conservative drop.
+            # never rang, so drop it. The two subclasses that are NOT transport
+            # failures (NovaLogicError, NovaProtobufDecodeError) are caught above,
+            # so what reaches this handler really is the transport giving up.
             if err.dispatched:
                 _LOGGER.warning(
                     "Play Sound for %s failed after reaching the server (%s); "
@@ -1742,7 +2067,10 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-            return _cancel_key_after_failure(err, request_uuid)
+            # The one outcome that justifies arming a push cooldown.
+            return _play_result_after_failure(
+                err, request_uuid, SoundDispatchOutcome.TRANSPORT_FAILED
+            )
 
         except ClientError as err:
             # Defensive: async_nova_request wraps aiohttp errors into NovaError
@@ -1754,35 +2082,71 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            return (False, None)
+            return PlaySoundResult(SoundDispatchOutcome.TRANSPORT_FAILED)
 
         except Exception as err:
+            # A bug on our side, not an outage. It gets a traceback and its own
+            # class, because reporting it as a transport failure is what put the
+            # integration into a self-inflicted 90-second cooldown.
             _LOGGER.error(
-                "Failed to play sound (async) on %s: %s", device_id, _short_err(err)
+                "Failed to play sound (async) on %s: %s",
+                device_id,
+                _short_err(err),
+                exc_info=True,
             )
-            return (False, None)
+            return PlaySoundResult(SoundDispatchOutcome.INTERNAL_ERROR)
 
     async def async_stop_sound(
         self, device_id: str, request_uuid: str | None = None
-    ) -> bool:
+    ) -> SoundDispatchOutcome:
         """Send a 'Stop Sound' command to a device (async path for HA).
 
         Auth mapping note:
-            If an auth error occurs here, we log and return False (service call context),
-            since re-auth is primarily driven by the coordinator’s data update path.
+            A credential rejection here is logged and returned as REJECTED_AUTH
+            (service call context), since re-auth is primarily driven by the
+            coordinator’s data update path. "Credential rejection" means the
+            STATUS says so (401/403) or the error is flagged permanent, not
+            merely that the transport raised ``NovaAuthError`` -- that type also
+            carries 400, 404 and the other non-retryable 4xx, which return
+            REJECTED_SERVER. See ``_classify_nova_auth_error``.
 
         Args:
             device_id: The canonical ID of the device.
             request_uuid: Optional UUID of the Play Sound request to cancel.
-                         If not provided, a new UUID is generated (may not properly cancel).
+                If omitted, the request is submitted WITHOUT a cancel key
+                (the protobuf leaves ``requestUuid`` empty). Google then has
+                nothing to correlate the stop with, so the ring may keep
+                playing. The caller is responsible for surfacing that
+                limitation; see StopSoundOutcome.UNCORRELATED.
 
         Returns:
-            True if the command was submitted successfully, False otherwise.
+            A `SoundDispatchOutcome` naming who refused, on the same contract as
+            `async_play_sound`. Only `TRANSPORT_FAILED` describes a broken push
+            transport and may make a caller arm a cooldown; a server rejection, a
+            rate limit, a missing local token and a bug of our own each keep their
+            own value.
+
+            `ACCEPTED` means Nova accepted the submission (HTTP 200). It is NOT a
+            confirmation that the device received or executed the command, and
+            in particular not that the ring stopped: no ExecuteActionResponse
+            schema exists and no FCM callback is registered for sound, so
+            nothing on this path can observe the ring. See
+            IRR-CA-NO-RING-CONFIRMATION in docs/PLAY_SOUND_ARCHITECTURE.md.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
         if not token:
-            return False
+            # PRE-dispatch: no transport was used, so neither the server nor the
+            # network may be blamed for the missing local token.
+            return SoundDispatchOutcome.NOT_SENT
+        # Idempotent guard, not a second normalisation policy: the coordinator
+        # funnel already maps blank to None. This entry point is public and
+        # documented "for non-HA contexts", so a blank string can still arrive
+        # here -- and a blank key is dropped from the proto3 payload entirely.
+        # Without this, the log below would claim a cancel key that never
+        # reaches the wire, which is the very class of unbacked success claim
+        # this change set removes.
+        request_uuid = (request_uuid or "").strip() or None
         try:
             if request_uuid:
                 _LOGGER.info(
@@ -1792,7 +2156,8 @@ class GoogleFindMyAPI:
                 )
             else:
                 _LOGGER.warning(
-                    "Submitting Stop Sound (async) for %s without UUID (may not cancel properly)",
+                    "Submitting Stop Sound (async) for %s without a cancel key; "
+                    "the server cannot correlate it with a running ring",
                     device_id,
                 )
             result_hex = await async_submit_stop_sound_request(
@@ -1803,16 +2168,30 @@ class GoogleFindMyAPI:
                 cache=cast("TokenCache | None", self._cache),
                 request_uuid=request_uuid,
             )
-            ok = result_hex is not None
-            if ok:
+            # NOTE: a non-empty Nova reply means "the POST was accepted", not
+            # "the device stopped". No ExecuteActionResponse schema exists, so
+            # the body is never parsed. Deliberate architecture boundary, see
+            # docs/PLAY_SOUND_ARCHITECTURE.md and IRR-CA-NO-RING-CONFIRMATION.
+            submitted = result_hex is not None
+            if submitted and request_uuid:
                 _LOGGER.info(
-                    "Stop Sound (async) submitted successfully for %s", device_id
+                    "Stop Sound (async) submitted for %s (cancel key present)",
+                    device_id,
                 )
+            elif submitted:
+                _LOGGER.warning(
+                    "Stop Sound (async) submitted for %s without a cancel key; "
+                    "the server cannot correlate it with a running ring, so the "
+                    "device may keep ringing",
+                    device_id,
+                )
+            if submitted:
+                # Byte count only: the body is never parsed (see NOTE above)
+                # and raw API payloads are never logged (AGENTS.md section 5).
                 _LOGGER.debug(
-                    "Stop Sound Nova response for %s: %d bytes: %s",
+                    "Stop Sound Nova response for %s: %d bytes",
                     device_id,
                     len(result_hex) // 2 if result_hex else 0,
-                    result_hex[:200] if result_hex else "(empty)",
                 )
             else:
                 _LOGGER.error(
@@ -1820,15 +2199,32 @@ class GoogleFindMyAPI:
                     "empty response from server (no error details available)",
                     device_id,
                 )
-            return bool(ok)
+            # The submitter returns a hex body on acceptance and re-raises
+            # otherwise, so an empty reply breaks its own contract: our bug, not
+            # an outage.
+            if submitted:
+                return SoundDispatchOutcome.ACCEPTED
+            return SoundDispatchOutcome.INTERNAL_ERROR
 
         except NovaAuthError as err:
-            _LOGGER.error(
-                "Authentication failed while stopping sound on %s: %s",
-                device_id,
-                _short_err(err),
-            )
-            return False
+            # The server answered and refused. The transport worked, so no
+            # cooldown may be armed for this. Same rule as on the play path:
+            # the status names the refusal, not the exception type.
+            outcome = _classify_nova_auth_error(err)
+            if outcome is SoundDispatchOutcome.REJECTED_AUTH:
+                _LOGGER.error(
+                    "Authentication failed while stopping sound on %s: %s",
+                    device_id,
+                    _short_err(err),
+                )
+            else:
+                _LOGGER.warning(
+                    "Client error (HTTP %s) while stopping sound on %s: %s",
+                    getattr(err, "status", "unknown"),
+                    device_id,
+                    _short_err(err),
+                )
+            return outcome
 
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):
@@ -1838,20 +2234,51 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                return False
+                return SoundDispatchOutcome.REJECTED_AUTH
             _LOGGER.warning(
                 "Server error (%s) while stopping sound on %s: %s",
                 err.status,
                 device_id,
                 _short_err(err),
             )
-            return False
+            return SoundDispatchOutcome.REJECTED_SERVER
 
         except NovaRateLimitError as err:
             _LOGGER.warning(
                 "Stop Sound rate-limited for %s: %s", device_id, _short_err(err)
             )
-            return False
+            # The server answered; only the pace was wrong.
+            return SoundDispatchOutcome.REJECTED_RATE_LIMIT
+
+        except NovaProtobufDecodeError as err:
+            # Caught before `except NovaError` for the same reason as on the play
+            # path: an undecodable body is our defect, not a dead network.
+            _LOGGER.error(
+                "Undecodable Stop Sound response for %s: %s",
+                device_id,
+                _short_err(err),
+                exc_info=True,
+            )
+            return SoundDispatchOutcome.INTERNAL_ERROR
+
+        except NovaLogicError as err:
+            _LOGGER.warning(
+                "Stop Sound refused by Nova for %s: %s", device_id, _short_err(err)
+            )
+            return SoundDispatchOutcome.REJECTED_SERVER
+
+        except NovaError as err:
+            # A network failure wrapped by async_nova_request after its retries,
+            # or any other NovaError leaving the transport. Before the sound
+            # contract existed this fell through to `except Exception` and was
+            # reported as a plain False, indistinguishable from a server saying
+            # no. It is the one outcome that justifies arming a push cooldown.
+            _LOGGER.error(
+                "Network error while stopping sound on %s: %s",
+                device_id,
+                _short_err(err),
+            )
+            return SoundDispatchOutcome.TRANSPORT_FAILED
 
         except ClientError as err:
             _LOGGER.error(
@@ -1859,13 +2286,17 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            return False
+            return SoundDispatchOutcome.TRANSPORT_FAILED
 
         except Exception as err:
+            # Our own bug: traceback, own class, and never a cooldown.
             _LOGGER.error(
-                "Failed to stop sound (async) on %s: %s", device_id, _short_err(err)
+                "Failed to stop sound (async) on %s: %s",
+                device_id,
+                _short_err(err),
+                exc_info=True,
             )
-            return False
+            return SoundDispatchOutcome.INTERNAL_ERROR
 
 
 if (

@@ -7,15 +7,25 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from types import ModuleType, SimpleNamespace
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
-from selenium.webdriver.chrome.webdriver import WebDriver
-from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
+from custom_components.googlefindmy.browser_deps import (
+    MISSING_BROWSER_PACKAGES_HINT,
+    BrowserPackagesUnusable,
+    missing_browser_dependency,
+)
+
+try:
+    from selenium.webdriver.chrome.webdriver import WebDriver
+    from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
+except ImportError as _err:  # pragma: no cover - needs a selenium-less environment
+    raise missing_browser_dependency(_err) from _err
 
 # Platform-specific import for Windows registry access
 _winreg: ModuleType | None = None
@@ -75,10 +85,22 @@ def _load_uc() -> Any:
             def add_argument(self, argument: str) -> None:
                 self.arguments.append(argument)
 
-        def _stub_chrome(*, options: object) -> WebDriver:
-            raise RuntimeError(
-                "undetected_chromedriver could not be imported; install its runtime "
-                "dependencies (including setuptools' distutils module)"
+        def _stub_chrome(*args: object, **kwargs: object) -> WebDriver:
+            # This is where a selenium-only environment actually fails: the
+            # import above is lazy, so nothing earlier notices that
+            # undetected-chromedriver is absent. Carry the install hint here
+            # rather than leaving a generic driver error at the end of the
+            # strategy chain.
+            #
+            # The signature accepts whatever the real strategies pass
+            # (`version_main`, `browser_executable_path`, ...). A narrower one
+            # would raise TypeError before this hint is reached, and the
+            # strategy chain would swallow it as a generic driver failure.
+            raise BrowserPackagesUnusable(
+                f"{MISSING_BROWSER_PACKAGES_HINT}\n\n"
+                "undetected_chromedriver could not be imported; if it is "
+                "installed, check its runtime dependencies (including "
+                "setuptools' distutils module)"
             ) from error
 
         return SimpleNamespace(ChromeOptions=_StubChromeOptions, Chrome=_stub_chrome)
@@ -225,11 +247,226 @@ def get_chrome_version(chrome_path: str, *, prefer_binary: bool = False) -> int 
     return None
 
 
+def _is_container_login() -> bool:
+    """Return True when running inside the docker-login container.
+
+    The entrypoint sets ``GOOGLEFINDMY_CONTAINER_LOGIN=1`` for the standalone
+    login process (``Auth/auth_flow.py`` reads the same signal). Inside the
+    ``selenium/standalone-chrome`` base image the broad process kills below are
+    actively harmful: matching ``chrome``/``chromedriver`` against the *full*
+    command line hits the Java Selenium Grid node (its argv references both).
+    That node's unexpected exit makes supervisord tear down the whole stack --
+    xvfb, vnc and noVNC included -- destroying the very display the login needs.
+    undetected-chromedriver manages its own driver lifecycle, so the pre-emptive
+    kill is unnecessary here anyway.
+
+    The ancestry filter in ``_terminate_matching_processes`` does **not** make
+    this guard redundant: the Grid node is a sibling under supervisord, not an
+    ancestor of the login process, so nothing would spare it.
+    """
+    return os.environ.get("GOOGLEFINDMY_CONTAINER_LOGIN") == "1"
+
+
+# Depth limit for the ancestry walk. A realistic chain is four to six levels
+# (shell -> pytest -> python -m ... -> helper); the limit only guards against a
+# corrupted PPID table, it is not a functional bound.
+_ANCESTRY_MAX_DEPTH = 64
+
+# ``ps -o pid=,ppid=`` yields exactly these two fields per row.
+_PS_ROW_FIELDS = 2
+
+
+def _read_ppid_from_proc(pid: int) -> int | None:
+    """Return the parent PID of *pid* from ``/proc``, or ``None`` if unknown.
+
+    Reads ``/proc/<pid>/status`` rather than ``/proc/<pid>/stat``: the parent PID
+    lives in field 4 of ``stat``, but field 2 (``comm``) may itself contain
+    spaces and parentheses, so a positional split is only correct after an
+    ``rpartition(')')`` dance. ``status`` is line oriented and parses safely.
+    """
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("PPid:"):
+                    return int(line.split(":", 1)[1].strip())
+    except (OSError, ValueError):  # pragma: no cover - racy/foreign process
+        return None
+    return None
+
+
+def _ppid_map_from_ps() -> dict[int, int]:
+    """Return a ``{pid: ppid}`` map via ``ps`` for systems without ``/proc``.
+
+    One ``ps`` call for the whole table instead of one call per ancestry level:
+    cheaper, and a single seam for tests. The trailing ``=`` in the format
+    suppresses the header on both Linux and BSD/macOS.
+    """
+    mapping: dict[int, int] = {}
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - defensive
+        LOGGER.debug("Could not enumerate processes via ps")
+        return mapping
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < _PS_ROW_FIELDS:
+            continue
+        try:
+            mapping[int(parts[0])] = int(parts[1])
+        except ValueError:
+            continue
+    return mapping
+
+
+def _protected_pids() -> frozenset[int] | None:
+    """Return self plus every ancestor, or ``None`` if the walk was incomplete.
+
+    ``pkill -f``/``pgrep -f`` match the *full command line*, so any ancestor
+    whose argv happens to carry the pattern is a target. That is not theory: a
+    pytest invocation listing ``tests/test_chrome_driver.py`` was killed by its
+    own grandchild (exit 143). Excluding only ``os.getpid()`` would not help,
+    because the process that dies is the *grandparent*.
+
+    A partial answer is worse than none: it looks like a protection while the
+    grandparent is already unprotected, which is exactly the original bug. So an
+    interrupted walk (unreadable ``/proc`` under ``hidepid``, no ``ps``, a
+    corrupted table) returns ``None`` and the caller skips the cleanup entirely.
+    Skipping is safe -- the pre-kill is best effort -- while a wrong kill is not.
+    """
+    proc_available = os.path.isdir("/proc/self")
+    ppid_map: dict[int, int] = {} if proc_available else _ppid_map_from_ps()
+
+    def _parent_of(pid: int) -> int | None:
+        if proc_available:
+            parent = _read_ppid_from_proc(pid)
+            if parent is not None:
+                return parent
+            # /proc exists but this entry is unreadable (hidepid, foreign uid).
+            # Fall back to ps once instead of silently truncating the chain.
+            if not ppid_map:
+                ppid_map.update(_ppid_map_from_ps())
+        return ppid_map.get(pid)
+
+    protected: set[int] = {os.getpid(), os.getppid()}
+    # ``visited`` tracks the walk itself and must stay separate from
+    # ``protected``: the latter is pre-seeded with the direct parent, so reusing
+    # it as the cycle guard would abort the walk on its very first step.
+    current = os.getpid()
+    visited: set[int] = {current}
+    for _ in range(_ANCESTRY_MAX_DEPTH):
+        parent = _parent_of(current)
+        if parent is None:
+            LOGGER.debug(
+                "Could not resolve the parent of PID %s; skipping process cleanup "
+                "rather than risking a partial ancestry filter.",
+                current,
+            )
+            return None
+        if parent == 0:
+            # PID 1's parent: the chain is complete.
+            return frozenset(protected)
+        if parent in visited:
+            # A cycle proves the PPID data is inconsistent, not that the chain
+            # was walked to the end. Some ancestor above the loop is missing from
+            # the set, and signalling it is exactly the failure this prevents.
+            LOGGER.debug(
+                "Cycle in the PPID chain at PID %s; skipping process cleanup.",
+                parent,
+            )
+            return None
+        protected.add(parent)
+        visited.add(parent)
+        current = parent
+
+    LOGGER.debug(
+        "Ancestry walk exceeded %s levels; skipping process cleanup.",
+        _ANCESTRY_MAX_DEPTH,
+    )
+    return None
+
+
+def _pgrep_pids(pattern: str) -> list[int]:
+    """Return the PIDs whose full command line matches *pattern*.
+
+    Same selection semantics as ``pkill -f <pattern>`` (both tools share the
+    procps/BSD matcher), but the result is a list we can filter before killing.
+    Exit code 1 means "no match" and is not an error.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        LOGGER.debug("pgrep unavailable; skipping cleanup for pattern %r", pattern)
+        return []
+    if result.returncode not in (0, 1):
+        LOGGER.debug("pgrep exited with %s for pattern %r", result.returncode, pattern)
+        return []
+    pids: list[int] = []
+    for line in result.stdout.split():
+        try:
+            pids.append(int(line))
+        except ValueError:
+            continue
+    return pids
+
+
+def _terminate_matching_processes(pattern: str) -> int:
+    """Signal every process matching *pattern*, except self and its ancestors.
+
+    Replaces the historical ``subprocess.run(["pkill", "-f", pattern])``. The
+    selection is identical, but ``pkill`` only ever spares *itself* -- not the
+    caller, and not the caller's ancestry -- which made the cleanup lethal to its
+    own process tree whenever the pattern appeared in an ancestor's command line.
+    Doing the selection here keeps the behaviour testable.
+
+    Returns the number of processes that were signalled. Returns ``0`` without
+    touching anything when the ancestry could not be resolved completely: a
+    partial filter would reproduce the very bug this replaces.
+    """
+    protected = _protected_pids()
+    if protected is None:
+        return 0
+    signalled = 0
+    for pid in _pgrep_pids(pattern):
+        if pid <= 1 or pid in protected:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue  # Already gone between pgrep and kill.
+        except PermissionError:
+            LOGGER.debug("Not allowed to terminate PID %s", pid)
+            continue
+        signalled += 1
+    return signalled
+
+
 def _kill_existing_chrome_processes() -> None:
     """Terminate any existing Chrome processes to avoid conflicts.
 
     This helps prevent issues when Chrome is already running or has zombie processes.
     """
+    if _is_container_login():
+        # In the selenium/standalone-chrome image a broad ``pkill -f chrome``
+        # kills the Grid node and collapses the noVNC/X stack (see
+        # _is_container_login). Skip the pre-kill; undetected-chromedriver
+        # cleans up its own driver.
+        LOGGER.debug(
+            "Container login detected; skipping broad Chrome pre-kill to "
+            "preserve the Selenium/noVNC stack."
+        )
+        return
     try:
         if platform.system() == "Windows":
             subprocess.run(
@@ -238,7 +475,7 @@ def _kill_existing_chrome_processes() -> None:
                 check=False,
             )
         else:
-            subprocess.run(["pkill", "-f", "chrome"], capture_output=True, check=False)
+            _terminate_matching_processes("chrome")
         time.sleep(2)  # Allow time for processes to terminate
     except Exception:  # pragma: no cover - defensive, best-effort cleanup
         LOGGER.debug("Failed to kill existing Chrome processes (non-fatal)")
@@ -344,6 +581,127 @@ def find_chrome() -> str | None:
     return None
 
 
+# Optional BCP-47 language tag for the login browser (e.g. "de-DE", "pt-BR").
+# Unset means "do not choose for the user": Chrome keeps its own default.
+ENV_LOGIN_LOCALE = "GOOGLEFINDMY_LOGIN_LOCALE"
+
+# A language tag as Chrome accepts it: a two- or three-letter primary language,
+# optionally followed by script and region subtags ("de", "de-DE", "zh-Hant-TW").
+# Validated rather than passed through for two reasons: the value is spliced into
+# a command line, and the primary length limit is what makes a plain mistake
+# ("German", "Deutsch") visible instead of silently ineffective.
+_LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$")
+
+# The POSIX "no localisation" locale, in the spellings a shell hands out. It is
+# not a malformed language tag, it is a stated absence of one, so it must not be
+# warned about. That distinction is what gives the setting an opt-out cmd.exe can
+# type at all: `login.sh` can express "no preference" as an empty value, but
+# cmd.exe DELETES a variable that is set to nothing, so on Windows the empty case
+# does not exist and the launcher goes on to ask the OS for its culture. (A bare
+# `docker compose run` needs no opt-out: docker-compose.yml reads GFMY_LOCALE and
+# nothing else, so it never picks up a host locale to begin with.) The suffix arm
+# takes both POSIX separators, `.` for the codeset and `@` for the modifier, the
+# same two the normalisation below strips -- otherwise `C@euro` would miss this
+# rule and earn the "expected a language tag" warning it is the opposite of.
+_NO_LOCALE_PATTERN = re.compile(r"^(C|POSIX)([.@].*)?$")
+
+
+def _login_locale(env: Mapping[str, str]) -> str | None:
+    """Return the requested login language tag, or ``None`` to leave it to Chrome.
+
+    A malformed value is ignored rather than fatal: a login must not fail over a
+    cosmetic preference, and the caller cannot fix a typo mid-flow. It is logged
+    at warning level so the user learns why their setting had no effect.
+
+    An empty value and the POSIX ``C``/``POSIX`` locale are not malformed, they
+    say "no preference", so both return ``None`` in silence. ``C`` is the form
+    every caller can express: ``login.sh`` also accepts an empty value, but
+    ``login.cmd`` cannot, because cmd.exe deletes a variable set to nothing.
+
+    Note what is validated and what is not: everything from the first ``.`` or
+    ``@`` onwards is *dropped*, not inspected, and only the remainder -- with
+    ``_`` read as ``-`` -- has to look like a language tag. Together that is what
+    makes ``de_DE.UTF-8`` work, and it also
+    means ``de-DE.anything`` quietly becomes ``de-DE``. Tightening that would
+    have to tell a codeset from a typo -- ``UTF-8``, ``utf8``, ``ISO-8859-1``,
+    ``euro`` -- and a false reject there costs the user their language for no
+    gain, so the normalisation is logged instead of second-guessed.
+    """
+    raw = (env.get(ENV_LOGIN_LOCALE) or "").strip()
+    if not raw or _NO_LOCALE_PATTERN.match(raw):
+        return None
+    # Accept the one near-miss worth accepting: POSIX locales ("de_DE.UTF-8",
+    # "pt_BR@euro") are what a shell hands out, and translating them costs one
+    # line, while rejecting them would send users hunting for the difference
+    # between a locale and a language tag.
+    candidate = raw.split(".", 1)[0].split("@", 1)[0].replace("_", "-")
+    if not _LOCALE_PATTERN.match(candidate):
+        LOGGER.warning(
+            "Ignoring %s=%r: expected a language tag such as 'de-DE' or 'fr'",
+            ENV_LOGIN_LOCALE,
+            raw,
+        )
+        return None
+    if candidate != raw:
+        # What was missing was the *pairing*: _apply_login_locale already logs
+        # the tag that survived, but not what the user actually set, so a value
+        # that was merely cut short read exactly like one that was accepted
+        # whole. A rejected value announces itself above at warning level.
+        LOGGER.debug(
+            "Normalised %s=%r to the language tag %r",
+            ENV_LOGIN_LOCALE,
+            raw,
+            candidate,
+        )
+    return candidate
+
+
+class _AcceptsChromeArguments(Protocol):
+    """The one thing both option builders have in common.
+
+    Documents the requirement; it does not currently enforce it at either call
+    site, and saying otherwise would be a control claim this file cannot cash.
+    Both callers pass an object typed ``Any`` (the uc module is resolved
+    dynamically, ``_selenium_webdriver`` is imported lazily), and mypy checks
+    nothing against a protocol when the argument is ``Any``. It becomes binding
+    the moment either of those grows a real type, which is the cheapest way to
+    have the guarantee waiting rather than to add it later.
+    """
+
+    def add_argument(self, argument: str) -> None: ...  # pragma: no cover
+
+
+def _apply_login_locale(
+    options: _AcceptsChromeArguments, env: Mapping[str, str]
+) -> str | None:
+    """Put the user's language on ``options``, or leave it untouched.
+
+    Every Chrome this module starts goes through one of two option builders, and
+    a user who sets the variable means the login they get, not the one strategy
+    that happened to win. Keeping the two switches here rather than in each
+    builder is the point: a third builder that forgets them is then caught by
+    ``test_every_chrome_options_builder_applies_the_login_locale`` -- within
+    that test's measured extent, which is module-level ``def``/``async def`` in
+    this file that name ``ChromeOptions`` directly. A builder reached through an
+    alias or built at import time is outside it, and outside anything short of
+    running the code.
+
+    Both switches are needed and neither is optional: ``--lang`` localises the
+    browser, ``--accept-lang`` the page Google serves for it. Returns the applied
+    tag, or ``None`` when nothing was requested.
+    """
+    locale = _login_locale(env)
+    if locale is None:
+        return None
+    options.add_argument(f"--lang={locale}")
+    options.add_argument(f"--accept-lang={locale}")
+    # Logged here rather than left to the callers: a rejected value already says
+    # so at warning level, but an accepted one that never reached the browser
+    # used to leave no trace at all, which is the harder half to diagnose.
+    LOGGER.debug("Login browser language set to %s", locale)
+    return locale
+
+
 def get_options(*, headless: bool = False) -> ChromeOptions:
     """Create Chrome options that match the integration's requirements.
 
@@ -367,8 +725,51 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    # The two flags below relax the browser's own origin isolation. They are
+    # under discussion (BSkando/GoogleFindMy-HA#214), so here is what is known:
+    #
+    # * Scope. ``get_options`` is reached only through ``create_driver``, and
+    #   ``create_driver`` only from the manual command-line entry points
+    #   (``Auth/auth_flow.py``, ``KeyBackup/shared_key_flow.py``,
+    #   ``get_oauth_token.py``). No module Home Assistant loads imports this one:
+    #   an import-graph walk from ``__init__.py``, ``config_flow.py`` and
+    #   ``eid_resolver.py`` reaches no browser package.
+    # * The one exception, stated rather than glossed over.
+    #   ``KeyBackup/shared_key_retrieval.py`` -> ``_interactive_flow_hex`` loads
+    #   the browser flow through ``importlib.import_module``, which no import
+    #   graph sees. Its guard in ``_retrieve_shared_key_hex`` used to ask whether
+    #   a terminal was attached, and a foreground Home Assistant answers yes, so
+    #   these flags *could* be applied inside the Home Assistant process. That
+    #   guard now asks two questions instead: ``GOOGLEFINDMY_CLI_PROCESS``, which
+    #   ``main.py`` sets on its own process and Home Assistant never sets, and
+    #   whether somebody is there to answer the browser prompt. Either one alone
+    #   is refused. That is a default, not a guarantee: the variable is inherited
+    #   like any other, and the refusal message deliberately tells an unforeseen
+    #   command-line wrapper to set it. Someone who exports it into a Home
+    #   Assistant process is answering the question the guard asks.
+    # * Provenance. They arrived with commit 5219da9f, described as taken from
+    #   the upstream tool. That is not accurate: leonboe1/GoogleFindMyTools sets
+    #   exactly three arguments in its own ``get_options`` (``--start-maximized``,
+    #   ``--no-sandbox``, ``--disable-dev-shm-usage``) and obtains the same keys
+    #   through the same flow without these two.
+    # * Second sign that they may be dispensable: our own fallback path,
+    #   ``_try_webdriver_manager_fallback``, starts Chrome for the same purpose
+    #   and sets neither.
+    #
+    # Not removed on that evidence alone. Verifying a removal takes a real Google
+    # sign-in with 2FA on a real desktop; it cannot be automated, cannot be
+    # repeated in CI, and one successful run would not prove it holds for every
+    # account and Chrome build. The gain would be zero (no attack path in the
+    # Home Assistant runtime, see scope), the loss on a mistake is every user's
+    # only route to their own credentials. Whoever removes them owes that
+    # measurement.
     chrome_options.add_argument("--disable-web-security")
     chrome_options.add_argument("--allow-running-insecure-content")
+
+    # Language. Nothing here forces one: without the variable Chrome keeps its
+    # own default (English in a bare container), which is the right fallback for
+    # a login page nobody should have to translate.
+    _apply_login_locale(chrome_options, os.environ)
 
     return chrome_options
 
@@ -419,8 +820,19 @@ def get_driver(
     )
 
 
-def _try_webdriver_manager_fallback() -> WebDriver | None:
+def _try_webdriver_manager_fallback(
+    *, headless: bool = False, resolved_path: str | None = None
+) -> WebDriver | None:
     """Try to use webdriver-manager as a fallback for standard Selenium.
+
+    Parameters
+    ----------
+    headless: bool
+        Whether the browser should run without a window, mirroring the
+        caller's request to :func:`create_driver`.
+    resolved_path: str | None
+        The Chrome binary the four earlier strategies were pointed at, or
+        ``None`` to let Selenium look for one itself.
 
     Returns
     -------
@@ -436,9 +848,54 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
         LOGGER.info("Attempting webdriver-manager fallback...")
         service = _chrome_service_cls(_chrome_driver_manager_cls().install())
         options = _selenium_webdriver.ChromeOptions()
-        options.add_argument("--start-maximized")
+        # Still not a copy of get_options(): the two origin-isolation flags it
+        # sets are absent here on purpose, and their absence is the evidence
+        # that they are dispensable (see the note there). What does belong on
+        # every path is what the *caller* asked for, and strategy 5 used to be
+        # the one path that forgot it (Codex review, PR #1261).
+        #
+        # What is applied here, and why each is not optional:
+        #   - the window mode: a visible window is useless in an environment
+        #     that has no display, which is exactly the one that asked for
+        #     headless. --disable-gpu rides along because get_options() sets it
+        #     unconditionally and headless without it is the documented failure
+        #     combination on older builds and on Windows.
+        #   - the Chrome binary: the four earlier strategies all honour
+        #     GOOGLEFINDMY_CHROME_PATH, so a fallback that starts whatever
+        #     Chrome happens to be on PATH either fails on a machine that has
+        #     none, or silently runs a different browser than the user chose.
+        #   - the language: the sign-in page has to be readable whichever
+        #     strategy opened it.
+        #
+        # Still *not* honoured here, and for a measured reason rather than a
+        # suspected one: the resolved Chrome major version. webdriver-manager
+        # (measured against 4.1.2) takes it as
+        # ChromeDriverManager(driver_version=...) and passes that string
+        # verbatim to get_url_for_version_and_platform, which selects from the
+        # Chrome-for-Testing list by *substring* and then takes the last match.
+        # Measured against a synthetic known-good list: a pin on the newest
+        # milestone does resolve correctly, but "120" selects 133.0.6943.120,
+        # because that build's patch component contains those digits. So the pin
+        # is honoured or silently redirected to an unrelated newer driver
+        # depending on what else is in the list -- and the silent case is the
+        # likely one here, since users reach for GOOGLEFINDMY_CHROME_VERSION
+        # precisely when their Chrome is *behind* the stable channel. The
+        # library's own major-to-full resolution runs only when driver_version
+        # is left unset, and starts from the browser it detects rather than from
+        # the version we resolved. Honouring the pin properly therefore means a
+        # signature change here plus an HTTP call of our own against the
+        # Chrome-for-Testing metadata -- a bad trade on a last-resort path whose
+        # job is to produce *some* working driver.
+        if headless:
+            options.add_argument("--headless")
+            options.add_argument("--disable-gpu")
+        else:
+            options.add_argument("--start-maximized")
+        if resolved_path:
+            options.binary_location = resolved_path
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
+        _apply_login_locale(options, os.environ)
 
         driver = _selenium_webdriver.Chrome(service=service, options=options)
         LOGGER.warning(
@@ -474,18 +931,23 @@ def safe_quit_driver(driver: RemoteWebDriver | None) -> None:
     finally:
         # Force kill any remaining processes
         try:
-            if platform.system() == "Windows":
+            if _is_container_login():
+                # ``pkill -f chromedriver`` would also match the Selenium Grid
+                # node and tear down the shared noVNC/X stack (see
+                # _is_container_login). ``driver.quit()`` above already released
+                # this driver, so leave the shared container stack alone.
+                LOGGER.debug(
+                    "Container login detected; skipping chromedriver "
+                    "force-kill to preserve the Selenium/noVNC stack."
+                )
+            elif platform.system() == "Windows":
                 subprocess.run(
                     ["taskkill", "/f", "/im", "chromedriver.exe"],
                     capture_output=True,
                     check=False,
                 )
             else:
-                subprocess.run(
-                    ["pkill", "-f", "chromedriver"],
-                    capture_output=True,
-                    check=False,
-                )
+                _terminate_matching_processes("chromedriver")
         except Exception:  # noqa: BLE001 - cleanup should not raise
             pass
 
@@ -594,6 +1056,80 @@ def _log_version_mismatch_hint(
         version_source,
         _ENV_CHROME_VERSION,
     )
+
+
+def _major_from_version_string(value: object) -> int | None:
+    """Parse the leading integer major from a Chrome capability version string.
+
+    Chrome reports ``browserVersion`` as ``"150.0.7258.66"`` and
+    ``chromedriverVersion`` as ``"150.0.7258.66 (<hash>)"``; both start with the
+    major. Returns ``None`` for anything unparseable so the guard degrades to a
+    debug log instead of raising.
+    """
+    if not isinstance(value, str):
+        return None
+    head = value.strip().split(".", 1)[0]
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _warn_on_driver_version_mismatch(
+    driver: WebDriver, *, detected_version: int | None
+) -> None:
+    """Warn if the live ChromeDriver major differs from the running Chrome major.
+
+    Runs AFTER a driver was constructed successfully. It compares the majors of
+    the session that actually launched -- Chrome (``browserVersion``) against
+    ChromeDriver (``chrome.chromedriverVersion``) -- and, defensively,
+    cross-checks the detected Chrome major. Missing or unparseable capabilities
+    degrade to a debug log. This guard NEVER raises and NEVER aborts a working
+    session: a mismatch that still produced a driver is warned about, not
+    treated as a failure (the runtime path stays non-fatal; the hard check lives
+    at image build time).
+    """
+    try:
+        caps = getattr(driver, "capabilities", None)
+        if not isinstance(caps, dict):
+            LOGGER.debug(
+                "Driver exposes no capabilities mapping; skipping version guard."
+            )
+            return
+        browser_major = _major_from_version_string(caps.get("browserVersion"))
+        chrome_caps = caps.get("chrome")
+        driver_major = _major_from_version_string(
+            chrome_caps.get("chromedriverVersion")
+            if isinstance(chrome_caps, dict)
+            else None
+        )
+        if browser_major is None or driver_major is None:
+            LOGGER.debug(
+                "Version guard incomplete (chrome major: %s, driver major: %s); "
+                "capabilities missing expected keys.",
+                browser_major,
+                driver_major,
+            )
+            return
+        if browser_major != driver_major:
+            LOGGER.warning(
+                "ChromeDriver major %s does not match the running Chrome major "
+                "%s. The session started, but if location requests fail, pin the "
+                "major via the %s environment variable.",
+                driver_major,
+                browser_major,
+                _ENV_CHROME_VERSION,
+            )
+        elif detected_version is not None and detected_version != browser_major:
+            LOGGER.debug(
+                "Detected Chrome major %s differs from the live session's Chrome "
+                "major %s (the driver major %s matches the session).",
+                detected_version,
+                browser_major,
+                driver_major,
+            )
+    except Exception as err:  # noqa: BLE001 - a guard must never break driver creation
+        LOGGER.debug("Post-construction version guard skipped: %s", err)
 
 
 def _parse_env_version(env_raw: str | None) -> int | None:
@@ -852,6 +1388,7 @@ def _create_driver_inner(
     for attempt in attempts:
         driver, error = attempt()
         if driver is not None:
+            _warn_on_driver_version_mismatch(driver, detected_version=detected_version)
             return driver
         if error is not None:
             last_error = error
@@ -859,8 +1396,13 @@ def _create_driver_inner(
                 all_file_lock = False
 
     # Strategy 5: webdriver-manager fallback
-    fallback_driver = _try_webdriver_manager_fallback()
+    fallback_driver = _try_webdriver_manager_fallback(
+        headless=headless, resolved_path=resolved_path
+    )
     if fallback_driver is not None:
+        _warn_on_driver_version_mismatch(
+            fallback_driver, detected_version=detected_version
+        )
         return fallback_driver
 
     # If all failures were file-lock related, raise PermissionError so the
@@ -879,6 +1421,14 @@ def _create_driver_inner(
         resolved_version=resolved_version,
         version_source=version_source,
     )
+    # A package that cannot be loaded is not a driver problem, and the advice
+    # below does not address it. Raised after the strategies and the
+    # webdriver-manager fallback have had their turn, so nothing that could
+    # still have worked is cut short; only the wording of the final failure
+    # changes.
+    if isinstance(last_error, BrowserPackagesUnusable):
+        raise last_error
+
     raise RuntimeError(
         "Failed to start ChromeDriver after all attempts.\n"
         "Possible solutions:\n"

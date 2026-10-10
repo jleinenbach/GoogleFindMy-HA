@@ -2,18 +2,31 @@
 
 from __future__ import annotations
 
+import ast
+import logging
+import pathlib
 from collections.abc import Mapping
 from dataclasses import dataclass, is_dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant import data_entry_flow
 
 from custom_components.googlefindmy import (
     ConfigEntrySubentryDefinition,
     ConfigEntrySubEntryManager,
 )
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    LITERAL_CORE_KEY_OWNER,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_SUBENTRY_KEY,
+)
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.homeassistant import (
     DeferredRegistryConfigEntriesManager,
     FakeConfigEntriesManager,
@@ -22,8 +35,17 @@ from tests.helpers.homeassistant import (
 )
 
 try:
-    from homeassistant.config_entries import ConfigSubentry as _RealConfigSubentry
-except ModuleNotFoundError:  # pragma: no cover - optional core stubs
+    # Attribute form on purpose: ``conftest.py`` installs a synthetic
+    # ``homeassistant.config_entries`` in ``sys.modules``, so
+    # ``from homeassistant.config_entries import ConfigSubentry`` binds the
+    # *stub* -- a mutable, non-dataclass placeholder. Reaching the submodule
+    # through the package attribute yields the genuine frozen dataclass, which
+    # is the only shape that makes the frozen-write and ``MappingProxyType``
+    # guarantees below testable at all (``tests/AGENTS.md``, point 10).
+    import homeassistant.config_entries as _ha_config_entries
+
+    _RealConfigSubentry: Any = _ha_config_entries.ConfigSubentry
+except (ModuleNotFoundError, AttributeError):  # pragma: no cover - core absent
     _RealConfigSubentry = None
 
 
@@ -91,6 +113,13 @@ async def test_async_sync_caches_resolved_registry_subentry(
             subentry_type="tracker",
             state=None,
         )
+    # Asymmetry worth knowing about: unlike ``_ap1_subentry`` below, this
+    # branch degrades *silently*. If the import ever binds the mutable stub
+    # again, ``is_dataclass`` turns false and the ``dataclass`` parameter id
+    # keeps running -- against the locally defined ``_FrozenSubentry`` in the
+    # ``else`` branch. That fallback is genuinely frozen, so the case is not
+    # vacuous, but it no longer measures core fidelity under a name that
+    # promises it. ``_ap1_subentry`` is where a substituted stub is made loud.
     elif _RealConfigSubentry is not None and is_dataclass(_RealConfigSubentry):
         resolved_child = _RealConfigSubentry(
             data=MappingProxyType({"group_key": "child-group"}),
@@ -227,3 +256,1962 @@ def test_update_visible_device_ids_refreshes_dataclass_subentry() -> None:
         "device-1",
     ]
     assert manager._managed_by_subentry_id.get(subentry_id) == key
+
+
+@dataclass(frozen=True, kw_only=True)
+class _AliasSubentry:
+    """Minimal subentry double for the alias-resolution tests."""
+
+    data: Mapping[str, Any]
+    subentry_type: str
+    title: str
+    unique_id: str | None
+    subentry_id: str
+    translation_key: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+
+
+class _CapturingConfigEntries(FakeConfigEntriesManager):
+    """Record which subentry a visibility write lands on."""
+
+    def __init__(self, managed_entry: FakeConfigEntry) -> None:
+        super().__init__([managed_entry])
+        self._entry = managed_entry
+        self.writes: list[tuple[str, dict[str, Any]]] = []
+
+    def async_update_subentry(
+        self,
+        entry_arg: FakeConfigEntry,
+        subentry_arg: Any,
+        *,
+        data: dict[str, Any],
+    ) -> _AliasSubentry:
+        subentry_id = subentry_arg.subentry_id
+        self.writes.append((subentry_id, dict(data)))
+        replacement = _AliasSubentry(
+            data=data,
+            subentry_type=subentry_arg.subentry_type,
+            title=subentry_arg.title,
+            unique_id=subentry_arg.unique_id,
+            subentry_id=subentry_id,
+        )
+        self._entry.subentries[subentry_id] = replacement
+        return replacement
+
+
+def _entry_with_twins(
+    stored_key: str, *, service_first: bool = True
+) -> FakeConfigEntry:
+    """Return an entry whose service and tracker subentry share ``stored_key``.
+
+    ``service_first`` fixes the order in which the entry yields them, because
+    the defect these tests pin was order dependent.
+    """
+
+    entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
+    specs = [
+        ("svc", "service", "Service"),
+        ("trk", "tracker", "Trackers"),
+    ]
+    if not service_first:
+        specs.reverse()
+    for slug, subentry_type, title in specs:
+        subentry = _AliasSubentry(
+            data={"group_key": stored_key},
+            subentry_type=subentry_type,
+            title=title,
+            unique_id=f"unique-{slug}",
+            subentry_id=f"{slug}-subentry",
+        )
+        entry.subentries[subentry.subentry_id] = subentry
+    return entry
+
+
+@pytest.mark.parametrize("service_first", [True, False])
+def test_a_service_twin_cannot_alias_the_tracker_key_to_itself(
+    service_first: bool,
+) -> None:
+    """A core key names its own group and must never stand in for another.
+
+    A service subentry left over from an early migration can still store
+    ``core_tracking``. Its canonical identity is the service group, so the
+    alias table used to learn ``core_tracking -> service`` and route every
+    write meant for the tracker group onto the service twin.
+    """
+
+    entry = _entry_with_twins("core_tracking", service_first=service_first)
+    hass = FakeHass(config_entries=_CapturingConfigEntries(entry))
+
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+
+    # Effect first: the assertions below must fail on their own when the
+    # guard is removed, so this test cannot be carried by its structural
+    # check alone.
+    manager.update_visible_device_ids("core_tracking", ["device-1"])
+
+    written = hass.config_entries.writes
+    assert [subentry_id for subentry_id, _ in written] == ["trk-subentry"], (
+        "the device list belongs to the tracker group; the service twin must "
+        "never receive it"
+    )
+    assert entry.subentries["svc-subentry"].data.get("visible_device_ids") is None
+
+    resolved = manager.get("core_tracking")
+    assert resolved is not None
+    assert resolved.subentry_id == "trk-subentry"
+
+
+@pytest.mark.parametrize("service_first", [True, False])
+def test_a_key_claimed_by_two_subentries_resolves_to_nothing(
+    service_first: bool,
+) -> None:
+    """An ambiguous stored key must miss rather than hit an arbitrary twin."""
+
+    entry = _entry_with_twins("owner@example.com", service_first=service_first)
+    hass = FakeHass(config_entries=_CapturingConfigEntries(entry))
+
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+
+    manager.update_visible_device_ids("owner@example.com", ["device-1"])
+
+    assert hass.config_entries.writes == [], (
+        "with two subentries claiming the key there is no single right answer, "
+        "so the write must not pick one"
+    )
+    assert manager.get("owner@example.com") is None
+
+
+@pytest.mark.parametrize("service_position", [0, 1, 2])
+def test_an_ambiguous_key_stays_ambiguous_for_every_later_claimant(
+    service_position: int,
+) -> None:
+    """A third subentry with the same key must not re-establish the alias.
+
+    Dropping the conflicting mapping alone would leave the key free again, so
+    whichever subentry is iterated afterwards would re-register it and the
+    resolution would once more depend on iteration order. The ambiguity is
+    therefore remembered for the rest of the pass, whatever position the
+    service twin holds.
+    """
+
+    stored_key = "owner@example.com"
+    entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
+    specs = [
+        ("trk1", "tracker", "Alpha trackers"),
+        ("trk2", "tracker", "Beta trackers"),
+    ]
+    specs.insert(service_position, ("svc", "service", "Service"))
+    for slug, subentry_type, title in specs:
+        subentry = _AliasSubentry(
+            data={"group_key": stored_key},
+            subentry_type=subentry_type,
+            title=title,
+            unique_id=f"unique-{slug}",
+            subentry_id=f"{slug}-subentry",
+        )
+        entry.subentries[subentry.subentry_id] = subentry
+
+    hass = FakeHass(config_entries=_CapturingConfigEntries(entry))
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+
+    manager.update_visible_device_ids(stored_key, ["device-1"])
+
+    assert hass.config_entries.writes == []
+    assert manager.get(stored_key) is None
+
+
+def test_an_ambiguous_key_is_not_answered_by_a_subentry_of_a_retired_type() -> None:
+    """Ambiguity must survive a subentry whose own identity is that key.
+
+    A subentry type that a later release stopped offering still sits in
+    ``.storage`` after an upgrade. Its canonical identity falls back to the
+    stored key itself, so the key exists in the managed mapping even though no
+    alias points at it. Dropping the conflicting alias alone would therefore
+    still hand that leftover out for a key two other subentries are fighting
+    over.
+    """
+
+    stored_key = "owner@example.com"
+    entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
+    for slug, subentry_type, title in (
+        ("svc", "service", "Service"),
+        ("trk", "tracker", "Trackers"),
+        ("old", "retired-group", "Retired group"),
+    ):
+        subentry = _AliasSubentry(
+            data={"group_key": stored_key},
+            subentry_type=subentry_type,
+            title=title,
+            unique_id=f"unique-{slug}",
+            subentry_id=f"{slug}-subentry",
+        )
+        entry.subentries[subentry.subentry_id] = subentry
+
+    hass = FakeHass(config_entries=_CapturingConfigEntries(entry))
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+
+    # Precondition of this test: the retired type really does claim the key as
+    # its own canonical identity, so a missing guard has something to hit.
+    assert manager._managed.get(stored_key) is entry.subentries["old-subentry"]
+
+    manager.update_visible_device_ids(stored_key, ["device-1"])
+
+    assert hass.config_entries.writes == []
+    assert manager.get(stored_key) is None
+
+
+@pytest.mark.parametrize("service_first", [True, False])
+def test_a_subentry_that_owns_its_stored_key_contests_a_foreign_alias(
+    service_first: bool,
+) -> None:
+    """A self-claiming subentry must be able to make a key ambiguous.
+
+    A ``hub``-typed subentry canonicalises onto its own stored key, so it
+    registers no redirection. Counting only redirections would leave such a
+    key uncontested and let a service twin capture it, which is the same
+    hijack the core-key guard closes for ``core_tracking``.
+    """
+
+    stored_key = "owner@example.com"
+    entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
+    specs = [("hub", "hub", "Hub"), ("svc", "service", "Service")]
+    if service_first:
+        specs.reverse()
+    for slug, subentry_type, title in specs:
+        subentry = _AliasSubentry(
+            data={"group_key": stored_key},
+            subentry_type=subentry_type,
+            title=title,
+            unique_id=f"unique-{slug}",
+            subentry_id=f"{slug}-subentry",
+        )
+        entry.subentries[subentry.subentry_id] = subentry
+
+    hass = FakeHass(config_entries=_CapturingConfigEntries(entry))
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+
+    manager.update_visible_device_ids(stored_key, ["device-1"])
+
+    assert hass.config_entries.writes == [], (
+        "the service twin must not receive device ids through a key the hub "
+        "subentry owns"
+    )
+    assert manager.get(stored_key) is None
+
+
+def test_the_canonical_service_key_is_not_captured_by_a_tracker_twin() -> None:
+    """The reserved-key guard covers the service key, not only the tracker one."""
+
+    entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
+    for slug, subentry_type, title in (
+        ("trk", "tracker", "Trackers"),
+        ("svc", "service", "Service"),
+    ):
+        subentry = _AliasSubentry(
+            data={"group_key": "service"},
+            subentry_type=subentry_type,
+            title=title,
+            unique_id=f"unique-{slug}",
+            subentry_id=f"{slug}-subentry",
+        )
+        entry.subentries[subentry.subentry_id] = subentry
+
+    hass = FakeHass(config_entries=_CapturingConfigEntries(entry))
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+
+    resolved = manager.get("service")
+    assert resolved is not None, (
+        "a tracker twin storing the service key must not turn the service "
+        "group into an unresolvable one"
+    )
+    assert resolved.subentry_id == "svc-subentry"
+
+
+@pytest.mark.parametrize("subentry_type", ["service", "hub"], ids=["service", "hub"])
+@pytest.mark.parametrize(
+    "stored_key", ["core_tracking", "owner@example.com", "service"]
+)
+def test_update_visible_device_ids_refuses_a_non_device_bearing_type(
+    subentry_type: str, stored_key: str
+) -> None:
+    """The manager must not store device ids on a service or hub subentry.
+
+    ``config_flow._accepts_device_assignment`` keeps the options flow from
+    offering such a group as an assignment target, but it lives in another
+    module and cannot see this call. Without a check here the invariant rested
+    entirely on every caller resolving to the right key, so a single caller
+    passing a key that resolves to a service or hub subentry wrote devices onto
+    the one group that must not hold any.
+
+    Deciding on the resolved subentry rather than on the key is what makes this
+    total, and the three stored keys reach it by three different routes. One
+    cell is deliberately *not* carried by this guard: a ``service``-typed
+    subentry storing ``core_tracking`` is canonicalised onto ``service``, and
+    the reserved-key rule stops ``core_tracking`` from aliasing anywhere, so
+    the lookup finds nothing and the method returns one line earlier. The
+    precondition below is what tells the two apart, so a cell cannot pass by
+    never reaching the guard at all.
+    """
+
+    entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
+    subentry = _AliasSubentry(
+        data={"group_key": stored_key},
+        subentry_type=subentry_type,
+        title="Non-device group",
+        unique_id="unique-non-device",
+        subentry_id="non-device-subentry",
+    )
+    entry.subentries[subentry.subentry_id] = subentry
+
+    hass = FakeHass(config_entries=_CapturingConfigEntries(entry))
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+
+    resolved = manager._resolve_key(stored_key)
+    reaches_the_guard = (
+        resolved is not None and manager._managed.get(resolved) is subentry
+    )
+    carried_by_the_reserved_key_rule = (
+        subentry_type == "service" and stored_key == TRACKER_SUBENTRY_KEY
+    )
+    assert reaches_the_guard is not carried_by_the_reserved_key_rule, (
+        "precondition: every cell except the reserved-key one must actually "
+        "reach the guard, otherwise a passing assertion proves nothing"
+    )
+
+    manager.update_visible_device_ids(stored_key, ["device-1"])
+
+    assert hass.config_entries.writes == [], (
+        f"a {subentry_type!r} subentry must never receive visible_device_ids, "
+        f"whatever key it stores (here {stored_key!r})"
+    )
+    stored = entry.subentries[subentry.subentry_id]
+    assert "visible_device_ids" not in stored.data, (
+        "and the stored payload must be left untouched, not merely the write log"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Characterising the subentry manager axis (PR #1230, AP1).
+#
+# Every test below states its class in its own docstring:
+#   Class A -- standing assertion. It must stay green: a later rank change
+#              turning one red is a regression of PR #1230, not an adjustment.
+#              Two sub-cases, both binding:
+#                A1 -- behaviour we want (the tracker fold, kept by V-1).
+#                A2 -- behaviour we carry. Changing it is reserved for
+#                      PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS, so it must not
+#                      move as a side effect here either.
+#   Class B -- characterisation. AP3 (rank) or AP4 (reading side) turns
+#              exactly these over.
+#
+# That A2 reservation was drawn on by PR #1236, which is what it was held for:
+# the ``unique_id`` case of ``::test_dedup_type_ranks_on_one_axis_and_groups_on
+# _the_other`` carried the load-order survivor as A2 and now carries the type
+# owner as A1. Nothing else moved with it; the remaining A2 cases are still
+# reserved.
+#
+# Substitution declared: PR #1230 asked the second Class B case to pin the
+# reading side (``_refresh_subentry_index`` and
+# ``metadata[TRACKER_SUBENTRY_KEY].config_subentry_id``). It is pinned here on
+# the manager side instead, because AP4 builds the coordinator fixture that
+# case needs anyway; the reading-side twin moves into AP4 rather than being
+# dropped.
+# ---------------------------------------------------------------------------
+
+_LEGACY_EMAIL_KEY = "user@example.com"
+# Index of ``type_match`` in ``_candidate_score``'s tuple. A name, not a
+# guard: inserting a field in front of it moves the assertion onto its
+# neighbour exactly as a literal would. It is named so the *fix* is one line
+# when that happens, and so a reader sees which field is meant.
+_TYPE_FIELD = 1
+
+
+def _ap1_subentry(
+    subentry_id: str, group_key: str | None, subentry_type: str, unique_id: str
+) -> Any:
+    """Build a subentry double.
+
+    A ``ConfigSubentry`` rather than an ad-hoc ``SimpleNamespace``: that is the
+    type the production code type-checks against. Entry doubles do go through
+    ``make_config_entry`` (``tests/AGENTS.md``, "Canonical config-entry stub");
+    subentry doubles do not, because that factory builds a ConfigEntry -- the
+    wrong object type here, which is why ``test_guard_config_entry_stub``
+    exempts subentry markers.
+    """
+
+    # Measured, not assumed: every guarantee the doubles below claim (frozen
+    # writes, ``MappingProxyType`` data) is vacuous against the mutable
+    # ``conftest`` stand-in, and a stub silently substituted for the core class
+    # would make those claims pass without testing anything. Assert the shape
+    # here so the substitution fails loudly instead.
+    assert _RealConfigSubentry is not None, "core config_entries not importable"
+    assert is_dataclass(_RealConfigSubentry), (
+        f"{_RealConfigSubentry.__module__}.{_RealConfigSubentry.__qualname__} is not a "
+        "dataclass -- the conftest stub was bound instead of the core class"
+    )
+    assert _RealConfigSubentry.__dataclass_params__.frozen, (
+        "core ConfigSubentry is expected to be frozen; the frozen-write "
+        "guarantees asserted by the doubles below are vacuous otherwise"
+    )
+    data = {"group_key": group_key} if group_key is not None else {}
+    return _RealConfigSubentry(
+        # Fidelity, not a proven guard, and said plainly because the mutation
+        # says so: the core declares ``data: MappingProxyType[str, Any]`` with
+        # no ``__post_init__`` coercion, so this matches the real shape --
+        # but swapping it for a plain dict kills no test here (measured).
+        # The reason, stated as measured rather than as a sweeping rule: *no*
+        # subentry path in production narrows ``data`` to ``dict``. They either
+        # narrow to ``Mapping`` (``__init__.py:4294``) or duck-type straight
+        # through ``.get()`` with no narrowing at all (``config_flow.py:1404``,
+        # ``__init__.py:4772``), and both forms satisfy either. The six
+        # ``isinstance(data, dict)`` sites in the integration read unrelated
+        # payloads -- none of them a ``ConfigSubentry``. Keep the faithful
+        # shape so a future ``dict``-narrowing guard fails here rather than
+        # only in production, and treat that as the reason -- not a claim that
+        # it is pinned today.
+        data=MappingProxyType(data),
+        subentry_type=subentry_type,
+        title=f"{subentry_type}:{group_key}",
+        unique_id=unique_id,
+        subentry_id=subentry_id,
+    )
+
+
+def _ap1_entry(entry_id: str, subentries: list[Any]) -> Any:
+    """Config entry double whose ``subentries`` mirrors the core type.
+
+    The core stores ``MappingProxyType`` (``config_entries.py``: ``subentries:
+    MappingProxyType[str, ConfigSubentry]``), so the double does too; a plain
+    dict would let a test mutate what production cannot.
+    """
+
+    return make_config_entry(
+        entry_id=entry_id,
+        domain=DOMAIN,
+        subentries=MappingProxyType({s.subentry_id: s for s in subentries}),
+    )
+
+
+class _CoreLikeSubentryEntries(FakeConfigEntriesManager):
+    """Config-entries manager that mirrors the core subentry contract.
+
+    Subclasses ``FakeConfigEntriesManager`` as ``tests/AGENTS.md`` ("Custom
+    config entries manager subclasses") requires; the base class carries no
+    subentry mutators at all, so they are added here.
+
+    Read out of ``homeassistant/config_entries.py`` rather than assumed:
+
+    * ``async_update_subentry`` runs the unique-id collision check *only* when a
+      ``unique_id`` is passed and differs from the stored one, raising
+      ``AbortFlow("already_configured")``; it returns ``False`` when nothing
+      changed, which is what steers the re-indexing branch in production.
+    * it writes through ``object.__setattr__``, because ``ConfigSubentry`` is a
+      frozen dataclass in the core. Assigning attributes directly would only
+      work against the mutable test stub -- the trap ``tests/AGENTS.md`` names.
+    * ``async_remove_subentry`` clears the device *and* the entity registry
+      binding, so every removal is recorded here.
+    * removal replaces ``entry.subentries`` with a fresh ``MappingProxyType``
+      instead of mutating in place, exactly as ``_async_update_entry`` does.
+      An update does not touch ``entry.subentries`` at all -- the core writes
+      through to the subentry object and saves, so the double must not either.
+
+    The unique-id collision branch is kept although no test currently reaches
+    it: production actively catches ``AbortFlow("already_configured")`` from
+    this call and recovers, so a double that cannot raise it would silently
+    exclude a live production path. That is a different case from
+    ``async_create_subentry``, which is deliberately absent because the core
+    has no such method at all (production probes it via ``getattr`` and takes a
+    non-core branch when present).
+
+    One deliberate deviation: the core raises ``UnknownSubEntry`` for an unknown
+    id, this double returns ``False``. No test drives that path, and importing
+    the exception at module level would defeat the guarded import above.
+    """
+
+    def __init__(self, entry: Any) -> None:
+        super().__init__([entry])
+        self.removed: list[str] = []
+        self.updated: list[tuple[str, dict[str, Any]]] = []
+
+    @staticmethod
+    def _replace(entry: Any, mapping: dict[str, Any]) -> None:
+        entry.subentries = MappingProxyType(mapping)
+
+    @staticmethod
+    def _raise_if_unique_id_exists(entry: Any, unique_id: str | None) -> None:
+        if unique_id is None:
+            return
+        for existing in entry.subentries.values():
+            if getattr(existing, "unique_id", None) == unique_id:
+                raise data_entry_flow.AbortFlow("already_configured")
+
+    def async_remove_subentry(self, entry: Any, subentry_id: str) -> bool:
+        mapping = dict(entry.subentries)
+        if subentry_id not in mapping:
+            return False
+        mapping.pop(subentry_id)
+        self.removed.append(subentry_id)
+        self._replace(entry, mapping)
+        return True
+
+    def async_update_subentry(self, entry: Any, subentry: Any, **kwargs: Any) -> bool:
+        setter = object.__setattr__
+        sentinel = object()
+        changed = False
+
+        unique_id = kwargs.get("unique_id", sentinel)
+        if unique_id is not sentinel and subentry.unique_id != unique_id:
+            self._raise_if_unique_id_exists(entry, unique_id)
+            setter(subentry, "unique_id", unique_id)
+            changed = True
+
+        title = kwargs.get("title", sentinel)
+        if title is not sentinel and subentry.title != title:
+            setter(subentry, "title", title)
+            changed = True
+
+        data = kwargs.get("data", sentinel)
+        if data is not sentinel and dict(subentry.data) != dict(data):
+            setter(subentry, "data", MappingProxyType(dict(data)))
+            changed = True
+
+        self.updated.append((subentry.subentry_id, dict(kwargs)))
+        return changed
+
+
+def _ap1_setup(entry_id: str, subentries: list[Any]) -> tuple[Any, Any, Any]:
+    """Return ``(entry, recorder, manager)`` wired the way production is."""
+
+    entry = _ap1_entry(entry_id, subentries)
+    recorder = _CoreLikeSubentryEntries(entry)
+    manager = ConfigEntrySubEntryManager(FakeHass(config_entries=recorder), entry)
+    return entry, recorder, manager
+
+
+def _ap1_core_definitions(entry_id: str) -> list[ConfigEntrySubentryDefinition]:
+    return [
+        ConfigEntrySubentryDefinition(
+            key=TRACKER_SUBENTRY_KEY,
+            title="Devices",
+            data={},
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            unique_id=f"{entry_id}-{TRACKER_SUBENTRY_KEY}",
+        ),
+        ConfigEntrySubentryDefinition(
+            key=SERVICE_SUBENTRY_KEY,
+            title="Service",
+            data={},
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            unique_id=f"{entry_id}-{SERVICE_SUBENTRY_KEY}",
+        ),
+    ]
+
+
+# --- Class A: standing assertions -----------------------------------------
+
+
+def test_ap1_a_tracker_type_folds_legacy_email_key_onto_core_tracking() -> None:
+    """Class A1 (standing assertion, behaviour we want).
+
+    A ``tracker``-typed subentry that still stores a legacy e-mail group key is
+    reachable under ``core_tracking`` and does not appear under the stored key
+    in the managed mapping (``__init__.py``, ``_refresh_from_entry``, tracker
+    fold). It stays *resolvable* by the stored key through the alias table --
+    what is asserted here is the mapping, not resolvability.
+
+    V-1 decided the fold stays: it is the shield that keeps such a group inside
+    ``desired`` and therefore out of the stale sweep. Turning it over is a
+    decision, not a refactoring. Complements
+    ``test_config_flow_subentry_sync.py`` rather than replacing it.
+    """
+
+    legacy = _ap1_subentry("id-legacy", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_TRACKER, "u-1")
+    _entry, _recorder, manager = _ap1_setup("e1", [legacy])
+
+    assert manager.get(TRACKER_SUBENTRY_KEY) is legacy
+    assert _LEGACY_EMAIL_KEY not in manager.managed_subentries
+
+
+def test_ap1_a_hub_type_keeps_stored_core_tracking_key() -> None:
+    """Class A2 (standing assertion, behaviour we carry).
+
+    A ``hub``-typed subentry storing ``core_tracking`` keeps that key; its type
+    does not pull it onto ``service``. The contract states this in
+    ``coordinator/subentry.py`` (the comment above the index fold:
+    ``_refresh_from_entry`` "canonicalises ``service`` and ``tracker`` by type
+    but leaves ``hub`` on its stored key"). Note the scope: that holds for the
+    *manager*. The very same file folds ``hub`` onto ``SERVICE_SUBENTRY_KEY``
+    for its own index a few lines below, via ``NON_DEVICE_SUBENTRY_TYPES`` --
+    the asymmetry is deliberate and is what this test pins on the manager side.
+
+    Discriminating power sits in the second assertion; the first only states
+    the key is present at all.
+    """
+
+    hub = _ap1_subentry("id-hub", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "u-2")
+    _entry, _recorder, manager = _ap1_setup("e1", [hub])
+
+    assert TRACKER_SUBENTRY_KEY in manager.managed_subentries
+    assert SERVICE_SUBENTRY_KEY not in manager.managed_subentries
+
+
+def test_ap1_a_hub_type_with_email_key_stays_on_that_key() -> None:
+    """Class A2 (standing assertion, behaviour we carry).
+
+    A ``hub``-typed subentry with an e-mail group key is indexed under that very
+    key -- no fold applies, so this is the sharp evidence that the stored key
+    decides for a non-core type. It is also the precondition of the stale-sweep
+    pins below: landing outside ``{core_tracking, service}`` is what puts a
+    group in reach of the sweep.
+    """
+
+    hub = _ap1_subentry("id-hub", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_HUB, "u-3")
+    _entry, _recorder, manager = _ap1_setup("e1", [hub])
+
+    assert manager.managed_subentries.get(_LEGACY_EMAIL_KEY) is hub
+
+
+# --- Class B, turned over by AP3: standing assertions now ------------------
+#
+# Both assertions below were characterisation at 5e964a1f: they recorded that
+# the manager resolved a key collision by load order, and named the change that
+# would end it. AP3 made that change, so they now assert the rule rather than
+# the symptom. The pre-AP3 wording is in the history of this file; the anchor
+# commit is 5e964a1f.
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+def test_ap3_candidate_score_reads_the_type_axis_on_key_collision(
+    reverse: bool,
+) -> None:
+    """Class A (standing assertion; AP3 turned this over from Class B).
+
+    Two candidates collide on ``core_tracking`` and differ only in
+    ``subentry_type`` (their ``subentry_id`` and title differ too, but neither
+    reaches the decision: the score reads only whether an id is *present*, and
+    the identifier tie-break is not consulted once the scores differ). Before
+    AP3 both produced the same score, the strict ``>`` fell through, and the
+    winner was whichever the entry yielded first. Now the type that literally
+    owns the key per ``LITERAL_CORE_KEY_OWNER`` outranks the one that does not,
+    in either order.
+
+    The ``hub`` here is deliberately given the *lower* ``subentry_id``
+    (``id-a-hub`` < ``id-b-tracker``), so it would win the identifier tie-break
+    if the type field were removed. That is what makes this an assertion about
+    the type axis rather than about determinism in general: neutralising
+    ``type_match`` does not merely make the outcome order-dependent, it flips
+    the winner to the hub in *both* orders.
+    """
+
+    tracker = _ap1_subentry(
+        "id-b-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-x"
+    )
+    hub = _ap1_subentry("id-a-hub", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-x")
+    order = [hub, tracker] if reverse else [tracker, hub]
+    _entry, _recorder, manager = _ap1_setup("e1", order)
+
+    tracker_score = manager._candidate_score(tracker, key=TRACKER_SUBENTRY_KEY)
+    hub_score = manager._candidate_score(hub, key=TRACKER_SUBENTRY_KEY)
+    assert tracker_score > hub_score
+    assert manager.get(TRACKER_SUBENTRY_KEY) is tracker
+
+
+def test_ap3_candidate_score_type_axis_is_neutral_off_the_core_keys() -> None:
+    """Class A (standing assertion).
+
+    ``LITERAL_CORE_KEY_OWNER`` only names the two core keys. For any other key
+    the lookup yields ``None``, so *no* candidate can match and the field is
+    uniformly ``0``. Without that guard every non-core key would acquire a
+    second ordering nobody chose.
+
+    The third candidate carries ``subentry_type=None`` and is the only one that
+    pins the guard rather than the field. An earlier version of this test
+    claimed the guard was asserted and did not assert it: with two *typed*
+    candidates, dropping ``canonical_owner is not None`` leaves both at ``0``
+    anyway and the mutation survives (measured). Only ``None == None`` turns
+    the missing table entry into a *match*, which would hand an untyped
+    subentry a rank nobody granted it on every non-core key.
+
+    That candidate is a ``SimpleNamespace`` rather than a ``ConfigSubentry``,
+    deliberately and against the file's usual rule: the core declares
+    ``subentry_type: str``, so the shape is not one the *type* allows, and
+    ``_candidate_score`` reads every attribute through ``getattr`` without
+    narrowing. Not that it is impossible to construct -- dataclasses do not
+    validate at runtime, and ``_ap5_manager_removes`` builds exactly this shape
+    from the real class for the ``untyped-on-email-key`` row. An earlier
+    wording said "cannot be built", which that row falsified. The tree treats untyped subentries as a real if defensive shape
+    (``agents/config_flow/AGENTS.md`` on the stale sweep,
+    ``_canonical_core_key_of``), which is why the guard exists at all.
+    """
+
+    tracker = _ap1_subentry(
+        "id-t", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_TRACKER, "e1-legacy"
+    )
+    hub = _ap1_subentry("id-h", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_HUB, "e1-legacy")
+    untyped = SimpleNamespace(
+        data=MappingProxyType({"group_key": _LEGACY_EMAIL_KEY}),
+        subentry_type=None,
+        title="untyped",
+        unique_id="e1-legacy",
+        subentry_id="id-u",
+    )
+    _entry, _recorder, manager = _ap1_setup("e1", [tracker])
+
+    assert LITERAL_CORE_KEY_OWNER.get(_LEGACY_EMAIL_KEY) is None
+    assert (
+        manager._candidate_score(tracker, key=_LEGACY_EMAIL_KEY)[_TYPE_FIELD]
+        == manager._candidate_score(hub, key=_LEGACY_EMAIL_KEY)[_TYPE_FIELD]
+        == manager._candidate_score(untyped, key=_LEGACY_EMAIL_KEY)[_TYPE_FIELD]
+        == 0
+    )
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+def test_ap3_an_exact_stored_key_outranks_a_folded_twin(reverse: bool) -> None:
+    """Class A (standing assertion).
+
+    This pins ``exact_key``, the **first** field of the rank tuple (index 0):
+    a subentry that stores ``core_tracking`` itself beats one that merely folds
+    onto it, in either order. Both are ``tracker``-typed, so the type axis ties
+    and cannot decide.
+
+    This field is here because leaving it out was a measured regression rather
+    than a hypothetical: without it the legacy twin below wins on the
+    identifier tie-break (``id-legacy`` < ``id-tracker``) and takes the
+    ``core_tracking`` slot. The failure this fixture then shows -- ``async_sync``
+    raising for a unique id no subentry holds -- is the *loud* form of it, and it
+    is loud because these fixture ids (``e1-t``, ``e1-legacy``) are not of the
+    ``f"{entry_id}-{key}"`` shape every production writer uses. On disk the
+    adoption finds an owner and writes the payload onto the wrong subentry
+    silently; see ``_candidate_score``'s docstring for the writer list. The
+    fixture keeps the identifier ordering on purpose -- the twin must be able to
+    win the later fields -- so neutralising ``exact_key`` flips the outcome
+    instead of merely making it order-dependent.
+    """
+
+    canonical = _ap1_subentry(
+        "id-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-t"
+    )
+    legacy_twin = _ap1_subentry(
+        "id-legacy", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_TRACKER, "e1-legacy"
+    )
+    order = [legacy_twin, canonical] if reverse else [canonical, legacy_twin]
+    _entry, _recorder, manager = _ap1_setup("e1", order)
+
+    assert manager._candidate_score(
+        canonical, key=TRACKER_SUBENTRY_KEY
+    ) > manager._candidate_score(legacy_twin, key=TRACKER_SUBENTRY_KEY)
+    assert legacy_twin.subentry_id < canonical.subentry_id, (
+        "the fixture must let the twin win the identifier tie-break, or "
+        "neutralising exact_key would only make the outcome order-dependent"
+    )
+    slot = manager.get(TRACKER_SUBENTRY_KEY)
+    assert slot is not None and slot.subentry_id == "id-tracker"
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+def test_ap3_duplicate_tracker_group_resolves_by_identifier_not_load_order(
+    reverse: bool,
+) -> None:
+    """Class A (standing assertion; AP3 turned this over from Class B).
+
+    Two ``tracker``-typed subentries collide on ``core_tracking``. Their scores
+    tie on every field including the type axis -- same type, same key -- so this
+    is the case the identifier tie-break exists for. Before AP3 the strict ``>``
+    fell through and ``_refresh_from_entry`` kept whichever came first, so the
+    owning ``subentry_id`` differed between the two orders. Now the lowest
+    ``subentry_id`` wins in both.
+
+    Lowest rather than highest, and that direction is the load-bearing part.
+    The source of the direction is ``config_flow.py::_resolve_existing``, whose
+    ``min(...)`` is parametric in the key and therefore already applies to
+    ``core_tracking``. The counterpart it converges on is
+    ``coordinator/subentry.py``'s final rank field ``subentry_id or ""``. When
+    this test was written that citation would have been wrong -- the field sat
+    inside ``if group_key == SERVICE_SUBENTRY_KEY:`` and had no counterpart on
+    this key -- and an earlier draft made exactly that claim and then
+    contradicted itself four lines later. AP4 widened the block to both core
+    keys, so the counterpart now exists.
+
+    Scope, stated because it is narrower than the name suggests: this pins the
+    *manager*. That both sides now name the same subentry is a separate
+    assertion and lives where it can see both
+    (``tests/test_coordinator_subentry_visibility.py::test_ap4_the_manager_and_the_index_agree_on_the_tracker_slot``).
+    """
+
+    first = _ap1_subentry(
+        "id-first", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-dup-a"
+    )
+    second = _ap1_subentry(
+        "id-second", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-dup-b"
+    )
+    order = [second, first] if reverse else [first, second]
+    _entry, _recorder, manager = _ap1_setup("e1", order)
+
+    assert manager._candidate_score(
+        first, key=TRACKER_SUBENTRY_KEY
+    ) == manager._candidate_score(second, key=TRACKER_SUBENTRY_KEY)
+    assert manager.get(TRACKER_SUBENTRY_KEY) is first
+
+
+# --- Stale-sweep pins: characterise, do not change -------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "group_key,subentry_type,expect_removed",
+    [
+        (_LEGACY_EMAIL_KEY, SUBENTRY_TYPE_HUB, True),
+        (None, SUBENTRY_TYPE_HUB, True),
+        (SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, False),
+        (_LEGACY_EMAIL_KEY, SUBENTRY_TYPE_TRACKER, False),
+    ],
+    ids=[
+        "hub-email-removed",
+        "hub-nokey-removed",
+        "hub-service-kept",
+        "tracker-email-kept",
+    ],
+)
+async def test_ap1_stale_sweep_is_decided_by_the_resolved_key(
+    group_key: str | None, subentry_type: str, expect_removed: bool
+) -> None:
+    """Class A2 (standing assertion, behaviour we carry).
+
+    ``async_sync`` sweeps managed keys outside ``desired`` and removes them
+    through ``async_remove``, which reaches the core and clears the device and
+    entity registry bindings. What the sweep never reads is the
+    ``subentry_type``; the outcome follows from the *resolved* key alone.
+
+    The two removed cases reach the sweep and fail its first barrier: their
+    resolved key (the stored e-mail key, or the bare type name when no key is
+    stored) is outside ``desired``. The two kept cases never reach the sweep at
+    all, and for a reason worth naming, because it is not a barrier: the later
+    twin resolves onto a key the canonical subentry already holds and loses the
+    collision in ``_refresh_from_entry`` (``preferred is existing`` short-cuts
+    the indexing), so it is never managed. The tracker case additionally
+    depends on the Class A1 fold putting it on ``core_tracking`` first.
+
+    Scope of this pin, stated rather than implied: the first barrier (a key
+    inside ``desired`` is skipped) is pinned below -- without it both core ids
+    are in ``desired_ids`` and would be popped from the managed map. The
+    *second* barrier (a key whose ``subentry_id`` already belongs to a desired
+    key) is **not** pinned here and cannot be from this direction: the only
+    writer of the managed map, ``_index_managed_subentry``, pops any earlier
+    key holding the same ``subentry_id``, so no fixture built through
+    ``async_sync`` can put one id under two keys. Whether that branch is
+    reachable at all is carried as a follow-up finding in
+    ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``.
+
+    No guard is added here; changing this is reserved for that plan. The
+    assertion is on the exact removal list, not on membership: a regression
+    that additionally sweeps a canonical core group is the irreversible
+    outcome this pin exists for, and ``async_remove`` swallows every exception
+    into a debug log, so the test is the only visibility.
+    """
+
+    tracker = _ap1_subentry(
+        "id-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-t"
+    )
+    service = _ap1_subentry(
+        "id-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-s"
+    )
+    third = _ap1_subentry("id-third", group_key, subentry_type, "e1-third")
+    _entry, recorder, manager = _ap1_setup("e1", [tracker, service, third])
+
+    await manager.async_sync(_ap1_core_definitions("e1"))
+
+    assert recorder.removed == (["id-third"] if expect_removed else [])
+
+    # Both core groups survive the sweep under their canonical key and keep
+    # their original subentry. The first half of this pins the first barrier:
+    # drop the ``managed_key in desired`` skip and both ids match
+    # ``desired_ids``, so both groups are popped from the managed map and
+    # ``manager.get`` returns None. The second half pins the collision loss
+    # described above: if the later twin took over the slot, the id here would
+    # be ``id-third``.
+    tracker_slot = manager.get(TRACKER_SUBENTRY_KEY)
+    service_slot = manager.get(SERVICE_SUBENTRY_KEY)
+    assert tracker_slot is not None
+    assert tracker_slot.subentry_id == "id-tracker"
+    assert service_slot is not None
+    assert service_slot.subentry_id == "id-service"
+
+
+# --- Deduplication pin: the negative control for AP3 -----------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+@pytest.mark.parametrize(
+    ("axis", "types", "unique_ids", "expected"),
+    [
+        (
+            "unique_id",
+            (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_HUB),
+            ("e1-shared-uid", "e1-shared-uid"),
+            "none",
+        ),
+        (
+            "group",
+            (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_TRACKER),
+            ("e1-uid-a", "e1-uid-b"),
+            "id-b",
+        ),
+        (
+            "group-type-separates",
+            (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_HUB),
+            ("e1-uid-a", "e1-uid-b"),
+            "none",
+        ),
+        (
+            "group-no-unique-id",
+            (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_TRACKER),
+            (None, None),
+            "load-order-loser",
+        ),
+    ],
+    ids=["unique_id", "group", "group-type-separates", "group-no-unique-id"],
+)
+async def test_dedup_identity_decides_on_one_axis_and_groups_on_the_other(
+    axis: str,
+    types: tuple[str, str],
+    unique_ids: tuple[str | None, str | None],
+    expected: str,
+    reverse: bool,
+) -> None:
+    """Class A1 for the ``unique_id`` case, A2 for the other three.
+
+    Both axes read ``subentry_type`` now, but they read it differently.
+
+    ``_deduplicate_subentries`` runs *two* grouping passes feeding one shared
+    ``removal_targets`` set:
+
+    * the ``unique_id`` axis groups by ``unique_id`` alone, so neither the type
+      nor the stored key can be part of the key. They enter as a *removal
+      guard* instead: only a candidate whose full ``(group_key,
+      subentry_type)`` identity matches the canonical one is removed at all.
+    * the ``group`` axis groups by ``(key_value, subentry_type)``, so the type
+      *is* part of the key. Two subentries sharing a ``group_key`` collapse only
+      when their types match; differing types put them in separate buckets and
+      nothing is removed.
+
+    Both axes therefore end at the same rule from two directions: a subentry of
+    a different type is a group of its own and is never removed as a duplicate
+    of another. The ``unique_id`` case is the interesting one precisely because
+    the axis cannot express that rule in its grouping key.
+
+    The name of this test and its first case were inverted three times, and each
+    correction reversed the one before. Before AP3 the survivor on the
+    ``unique_id`` axis was whichever subentry the entry happened to yield
+    first, and the case pinned that as a standing assertion, which it was not.
+    AP3 added a type rank, made the loser deterministic, and the case then
+    pinned ``id-b`` going. Codex flagged that on PR #1236: a deterministic
+    removal of a foreign-typed sibling is worse than a random one, not better,
+    and the repo contract (``agents/config_flow/AGENTS.md``) already says such
+    a sibling must be left alone. A type-only guard closed that case, and Codex
+    flagged the *next* one on the same PR -- two same-typed subentries with
+    distinct keys were still collapsed, although several tracker groups with
+    distinct keys are a supported shape. The guard now compares the full
+    identity, which is what this test's name says, and the rank went with the
+    change: once the guard spares everything of a different identity, the rank
+    decides nothing (measured over every three-subentry shape).
+
+    Load order still decides wherever the sort tuple ties, and that is worth
+    stating exactly, because earlier drafts got it wrong in both directions and
+    were corrected by measurement rather than by reading: it ties on the group
+    axis whenever both candidates carry ``unique_id=None`` (``unique_part``
+    falls back to ``""`` for both). The ``group-no-unique-id`` case exists so
+    that error cannot recur silently: subentries without a ``unique_id`` are a
+    real production shape and never enter the ``unique_id`` grouping at all,
+    since it filters on ``isinstance(subentry_unique_id, str)``.
+
+    Scope of the claim: ``_deduplicate_subentries`` never calls
+    ``_candidate_score``, so a change to *that* ranker still cannot turn these
+    red. Against ``_select_canonical`` they are a guard in the strong sense, and
+    the killing mutation is named in the case table below.
+    """
+
+    first = _ap1_subentry("id-a", TRACKER_SUBENTRY_KEY, types[0], unique_ids[0])
+    second = _ap1_subentry("id-b", TRACKER_SUBENTRY_KEY, types[1], unique_ids[1])
+    order = [second, first] if reverse else [first, second]
+    _entry, recorder, manager = _ap1_setup("e1", order)
+
+    await manager._deduplicate_subentries()
+
+    if expected == "load-order-loser":
+        assert recorder.removed == [order[1].subentry_id], axis
+    elif expected == "none":
+        assert recorder.removed == [], axis
+    else:
+        # Only the ``group`` axis reaches here now, and it is identical in both
+        # load orders because the tie breaks lexicographically on ``unique_id``.
+        # The ``unique_id`` case cannot reach this branch any more: its removals
+        # are guarded on the full identity, which is precisely this axis's
+        # grouping key, so whatever it would remove this pass removes anyway.
+        assert recorder.removed == [expected], axis
+
+
+# --- The production collision shape, characterised before it is changed ----
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+async def test_dedup_keeps_both_a_hub_and_a_service_sharing_one_identifier(
+    reverse: bool,
+) -> None:
+    """Class A1. The production collision shape, and the one this PR exists for.
+
+    The parametrised case above uses ``core_tracking`` for both candidates,
+    which is a *constructed* collision. This is the shape production actually
+    builds: ``HubSubentryFlowHandler`` and ``ServiceSubentryFlowHandler`` both
+    derive ``unique_id`` as ``f"{entry_id}-{self._group_key}"`` from the same
+    ``_group_key = SERVICE_SUBENTRY_KEY``, so two subentries differing *only* in
+    ``subentry_type`` land in one ``grouped_by_unique`` bucket.
+
+    Measured at ``c835d6b6``, with no type field in the sort key at all:
+
+    * ``fwd`` (service stored first) removed ``id-hub``;
+    * ``rev`` (hub stored first) removed ``id-service`` -- **the canonical
+      service group**, registry bindings included.
+
+    That second outcome is the defect ``agents/config_flow/AGENTS.md`` records
+    for the flow side, where "taking whichever came first" turned an
+    ``AbortFlow`` into a silent removal of exactly this group. It was fixed
+    there; here it survived because nothing asserted on it.
+
+    The first answer was a type rank alone, and it was **not enough**. It made
+    the hub the loser in both orders, and this test pinned ``["id-hub"]`` --
+    trading a random silent removal for a reliable one. Codex flagged that on
+    PR #1236 against the same contract file, which states the rule the rank
+    alone violates: a ``hub`` that loses the service slot "is then not a
+    cheaper outcome but a different one, a group of its own that keeps its
+    title, its key and its stored ids, and the cleanup must leave it alone".
+    The flow-side sweep ``_async_cleanup_stale_subentries`` had carried that
+    guard since PR #1230; the manager-side deduplicator had not.
+
+    So the removal is guarded instead: within a ``unique_id`` bucket only a
+    candidate whose full ``(group_key, subentry_type)`` identity matches the
+    canonical one is removed. Both subentries survive, in both orders. The
+    ``hub`` here differs on the type half; the key half is what
+    ``::test_dedup_two_tracker_groups_sharing_an_identifier_both_survive``
+    pins, and it was the second defect Codex found on this PR.
+
+    Killing mutation: neutralise the identity comparison in
+    ``_deduplicate_subentries`` and both cases go back to removing whichever
+    subentry load order puts second.
+
+    Two subentries can only reach this state from storage, never through a
+    write: the core refuses a colliding ``unique_id`` in both
+    ``async_add_subentry`` and ``async_update_subentry``. Restoration from
+    ``.storage`` runs neither check.
+
+    Scope of the claim, restated because the earlier version of this paragraph
+    declared the question out of scope and it was not: leaving the pair intact
+    does not resolve the shared identifier. Nothing in the runtime manager
+    renames a colliding holder -- ``_claim_unique_id`` lives in
+    ``ConfigFlow._async_sync_feature_subentries`` and runs only from a flow --
+    so the collision persists until the next flow pass. That is the deliberate
+    direction: ``async_remove_subentry`` clears device and entity registry
+    bindings and cannot be undone, a deferred rename can.
+    """
+
+    service = _ap1_subentry(
+        "id-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-service"
+    )
+    hub = _ap1_subentry("id-hub", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-service")
+    order = [hub, service] if reverse else [service, hub]
+    _entry, recorder, manager = _ap1_setup("e1", order)
+
+    await manager._deduplicate_subentries()
+
+    # Load-order independent, which is the whole point; asserted as an empty
+    # literal rather than via ``order`` so a future reshuffle of the fixture
+    # cannot make the expectation follow either defect back -- neither the
+    # random removal before the rank nor the reliable one before the guard.
+    assert recorder.removed == []
+
+
+@pytest.mark.asyncio
+async def test_dedup_the_group_axis_still_collapses_a_same_typed_copy() -> None:
+    """Class A1. Guarding the identifier axis does not switch deduplication off.
+
+    The guard on that axis is broad -- it spares everything whose ``(group_key,
+    subentry_type)`` identity differs from the canonical one -- and a reader
+    could take it for a blanket amnesty. It is not: two genuine copies of one
+    group are still collapsed, and this fixture is the smallest shape that
+    shows it while the identifier axis is fully occupied.
+
+    Measured at four stages, which is also why the fixture survives three
+    rewrites of the code under it:
+
+    * at ``c835d6b6``, with no type field at all, the unique bucket
+      ``{hub, service}`` keeps the load-order winner ``id-hub`` and only
+      ``id-service`` is removed -- once, by both axes at the same time;
+    * with a type rank alone, the unique bucket keeps the owner ``id-service``,
+      so ``id-hub`` is removed *and* ``id-service`` still loses the group
+      bucket to ``id-decoy``. Two removals;
+    * with the rank *and* a type-only guard, ``id-hub`` is spared as a foreign
+      type and ``id-service`` still loses the group bucket. One removal again,
+      but a different one from the first stage;
+    * with the full-identity guard and no rank, the unique bucket contributes
+      nothing at all and the group bucket removes ``id-service`` on its own.
+      Same single removal as the stage before, reached by one axis instead of
+      two.
+
+    ``id-decoy`` is what makes the group bucket bite: it stores the same
+    ``(service, service)`` pair but a *different* ``unique_id``, so it never
+    enters the unique grouping and competes only on the group axis, where the
+    lexicographically smaller identifier wins.
+
+    **The loss of ``id-service`` is pre-existing and belongs to neither the rank
+    nor the guard**, and that attribution is measured rather than argued: it is
+    already the outcome at ``c835d6b6``, in the first stage above. Both axes
+    wanted it gone then; only the group axis does now. What the group axis is
+    doing there is its own defect -- two real ``service`` copies collide, and the
+    survivor is picked by lexicographic ``unique_id``, so the copy carrying the
+    *canonical* ``e1-service`` loses to one carrying the tracker key's
+    identifier. That is carried as ``B20`` in
+    ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS`` rather than fixed here: it is a
+    same-typed collision, which is exactly what a deduplicator is supposed to
+    collapse, and changing *which* copy wins is a separate decision from
+    stopping it from crossing a type boundary.
+
+    Reachability, stated rather than assumed: no writer in ``custom_components``
+    produces ``id-decoy``'s shape, because both flow handlers derive
+    ``unique_id`` from the very key they store. It is a legacy or hand-edited
+    shape, which is also the only way two subentries share a ``unique_id`` at
+    all. Killing mutation: neutralise the identity comparison in
+    ``_deduplicate_subentries`` and this test goes back to two removals.
+    """
+
+    decoy = _ap1_subentry(
+        "id-decoy", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-core_tracking"
+    )
+    hub = _ap1_subentry("id-hub", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-service")
+    service = _ap1_subentry(
+        "id-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-service"
+    )
+    _entry, recorder, manager = _ap1_setup("e1", [decoy, hub, service])
+
+    await manager._deduplicate_subentries()
+
+    assert sorted(recorder.removed) == ["id-service"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+async def test_dedup_two_tracker_groups_sharing_an_identifier_both_survive(
+    reverse: bool,
+) -> None:
+    """Class A1. The shape Codex flagged against the type-only guard.
+
+    The stage before this one compared ``subentry_type`` alone, which reads a
+    shared ``unique_id`` as proof that two subentries are copies of one group.
+    For two ``tracker``-typed subentries that is wrong in the way the contract
+    already states: ``agents/config_flow/AGENTS.md`` records that several
+    tracker groups with **distinct keys** are a supported shape, so a canonical
+    ``core_tracking`` group and a legacy per-account group are two groups, and
+    the identifier they happen to share is a collision between them rather
+    than evidence of one.
+
+    Measured against the type-only guard, in both load orders: the removal took
+    the legacy group -- ``async_remove_subentry`` clears its device and entity
+    registry bindings -- because the rank of that stage handed the slot to the
+    tracker that literally owns ``core_tracking``. Deterministic, and
+    deterministically wrong; the stage before *that* one took whichever came
+    first, which is the same defect with a coin toss in front of it.
+
+    The guard now compares the full ``(group_key, subentry_type)`` identity, so
+    neither is removed, in either order. The identifier collision is deferred
+    to ``_claim_unique_id`` on the flow side, which renames rather than
+    removes.
+
+    Killing mutation: narrow the guard back to the type comparison and one of
+    the two goes in both orders.
+
+    Reachable only from storage, like every shape on this axis: the core
+    refuses a colliding ``unique_id`` in ``async_add_subentry`` and in
+    ``async_update_subentry``, and restoring from ``.storage`` runs neither
+    check.
+    """
+
+    core = _ap1_subentry(
+        "id-core", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-core_tracking"
+    )
+    legacy = _ap1_subentry(
+        "id-legacy", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_TRACKER, "e1-core_tracking"
+    )
+    order = [legacy, core] if reverse else [core, legacy]
+    _entry, recorder, manager = _ap1_setup("e1", order)
+
+    await manager._deduplicate_subentries()
+
+    assert recorder.removed == []
+
+
+@pytest.mark.asyncio
+async def test_dedup_a_same_typed_twin_on_a_foreign_key_is_left_alone() -> None:
+    """Class A1. The same rule where both candidates carry the *same* type.
+
+    This fixture used to pin the opposite outcome, under the name
+    ``::test_dedup_the_guard_still_needs_the_rank``: with a type-only guard the
+    type rank decided which candidate became canonical, and the same-typed
+    sibling was then removed however far apart the two stored keys were. The
+    three candidates sit in *distinct* ``grouped_by_group`` buckets on purpose,
+    so the group pass cannot fire at all and every removal has to come from the
+    identifier axis:
+
+    * ``id-svc-a`` -- ``service`` storing ``service``       (own bucket);
+    * ``id-hub``   -- ``hub``     storing ``service``       (own bucket);
+    * ``id-svc-b`` -- ``service`` storing ``core_tracking`` (own bucket).
+
+    All three share ``e1-service``. ``id-svc-b`` is a mis-keyed twin rather
+    than a legitimate second service group -- there is only ever one -- and
+    that is exactly why it is *not* removed here: repairing it is the flow
+    side's business, where ``_resolve_existing`` adopts such a twin and
+    ``_claim_unique_id`` renames the identifier it leaves behind. Both of those
+    are reversible; ``async_remove_subentry`` is not, and the manager has no
+    way to tell a mis-keyed twin from a group whose key it simply does not know.
+
+    ``id-svc-a`` is stored first so that a type-only guard would have something
+    to bite: with ``id-hub`` first the load-order winner is a type no sibling
+    shares and the mutation below would pass by accident.
+
+    Killing mutation: narrow the guard back to the type comparison and
+    ``id-svc-b`` is removed again.
+    """
+
+    svc_a = _ap1_subentry(
+        "id-svc-a", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-service"
+    )
+    hub = _ap1_subentry("id-hub", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-service")
+    svc_b = _ap1_subentry(
+        "id-svc-b", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-service"
+    )
+    _entry, recorder, manager = _ap1_setup("e1", [svc_a, hub, svc_b])
+
+    await manager._deduplicate_subentries()
+
+    assert recorder.removed == []
+
+
+@pytest.mark.asyncio
+async def test_dedup_a_spared_hub_survives_a_whole_sync_not_just_the_helper() -> None:
+    """Class A1. "Left standing" measured through ``async_sync``, not the helper.
+
+    Every other test here calls ``_deduplicate_subentries`` directly, which
+    answers "does the helper remove it?" and not "is it still there afterwards?".
+    Those are different questions: ``async_sync`` runs the helper first and then
+    a *type-blind* stale sweep of its own, so a subentry the helper spares can
+    still be removed further down the same call. A reviewer flagged the gap on
+    PR #1236 while checking the contract wording, and it is a real one -- see
+    ``::test_ap1_stale_sweep_is_decided_by_the_resolved_key``, where a ``hub``
+    storing a legacy key *is* swept.
+
+    What this pins is therefore narrow on purpose: for the **production**
+    collision shape -- a ``hub`` storing ``SERVICE_SUBENTRY_KEY`` beside a real
+    ``service`` storing the same key, both on ``e1-service`` -- the hub survives
+    the whole sync. It never enters ``_managed`` at all, because
+    ``_candidate_score`` gives the slot to the literal owner, and the stale
+    sweep only looks at managed keys.
+
+    Killing mutation: neutralise the identity comparison in
+    ``_deduplicate_subentries`` and ``id-hub`` is gone before the sweep is ever
+    reached.
+    """
+
+    tracker = _ap1_subentry(
+        "id-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-core_tracking"
+    )
+    hub = _ap1_subentry("id-hub", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-service")
+    service = _ap1_subentry(
+        "id-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-service"
+    )
+    _entry, recorder, manager = _ap1_setup("e1", [tracker, hub, service])
+
+    await manager.async_sync(_ap1_core_definitions("e1"))
+
+    assert recorder.removed == []
+    slot = manager.get(SERVICE_SUBENTRY_KEY)
+    assert slot is not None
+    # The literal owner holds the slot; the hub is beside it, not instead of it.
+    assert slot.subentry_id == "id-service"
+
+
+@pytest.mark.asyncio
+async def test_dedup_sparing_a_twin_can_route_a_sync_through_the_adoption_exit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Class A1. The guard's cost, pinned rather than claimed away.
+
+    An earlier draft of the root ``AGENTS.md`` paragraph asserted, as *measured*,
+    that sparing a foreign-typed twin leaves the retry loop untouched, on the
+    reasoning that the manager only ever writes back an identifier the slot
+    holder already has. A reviewer constructed the counter-shape and it
+    reproduces: the spared twin can be the very subentry that *takes* the slot,
+    and then the write-back does change an identifier.
+
+    * ``id-h`` -- ``hub``     storing ``service``,       on ``e1-core_tracking``
+    * ``id-t`` -- ``tracker`` storing ``core_tracking``, on ``e1-core_tracking``
+    * ``id-x`` -- ``service`` storing ``core_tracking``, on ``e1-service``
+
+    ``id-h`` and ``id-t`` share a ``unique_id`` but nothing else, so the guard
+    spares both. ``_refresh_from_entry``
+    then indexes the hub under its *stored* key, so the hub holds the service
+    slot, and ``async_sync`` tries to write ``e1-service`` onto it -- which
+    ``id-x`` holds. The core raises, the retry deduplicates to no effect, and
+    the second abort lands in ``_async_adopt_existing_unique_id``.
+
+    Measured in both directions: with the guard neutralised, ``id-h`` is removed
+    and the slot is ``id-x`` immediately, with a different log line and no
+    repeated collision.
+
+    This is the deliberate trade rather than a regression -- an irreversible
+    ``async_remove_subentry`` traded for a documented, logged fallback that ends
+    at the same holder -- but it is a cost, and the contract now says so instead
+    of claiming the loop is unaffected. Killing mutation: neutralise the guard
+    and the repeated-collision record disappears.
+    """
+
+    caplog.set_level(logging.DEBUG)
+    hub = _ap1_subentry(
+        "id-h", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-core_tracking"
+    )
+    tracker = _ap1_subentry(
+        "id-t", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-core_tracking"
+    )
+    service = _ap1_subentry(
+        "id-x", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-service"
+    )
+    _entry, recorder, manager = _ap1_setup("e1", [hub, tracker, service])
+
+    await manager.async_sync(_ap1_core_definitions("e1"))
+
+    # Nothing removed: that is the point of the guard.
+    assert recorder.removed == []
+    # But the sync paid for it with a second collision round.
+    assert any(
+        "repeated unique_id collision" in record.message for record in caplog.records
+    )
+    # And it still ends at the right holder, which is why this is a cost and
+    # not a defect.
+    slot = manager.get(SERVICE_SUBENTRY_KEY)
+    assert slot is not None
+    assert slot.subentry_id == "id-x"
+
+
+# ---------------------------------------------------------------------------
+# The reverse index after a displacement (PR #1230, AP4 step 3b, a follow-up
+# from its AP3 re-review).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+def test_ap4_the_reverse_index_drops_a_displaced_subentry(reverse: bool) -> None:
+    """A subentry pushed off a managed key must lose its reverse-index entry.
+
+    Class A. ``_managed`` is keyed by managed key and is therefore overwritten
+    cleanly when a better candidate arrives; ``_managed_by_subentry_id`` is
+    keyed by *identifier* and survives that overwrite, so the loser kept
+    claiming a slot it no longer held.
+
+    The harm is not bookkeeping hygiene, and it was measured rather than
+    derived: ``_async_adopt_existing_unique_id`` asks
+    ``_managed_key_for_subentry_id(owner_subentry_id)`` which key the owner
+    previously held and pops it. Given the stale answer it pops the slot of the
+    *rightful* holder, so ``core_tracking`` drops out of ``_managed`` entirely
+    until the next refresh.
+
+    Only one load order produces the displacement (the loser has to be indexed
+    first), which is exactly why both are asserted: the defect was invisible in
+    the other one.
+    """
+
+    low = _ap1_subentry("id-a", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-a")
+    high = _ap1_subentry("id-b", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-b")
+    order = [high, low] if reverse else [low, high]
+    _entry, _recorder, manager = _ap1_setup("e1", order)
+
+    manager._refresh_from_entry()
+
+    managed = manager._managed.get(TRACKER_SUBENTRY_KEY)
+    assert managed is not None and managed.subentry_id == "id-a", (
+        "the tie-break picks the lowest identifier in both load orders"
+    )
+    assert manager._managed_key_for_subentry_id("id-b") is None, (
+        "the displaced subentry must not keep claiming the key it lost; the "
+        "adoption path reads this mapping to decide which slot to vacate"
+    )
+    assert manager._managed_key_for_subentry_id("id-a") == TRACKER_SUBENTRY_KEY, (
+        "and the winner keeps its own entry"
+    )
+
+
+# --- AP5: the setup sync must not delete what no definition governs ---------
+
+
+def _ap5_subentry(
+    subentry_id: str,
+    group_key: str,
+    subentry_type: str,
+    unique_id: str,
+    *,
+    stored: Mapping[str, Any],
+) -> Any:
+    """A subentry carrying fields beyond the ones a definition ever names.
+
+    Built on the same real ``ConfigSubentry`` as :func:`_ap1_subentry` and for
+    the same reason: the core replaces ``data`` wholesale, and only the frozen
+    dataclass with its ``MappingProxyType`` makes that replacement observable
+    the way production performs it.
+    """
+
+    assert _RealConfigSubentry is not None, "core config_entries not importable"
+    data: dict[str, Any] = {"group_key": group_key}
+    data.update(stored)
+    return _RealConfigSubentry(
+        data=MappingProxyType(data),
+        subentry_type=subentry_type,
+        title=f"{subentry_type}:{group_key}",
+        unique_id=unique_id,
+        subentry_id=subentry_id,
+    )
+
+
+def _ap5_production_definitions(entry_id: str) -> list[ConfigEntrySubentryDefinition]:
+    """The definitions ``async_setup_entry`` really passes.
+
+    Not :func:`_ap1_core_definitions`, whose ``data`` is empty: an empty
+    definition cannot show that the *governed* fields still win over the
+    preserved ones, and that half of the behaviour is what keeps the
+    preservation from freezing the subentry. The four keys mirror the two
+    production builders (``__init__.py`` setup step 2 and
+    ``coordinator/subentry.py`` core repair), which carry the same set.
+    """
+
+    return [
+        ConfigEntrySubentryDefinition(
+            key=TRACKER_SUBENTRY_KEY,
+            title="Google Find My devices",
+            data={
+                "features": ["device_tracker"],
+                "fcm_push_enabled": False,
+                "has_google_home_filter": True,
+                "entry_title": "Find My",
+            },
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            unique_id=f"{entry_id}-{TRACKER_SUBENTRY_KEY}",
+        ),
+        ConfigEntrySubentryDefinition(
+            key=SERVICE_SUBENTRY_KEY,
+            title="Google Find Hub Service",
+            data={
+                "features": ["sensor"],
+                "fcm_push_enabled": False,
+                "has_google_home_filter": True,
+                "entry_title": "Find My",
+            },
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            unique_id=f"{entry_id}-{SERVICE_SUBENTRY_KEY}",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stored_visible", "label"),
+    [
+        (("dev-1", "dev-2"), "E3"),
+        ((), "E1"),
+        (("dev-bad:",), "E4"),
+    ],
+    ids=["E3-listed", "E1-empty", "E4-unusable"],
+)
+@pytest.mark.asyncio
+async def test_ap5_a_stored_allow_list_survives_the_setup_sync(
+    stored_visible: tuple[str, ...], label: str
+) -> None:
+    """F-7: ``async_sync`` must not delete the group's device assignment.
+
+    The setup sync builds its payload from the definition alone and the core
+    replaces ``ConfigSubentry.data`` wholesale, so every stored field the
+    definition does not name used to be deleted -- at *every* start, before the
+    first refresh.
+
+    Carried as the setup-path half of the visibility-assignment bookkeeping
+    remainders; the identifier lives in the register of
+    ``agents/config_flow/AGENTS.md`` rather than here, so this docstring names
+    the behaviour instead of a code the reader would have to look up.
+
+    All three shapes that can be stored are asserted, not just the listed one,
+    because they mean different things under the target semantics and the
+    failure collapses them: a deleted key reads as "never assigned" and
+    therefore as unrestricted, so an empty list ("this group shows nothing")
+    would come back as "this group shows everything". Asserting only the
+    listed shape would leave exactly the fail-open direction untested.
+
+    Verbatim rather than normalised is asserted on purpose for ``E4``: the
+    reinterpretation report reads the raw stored value, and a preservation
+    that quietly normalised it would erase its own evidence.
+
+    Killing mutation: drop ``_payload_preserving_stored_fields`` from the
+    update branch of ``async_sync`` and pass ``payload`` straight through.
+    """
+
+    tracker = _ap5_subentry(
+        "id-t",
+        TRACKER_SUBENTRY_KEY,
+        SUBENTRY_TYPE_TRACKER,
+        "e1-core_tracking",
+        stored={
+            "visible_device_ids": stored_visible,
+            "feature_flags": {"probe": True},
+            # A *governed* field, seeded with a stale value on purpose. Without
+            # it the "the definition still wins" assertion below is vacuously
+            # true: reversing the merge precedence leaves it green when the
+            # stored mapping simply has no ``features`` key to win with.
+            "features": ["stale_platform"],
+        },
+    )
+    entry, _recorder, manager = _ap5_setup_with(tracker)
+
+    await manager.async_sync(_ap5_production_definitions("e1"))
+
+    stored_after = dict(entry.subentries["id-t"].data)
+    assert "visible_device_ids" in stored_after, (
+        f"{label}: the assignment key must survive the sync; losing it reads as "
+        "'never assigned' and therefore as unrestricted"
+    )
+    assert tuple(stored_after["visible_device_ids"]) == stored_visible, (
+        f"{label}: the stored value is preserved verbatim, not normalised"
+    )
+    assert stored_after.get("feature_flags") == {"probe": True}, (
+        "the same deletion took the feature flags with it; the fix is the "
+        "field-agnostic one, so this is asserted rather than assumed"
+    )
+    assert stored_after["features"] == ["device_tracker"], (
+        "a field the definition *does* govern still wins -- preservation must "
+        "not freeze the subentry against its own definition"
+    )
+
+    service_after = dict(entry.subentries["id-s"].data)
+    assert "visible_device_ids" not in service_after, (
+        "the exemption: a non-device group must not have its legacy device "
+        "assignment preserved, because clearing it is the repair that keeps a "
+        "wrong assignment from becoming permanent"
+    )
+    assert service_after.get("feature_flags") == {"svc": 1}, (
+        "the exemption is one field wide, not a blanket opt-out for the "
+        "service group -- its other stored fields are preserved like anyone's"
+    )
+
+
+def _ap5_setup_with(*subentries: Any) -> tuple[Any, Any, Any]:
+    """``_ap1_setup`` with both core groups present.
+
+    ``async_sync`` sweeps managed subentries that fall out of ``desired``, so a
+    fixture carrying only one core group would exercise the create branch for
+    the other and cloud what the update branch does.
+    """
+
+    service = _ap5_subentry(
+        "id-s",
+        SERVICE_SUBENTRY_KEY,
+        SUBENTRY_TYPE_SERVICE,
+        "e1-service",
+        # Seeded with a legacy assignment on purpose: the preservation must
+        # *not* reach it, and an empty service fixture could not tell a
+        # working exemption from a missing one.
+        stored={"visible_device_ids": ("dev-legacy",), "feature_flags": {"svc": 1}},
+    )
+    return _ap1_setup("e1", [*subentries, service])
+
+
+@pytest.mark.parametrize(
+    ("group_key", "subentry_type", "axis"),
+    [
+        (SERVICE_SUBENTRY_KEY, "a_type_this_build_does_not_know", "key"),
+        (TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "type"),
+    ],
+    ids=["key-axis", "type-axis"],
+)
+@pytest.mark.asyncio
+async def test_ap5_the_exemption_reads_both_non_device_axes(
+    group_key: str, subentry_type: str, axis: str
+) -> None:
+    """The non-device judgement has two axes, and each catches its own shape.
+
+    ``config_flow._accepts_device_assignment`` reads the group key first
+    (``NON_DEVICE_SUBENTRY_KEYS``) and the subentry type second
+    (``NON_DEVICE_SUBENTRY_TYPES``). The preservation mirrors both, and both
+    parameters here are reachable shapes that the *other* axis alone would miss
+    -- measured on 2026-08-06 rather than argued:
+
+    * key axis: a subentry carrying a type this build does not know (an older
+      or newer build, a hand-edited store) storing the service key **is**
+      managed under ``service``, and its type classifies nothing. A ``tracker``
+      storing that key is *not* a counter-example: the fold moves it to the
+      tracker key before it gets here.
+    * type axis: a ``hub`` storing the tracker key **is** managed under
+      ``core_tracking`` -- ``_refresh_from_entry`` canonicalises ``service``
+      and ``tracker`` by type but leaves ``hub`` on its stored key -- so the
+      key says "device group" and only the type says otherwise. That shape is
+      the carried remainder ``B10``, not a hypothetical.
+
+    Killing mutations: drop either disjunct; each kills exactly its own
+    parameter and leaves the other green, which is what makes the two axes
+    non-redundant rather than belt-and-braces.
+    """
+
+    odd = _ap5_subentry(
+        "id-odd",
+        group_key,
+        subentry_type,
+        f"e1-{group_key}",
+        stored={"visible_device_ids": ("legacy-dev",), "feature_flags": {"odd": 1}},
+    )
+    companion_key = (
+        TRACKER_SUBENTRY_KEY
+        if group_key == SERVICE_SUBENTRY_KEY
+        else SERVICE_SUBENTRY_KEY
+    )
+    companion_type = (
+        SUBENTRY_TYPE_TRACKER
+        if companion_key == TRACKER_SUBENTRY_KEY
+        else SUBENTRY_TYPE_SERVICE
+    )
+    companion = _ap5_subentry(
+        "id-companion",
+        companion_key,
+        companion_type,
+        f"e1-{companion_key}",
+        stored={},
+    )
+    entry, _recorder, manager = _ap1_setup("e1", [odd, companion])
+    assert manager.get(group_key) is odd, (
+        f"precondition ({axis} axis): the subentry must really be managed under "
+        f"'{group_key}', or this parameter asserts nothing about that axis"
+    )
+
+    await manager.async_sync(_ap5_production_definitions("e1"))
+
+    stored_after = dict(entry.subentries["id-odd"].data)
+    assert "visible_device_ids" not in stored_after, (
+        f"the {axis} axis classifies this as a non-device group, so its legacy "
+        "assignment is cleared"
+    )
+    assert stored_after.get("feature_flags") == {"odd": 1}, (
+        "and the exemption stays one field wide on either axis"
+    )
+
+
+# --- AP5 / A-6: the two sweeps carry their opposite polarity as an assertion ---
+
+
+# The verdict pair per shape, measured rather than reasoned. Read as
+# ``(flow sweep removes?, manager sweep removes?)``.
+_AP5_COHERENCE_TABLE: dict[str, tuple[bool, bool]] = {
+    "hub-on-service-key": (False, False),
+    "hub-on-empty-key": (False, True),
+    "hub-on-email-key": (False, True),
+    "tracker-on-email-key": (False, False),
+    "untyped-on-email-key": (False, True),
+}
+
+
+def _ap5_shape(shape: str) -> tuple[str | None, str]:
+    """Return ``(subentry_type, stored group key)`` for a table row.
+
+    The stored key is a plain string on both sides on purpose. An earlier draft
+    used ``None`` for the keyless row and let each side spell it differently:
+    the manager fixture then stored *no* ``group_key`` field while the flow
+    fixture stored an empty string. Both happen to end at the same barrier
+    today, so the row was green under a name that described only one of the two
+    shapes. Narrow the barrier to ``group_key is None`` and the columns would
+    drift apart silently.
+    """
+
+    return {
+        "hub-on-service-key": (SUBENTRY_TYPE_HUB, SERVICE_SUBENTRY_KEY),
+        "hub-on-empty-key": (SUBENTRY_TYPE_HUB, ""),
+        "hub-on-email-key": (SUBENTRY_TYPE_HUB, _LEGACY_EMAIL_KEY),
+        "tracker-on-email-key": (SUBENTRY_TYPE_TRACKER, _LEGACY_EMAIL_KEY),
+        "untyped-on-email-key": (None, _LEGACY_EMAIL_KEY),
+    }[shape]
+
+
+async def _ap5_manager_removes(subentry_type: str | None, group_key: str) -> bool:
+    tracker = _ap1_subentry(
+        "id-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-t"
+    )
+    service = _ap1_subentry(
+        "id-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-s"
+    )
+    third = _ap1_subentry("id-third", group_key, subentry_type, "e1-third")
+    _entry, recorder, manager = _ap1_setup("e1", [tracker, service, third])
+    await manager.async_sync(_ap1_core_definitions("e1"))
+    return "id-third" in recorder.removed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", sorted(_AP5_COHERENCE_TABLE))
+async def test_ap5_both_sweeps_agree_with_the_recorded_polarity_table(
+    shape: str,
+) -> None:
+    """Class A2 (standing assertion), the AP5 coherence probe for ``A-6``.
+
+    ``ConfigFlow._async_cleanup_stale_subentries`` and the stale sweep inside
+    ``ConfigEntrySubEntryManager.async_sync`` run *opposite* polarities on the
+    same axis and never read each other. There a non-core stored key is the
+    skipped one; here ``desired`` **is** the core key set, so a non-core key is
+    the removal candidate. Two sweeps of one axis that do not read each other
+    are the starting position of PR #1229, and the plan's answer is deliberately
+    not a shared reader but a shared *assertion*: this table.
+
+    What each column is worth is not the same, and saying so keeps the pin
+    honest. The flow column is a property of that sweep's own barriers. The
+    manager column is not: two of its ``False`` values are decided before the
+    sweep runs at all. ``tracker-on-email-key`` is folded onto ``core_tracking``
+    by ``_refresh_from_entry``, and ``hub-on-service-key`` loses the collision
+    against the canonical service group and is never managed in the first place
+    (``test_ap1_stale_sweep_is_decided_by_the_resolved_key`` says the same about
+    its kept cases). ``hub`` is left on its stored key by that same fold, which
+    is the whole asymmetry the table exists to make visible.
+
+    This shares its manager-side fixture shape with
+    ``test_ap1_stale_sweep_is_decided_by_the_resolved_key`` rather than
+    extracting a common helper. That is a choice, not an oversight: the other
+    test is a standing pin on an irreversible removal path, and reshaping its
+    fixture to serve this table is the kind of edit that changes what a pin
+    pins. If the two ever disagree, the pin is right and this table is wrong.
+
+    The three ``(False, True)`` rows are the open gap, carried rather than
+    wanted: a stored ``hub`` under a non-core key, or an untyped leftover,
+    survives the flow and is removed by the manager, registry bindings included.
+    ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS`` decides against a local guard
+    there; these rows are what make that decision observable instead of a
+    sentence in a plan file.
+
+    Which row carries which barrier, measured by mutation rather than asserted,
+    because a table can be green while measuring nothing:
+
+    * neutralise the flow sweep's *type* guard and ``hub-on-service-key`` fails,
+      alone. That is the shape the Codex finding on PR #1236 named: a ``hub``
+      beside a real ``service`` is a group of its own.
+    * neutralise the flow sweep's *stored key* barrier and
+      ``untyped-on-email-key`` fails, alone. It is the only shape here the type
+      guard does not already spare, since ``None`` compares unequal to every
+      literal owner.
+    * neutralise the manager sweep's removal loop and exactly the three
+      ``(False, True)`` rows fail, none of the others. Flipping a ``True`` in
+      the table instead would be trivially true for any table and proves
+      nothing about what it measures.
+
+    An earlier draft omitted the untyped row, and the key barrier then had no
+    witness at all: every other shape is spared by the type guard first, so the
+    barrier could be deleted with the suite still green.
+    """
+
+    from tests.test_config_flow_subentry_sync import (
+        _build_flow,
+        _context_map_for,
+        _entry_with_subentries,
+        _legacy_twin,
+        _run_sync,
+        _subentry_store,
+    )
+
+    subentry_type, group_key = _ap5_shape(shape)
+    expected_flow, expected_manager = _AP5_COHERENCE_TABLE[shape]
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    # A real service subentry beside the twin, and it is load-bearing rather
+    # than scenery: without it ``_run_sync`` *adopts* the twin onto the service
+    # slot, rewrites its stored key to ``service`` and puts its id into
+    # ``context_map``. Every barrier below is then skipped by the
+    # ``subentry_id in expected_ids`` short-cut, and the flow column reads
+    # ``False`` for a reason that has nothing to do with the sweep. An earlier
+    # draft of this test did exactly that and was green while neutralising
+    # either flow-side barrier in production killed nothing.
+    #
+    # Built through the *flow* module's own helper rather than this module's
+    # ``_ap1_subentry``: the two bind different classes on purpose. This module
+    # pins the genuine frozen core class, the flow module takes whatever
+    # ``conftest`` bound, and the flow's fake manager writes fields in place --
+    # a genuine frozen instance raises ``FrozenInstanceError`` there.
+    real_service = _legacy_twin(
+        entry.entry_id,
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        group_key=SERVICE_SUBENTRY_KEY,
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+    )
+    store[real_service.subentry_id] = real_service
+    twin = _legacy_twin(
+        entry.entry_id,
+        subentry_type=subentry_type,
+        group_key=group_key,
+    )
+    store[twin.subentry_id] = twin
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "migration")
+    await _run_sync(flow, entry, context_map)
+    assert twin.subentry_id not in set(context_map.values()), (
+        "the twin must stay outside ``expected_ids``, otherwise the flow sweep "
+        "skips it before reaching any barrier and this column measures nothing"
+    )
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+    flow_removed = twin.subentry_id in flow.hass.config_entries.removed  # type: ignore[attr-defined]
+
+    manager_removed = await _ap5_manager_removes(subentry_type, group_key)
+
+    assert (flow_removed, manager_removed) == (expected_flow, expected_manager), (
+        f"The verdict pair for {shape} changed: recorded "
+        f"{(expected_flow, expected_manager)}, observed "
+        f"{(flow_removed, manager_removed)}. The two sweeps share no reader, "
+        "only this table, so a *loosening* on either side shows up here or "
+        "nowhere. A narrowing shows up on the manager side, in the three "
+        "``(False, True)`` rows -- the mutation list in the docstring measures "
+        "exactly that. On the flow side it does not: every flow row records "
+        "``False``, so a flow sweep that stopped removing anything at all "
+        "would leave the whole column green. That one direction is pinned "
+        "elsewhere, by "
+        "``tests/test_config_flow_subentry_sync.py::"
+        "test_a_genuinely_orphaned_core_group_is_still_removed``, which calls "
+        "the same ``_async_cleanup_stale_subentries`` and asserts a removal. "
+        "Next step: decide which sweep changed and whether the new pair is "
+        "intended; PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS carries the reasoning "
+        "for the recorded one."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shape ratchet over ``_select_canonical``'s sort tuple.
+#
+# Why a structural guard beside all the behavioural ones above: the rejected
+# behaviour is *behaviourally invisible*. PR #1236 ranked ``LITERAL_CORE_KEY_OWNER``
+# inside that tuple, Codex flagged it, and the fix was moved into the removal
+# guard instead -- which spares every candidate of a different
+# ``(group_key, subentry_type)`` identity, and thereby leaves the rank with
+# nothing to decide. Measured on this tree: reinstating the type field keeps
+# *all 130* behavioural tests in this file and
+# ``test_coordinator_subentry_visibility.py`` green -- the count as it stood
+# before this ratchet joined them, which is the state that measurement
+# describes. So every barrier against the rejected algorithm returning was, until
+# this ratchet, a paragraph of prose -- in ``const.py``, in
+# ``agents/config_flow/AGENTS.md`` and in ``agents/runtime_patterns/AGENTS.md``,
+# each of which had to be corrected once after describing an intermediate
+# stage as if it were the implementation. Three corrections in three review
+# rounds is the signal that the prose was carrying a load it cannot carry.
+#
+# AST over text, for the reason the census docstring gives: a text pattern
+# derived from one spelling misses the others. The tuple is read where it is
+# built, and an unreadable shape fails loudly instead of passing quietly.
+FROZEN_SELECT_CANONICAL_SORT_FIELDS: int = 4
+
+
+def _select_canonical_sort_key() -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Return the ``_sort_key`` node nested in ``_select_canonical``.
+
+    Resolved by walking the nesting rather than by name alone: all three names
+    are local, and a same-named helper elsewhere in the module would otherwise
+    be able to answer for this one.
+    """
+
+    source = pathlib.Path("custom_components/googlefindmy/__init__.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    def _named(node: ast.AST, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        found = [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and child.name == name
+        ]
+        assert len(found) == 1, (
+            f"Expected exactly one ``{name}`` in this scope, found "
+            f"{len(found)}. This ratchet reads the sort tuple through the "
+            "nesting ``_deduplicate_subentries`` -> ``_select_canonical`` -> "
+            "``_sort_key``; a second definition means the nesting moved and "
+            "the guard would otherwise silently read the wrong one."
+        )
+        return found[0]
+
+    dedup = _named(tree, "_deduplicate_subentries")
+    select = _named(dedup, "_select_canonical")
+    sort_key = _named(select, "_sort_key")
+
+    returns = [node for node in ast.walk(sort_key) if isinstance(node, ast.Return)]
+    assert len(returns) == 1, (
+        f"``_sort_key`` now has {len(returns)} return statements. It ranks "
+        "candidates on an irreversible removal path, so a second exit is a "
+        "second ordering; decide which one this ratchet should freeze rather "
+        "than widening it to accept both."
+    )
+    return sort_key
+
+
+def test_select_canonical_ranks_no_subentry_type() -> None:
+    """The removal ranker must not read the type, in any spelling.
+
+    Killing mutation: re-add a ``type_part`` field scored against
+    ``LITERAL_CORE_KEY_OWNER`` -- the exact shape PR #1236 carried for one
+    stage and dropped again. That mutation leaves every behavioural test in
+    this file green, which is why this assertion exists at all.
+
+    What this does *not* assert is that a type rank would be wrong in general.
+    It asserts that reinstating one is a decision, not a drift: the three
+    contract paragraphs naming this tuple have to be corrected in the same
+    change, and a red test is what forces that.
+    """
+
+    # The whole function body, not just the ``return``. Scanning the return
+    # expression alone would freeze the *holder* of the criterion rather than
+    # the criterion -- the same defeat the census docstring records one level
+    # down, and the one Codex flagged there in this very PR. A rank computed
+    # into a local above the return and spliced in by name would leave a
+    # return-only scan green; measured, that mutation is exactly M-R3 below.
+    sort_key = _select_canonical_sort_key()
+    node = next(child for child in ast.walk(sort_key) if isinstance(child, ast.Return))
+    value = node.value
+    assert isinstance(value, ast.Tuple), (
+        "``_sort_key`` no longer returns a tuple literal, so the field list is "
+        "not readable here. Restore the literal or move this ratchet onto "
+        "whatever now expresses the ordering -- do not delete it: the rank it "
+        "guards against is invisible to every behavioural test in this file."
+    )
+    assert len(value.elts) == FROZEN_SELECT_CANONICAL_SORT_FIELDS, (
+        f"The sort tuple now has {len(value.elts)} fields rather than "
+        f"{FROZEN_SELECT_CANONICAL_SORT_FIELDS} (identifier presence, the "
+        "identifier, the iteration index, ``subentry_id``). A field added "
+        "here changes which subentry ``async_remove_subentry`` takes, "
+        "registry bindings included. If the change is intended, update this "
+        "constant *and* the three paragraphs that describe the tuple: "
+        "``const.py`` above ``LITERAL_CORE_KEY_OWNER``, "
+        "``agents/config_flow/AGENTS.md`` and "
+        "``agents/runtime_patterns/AGENTS.md``."
+    )
+
+    names = {
+        child.id for child in ast.walk(sort_key) if isinstance(child, ast.Name)
+    } | {child.attr for child in ast.walk(sort_key) if isinstance(child, ast.Attribute)}
+    constants = {
+        child.value
+        for child in ast.walk(sort_key)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    }
+    forbidden = {"subentry_type", "LITERAL_CORE_KEY_OWNER", "_LITERAL_CORE_KEY_OWNER"}
+    offenders = sorted((names | constants) & forbidden)
+    assert not offenders, (
+        f"``_sort_key`` reads {offenders} again. That is the rank PR #1236 "
+        "introduced and withdrew: with the removal guard comparing the full "
+        "``(group_key, subentry_type)`` identity, a type field decides nothing "
+        "on either axis, and a ranking field on a removal path reads as "
+        "load-bearing to the next maintainer. Codex flagged the original twice "
+        "and the stale descriptions of it once more; see "
+        "``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``."
+    )

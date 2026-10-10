@@ -16,6 +16,7 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
     SERVICE_STOP_SOUND,
+    StopSoundOutcome,
 )
 from custom_components.googlefindmy.util_services import register_entity_service
 
@@ -55,9 +56,12 @@ def _build_stop_sound_service_hass(monkeypatch: pytest.MonkeyPatch):
 
         async def async_stop_sound(
             self, canonical_id: str, request_uuid: str | None = None
-        ) -> bool:
+        ) -> StopSoundOutcome:
+            # Mirrors the production return type. A bool here would pass the
+            # handler's `is` checks by falling through to its default, so the
+            # double would keep this test green while the contract broke.
             self.stop_calls.append((canonical_id, request_uuid))
-            return True
+            return StopSoundOutcome.CANCELLED
 
     class _StubRuntime:
         def __init__(self, coordinator: _StubCoordinator) -> None:

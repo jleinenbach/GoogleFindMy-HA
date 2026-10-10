@@ -104,6 +104,8 @@ if TYPE_CHECKING:
 
         async def async_refresh(self) -> None: ...
 
+        async def async_shutdown(self) -> None: ...
+
     class ButtonEntity(_EntityBase):
         """Structural type for button platform entities."""
 

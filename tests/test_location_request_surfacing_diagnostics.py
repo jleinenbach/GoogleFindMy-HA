@@ -6,8 +6,8 @@ When a locate request fails with an unexpected error, the broad surfacing block
 last place the failure is observable. Two plan requirements pin its behavior:
 
 * **R6** (AGENTS.md Section 5 redaction): the user-facing WARNING must not carry a
-  raw device display name; it states a count/index instead, while the full name
-  stays at DEBUG only (the Count@WARNING / Name@DEBUG line from PR #1129).
+  raw device display name (a count/index may stand in its place), while the full
+  name stays at DEBUG only (the Count@WARNING / Name@DEBUG line from PR #1129).
 * **R9c**: the surfacing record must contain the *full* cause chain so a gRPC
   server detail nested two levels deep (surfacing -> SpotError -> GRPCError) is
   not overwritten by the first level's ``str(exc)``.
@@ -31,6 +31,9 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     OwnerKeyLookupTransientError,
+)
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
 )
 from custom_components.googlefindmy.SpotApi.spot_request import SpotGrpcStatusError
 
@@ -110,7 +113,7 @@ async def test_r6_surfacing_warning_omits_device_name_keeps_it_at_debug(
     """RED (R6): a unique device name must not leak into a user-facing WARNING.
 
     With a sentinel display name and a forced unexpected error, the surfacing block
-    must keep the raw name out of any WARNING/ERROR record (count/index only) and
+    must keep the raw name out of any WARNING/ERROR record and
     only ever expose it at DEBUG. RED today: the broad ``except Exception`` block
     logs ``"Error requesting location for %s"`` with the raw name at ERROR.
     """
@@ -118,14 +121,19 @@ async def test_r6_surfacing_warning_omits_device_name_keeps_it_at_debug(
 
     caplog.set_level(logging.DEBUG, logger=location_request.__name__)
 
-    result = await location_request.get_location_data_for_device(
-        canonic_device_id="device-xyz",
-        name=_SENTINEL_NAME,
-        session=None,
-        username="user@example.com",
-        cache=_FakeTokenCache(),
-    )
-    assert result == []
+    # ``_wire_locate_flow`` breaks the payload build, i.e. BEFORE the accept line,
+    # so the surfacing handler re-raises as LocationRequestNotAcceptedError instead
+    # of returning empty (PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE). The records this
+    # test is about are emitted on both sides of that branch by design -- which side
+    # the failure fell on says nothing about whether an operator needs them.
+    with pytest.raises(LocationRequestNotAcceptedError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id="device-xyz",
+            name=_SENTINEL_NAME,
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
 
     user_facing = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
     assert user_facing, "expected at least one user-facing surfacing record"
@@ -166,14 +174,18 @@ async def test_r9c_surfacing_includes_nested_grpc_cause_detail(
 
     caplog.set_level(logging.DEBUG, logger=location_request.__name__)
 
-    result = await location_request.get_location_data_for_device(
-        canonic_device_id="device-xyz",
-        name="Tracker",
-        session=None,
-        username="user@example.com",
-        cache=_FakeTokenCache(),
-    )
-    assert result == []
+    # Raises rather than returns for the same reason as the test above; the cause
+    # chain is logged before the branch. Note the two chains are different objects:
+    # the one asserted on here is the one the RECORD carries, not the ``__cause__``
+    # of the signal, which merely wraps it.
+    with pytest.raises(LocationRequestNotAcceptedError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id="device-xyz",
+            name="Tracker",
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
 
     # Exclude the raw ``traceback.format_exc()`` dump: R9c requires the structured
     # cause chain in a dedicated surfacing record, not merely inside a stack trace.
@@ -342,6 +354,11 @@ async def test_missing_fcm_token_surfacing_redacts_name_and_defers_to_warning(
 
     RED before the fix: the branch logged ``"Failed to get FCM token for %s: ...
     (client/token unavailable or no coordinator)"`` with the raw name at ERROR.
+
+    The branch also no longer returns empty: a locate without an FCM token never
+    reaches the server, so it raises ``LocationRequestNotAcceptedError``
+    (PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE). Both records asserted on below are
+    emitted before that raise.
     """
 
     def _fake_make_callback(
@@ -360,14 +377,14 @@ async def test_missing_fcm_token_surfacing_redacts_name_and_defers_to_warning(
 
     caplog.set_level(logging.DEBUG, logger=location_request.__name__)
 
-    result = await location_request.get_location_data_for_device(
-        canonic_device_id="device-xyz",
-        name=_SENTINEL_NAME,
-        session=None,
-        username="user@example.com",
-        cache=_FakeTokenCache(),
-    )
-    assert result == []
+    with pytest.raises(LocationRequestNotAcceptedError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id="device-xyz",
+            name=_SENTINEL_NAME,
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
 
     user_facing = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
     assert user_facing, "expected a user-facing record for the skipped locate"

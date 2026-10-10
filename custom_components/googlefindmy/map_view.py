@@ -3,14 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import time
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from html import escape
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from aiohttp import web
 from homeassistant.config_entries import ConfigEntry
@@ -106,6 +109,96 @@ _MAP_COPY_HELPER_JS = """
             gfmyFlashCopied(iconEl);
         }
 """
+
+# Tile layer of the map, in two variants. Defined as plain (non-f) strings so
+# their literal JS braces and the Leaflet placeholders ``{z}``/``{x}``/``{y}``/
+# ``{token}`` need no doubling; ``_tile_layer_js`` fills the ``__GFMY_*__``
+# placeholders and the result is interpolated into the f-string template via a
+# single ``{tile_layer_js}`` placeholder.
+#
+# Fallback (any Core without ``map_tiles``): tiles come straight from
+# OpenStreetMap as before. The URL is the one hostname the OSMF tile usage
+# policy names; ``referrerPolicy: 'origin'`` identifies the requests without
+# leaking the page path (and its token).
+_MAP_TILE_LAYER_OSM_JS = """L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '__GFMY_ATTRIBUTION__',
+            referrerPolicy: 'origin'
+        }).addTo(map);"""
+
+# Proxy (Core >= 2026.9 with ``map_tiles``): tiles are fetched from this
+# instance, which forwards them to OpenStreetMap with an application
+# User-Agent, a contact address and a cache. The URL is root-relative, so it
+# works behind a reverse proxy and through Nabu Casa. ``referrerPolicy:
+# 'no-referrer'`` is stricter than the ``'origin'`` of the direct layer: the
+# requests go to this instance, which needs no identifying referrer (the OSMF
+# policy is satisfied by Core's own User-Agent), so nothing is sent at all.
+# Core already serves the page with ``Referrer-Policy: no-referrer``
+# (``homeassistant.components.http.headers``); the explicit policy keeps the
+# property independent of that header. Without it, a browser default of
+# ``strict-origin-when-cross-origin`` would send the full page URL, share token
+# included, once per tile into any access log.
+# Leaflet substitutes ``{token}`` from the layer options on every request,
+# which is what makes a refreshed token take effect without rebuilding the
+# layer.
+_MAP_TILE_LAYER_PROXY_JS = """var gfmyTileLayer = L.tileLayer('__GFMY_TILE_URL__', {
+            attribution: '__GFMY_ATTRIBUTION__',
+            maxNativeZoom: __GFMY_MAX_NATIVE_ZOOM__,
+            referrerPolicy: 'no-referrer',
+            token: __GFMY_TILE_TOKEN__
+        }).addTo(map);
+        var GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS = 30000;
+        var gfmyLastTileTokenRefresh = 0;
+        // An <img> exposes no status, so a 403 from a rotated token is only
+        // visible as tileerror; throttled like the frontend (30 s); an
+        // unchanged token means the failure was not the token, so no redraw.
+        gfmyTileLayer.on('tileerror', function () {
+            var now = Date.now();
+            if (now - gfmyLastTileTokenRefresh < GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS) {
+                return;
+            }
+            gfmyLastTileTokenRefresh = now;
+            var shareToken = new URL(window.location).searchParams.get('token');
+            if (!shareToken) {
+                return;
+            }
+            // The share token travels in a header, not in the URL, so it does
+            // not end up in the request line of an access log. The referrer
+            // policy sends at most the origin (never the page URL with its
+            // token), whatever Core's page header says; the origin of a
+            // same-origin JSON call to this instance reveals nothing.
+            fetch('__GFMY_REFRESH_PATH__', {
+                cache: 'no-store',
+                referrerPolicy: 'origin',
+                headers: { '__GFMY_TOKEN_HEADER__': shareToken }
+            })
+                .then(function (response) {
+                    if (!response.ok) {
+                        return null;
+                    }
+                    return response.json();
+                })
+                .then(function (body) {
+                    if (body && typeof body.token === 'string' && body.token !== gfmyTileLayer.options.token) {
+                        gfmyTileLayer.options.token = body.token;
+                        gfmyTileLayer.redraw();
+                    }
+                })
+                .catch(function () {});
+        });"""
+
+
+def _tile_layer_js(token: str | None) -> str:
+    """Return the tile layer script for the page: proxy with a token, else OSM."""
+    if token is None:
+        return _MAP_TILE_LAYER_OSM_JS.replace("__GFMY_ATTRIBUTION__", _OSM_ATTRIBUTION)
+    return (
+        _MAP_TILE_LAYER_PROXY_JS.replace("__GFMY_TILE_URL__", _MAP_TILES_RASTER_URL)
+        .replace("__GFMY_ATTRIBUTION__", _OSM_ATTRIBUTION)
+        .replace("__GFMY_MAX_NATIVE_ZOOM__", str(_MAP_TILES_RASTER_MAX_NATIVE_ZOOM))
+        .replace("__GFMY_TILE_TOKEN__", json.dumps(token))
+        .replace("__GFMY_REFRESH_PATH__", _MAP_TILES_TOKEN_REFRESH_PATH)
+        .replace("__GFMY_TOKEN_HEADER__", _MAP_TILES_TOKEN_HEADER)
+    )
 
 
 def _plus_code_for(lat: float, lon: float) -> str | None:
@@ -307,19 +400,172 @@ def _resolve_parse_last_seen_timestamp() -> Any:
 # ------------------------------- HTML Helpers -------------------------------
 
 
-def _html_response(title: str, body: str, status: int = 200) -> web.Response:
-    """Return a minimal HTML response (no secrets, no stacktraces)."""
+_LEAFLET_DIR = Path(__file__).parent / "vendor" / "leaflet"
+
+# Every asset the rendered page embeds. Both are read in one executor hop, so a
+# map request never pays two round trips and never reads a second file later on
+# (`leaflet.js` used to be read only once the CSS was already cached). Keep in
+# sync with `ASSETS` in `script/vendor_leaflet.py`, which vendors these files
+# and whose list the CI gate checks.
+_LEAFLET_ASSETS: tuple[str, ...] = ("leaflet.css", "leaflet.js")
+
+# Process-wide because the files are read-only build artifacts of the release:
+# they cannot change while Home Assistant runs, and a second config entry would
+# otherwise re-read the same 160 KiB.
+_LEAFLET_CACHE: dict[str, str] = {}
+
+
+def _read_leaflet_assets() -> dict[str, str]:
+    """Read the vendored Leaflet assets from disk.
+
+    Blocking disk I/O: call this in an executor only, never in the event loop.
+    """
+
+    return {
+        name: (_LEAFLET_DIR / name).read_text(encoding="utf-8")
+        for name in _LEAFLET_ASSETS
+    }
+
+
+async def _async_prime_leaflet_cache(hass: HomeAssistant) -> None:
+    """Fill the Leaflet cache off the event loop.
+
+    The map page embeds Leaflet instead of pulling it from a CDN. A CDN copy
+    executes third-party JavaScript on the Home Assistant origin, and the tags
+    carried no `integrity` attribute, so a compromise there would have been
+    unnoticeable.
+
+    Embedding rather than registering a static path is deliberate: Home
+    Assistant's static paths are process-wide and cannot be unregistered, and
+    this integration registers none today, so serving the file would introduce a
+    mechanism (and a multi-entry collision) that the page does not need. The map
+    draws with `L.circleMarker` and uses no layers control, so the image assets
+    Leaflet's CSS references are never requested and nothing else has to be
+    served.
+
+    What embedding does NOT license is reading the files where the read lands:
+    the first map request per process filled the cache from inside the request
+    handler, which runs in the event loop, and Home Assistant reported it as
+    `Detected blocking call to read_text` (`homeassistant/util/loop.py`). The
+    read therefore happens here, in the executor, before rendering starts.
+    """
+
+    if all(name in _LEAFLET_CACHE for name in _LEAFLET_ASSETS):
+        return
+
+    # `hass` is a stand-in in several unit tests; fall back to the running loop's
+    # default executor so the assets still leave the event loop there. Note the
+    # limit of that safety net: the history read above dereferences
+    # `self.hass.async_add_executor_job` unconditionally, so a stand-in without
+    # the method only reaches this branch when no entity id resolved. The
+    # `getattr` probe follows `config_flow._async_import_api`, the fallback
+    # deliberately does not: that one runs the blocking import inline, which is
+    # the very shape this function exists to avoid.
+    executor = getattr(hass, "async_add_executor_job", None)
+    if callable(executor):
+        assets = await executor(_read_leaflet_assets)
+    else:  # pragma: no cover - stand-in without an executor AND no history read
+        loop = asyncio.get_running_loop()
+        assets = await loop.run_in_executor(None, _read_leaflet_assets)
+
+    _LEAFLET_CACHE.update(assets)
+
+
+def _leaflet_asset(name: str) -> str:
+    """Return an asset that `_async_prime_leaflet_cache` has already read.
+
+    Deliberately no read-through fallback. Reading here on a cache miss is
+    exactly the blocking call this indirection exists to prevent, and it would
+    hide the defect instead of removing it: the miss only happens once per
+    process, so the warning would come back rarely enough to look fixed.
+    """
+
+    try:
+        return _LEAFLET_CACHE[name]
+    except KeyError:
+        raise RuntimeError(
+            f"Leaflet asset {name!r} is not cached; "
+            "await _async_prime_leaflet_cache(hass) before rendering the map"
+        ) from None
+
+
+# Home Assistant Core >= 2026.9 ships the system component ``map_tiles``, which
+# proxies OpenStreetMap tiles with an application User-Agent and a server-side
+# cache. It publishes no Python API; the only runtime coupling is the key under
+# which it stores its short-lived query tokens in ``hass.data``. That key
+# mirrors ``homeassistant.components.map_tiles.const.DATA_ACCESS_TOKENS``
+# (a ``HassKey``, which is a ``str`` at runtime) and is pinned by the contract
+# test in ``tests/test_map_view_tiles.py``.
+_MAP_TILES_DATA_KEY = "map_tiles"
+_MAP_TILES_RASTER_URL = "/api/map_tiles/raster/{z}/{x}/{y}.png?token={token}"
+# The Core raster proxy answers 404 above this zoom level.
+_MAP_TILES_RASTER_MAX_NATIVE_ZOOM = 19
+# Same wording as the Core map (attribution with the copyright link the OSMF
+# attribution guidelines ask for); shared by the proxy and the fallback layer.
+_OSM_ATTRIBUTION = (
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    " contributors"
+)
+# Share-token guarded endpoint that hands the current Core token to a page that
+# outlived the token rotation (see GoogleFindMyMapTilesTokenView).
+_MAP_TILES_TOKEN_REFRESH_PATH = "/api/googlefindmy/map_tiles_token"
+# Request header carrying the map share token to the refresh endpoint. A header
+# rather than a query parameter keeps the credential out of the request line
+# that HTTP servers and reverse proxies log; not ``Authorization``, because the
+# Home Assistant auth middleware would try to read that as a Home Assistant
+# token.
+_MAP_TILES_TOKEN_HEADER = "X-GoogleFindMy-Map-Token"
+
+# The map URL carries its access token in the query string, so every response of
+# this view is as sensitive as the link itself. `no-store` keeps it out of shared
+# browser and proxy caches, `noindex, nofollow` keeps it out of search engines on
+# instances that are reachable from the internet. Both are pure response headers:
+# no migration, no effect on links already handed out.
+NO_STORE_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex, nofollow",
+}
+
+
+def _html_response(
+    title: str, body: str, status: int = 200, language: str | None = None
+) -> web.Response:
+    """Return a minimal HTML response (no secrets, no stacktraces).
+
+    ``language`` carries the resolved Home Assistant UI language for pages whose
+    text comes from ``map_i18n``. It lands in ``<html lang=...>`` and adds
+    ``dir="rtl"`` for right-to-left locales, so a Hebrew message is announced and
+    laid out in Hebrew instead of being only half translated. Localized callers
+    always pass a language (``"en"`` for the English fallback, mirroring
+    ``_generate_map_html``); callers that pass plain English literals omit it and
+    keep the previous markup byte for byte.
+
+    ``title`` and ``body`` are escaped. Every caller passes either a literal or a
+    catalog value today, so this changes no current output; it keeps a future
+    caller from turning a message into markup.
+
+    Like ``_generate_map_html``, ``lang`` carries the raw requested language
+    rather than the locale the catalog resolved to (pinned by
+    ``tests/test_map_view_i18n.py``: ``lang="xx"`` on an English fallback page).
+    Two different rules inside one module would be worse than this one.
+    """
+    html_attrs = f' lang="{escape(language)}"' if language else ""
+    if language and is_rtl(language):
+        html_attrs += ' dir="rtl"'
+    safe_title = escape(title)
+    safe_body = escape(body)
     return web.Response(
         text=f"""<!DOCTYPE html>
-<html>
-<head><meta charset=\"utf-8\"><title>{title}</title></head>
+<html{html_attrs}>
+<head><meta charset=\"utf-8\"><title>{safe_title}</title></head>
 <body>
-  <h1>{title}</h1>
-  <p>{body}</p>
+  <h1>{safe_title}</h1>
+  <p>{safe_body}</p>
 </body>
 </html>""",
         content_type="text/html",
         status=status,
+        headers=NO_STORE_HEADERS,
     )
 
 
@@ -375,6 +621,37 @@ def _resolve_entry_by_token(
         if auth_token in accepted:
             return entry, accepted
     return None, None
+
+
+def _map_tiles_access_token(hass: Any) -> str | None:
+    """Return the newest Core ``map_tiles`` access token, or ``None`` to fall back.
+
+    Core (>= 2026.9) keeps a short deque of hex tokens under
+    ``hass.data[_MAP_TILES_DATA_KEY]`` (mirrors
+    ``homeassistant.components.map_tiles.const.DATA_ACCESS_TOKENS``) and rotates
+    them every 30 minutes; the last element is the current one.
+
+    Fail-open rule: anything that is not a non-empty sequence of ASCII
+    alphanumeric strings (no ``data``, missing key, empty deque, a bare string,
+    a non-string element, a token with unexpected characters) yields ``None``
+    and the map keeps loading tiles directly from OpenStreetMap as before. The
+    alphanumeric check is also what keeps the token safe to embed in the page.
+    The token is never logged.
+    """
+    data = getattr(hass, "data", None)
+    if not isinstance(data, Mapping):
+        return None
+    tokens = data.get(_MAP_TILES_DATA_KEY)
+    if isinstance(tokens, (str, bytes)) or not isinstance(tokens, Sequence):
+        return None
+    if not tokens:
+        return None
+    token = tokens[-1]
+    if not isinstance(token, str) or not token:
+        return None
+    if not token.isascii() or not token.isalnum():
+        return None
+    return token
 
 
 # ------------------------------- Map View -----------------------------------
@@ -676,10 +953,44 @@ class GoogleFindMyMapView(HomeAssistantView):
         locations.sort(key=lambda location: location.get("last_seen", 0))
 
         # 6. Render
+        # The page embeds the vendored Leaflet assets, so they have to be on
+        # hand before the HTML is built. Reading them here keeps the disk I/O in
+        # the executor and out of the event loop; after the first map request of
+        # the process this is a dict lookup and returns without a hop.
+        try:
+            await _async_prime_leaflet_cache(self.hass)
+        except (OSError, UnicodeDecodeError) as err:
+            # A half-written update or a stripped install can leave the vendor
+            # directory incomplete. Say so with a page instead of a traceback.
+            # `UnicodeDecodeError` is a `ValueError`, not an `OSError`: a file
+            # that exists but carries corrupted bytes fails on decoding, and
+            # catching only `OSError` would let that case through as a 500 with
+            # a traceback.
+            _LOGGER.error("Failed to read the vendored Leaflet assets: %s", err)
+            # Resolved through the map catalog, not written out in English: this
+            # page appears when the install is already broken, which is the worst
+            # moment to hand a non-English user a language they may not read.
+            language = _resolve_language(self.hass)
+            labels = resolve_map_labels(language)
+            return _html_response(
+                labels["assets_unavailable_title"],
+                labels["assets_unavailable_body"],
+                status=500,
+                # ``or "en"``: a degraded hass without ``config`` yields an
+                # English page, and that page should say so. Same rule as
+                # ``_generate_map_html``.
+                language=language or "en",
+            )
+
         html = self._generate_map_html(
             device_name, locations, device_id, start_time, end_time, accuracy_filter
         )
-        return web.Response(text=html, content_type="text/html", charset="utf-8")
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            charset="utf-8",
+            headers=NO_STORE_HEADERS,
+        )
 
     def _generate_map_html(
         self,
@@ -721,6 +1032,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         language = _resolve_language(self.hass)
         labels = resolve_map_labels(language)
         labels_json = json.dumps(labels)
+        tile_layer_js = _tile_layer_js(_map_tiles_access_token(self.hass))
         html_attrs = f'lang="{escape(language or "en")}"'
         if is_rtl(language):
             html_attrs += ' dir="rtl"'
@@ -731,7 +1043,7 @@ class GoogleFindMyMapView(HomeAssistantView):
     <title>{escape(device_name)} - {escape(labels["location_history"])}</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>{_leaflet_asset("leaflet.css")}</style>
     <style>
         body {{ margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }}
         #map {{ height: 100vh; width: 100%; }}
@@ -798,13 +1110,10 @@ class GoogleFindMyMapView(HomeAssistantView):
     </div>
     <div id="map"></div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>{_leaflet_asset("leaflet.js")}</script>
     <script>
         var map = L.map('map').setView([{center_lat}, {center_lon}], 13);
-        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            attribution: '© OpenStreetMap contributors',
-            referrerPolicy: 'origin'
-        }}).addTo(map);
+        {tile_layer_js}
 
         var locations = {locations_json};
         var markers = L.layerGroup().addTo(map);
@@ -1007,6 +1316,14 @@ class GoogleFindMyMapView(HomeAssistantView):
 
 # ------------------------------ Redirect View -------------------------------
 
+# Same-origin target of the redirect view, derived from the map view's route so
+# the two cannot drift apart. The device id is appended percent-encoded as one
+# path segment; the dot segments ``.`` and ``..`` are rejected before that,
+# because a browser resolves them even when encoded, so the redirect stays on
+# the map path of the current origin.
+_MAP_PATH_PREFIX = GoogleFindMyMapView.url.removesuffix("{device_id}")
+_DOT_SEGMENTS = frozenset({".", ".."})
+
 
 class GoogleFindMyMapRedirectView(HomeAssistantView):
     """View to redirect to appropriate map URL based on request origin."""
@@ -1035,10 +1352,67 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
                 "Bad Request", "Missing authentication token.", status=400
             )
 
+        # aiohttp decodes the path parameter, so ``%2F``, ``%3F`` or ``%2E%2E``
+        # arrive here as ``/``, ``?`` and ``..``.
+        if device_id in _DOT_SEGMENTS:
+            return _html_response("Bad Request", "Invalid device id.", status=400)
+
         # Preserve all query parameters (incl. start/end/accuracy/token) in the redirect.
         # Build a relative URL so the browser keeps the current origin automatically.
+        # The device id is percent-encoded as a single path segment: an id
+        # containing ``?``, ``#``, ``%`` or ``/`` must not change the target.
+        # String concatenation keeps the constant prefix visible to static
+        # analysis (CodeQL ``py/url-redirection`` does not model f-strings).
         query_dict = dict(request.query.items())
-        redirect_url = f"/api/googlefindmy/map/{device_id}?{urlencode(query_dict)}"
+        redirect_url = (
+            _MAP_PATH_PREFIX + quote(device_id, safe="") + "?" + urlencode(query_dict)
+        )
         _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
 
-        raise web.HTTPFound(location=redirect_url)
+        raise web.HTTPFound(location=redirect_url, headers=NO_STORE_HEADERS)
+
+
+# ------------------------- Map Tiles Token View ------------------------------
+
+
+class GoogleFindMyMapTilesTokenView(HomeAssistantView):
+    """Hand the current Core ``map_tiles`` token to a page that outlived its own.
+
+    Core rotates the token every 30 minutes and keeps two, so a page that has
+    been open for longer (a shared family link left open in a phone browser)
+    starts getting 403 for its tiles. The page then asks here, once per 30 s at
+    most, and swaps the token into its tile layer without a reload, keeping
+    zoom, position and popups.
+
+    Trust boundary: the caller proves possession of a valid map share token
+    (the same check as the map page itself), sent in the
+    ``X-GoogleFindMy-Map-Token`` request header so that it does not appear in
+    the request line of access logs; in return it gets a Core token
+    that grants nothing but tile fetches through this instance's proxy, which
+    the map page already exposes in its HTML. Auth is checked before the proxy
+    is looked for, so an unauthenticated caller cannot probe whether the proxy
+    exists. 401 is returned, not raised, exactly like the map view, so the
+    HTTP ban middleware does not count it. Nothing is logged.
+    """
+
+    url = "/api/googlefindmy/map_tiles_token"
+    name = "api:googlefindmy:map_tiles_token"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Bind the Home Assistant instance to the token view."""
+        super().__init__()
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return ``{"token": ...}`` for a valid share token, 401 or 404 otherwise."""
+        auth_token = request.headers.get(_MAP_TILES_TOKEN_HEADER)
+        if not auth_token:
+            return web.Response(status=401, headers=NO_STORE_HEADERS)
+        entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
+        if entry is None:
+            return web.Response(status=401, headers=NO_STORE_HEADERS)
+        token = _map_tiles_access_token(self.hass)
+        if token is None:
+            return web.Response(status=404, headers=NO_STORE_HEADERS)
+        return web.json_response({"token": token}, headers=NO_STORE_HEADERS)

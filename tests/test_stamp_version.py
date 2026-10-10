@@ -324,3 +324,43 @@ def test_workflow_checks_out_published_tag() -> None:
         "branch resolution must not use the stale target_commitish hint at all; "
         "the tiebreaker could pick the wrong branch when the tag has several owners"
     )
+
+
+# --- Step order: stamp, then upload, then push -------------------------------
+
+
+def test_workflow_uploads_hacs_zip_before_branch_push() -> None:
+    """The HACS ZIP upload must run AFTER the stamp and BEFORE the branch push.
+
+    The push step may end the job (a branch-rules rejection with an
+    unclassified message hits ``exit 1``; a failing fallback ``gh pr create``
+    aborts under ``set -e``). The upload step carries no ``if:``, so an
+    upload placed after the push would be lost whenever the push fails, and
+    the release would ship without its HACS asset. The working tree is already
+    stamped once ``script/stamp_version.py`` has run, so the upload depends on
+    the stamp step but not on the commit or the push. Regression guard for the
+    step order; the existing tests only pin the upload command and the branch
+    resolution, not their order.
+    """
+    wf = (_REPO_ROOT / ".github/workflows/release-stamp.yml").read_text(
+        encoding="utf-8"
+    )
+    stamp_name = "- name: Stamp version into the three literals"
+    upload_name = "- name: Rebuild and upload the HACS ZIP from the stamped tree"
+    push_name = "- name: Resolve the owning branch and push the stamp"
+    for name in (stamp_name, upload_name, push_name):
+        assert name in wf, f"step renamed or removed; update the anchor: {name!r}"
+    stamp, upload, push = (wf.index(n) for n in (stamp_name, upload_name, push_name))
+    assert stamp < upload < push, (
+        "step order must be stamp -> HACS ZIP upload -> branch-stamp push; "
+        "an upload before the stamp ships an unstamped ZIP, an upload after "
+        "the push is lost when branch rules reject the push"
+    )
+    # The upload step itself must not be conditional: limit the window to this
+    # one step (up to the next step marker) and look for the YAML `if:` key.
+    next_step = wf.find("\n      - name:", upload + 1)
+    upload_block = wf[upload:next_step]
+    assert re.search(r"^\s*if:", upload_block, re.MULTILINE) is None, (
+        "the upload step must run unconditionally (no `if:`), independent of "
+        "whether the stamp commit or the branch push happened"
+    )

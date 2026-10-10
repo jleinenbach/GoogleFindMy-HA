@@ -595,7 +595,7 @@ async def test_t8_reconnect_is_scheduled_not_inline_awaited(
     assert not task.done()  # still running; caller was never blocked
     task.cancel()
 
-    # Gegen-probe B: the reuse-gated first-locate reconnect does nothing for an
+    # Counter-check B: the reuse-gated first-locate reconnect does nothing for an
     # aged (age >= churn) zombie -- proving the dedicated wrapper is required.
     monkeypatch.setattr(receiver, "nudge_retry", lambda eid=None: True)
 

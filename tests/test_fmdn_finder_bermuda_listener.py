@@ -6,13 +6,15 @@ when area changes are detected on Bermuda tracker entities.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import logging
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
     ATTR_AREA,
     BERMUDA_TRACKER_SUFFIX,
+    _async_upload_semantic_location,
     async_setup_bermuda_listener,
     async_unload_bermuda_listener,
 )
@@ -499,3 +501,87 @@ async def test_find_googlefindmy_device_ignores_non_device_tracker_entities() ->
     assert result is not None
     # Should find the device_tracker, not the sensor
     assert result["device_id"] == "target_device_id"
+
+
+@pytest.mark.asyncio
+async def test_semantic_upload_debug_log_masks_scanner_name(
+    hass_mock: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AGENTS.md section 5, class (c): the Bermuda scanner name is logged
+    masked, while the uploader still receives it in full.
+
+    Bermuda's `scanner` attribute is the scanner device's name and falls back
+    to `bermuda_<slug of the MAC>` (`bermuda_device.make_name`), so the value
+    is graded as a hardware address. Only the uploader boundary is mocked; the
+    DEBUG line under test runs for real.
+    """
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.bermuda_listener",
+    )
+    upload_mock = AsyncMock()
+    with patch(
+        "custom_components.googlefindmy.fmdn_finder.location_uploader.async_process_fmdn_beacon_detection",
+        upload_mock,
+    ):
+        await _async_upload_semantic_location(
+            hass_mock,
+            eid=b"\xab" * 20,
+            area="Kitchen",
+            config_entry_id="entry_1",
+            scanner="AA:BB:CC:DD:EE:FF",
+            google_device_id="google_dev_1",
+        )
+
+    assert "scanner=...E:FF" in caplog.text
+    assert "AA:BB:CC:DD:EE:FF" not in caplog.text
+    upload_mock.assert_awaited_once()
+    assert upload_mock.await_args.kwargs["scanner_address"] == "AA:BB:CC:DD:EE:FF"
+
+
+@pytest.mark.asyncio
+async def test_find_googlefindmy_device_info_keeps_entity_id_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AGENTS.md section 5 (b): the per-upload INFO names the Google device id
+    and the HA device id (both class b); the entity_id moves to DEBUG."""
+    from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
+        _async_find_googlefindmy_device,
+    )
+
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.bermuda_listener",
+    )
+    hass = MagicMock()
+    runtime_data = MagicMock()
+    hass.data = {"googlefindmy": {"entries": {"entry_1": runtime_data}}}
+    ha_device_id = "11b2838b4bb2ba2eb5f4f4b2c742cbf9"
+    entity_id = "device_tracker.moto_tag_jens_schlusselbund"
+    gfm_entity = MagicMock()
+    gfm_entity.entity_id = entity_id
+    gfm_entity.domain = "device_tracker"
+    gfm_entity.platform = "googlefindmy"
+    gfm_entity.device_id = ha_device_id
+    gfm_entity.config_entry_id = "entry_1"
+    gfm_entity.unique_id = "entry_1:google_device_12345"
+
+    with (
+        patch(
+            "homeassistant.helpers.entity_registry.async_get", return_value=MagicMock()
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=[gfm_entity],
+        ),
+    ):
+        result = await _async_find_googlefindmy_device(hass, ha_device_id)
+
+    assert result is not None
+    above = [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert any("google_device_12345" in r.getMessage() for r in above)
+    assert all(entity_id not in r.getMessage() for r in above)
+    assert any(
+        r.levelno == logging.DEBUG and entity_id in r.getMessage()
+        for r in caplog.records
+    )

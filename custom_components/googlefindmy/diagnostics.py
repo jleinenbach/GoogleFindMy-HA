@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -37,6 +37,7 @@ from .const import (
     CONF_GOOGLE_EMAIL,
     # secrets in entry.data (must never be exposed)
     CONF_OAUTH_TOKEN,
+    DATA_SECRET_BUNDLE,
     # defaults for options (used to avoid hard-coded literals)
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_ENABLE_STATS_ENTITIES,
@@ -56,7 +57,7 @@ from .const import (
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_POLL_INTERVAL,
 )
-from .ha_typing import callback
+from .redaction import REDACTED, async_redact_data
 from .shared_helpers import normalize_fcm_entry_snapshot, safe_fcm_health_snapshots
 
 if TYPE_CHECKING:
@@ -71,6 +72,21 @@ TO_REDACT: list[str] = [
     # Known integration secrets (entry.data)
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
+    # The whole credential bundle, and the two keys that decrypt locations.
+    # entry.data carries the bundle between the config flow and the migration in
+    # async_setup_entry; if setup fails in between, it is still there when a user
+    # downloads diagnostics for that very failure.
+    DATA_SECRET_BUNDLE,
+    "scanned_data",
+    "shared_key",
+    "owner_key",
+    # FCM credential material carried inside the bundle. These are fixed key
+    # names, so exact matching is enough; the surrounding fcm_* diagnostics
+    # (status, receiver state, counters) are deliberately NOT redacted.
+    "fcm_credentials",
+    "fcm_creds",
+    "fcm_installation",
+    "fcm_registration",
     # Common token/email/credential shapes
     "aas_token",
     "access_token",
@@ -137,7 +153,26 @@ TO_REDACT: list[str] = [
     "latitude",
     "longitude",
     "altitude",
+    # The accuracy gate's coarse fix (#216) lives on the entity, never in this
+    # dump. Listed for the same defensive reason as the three above: no path
+    # writes it here today, and the net is spanned for tomorrow.
+    "coarse_latitude",
+    "coarse_longitude",
 ]
+
+# Key names the token cache builds at run time, so they can never appear in a
+# fixed list: `adm_token_<e-mail>`, `android_id_<e-mail>` and friends. Exact
+# matching alone would pass every one of them through.
+TO_REDACT_PREFIXES: tuple[str, ...] = (
+    "aas_token",
+    "adm_token",
+    "spot_token",
+    "android_id",
+    "owner_key",
+    "shared_key",
+    "oauth_token",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -581,7 +616,12 @@ async def async_get_config_entry_diagnostics(
     elif OPT_GOOGLE_HOME_FILTER_KEYWORDS in effective_config_for_diag:
         effective_config_for_diag[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = []
 
-    redacted_effective_config = async_redact_data(effective_config_for_diag, TO_REDACT)
+    # One numbering for both redaction passes below, so that `<account-1>` in
+    # `effective_config` and in the rest of the payload is the same account.
+    accounts: dict[str, str] = {}
+    redacted_effective_config = async_redact_data(
+        effective_config_for_diag, TO_REDACT, TO_REDACT_PREFIXES, accounts=accounts
+    )
 
     config_summary = {
         # Durations and numeric thresholds
@@ -625,9 +665,28 @@ async def async_get_config_entry_diagnostics(
     device_registry_counts: dict[str, Any] = {}
     try:
         dev_reg = dr.async_get(hass)
-        devices_for_entry = [
-            d for d in dev_reg.devices.values() if entry.entry_id in d.config_entries
-        ]
+        # Ask the registry for this entry's devices instead of walking the
+        # registry-wide mapping and filtering by ownership.  Two deprecated
+        # reads go at once, and only one of them is reported by Core.  What
+        # reports is *using* the registry-wide container as a mapping -- from
+        # 2026.9 the ``devices`` attribute hands out a view whose container
+        # methods each raise a ``report_usage``; touching the attribute alone
+        # does not, and neither does iterating it.  On 2026.9 the set-shaped
+        # ``DeviceEntry.config_entries`` is a plain property and reports
+        # nothing at all; from 2026.10 it reports too (``breaks_in_ha_version
+        # ="2027.10.0"``).  Measured on 2026.9.1, reports per expression: the
+        # attribute 0, a container method on it 1, the removed expression 1,
+        # the line below 0, ``DeviceEntry.config_entries`` 0.  The ownership
+        # read goes with it because from 2026.8 a device belongs to exactly one
+        # config entry, which makes the set a compatibility shim whose single
+        # element is derived from ``config_entry_id``.
+        #
+        # The module-level helper is the supported way to ask.  Its signature
+        # and result are the same on every supported core (2025.9.1, 2026.8.2,
+        # 2026.9.1); its body is not, and that is the point: from 2026.9 it
+        # reaches the item store through the private name, which is why asking
+        # this way does not itself trip the reporter.
+        devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry.entry_id)
         device_registry_counts["devices_count"] = len(devices_for_entry)
     except Exception:
         device_registry_counts["devices_count"] = None
@@ -719,8 +778,12 @@ async def async_get_config_entry_diagnostics(
         if reauth_reason_block is not None:
             coordinator_block["reauth_reason"] = reauth_reason_block
 
-        # Anonymized per-device telemetry (P1-3): opaque index plus seven coarse
-        # fields, no names/IDs/coordinates/keys. Resilient: [] on any failure.
+        # Anonymized per-device telemetry (P1-3): an opaque index plus coarse
+        # fields only, no names/IDs/coordinates/keys. The exact field set is
+        # owned by ``build_per_device_diagnostics`` and pinned by
+        # ``tests/test_diagnostics_p1_per_device.py``; deliberately not
+        # restated as a number here, because that number rots.
+        # Resilient: [] on any failure.
         try:
             builder = getattr(coordinator, "build_per_device_diagnostics", None)
             coordinator_block["devices"] = builder() if callable(builder) else []
@@ -754,6 +817,17 @@ async def async_get_config_entry_diagnostics(
 
     eik_cache_stats = get_eik_cache_stats()
 
+    # Provisional P-256 readings of crowdsourced reports, per device of this
+    # entry. The block carries no ID value (positional index only) and is meant
+    # to be posted to the feedback issue on its own.
+    # Imported locally like the EIK block above, for symmetry only: unlike
+    # decrypt_locations, the tracker module has no import cycle with this one.
+    from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        get_foreign_reading_diagnostics,
+    )
+
+    foreign_report_readings = get_foreign_reading_diagnostics(entry.entry_id)
+
     # --- Assemble payload (without secrets) ---
     payload: dict[str, Any] = {
         "integration": integration_meta,
@@ -771,6 +845,7 @@ async def async_get_config_entry_diagnostics(
         },
         "concurrency": concurrency,
         "eik_cache": eik_cache_stats,
+        "foreign_report_readings": foreign_report_readings,
     }
     if crypto_info:
         payload["crypto"] = _crypto_block(crypto_info)
@@ -781,37 +856,4 @@ async def async_get_config_entry_diagnostics(
 
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
-    return async_redact_data(payload, TO_REDACT)
-
-
-# Consistent placeholder used when redacting fields.
-REDACTED = "**REDACTED**"
-
-_T = TypeVar("_T")
-
-
-@callback
-def async_redact_data(data: _T, to_redact: Iterable[Any]) -> _T:
-    """Redact sensitive keys from mappings or lists without importing HA's HTTP stack."""
-
-    if not isinstance(data, (Mapping, list)):
-        return data
-
-    if isinstance(data, list):
-        return cast(_T, [async_redact_data(item, to_redact) for item in data])
-
-    redacted = dict(data)
-
-    for key, value in list(redacted.items()):
-        if value is None:
-            continue
-        if isinstance(value, str) and not value:
-            continue
-        if key in to_redact:
-            redacted[key] = REDACTED
-        elif isinstance(value, Mapping):
-            redacted[key] = async_redact_data(value, to_redact)
-        elif isinstance(value, list):
-            redacted[key] = [async_redact_data(item, to_redact) for item in value]
-
-    return cast(_T, redacted)
+    return async_redact_data(payload, TO_REDACT, TO_REDACT_PREFIXES, accounts=accounts)

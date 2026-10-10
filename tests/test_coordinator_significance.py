@@ -77,6 +77,10 @@ def test_stale_timestamp_is_rejected_before_merge() -> None:
     assert cached["longitude"] == pytest.approx(existing["longitude"])
     assert cached["last_seen"] == pytest.approx(existing["last_seen"])
     assert stat_counts == {
+        # Accuracy class of the incoming fix. Counted before the fusion and
+        # before the gate (#216), so the distribution sees every fix - including
+        # the ones later dropped, which are the interesting half.
+        "accuracy_bucket_10_50": 1,
         "invalid_ts_drop_count": 1,
         "drop_reason_invalid_ts": 1,
         "invalid_ts_drop_benign": 1,
@@ -158,7 +162,14 @@ def test_accuracy_gain_is_significant_even_when_stationary() -> None:
     assert cached["accuracy"] == pytest.approx(100.0)
     assert cached["last_seen"] == pytest.approx(new_data["last_seen"])
     assert cached["status"] == "Fused (Weighted)"
-    assert stat_counts == {"background_updates": 1, "fused_updates": 1}
+    assert stat_counts == {
+        "background_updates": 1,
+        "fused_updates": 1,
+        # Accuracy class of the incoming fix. Counted before the fusion and
+        # before the gate (#216), so the distribution sees every fix - including
+        # the ones later dropped, which are the interesting half.
+        "accuracy_bucket_50_200": 1,
+    }
 
 
 def test_stationary_update_fuses_overlapping_coordinates() -> None:
@@ -194,7 +205,14 @@ def test_stationary_update_fuses_overlapping_coordinates() -> None:
     assert cached["accuracy"] == pytest.approx(115.0)
     assert cached["last_seen"] == pytest.approx(new_payload["last_seen"])
     assert cached["status"] == "Fused (Weighted)"
-    assert stat_counts == {"background_updates": 1, "fused_updates": 1}
+    assert stat_counts == {
+        "background_updates": 1,
+        "fused_updates": 1,
+        # Accuracy class of the incoming fix. Counted before the fusion and
+        # before the gate (#216), so the distribution sees every fix - including
+        # the ones later dropped, which are the interesting half.
+        "accuracy_bucket_50_200": 1,
+    }
 
 
 def test_stationary_metadata_change_fuses_coordinates() -> None:
@@ -233,7 +251,14 @@ def test_stationary_metadata_change_fuses_coordinates() -> None:
     assert cached["last_seen"] == pytest.approx(new_payload["last_seen"])
     assert cached["battery_level"] == pytest.approx(new_payload["battery_level"])
     assert cached["status"] == "Fused (Weighted)"
-    assert stat_counts == {"background_updates": 1, "fused_updates": 1}
+    assert stat_counts == {
+        "background_updates": 1,
+        "fused_updates": 1,
+        # Accuracy class of the incoming fix. Counted before the fusion and
+        # before the gate (#216), so the distribution sees every fix - including
+        # the ones later dropped, which are the interesting half.
+        "accuracy_bucket_50_200": 1,
+    }
 
 
 def test_identity_key_delta_triggers_resolver_refresh() -> None:

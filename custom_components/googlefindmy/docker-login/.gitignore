@@ -1,0 +1,3 @@
+# Cached Google auth tokens — never commit real credentials.
+data/secrets.json
+data/*.json

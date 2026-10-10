@@ -75,6 +75,12 @@ class _MixinBase:
     _round_trip_anchors: dict[str, dict[str, Any]]
     _device_caps: dict[str, dict[str, Any]]
     _present_last_seen: dict[str, float]
+    # Subentry ids already reported as holding an allow-list that selects
+    # nothing. Unlike its neighbours here this one is created lazily on first
+    # use rather than in ``__init__``, because it is a diagnostic ledger with
+    # no meaningful empty-state behaviour; declared all the same, so the union
+    # this module exists to provide stays complete.
+    _allow_list_reinterpretations: set[str | None]
     _poll_lock: asyncio.Lock
     _push_cooldown_until: float
     _locate_inflight: set[str]
@@ -102,7 +108,6 @@ class _MixinBase:
     _last_list_poll_mono: float
     _last_nonempty_wall: float
     _force_device_list_refresh: bool
-    _initial_discovery_done: bool
     _fcm_defer_started_mono: float
     _consecutive_transient_auth_failures: int
     _last_transient_auth_error: str | None
@@ -117,6 +122,15 @@ class _MixinBase:
     stats: dict[str, int]
     performance_metrics: dict[str, float]
     _propagating_location: bool
+    # Stats persistence. The load runs as a task created in the constructor, and the
+    # unload waits for it before flushing, so the handle has to be visible here too.
+    # The three flags around it travel with the same record: the load window, the
+    # deferral it hands to the load's `finally`, and the generation a reset starts.
+    _stats_load_task: asyncio.Task[None] | None
+    _stats_save_task: asyncio.Task[None] | None
+    _stats_loaded: bool
+    _save_after_stats_load: bool
+    _stats_epoch: int
 
     # Service device tracking
     _service_device_ready: bool
@@ -322,6 +336,11 @@ class _MixinBase:
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    def get_device_label_in_subentry(
+        self, subentry_key: str | None, device_id: str
+    ) -> str | None:
+        raise NotImplementedError
+
     # ------------------------------------------------------------------
     # Cross-mixin methods: PollingOperations
     # ------------------------------------------------------------------
@@ -387,11 +406,41 @@ class _MixinBase:
     ) -> bool:
         raise NotImplementedError
 
+    def count_accuracy_class(self, row: Mapping[str, Any]) -> None:
+        """Tally the reported accuracy class of an incoming fix (#216).
+
+        Declared here because the poll loop and the manual locate call it
+        alongside ``_apply_weighted_location_fusion`` above; the implementation
+        lives in ``CacheOperations``.
+        """
+        raise NotImplementedError
+
     def _merge_with_existing_cache_row(
         self,
         device_id: str,
         new_row: dict[str, Any],
     ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _expire_coarse_fix(
+        self,
+        device_id: str,
+        committed: Mapping[str, Any],
+    ) -> None:
+        raise NotImplementedError
+
+    def is_replayed_report(
+        self,
+        device_id: str,
+        row: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def claim_report_for_tally(
+        self,
+        device_id: str,
+        row: Mapping[str, Any],
+    ) -> bool:
         raise NotImplementedError
 
     def _persist_anchor_metadata(

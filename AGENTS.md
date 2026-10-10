@@ -20,12 +20,14 @@
     - [Shared pip cache for stub installs](#shared-pip-cache-for-stub-installs)
   - [1) What must be in **every** PR (lean checklist)](#1-what-must-be-in-every-pr-lean-checklist)
   - [Home Assistant version & dependencies](#home-assistant-version--dependencies)
+    - [Poetry lock file management](#poetry-lock-file-management)
   - [Maintenance mode](#maintenance-mode)
     - [Config subentry maintenance helper](#config-subentry-maintenance-helper)
   - [Key material and resolver hypotheses](#key-material-and-resolver-hypotheses)
     - [Where key material comes from](#where-key-material-comes-from)
     - [Wrapped EIK hypothesis](#wrapped-eik-hypothesis)
     - [Timebase hypotheses](#timebase-hypotheses)
+    - [Owner-key error taxonomy (classify only from positive evidence)](#owner-key-error-taxonomy-classify-only-from-positive-evidence)
   - [2) Roles (right-sized)](#2-roles-right-sized)
     - [2.1 Contributor (implementation) — **accountable for features/fixes/refactors**](#21-contributor-implementation--accountable-for-featuresfixesrefactors)
     - [2.2 Reviewer (maintainer/agent) — **accountable for correctness**](#22-reviewer-maintaineragent--accountable-for-correctness)
@@ -99,6 +101,13 @@
 
 > **Language reminder:** Keep all inline comments, docstrings, and documentation updates in English. When user-provided snippets
 > include other languages, translate or adapt them so the committed code remains English-only.
+> Enforced by `tests/test_guard_prose_contract.py`, which sweeps docstrings and comments of Python
+> files (not string literals, so translation payloads and assertion data stay exempt) for German
+> function words. Two limits, stated rather than implied: the detection keys on a measured word list
+> from which the measured English homographs and domain acronyms are subtracted, so it catches ordinary
+> German prose and not every
+> fragment; and Markdown is out of its scope, because this file itself quotes a German translation
+> guideline.
 
 > **Environment reset reminder:** After a container or virtualenv reset, rerun `make test-stubs` so the Home Assistant and
 > pytest stubs are reinstalled before invoking linting or pytest commands.
@@ -126,6 +135,7 @@
 Always keep any `from __future__` imports immediately after the module docstring, even when the file starts with the repository-relative path header described above. This ordering prevents pytest's import hook from rejecting the file during rewrites.
 > **Precedence:** (1) Official **Home Assistant Developer Docs** → (2) this AGENTS.md → (3) repository conventions. This file never overrides security/legal policies.
 > **Language policy:** Keep the project consistently in English for documentation, inline code comments, and docstrings. (Translation files remain multilingual.)
+> Guard: `tests/test_guard_prose_contract.py` (see the Language reminder above for its scope and limits).
 > **Non-blocking:** Missing optional artifacts (README sections, `quality_scale.yaml`, CODEOWNERS, CI files) **must not block** urgent fixes. The agent proposes a minimal stub or follow-up task instead.
 > **References:** This contract relies on the sources listed below; for a curated, extended list of links, see [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md).
 > **Upstream documentation hierarchy:** When consulting external guidance, prioritize Home Assistant's canonical domains in this order: developer portal (`https://developers.home-assistant.io`), user documentation (`https://www.home-assistant.io`), and the alerts/service bulletins site (`https://alerts.home-assistant.io`). If a required host is unreachable while the connectivity probe still confirms general internet access, pause implementation, request manual approval for that domain, and document the escalation before proceeding.
@@ -142,9 +152,10 @@ Always keep any `from __future__` imports immediately after the module docstring
 
 * [`tests/AGENTS.md`](tests/AGENTS.md) — Home Assistant config flow test stubs, helpers, discovery/update scaffolding details, **and** the package-layout note that requires package-relative imports now that `tests/` ships with an `__init__.py`. Also documents the coordinator device-registry expectations for `via_device` tuple handling so future stub updates remain aligned with Home Assistant 2025.10. The `_ensure_button_dependencies()` helper in `tests/test_button_setup.py` already prepares sufficient stubs to `import custom_components.googlefindmy.button`, so tests can reference coordinator attributes directly without reloading source snippets.
 * [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Full Home Assistant 2025.7+ handbook covering the architecture, config flow factories, lifecycle routing, discovery patterns, translation rules, and peer-review checklist for configuration subentries. Keep code and tests aligned with this contract. When adding concise checklists or reminders beneath an existing subsection, anchor the new block with a `####` heading so the handbook's navigation keeps the guidance grouped with its parent topic. Mirror this heading-level rule in other documentation unless a directory-specific `AGENTS.md` states otherwise.
-* [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10/2025.11 technical migration playbook for deprecations, breaking changes, and behavioral shifts. Treat its critical checklist as mandatory when touching affected APIs.
-  * Section VIII.D contains the new device/entity registry troubleshooting playbooks. Reference them whenever you touch `_async_setup_subentry`, registry rebuild services, or device cleanup helpers, and summarize the relevant diagnostics in your PR description.
+* [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10 through 2026.9 technical migration playbook for deprecations, breaking changes, and behavioral shifts. Treat its critical checklist as mandatory when touching affected APIs.
+  * Section VI of [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](docs/CONFIG_SUBENTRIES_HANDBOOK.md) ("Troubleshooting `ValueError` & Regressions") carries the device/entity registry troubleshooting playbooks. Reference them whenever you touch `_async_setup_subentry`, registry rebuild services, or device cleanup helpers, and summarize the relevant diagnostics in your PR description. For device *ownership* changes read `docs/AI_DEPRECATIONS_GUIDE.md`, section VI, first: from Core 2026.8 a device belongs to a single config entry and a single subentry, and the old keywords changed meaning rather than name.
 * **Self-healing helpers:** `_async_self_heal_duplicate_entities()` in `custom_components/googlefindmy/__init__.py` documents the existing duplicate-entity cleanup flow; review it alongside the new `EntityRecoveryManager` when designing additional recovery logic.
+* **Architecture orientation (third party):** [GitDiagram](https://gitdiagram.com/bskando/googlefindmy-ha) draws an interactive map of `BSkando/GoogleFindMy-HA`, the upstream repository the HACS badge, `manifest.json` and `pyproject.toml` point at: the config flow, the coordinator, the `Auth` package, the `device_tracker` platform and the `NovaApi`/`SpotApi` clients, and how they connect. Handy before you open `custom_components/googlefindmy/` for the first time. An external service generates it from the upstream tree and serves it from a cache, so a first visit may have to build it, and work that has not landed upstream does not show up in it. Orientation only: the nested `AGENTS.md` files and the documents under `docs/` remain authoritative.
 
 ### Home Assistant helper signature changelog
 
@@ -161,21 +172,167 @@ Always keep any `from __future__` imports immediately after the module docstring
 * [Language policy (English-only docs)](#language-policy)
 * [Docstrings & typing expectations (§11.1)](#docstrings--typing)
 * **README developer guidance:** Place any new development workflow notes (linting, testing, tooling commands) directly under the `### Continuous integration checks` section in `README.md`. Use a top-level `###` heading for repository-wide topics and `####` subheadings for individual command lists so contributor documentation stays grouped in one location.
-* **Tracker device linkage:** Tracker entities rely on Home Assistant's automatic parent-device assignment for the `TRACKER_SUBENTRY_KEY`. Do not introduce manual `via_device` pointers for tracker `DeviceInfo` payloads; only service-level entities may declare `via_device` tuples when modelling nested hardware chains documented upstream. When updating tracker devices via `async_update_device`, always include `add_config_entry_id` (or `config_entry_id` on legacy cores) whenever a tracker subentry identifier is present so Home Assistant keeps the device associated with its config entry.
+* **Tracker device linkage:** Tracker entities rely on Home Assistant's automatic
+  parent-device assignment for the `TRACKER_SUBENTRY_KEY`. Do not introduce manual
+  `via_device` pointers for tracker `DeviceInfo` payloads; only service-level entities
+  may declare `via_device` tuples when modelling nested hardware chains documented
+  upstream.
+
+  **Superseded instruction, do not restore.** Up to and including 1.7.15.14 this
+  bullet demanded that
+  every `async_update_device` call on a tracker device carry `add_config_entry_id`
+  (or `config_entry_id` on legacy cores) whenever a tracker subentry identifier was
+  present. That instruction is wrong from Home Assistant Core 2026.8 onwards. If you
+  are about to add `add_config_entry_id` to a call because it "keeps the device
+  associated with its config entry", stop: that is the superseded rule resurfacing.
+
+  **Why it changed.** From Core 2026.8 a device belongs to exactly one config entry
+  and exactly one config subentry. `add_config_entry_id` no longer attaches anything.
+  It records a transient pending move which is only carried out by a later
+  `remove_config_entry_id` issued by the same integration; on its own it is a no-op
+  when the device already belongs to the entry. Symmetrically,
+  `remove_config_entry_id` on the owning entry *deletes* the device when no pending
+  move is armed (`homeassistant/helpers/device_registry.py` at tag `2026.8.0`, line
+  2231). Both keywords are deprecated with `breaks_in_ha_version="2027.8.0"`, but the
+  behavioural change is the part that bites today, not the warning: on 2026.8 the new
+  behaviour ships **without** any log output, because the `report_usage` call for
+  these keywords only arrives in Core 2026.9 (tag `2026.9.0`, line 3741). A quiet log
+  is therefore not evidence that a call is still correct.
+
+  **Current rule.** Express the intent, never the keywords. Call
+  `RegistryOperations._apply_device_ownership(...)` with one of
+  `OwnershipIntent.MOVE` (put the device into this subentry),
+  `OwnershipIntent.ENSURE` (make sure the device sits where we think it does) or
+  `OwnershipIntent.DETACH` (give the device up). The single translation point is
+  `plan_device_ownership` in
+  `custom_components/googlefindmy/coordinator/helpers/registry.py`. It maps the
+  intent onto `new_config_subentry_id` (Core 2026.8.0 and newer, see
+  `homeassistant/helpers/device_registry.py` at tag `2026.8.0`, lines 2063-2064),
+  onto the `remove_*`/`add_*` quadruple (every core at or above our declared
+  minimum: `add_config_subentry_id` is already present at tag `2025.9.1`, line
+  1014), or onto `async_remove_device`. Write the intent at the call site, and
+  let the planner choose the keywords.
+
+  **Version clamp.** `hacs.json` and `pyproject.toml` declare `2025.9.1` as the
+  minimum supported core. Raising it only helps at `2026.8.0`, the single release
+  that introduces all four replacement APIs (`new_config_entry_id`,
+  `new_config_subentry_id`, `async_get_device_by_identifier`, `async_get_devices`);
+  every release up to and including `2026.7.0` has none of them. That raise is not
+  permitted before **six months after the 2026.8.0 release date**; check the
+  release date on the Home Assistant release notes before proposing it, and do
+  not carry a hard-coded date forward. The new keywords do not exist on the
+  declared minimum, so the switch is a runtime signature probe
+  (`detect_device_registry_capabilities`), not a version string comparison. Do not
+  replace it with a version check and do not delete the **legacy ownership branch**
+  as "dead code": it is the only branch that runs on the declared minimum. It is not
+  the same thing as the *subentry keyword naming* branch in
+  `_device_registry_config_subentry_kwarg_name`, whose legacy side serves no
+  supported core at all because that rename predates our minimum; see
+  `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+
+  **Before and after.**
+
+  ```python
+  # WRONG from Core 2026.8 on. What this call does depends on the device's current
+  # ownership, which is exactly why it is unsafe. Device already in that subentry:
+  # pure no-op. Device in a different subentry of the same entry: the add only arms
+  # a pending move and the remove condition does not match, so nothing is applied.
+  # Device sitting on the entry with no subentry: the remove condition matches and
+  # the move IS carried out. One call, three outcomes, no warning before Core 2026.9.
+  dev_reg.async_update_device(
+      device_id=device.id,
+      add_config_entry_id=entry.entry_id,
+      add_config_subentry_id=tracker_subentry_id,
+      remove_config_entry_id=entry.entry_id,
+      remove_config_subentry_id=None,
+  )
+
+  # RIGHT: state the intent, let the planner pick the keywords per core version
+  self._apply_device_ownership(
+      dev_reg,
+      intent=OwnershipIntent.MOVE,
+      device_id=device.id,
+      entry_id=entry.entry_id,
+      target_subentry_id=tracker_subentry_id,
+      device=device,
+  )
+  ```
+
+  Background and deadlines: `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
 * **Config entry version source of truth:** Use `custom_components/googlefindmy/const.py::CONFIG_ENTRY_VERSION` whenever flows, migrations, or tests need the integration's config-entry version. Do not introduce duplicate version constants in other modules.
 * [`docs/AI_MAINTENANCE_TASKLIST.md`](docs/AI_MAINTENANCE_TASKLIST.md) — Continuous QA checklist for the agent covering manifest hygiene, translation discipline, blocking I/O guards, and service consistency.
 * [`tests/helpers/README.md`](tests/helpers/README.md) — Quick index of ad-hoc debugging helpers (for example, the stub coordinator builder). Skim before adding new utilities so helper guidance stays centralized.
 * [`custom_components/googlefindmy/AGENTS.md`](custom_components/googlefindmy/AGENTS.md) — Top-level index for integration guidance. It links to the per-topic AGENT files under `custom_components/googlefindmy/agents/` (currently `config_flow`, `runtime_patterns`, and `typing_guidance`). Always consult the relevant topical file before editing `custom_components/googlefindmy/**` so you pick up the right runtime vs. typing rules (for example, tuple-based parent unloads versus per-platform subentry forwarding).
 * [`custom_components/googlefindmy/ProtoDecoders/AGENTS.md`](custom_components/googlefindmy/ProtoDecoders/AGENTS.md) — Protobuf overlay structure requirements, including the mandate that generated message classes remain nominal subclasses of `google.protobuf.message.Message` so helper utilities typed against the concrete base keep accepting them.
 * [`custom_components/googlefindmy/FMDNCrypto/AGENTS.md`](custom_components/googlefindmy/FMDNCrypto/AGENTS.md) — Cryptography helper typing contract that documents concrete `int` expectations for modular arithmetic and coordinate normalization across the decompression helpers.
-* **Config entry reload states:** When updating `custom_components/googlefindmy/services.py` (notably the `SERVICE_REBUILD_REGISTRY` implementation), always review Home Assistant's `ConfigEntryState` enum for newly introduced states. Keep the allowed reload state set in sync so entries stuck in transitional or failure states (including `FAILED_UNLOAD`) remain recoverable via the service.
+* **Config entry reload states:** `SERVICE_REBUILD_REGISTRY` in `custom_components/googlefindmy/services.py` calls `hass.config_entries.async_reload(entry_id)` unfiltered inside a `try`/`except` that logs the failure. There is no allowed reload state set to keep in sync: one was added in `7ab87a2e` and removed again in `faafc7e7`, and the file has carried no `ConfigEntryState` reference since. Do not reintroduce one. The core already gates: `async_reload` goes through `ConfigEntries.async_unload`, which raises `OperationNotAllowed` while `entry.state.recoverable` is false, so an entry in `FAILED_UNLOAD` or `MIGRATION_ERROR` is **not** recoverable through this service; the call produces a logged error, not a repair. A local filter would only move that verdict earlier and drift from the enum, which is what the two commits above already demonstrated. This is the same verdict `entry_reload_gate.entry_reload_is_hopeless` reaches for the scheduling paths (see `agents/runtime_patterns/AGENTS.md`), so both sides answer alike: a terminal entry needs a restart or a targeted repair, not another reload. When Home Assistant introduces a state, review it there, in the positive terminal list, not here.
 * **Platform subentry quick reference:**
   * Shared runtime data lives under `hass.data[DOMAIN]["entries"][entry_id]`. Always rebuild this mapping before child setup resumes and populate `entry.runtime_data` from the shared bucket instead of direct dictionary lookups.
   * Keep the Home Assistant service registration contract aligned with Section IV.I of `docs/CONFIG_SUBENTRIES_HANDBOOK.md`: register platform entity services inside `async_setup` and catch `ImplementationUnavailableError` during parent setup to raise `ConfigEntryNotReady`.
   * Service-level diagnostics (`binary_sensor`, diagnostic `sensor` entities, repairs counters, etc.) **must** pass `SERVICE_SUBENTRY_KEY` when constructing entities **and** expose `device_info = service_device_info(include_subentry_identifier=True)`. This guarantees every diagnostic entity binds to the same service device + config subentry pair so Home Assistant keeps the hub grouped in the device registry.
   * Per-device platforms (`device_tracker`, per-device `sensor` entities such as `last_seen`, `button` actions, future tracker-scoped entities) **must** pass `TRACKER_SUBENTRY_KEY`, publish tracker-specific identifiers in `device_info`, and rely on Home Assistant's automatic device association—do **not** add manual `via_device` tuples for tracker devices.
   * Subentry setup validation now lives alongside `_async_setup_new_subentries` in `custom_components/googlefindmy/__init__.py` with coverage in `tests/test_subentry_setup_trigger.py`; skim those guards when adjusting child setup or registry checks.
-  * Registry updates **must** include the child `entry_id` in every `async_update_device` or equivalent call (`add_config_entry_id` for 2025.7+, `config_entry_id` for legacy cores). Log the `(entry_id, device_id, identifiers)` tuple in debug builds to catch mismatches early; mirror the Section VIII.D playbooks when triaging stuck or orphaned devices.
+  * Registry updates **must not** pass `add_config_entry_id`,
+    `add_config_subentry_id`, `remove_config_entry_id` or
+    `remove_config_subentry_id`. The former rule on this line ("include the child
+    `entry_id` in every `async_update_device` call, `add_config_entry_id` for
+    2025.7+, `config_entry_id` for legacy cores") is superseded and must not be
+    reintroduced. From Core 2026.8 a device has a single owning entry and a single
+    owning subentry, so there is nothing to add: `add_config_entry_id` on its own
+    changes nothing but arms a deferred move that a later
+    `remove_config_entry_id` completes, and `remove_config_entry_id` on the
+    owning entry deletes the device unless such a move is armed. Never drop or
+    add just one half of that pair: it turns a working move into a deletion.
+    Route every ownership change through
+    `_apply_device_ownership` / `plan_device_ownership`, which selects
+    `new_config_subentry_id`, the legacy quadruple or `async_remove_device`
+    depending on the signature of the installed core (minimum `2025.9.1`, so the
+    legacy branch stays). `plan_device_ownership` is the one translation point
+    and has no alternative; the executor depends on where you are. With a
+    coordinator in hand, call `_apply_device_ownership`. Without one (`services.py`,
+    `config_flow.py`), build the plan and run it through `execute_ownership_plan`
+    in the same helpers module. Never name an ownership keyword at a call site
+    either way. Keep logging the `(entry_id, device_id, identifiers)`
+    tuple in debug builds to catch mismatches early, and mirror the troubleshooting
+    playbooks in `docs/CONFIG_SUBENTRIES_HANDBOOK.md`, Section VI, when triaging
+    stuck or orphaned devices. A static guard,
+    `tests/test_guard_device_registry_kwargs.py`, fails the build if the
+    superseded keywords reappear outside the legacy translator.
+  * **Walking devices: pick the question, not the shortest expression.** When the
+    answer is "the devices of this config entry" -- which it almost always is --
+    call `dr.async_entries_for_config_entry(dev_reg, entry_id)`. It is not
+    deprecated on any supported core and it says what it means. Only where the
+    answer is genuinely "every device in the registry" (a collision check across
+    entries, a one-time normalisation pass) use `iter_all_devices(dev_reg)` from
+    `custom_components/googlefindmy/coordinator/helpers/registry.py`. Then decide
+    per call site, and write the decision down. Three shapes occur, and the
+    examples are the ones in the tree:
+    (a) a pass that acts **for one entry** filters with `device_belongs_to_entry`
+    (the service-device fallback scan in `__init__.py`);
+    (b) a pass that is **entry-agnostic but needs the owner** reads it per device
+    with `device_owning_entry_ids` and does not filter (`_async_refresh_device_urls`,
+    which seeds a per-entry map token for devices of every entry);
+    (c) a pass that is **entry-agnostic and owner-blind** does neither and says so
+    (`_async_normalize_device_names`, the cross-entry collision check).
+    `RegistryOperations._ensure_registry_for_devices` belongs to (b) and shows why
+    the two are worth telling apart: it *collects* the names the hub's children
+    carry without any filter, because a sibling hanging off our hub may belong to
+    any entry and filtering there would miss exactly the names to avoid -- but it
+    then reads ownership per device in `_resolve_hub_name`, which is what decides
+    between reusing a device of ours and appending a suffix for a stranger's.
+    Owner-blind while gathering is not owner-blind while deciding.
+    Adding an ownership filter to (b) or (c) silently stops the pass doing its job
+    for every other entry, which is why the choice is written down rather than
+    left to the next reader. **Superseded instruction, do not restore:**
+    `dev_reg.devices.values()` and any other mapping access on `devices`
+    (`[...]`, `.get(...)`, `.keys()`) are deprecated from Core 2026.9
+    (`breaks_in_ha_version="2027.9.0"`, tag `2026.9.0`, line 1560). Plain
+    iteration does not report -- but it means two different things: on `2026.9`
+    it yields `DeviceEntry` objects, on the declared minimum `2025.9.1` it yields
+    device **ids**. That is why the wrapper exists and why writing
+    `list(dev_reg.devices)` at a call site is wrong even though it silences the
+    deprecation. The same static guard fails the build if a `devices` access
+    reappears outside the translator.
   * When `manifest.json` sets `"integration_type": "hub"`, expose an `async_step_hub` handler and register a `"hub"` mapping in `ConfigFlow.async_get_supported_subentry_types()` that points at the service/hub subentry flow handler. This keeps Home Assistant's "Add hub" button functional without custom UI patches.
   * Iterating `entry.subentries.items()` yields `(subentry_id, subentry)` tuples. Always select the child object's global `entry_id` when calling lifecycle helpers or emitting debug logs so identifiers stay aligned across unload fallbacks and cleanup paths.
     * Lifecycle helper checklist:
@@ -186,7 +343,7 @@ Always keep any `from __future__` imports immediately after the module docstring
 
 #### Deprecations & migrations
 
-* [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10/2025.11 migration playbook for breaking changes, API removals, and checklist-driven refactors.
+* [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10 through 2026.9 migration playbook for breaking changes, API removals, and checklist-driven refactors.
 * [`custom_components/googlefindmy/NovaApi`](custom_components/googlefindmy/NovaApi) — Nova helpers, request builders, and protobuf serializers. Keep protobuf imports inside `if TYPE_CHECKING:` guards when the dependency is only needed for type annotations so startup stays fast on constrained devices.
 * `custom_components/googlefindmy/Auth/firebase_messaging/**` — Firebase messaging modules share the `JSONDict` and `MutableJSONMapping` aliases defined alongside the implementations. Prefer these aliases over ad-hoc `dict[str, Any]`/`Mapping[str, object]` annotations when describing payloads, responses, or task metadata. When new helpers consume nested JSON, extend the aliases or introduce additional `TypeAlias` definitions in the same module so every constructor or attribute keeps explicit container parameters for mypy strict runs. When referencing stub-only overlays (for example, `protobuf_typing`), wrap the import inside an `if TYPE_CHECKING:` guard and alias to the runtime class otherwise so production code never depends on non-existent modules.
   * **FCM HTTP fatal classifier (PR #169 / #1086):** When `fcm_install`, `fcm_register`, `fcm_refresh_install_token`, `gcm_check_in`, or `gcm_register` encounter a status in `_FATAL_HTTP_STATUSES` (401, 404) that persists past their retry budget, they must raise `FcmRegisterHTTPError(status=N)` instead of returning `None`. The caller side in `Auth/fcm_receiver_ha.py::_raise_if_fatal_http_error` mirrors `_raise_if_fatal_client_error`: the `except FcmRegisterHTTPError` block in `_register_for_fcm_entry` MUST appear before the generic `except (TimeoutError, RuntimeError, Exception)` block so the 401 path triggers `_invalidate_fcm_tokens()` and the 404 retry budget instead of the transient-RuntimeError fallthrough. Helpers that follow this status surface must opt into the same classifier by populating a numeric status cache (see `gcm_register`'s `last_fatal_status: int | None`) and re-raising from it — do not introduce alternative escalation paths such as substring matching against the logger output, which couples the defense to the log message format. The numeric cache MUST follow **last-wins** semantics, and the classification SSOT MUST be the **HTTP status** of each response, not the branch identity or the response body shape. Every alternative response branch in the retry loop re-assigns the cache to `int(status) if int(status) in _FATAL_HTTP_STATUSES else None` (the network-exception branch is the only exception: no HTTP status is available, so the cache is cleared to `None`). This mirrors the long-standing `last_error` update discipline. Two related failure modes have surfaced and are now pinned by regression tests in `tests/test_fcm_register.py`: (a) **Stale fatal across non-fatal followups** — a retry that gets a non-fatal followup (transient 5xx, structured `Error=` body, network exception) after an earlier 401/404 MUST clear the cache so the post-loop classifier reflects the FINAL attempt, not the first fatal seen (Codex finding on PR #1087 commit `559afde82f`); (b) **Body-shape misclassification** — the structured `Error=...` body branch MUST NOT unconditionally clear the cache. The server CAN return a structured error body together with a fatal HTTP status (401/404); the body shape is orthogonal to the auth/endpoint classification used by the caller. Classify from the HTTP status, not from "this is the error_code branch" (Codex finding on PR #1087 commit `7a89e2e321`).
@@ -306,15 +463,18 @@ Prefer the executable name when it is available; fall back to the module form wh
 * **Translation schema guardrails.** Home Assistant option/config flow translations must stick to the documented schema. Under each `options.step.<id>` or `config.step.<id>` block, only use `title`, `description`, `data`, `data_description`, `menu_options`, `error`, `abort`, and `progress`. Avoid nested `select` objects or other ad-hoc keys—translation validation will reject them and the options UI will render placeholders instead of labels.
   * `data_description` entries must be **strings**. Validators reject dictionaries at that path, so encode select choice labels in plain text (for example, list the choices in the field description) and reserve option-specific labels for the selector definition in `config_flow.py`.
   * Keep localized translations in sync with the base `strings.json`. If you flatten a `data_description` value to a string in the source strings, mirror the same shape in every `translations/<lang>.json` file; a single lingering dictionary (for example, per-locale `options`) will cause hassfest to fail.
+  * **Consistent form of address (formality).** Each `translations/<lang>.json` file must use a single, consistent form of address throughout, matching the register Home Assistant uses for that locale. Never mix formal and informal address within one file. Home Assistant mandates formality only for German: use the informal *du*, never the formal *Sie* (per the Home Assistant [translation guidelines](https://developers.home-assistant.io/docs/translations/), German section: "Duze in den Übersetzungen, und verwende nicht das formale 'Sie'."). For every other locale, follow the register that locale already establishes. In this repository that means: French formal (*vous*); European Portuguese (`pt`) courtesy third person (courtesy imperative, no explicit *você* pronoun); Brazilian Portuguese (`pt-BR`) informal *você*; Dutch informal (*je*); Italian informal (*tu*); Polish informal second person (*ty*); Spanish informal (*tú*). Hebrew has no formal/informal *you* distinction, and the English base (`strings.json`, `translations/en.json`) is register-neutral. When adding or editing a localized string, match the existing register of that file.
 * **Voluptuous defaults:** When schema defaults need to reference runtime values (for example, Home zone coordinates), prefer callable defaults rather than eagerly captured constants. Tests that validate option-flow defaults should coerce callables to their resolved values before asserting to avoid brittle comparisons across environments.
 * **Contributor guidance hygiene.** Verify that root and scoped `AGENTS.md` files remain accurate. When code or tests touch related automation or guidance, review and update the impacted `.github` workflows/templates, shared test utilities, and documentation so they stay current.
   * **Mypy override ordering.** Append new strictly-typed modules to the override list in `pyproject.toml` in alphabetical order so future reviews can spot additions quickly.
+  * **Codespell ignore list.** Add a word to `[tool.codespell] ignore-words-list` in `pyproject.toml` when the reports it causes outweigh the detection lost tree-wide; `tests/test_guard_prose_contract.py` carries that trade and its measured counts.
   * **Test scaffolding reference.** The Home Assistant config flow stubs and helper behaviors for tests are documented in [`tests/AGENTS.md`](tests/AGENTS.md); point future contributors there whenever discovery/update helpers change.
   * **Task scheduling helpers.** Home Assistant-style test doubles for `async_create_task` may accept only `(coro)` without keyword arguments like `name`. Design scheduling wrappers so they gracefully handle both signatures and still attach error-handling callbacks when a task object is returned.
   * **Discovery callbacks.** Reuse `ha_typing.callback` for new discovery helper callbacks so strict mypy keeps enforcing the typed decorator instead of drifting back to untyped shims.
 * **pre-commit.ci automation.** The GitHub App is enabled with permission to push formatting fixes to PR branches whenever the configured hooks (e.g., `ruff`, `ruff-format`) report autofixable issues; keep `.pre-commit-config.yaml` aligned with the enforced checks.
 * **TOC upkeep.** Generate the root `AGENTS.md` overview with the pinned DocToc dev dependency: run `make doctoc` to hydrate `node_modules` with the cached `npm ci --prefer-offline --no-fund --no-audit --cache .npm-cache --include=dev` workflow and refresh the Table of Contents, or invoke `pre-commit run doctoc --files AGENTS.md` if you want to reuse the pre-commit shim.
 * **Hassfest auto-sort workflow.** `.github/workflows/hassfest-auto-fix.yml` must remain present and operational so manifest key ordering issues are auto-corrected and pushed back to PR branches; update the workflow when hassfest or `git-auto-commit-action` inputs change upstream.
+* **Action pinning.** Every third-party `uses:` line in `.github/workflows/`, except the two branch-tracking actions named below, references a full 40-character commit SHA followed by a comment naming the most specific release tag that points at it (`uses: actions/checkout@<sha> # v7.0.1`); a tag such as `@v7` can be moved, a commit SHA cannot. Dependabot's `github-actions` ecosystem (`.github/dependabot.yml`) updates such pins and the version comment together. The only exceptions are `home-assistant/actions/hassfest` and `hacs/action`: they track their default branch on purpose because their newest release tags are far behind it, and a pin would freeze the validation rules until someone refreshes it by hand. Each exception carries a comment line above it pointing here. `tests/test_workflow_action_pins.py` enforces the form in the regular `pytest` run, including that the exception list has no stale entries and that one action resolves to one SHA everywhere. The test runs offline, so it does not check that the tag in the comment really points at the SHA: verify that when writing or changing a pin (`gh api repos/<owner>/<repo>/commits/<tag> --jq .sha` must print the pinned SHA). Extend its `BRANCH_TRACKING_ACTIONS` only together with this paragraph.
 * **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.
 * **Tests — creation & update (MUST).** Any code change ships unit/integration tests that cover the change; every bug fix includes a **regression test** (§3.2). Never reduce existing coverage without a follow-up to restore it.
 
@@ -322,8 +482,9 @@ Prefer the executable name when it is available; fall back to the module form wh
   * **Regression test added:** for `fix:` commits (or `fix/...` branches), add a minimal regression test if none existed (§3.2).
 * **Ruff linting parity.** Treat `ruff check` as co-equal with `pytest -q` and `mypy --strict`; run it before presenting results and resolve every reported issue in-tree.
 * **Deprecation remediation.** Investigate and resolve every `DeprecationWarning` observed during implementation, local verification, or CI. Prefer code changes over warning filters; if a warning must persist, document the upstream blocker in the PR description with a follow-up issue reference.
-* **Coverage targets.** Keep **config flow at 100 %**; repo total **≥ 95 %**. If temporarily lower due to necessary code removal, **open a follow-up issue** to restore coverage and reference it in the PR.
+* **Coverage targets (aspirational target vs. effective floor).** The long-term targets stay **config flow at 100 %** and repo total **≥ 95 %** (`COVERAGE_PLATINUM_TARGET` in `tests/test_platinum_compliance.py`). They are *targets*, not the gate that fails a PR. The **effective floor is 80 %**, declared identically on both sides — `pyproject.toml` `[tool.coverage.report] fail_under` (engine) and `.github/workflows/ci.yml` `--cov-fail-under` (CI) — and `tests/test_platinum_compliance.py::test_coverage_threshold_enforced` fails the PR when the two drift apart or leave the `[60, 95]` band. Measured on `c972fd34` (recorded in the `pyproject.toml` comment block): repo total **80.33 %**. Earlier, on `04a66fc2` with the floor at 78 %: repo total **78.36 %**, `custom_components/googlefindmy/config_flow.py` **79 %**; there is no separate config-flow gate, so the 100 % figure is a target only. Treat the floor as a **ratchet**: raise it (both declarations in the same commit, with the measured total and its commit recorded in the `pyproject.toml` comment block) whenever a series locks in new coverage, and never lower it. If necessary code removal pushes the total below the floor, **open a follow-up issue** to restore coverage and reference it in the PR (§3.5).
 * **Behavioral safety.** No secrets/PII in logs; user-visible errors use translated `translation_key`s; entities report `unavailable` on communication failures.
+  * **Log hygiene for scanners.** Code scanning on the upstream repository reports CodeQL (`py/clear-text-logging-sensitive-data`) and Semgrep (`python-logger-credential-disclosure`) results for pull requests, and it counts a result as open even when the line carries `# nosemgrep` (Semgrep marks the result suppressed in the SARIF, code scanning ignores that) or a `codeql[...]` comment (the CodeQL setup here evaluates no such comments). Fix such a finding by changing the code. This is separate from the job gate in `.github/workflows/semgrep.yml`, which does honour `# nosemgrep: <rule-id>` for deliberate test fixtures. Semgrep matches the format string alone: a logger call whose format string literal contains `api key`, `secret`, `credential`, `token` or `password` (any case, also inside a word such as `TokenCache`) followed by a `%s`, both within the first source line of the literal, is reported, whatever the argument is (measured with Semgrep 1.180.0: a word on the first line and `%s` on a continuation line is not matched); name the component in neutral words (`cache instance` instead of `TokenCache`). CodeQL follows data flow from names and values that look like secrets (`*_token`, `*secret*`, `*password*`) into the log call; do not log a cache key name, because per-account keys embed the account e-mail (`owner_key_<email>`, `shared_key_<email>` in `__init__.py`). Log the value type, a count, or a class (a)/(b) identifier from section 5 ("Never log") instead. CodeQL has no sanitizer for this query: a value derived from a sensitive source stays sensitive after `_mask_email_for_logs`. A local or parameter whose name CodeQL's name heuristics (`SensitiveDataHeuristics.qll`) classify as secret, such as `secrets_bundle`, is such a source, so everything read through it counts as a secret; names with `account` are classified as identifiers, which this query ignores. Read an account e-mail from a bundle into a neutrally named local, and name an account in a log line by the label the caller derives from the config entry (`_label_entry_for_log(entry)`: the masked account e-mail, else the entry ID, never the entry title), not by a clear-text value read from the bundle. Log a bundle field name only if it is a fixed name taken from a literal list (`_LOGGABLE_BUNDLE_FIELDS`); other field names can embed the account e-mail (`adm_token_<email>`). To log a name for a credential key, choose a literal by comparison (`_optional_credential_label`) instead of logging the key. `tests/test_log_hygiene_pilot.py` pins both rules for every logger call in `Auth/token_cache.py`, `tests/test_log_hygiene_auth.py` pins the Semgrep form and credential-named constants for every logger call in `Auth/`, and `tests/test_log_hygiene_init.py` pins the Semgrep form for every logger call in `__init__.py`, the neutral local in `_resolve_entry_email`, the caller-side account label of the credential seed, both fallbacks of `_label_entry_for_log`, and what `_async_save_secrets_data` logs; its docstring lists what it does not cover. `tests/test_log_hygiene_entry_title.py` pins that no logger call in any module of the package passes a config entry title or the entry object itself, whose `repr` carries the title (name the entry by its ID or by `_label_entry_for_log(entry)`); its docstring lists the forms it does not follow. `tests/test_log_hygiene_flow_discovery.py` pins, for every logger call in `config_flow.py` and `discovery.py`, the Semgrep form and credential-named constants, that token candidate sources are logged only through `_probe_source_label` (a fixed name from `_PROBE_SOURCE_NAMES`, `<name>_n` for an indexed name such as `tokens_0`, else `other`) and discovery namespaces only through `_namespace_label`, that `_redact_account_for_log` without an e-mail argument names only the kind of key, and that no logger call in `config_flow.py` puts an `email` field or a `_mask_email_for_logs` value into `extra` (the address there can come from the secrets bundle, and Home Assistant's log format does not print `extra`); its docstring lists what it does not cover. The name heuristics apply to non-secret values as well: a timestamp in a local named `secrets_creation_date` or a length limit in a constant named `_SECRETS_STRUCT_LEN_THRESHOLD` is reported, so give such values a neutral name (`anchor_date`, `_STRUCTURED_PAYLOAD_LEN_THRESHOLD`). CodeQL also classifies `lat`/`lon` values as private data; a rejected coordinate is no less precise than an accepted one, so describe each half by a fixed label (`ok`, the kind from `_coordinate_kind`, or `ok`/`invalid` chosen by `_coordinate_in_range` in `coordinator/locate.py`), and name the device of a rejected fix only at DEBUG (section 5 (b)). `tests/test_log_hygiene_coordinator_nova.py` pins, for the logger calls it detects in `coordinator/identity.py`, `coordinator/locate.py`, `NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py` and `NovaApi/ListDevices/nbe_list_devices.py`, the Semgrep form, that no argument reads a raw coordinate or a name with `secret` in it, that `identity.py` passes none of the key-material names listed in the test (for these two name checks, arguments of `len`, `type` and `isinstance` are excepted), and that the device-list CLI prints a location only in `_print_locations`, whose purpose is to show it; its docstring lists what it does not cover.
 * **Docs/i18n (when user-facing behavior changes).** Update `README.md` and every relevant translation; avoid hard-coded UI strings in Python. Make sure placeholders/keys referenced in Python files match `strings.json` and `translations/en.json`. Afterwards synchronize every file in `custom_components/googlefindmy/translations/*.json` (for example, via `python script/sync_translations.py`, `pre-commit run translations-sync`, or `git diff -- custom_components/googlefindmy/translations`). The helper at [`script/sync_translations.py`](script/sync_translations.py) (callable with `python script/sync_translations.py`) will overwrite the base language with `strings.json` and backfill other locales (use `--check` during CI-style verification). Follow **Rule §9.DOC** so documentation and docstrings stay intact. Document any CI/test guidance adjustments directly in the PR description so automation notes remain accurate.
   * **Config subentry doctrine.** When touching README or docs about setup flows, reference Section 0 of `docs/CONFIG_SUBENTRIES_HANDBOOK.md` so guidance reflects the parent–child enforcement model, the March 2025 `_get_entry()` rename, and the expectation that `async_setup_entry` (not `async_setup`) owns instance bootstrap.
   * **Reference-style footnotes.** When introducing new reference-style links or numbered footnotes in Markdown, append the matching `[label]: URL` definitions so every callout resolves to a valid target.
@@ -355,7 +516,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – review package/version updates and synchronize lock files/manifests as needed (see the "Home Assistant version & dependencies" section)
 > – rerun the relevant tests/linters after dependency updates
 >
-> *(The helper `python script/local_verify.py` covers Ruff + Pytest as a quick pass; run it in addition to—but never instead of—the mandatory steps above. Document every component you run manually.)*
+> *(The helper `python script/local_verify.py` covers Ruff + Pytest as a quick pass; run it in addition to—but never instead of—the mandatory steps above. `--all` extends it to the full local preflight and marks every stage it could not run as `NOT CHECKED` rather than silently skipping it, see `script/AGENTS.md`. Document every component you run manually.)*
 > *Hassfest validation now runs in CI via `.github/workflows/hassfest-auto-fix.yml`; rely on that workflow and re-run it from the PR UI whenever you need a fresh manifest check.*
 >
 > **optional escalation:** `PYTHONWARNINGS=error::DeprecationWarning pytest -q` *(turns new deprecations into hard failures so they cannot be overlooked—clear the root cause or document the upstream blocker before retrying without the flag).*
@@ -364,6 +525,8 @@ Prefer the executable name when it is available; fall back to the module form wh
 
 * **Compatibility target:** Keep the integration working with the latest Home Assistant stable release. When older releases become incompatible, document the oldest supported version in the README or release notes.
 * **Synchronization points:** Keep `custom_components/googlefindmy/manifest.json`, `custom_components/googlefindmy/requirements.txt`, `pyproject.toml`, and `custom_components/googlefindmy/requirements-dev.txt` aligned. When bumping versions, check whether other files (for example, `hacs.json` or helpers under `script/`) must change as well.
+  * **One deliberate asymmetry:** `selenium` and `undetected_chromedriver` are listed in `pyproject.toml`, `custom_components/googlefindmy/requirements.txt` (the `docker-login` image installs from it) and the dev requirements, but **not** in `manifest.json`. Home Assistant installs `manifest.json` `requirements` into every setup, and no code path Home Assistant executes on its own imports a browser package — the browser is used only by the manual, user-started credential extraction. Do not "repair" this by adding them back; `tests/test_browser_deps_boundary.py` fails if a Home Assistant entry point starts reaching them.
+  * **Second deliberate asymmetry:** `aiohttp`, `cryptography` and `httpx` are listed in `pyproject.toml` and `custom_components/googlefindmy/requirements.txt`, but **not** in `manifest.json`. Home Assistant pins all three (2025.9.1, the minimum in `hacs.json`, ships versions above our former floors), and hassfest rejects a custom integration that lists a package Home Assistant itself requires or constrains. The integration code does not import `httpx` at all. Do not add them back. `tests/test_hacs_validation.py::test_manifest_lists_no_home_assistant_core_dependency` is a local early warning that reads only the installed `homeassistant` distribution's requirements; hassfest also reads core's `requirements.txt`, `requirements_all.txt` and `package_constraints.txt` and stays authoritative. With this change the pip-audit gate (`script/audit_manifest.py`) no longer receives `aiohttp` and `httpx` as input; `cryptography` still reaches it as a dependency of `http-ece`. Findings for packages Home Assistant pins never blocked the gate.
 * **Upgrade workflow:** With internet access, perform dependency maintenance via `pip install`, `pip-compile`, `pip-audit`, `poetry update` (if relevant), and `python -m pip list --outdated`. Afterwards rerun tests/linters and document the outcomes.
 * **Change notes:** Record adjusted minimum versions or dropped legacy releases in the PR description and, when needed, in `CHANGELOG.md` or `README.md`.
 
@@ -410,7 +573,7 @@ Run `poetry lock` to fix the lock file.
 
 ### Config subentry maintenance helper
 
-* `custom_components/googlefindmy/__init__.py::ConfigEntrySubEntryManager._deduplicate_subentries()` removes redundant config subentries while preserving a single canonical group/member pair. Call it when migrations or recovery paths encounter Home Assistant's `AbortFlow("already_configured")` errors to converge on a stable state before retrying updates.
+* `custom_components/googlefindmy/__init__.py::ConfigEntrySubEntryManager._deduplicate_subentries()` removes redundant config subentries while preserving a single canonical group/member pair. Call it when migrations or recovery paths encounter Home Assistant's `AbortFlow("already_configured")` errors to converge on a stable state before retrying updates. **Convergence is not guaranteed for every colliding shape, and a caller must not treat a second abort as impossible.** Since PR #1236 the helper removes a duplicate only where the survivor and the loser share a `subentry_type`: a foreign type sharing an identifier is a group of its own and is left standing, because `async_remove_subentry` clears its device and entity registry bindings irreversibly (the rule and its measurements live in `custom_components/googlefindmy/agents/config_flow/AGENTS.md`). Renaming a colliding holder is the flow's job, through `_claim_unique_id`, which this manager never calls. **The guard has a cost, and an earlier version of this paragraph claimed it away as "measured".** It is not the retry loop being untouched; a spared twin can be the very subentry that then takes a core slot, and the write-back does change an identifier in that case. Reproduced: a `hub` storing the service key on `e1-core_tracking` beside a `tracker` on the same identifier is spared, holds the service slot through its stored key, and `async_sync` then tries to write `e1-service` onto it while a third subentry holds that -- the core raises, the retry deduplicates to no effect, and the second abort lands in `_async_adopt_existing_unique_id`. With the guard neutralised the same shape removes the hub and reaches the right holder directly. Both paths end at the same holder, so the trade is an irreversible removal exchanged for a logged fallback, which is the direction this repository wants; it is not a free change. Pinned by `tests/test_subentry_manager_registry_resolution.py::test_dedup_sparing_a_twin_can_route_a_sync_through_the_adoption_exit`. **"Left standing" is a statement about this helper, not about the call.** `async_sync` runs a type-blind stale sweep of its own afterwards, which removes a spared `hub` that stores a legacy or absent key (`::test_ap1_stale_sweep_is_decided_by_the_resolved_key`); the survival claim is verified end to end only for the production collision shape, by `::test_dedup_a_spared_hub_survives_a_whole_sync_not_just_the_helper`.
 * The helper is **idempotent** and refreshes the manager's internal `_managed` mapping after cleanup. Avoid creating new subentries inside the helper; it only removes duplicates reported by Home Assistant.
 
 ---
@@ -502,6 +665,7 @@ When a change is a bug fix (**commit type** `fix:` or **branch** `fix/...`) and 
 ### 3.4 Definition of Done for tests
 
 * **Deterministic:** no sleeps/time-races; use time freezing/monkeypatching.
+  * Private event loops: close them with `tests.helpers.drain_loop`, which joins the default executor (a leftover `asyncio_*` thread fails Home Assistant's `verify_cleanup`), and wait for work that crosses an executor thread with `tests.helpers.run_loop_until` instead of a fixed `loop.run_until_complete(asyncio.sleep(...))`.
 * **Isolated:** no live network; inject HA web sessions; mock external I/O at the boundary.
 * **Readable:** clear arrange/act/assert, meaningful names, minimal fixture magic.
 * **Value-dense:** each test protects a distinct behavior; avoid near-duplicates.
@@ -523,8 +687,8 @@ For any work that migrates entity-registry records during reload/startup flows, 
 
 ### 3.7 Device registry healing checklist
 
-1. **Trigger conditions.** Only heal when a registry lookup returns an existing `DeviceEntry` with an incorrect or missing `config_subentry_id`, name, or support flag. Read the latest object via `dev_reg.async_get_device` (or list iteration) immediately before scheduling the update so debug logs can reference the authoritative identifiers.
-2. **Apply updates via `async_update_device`.** Do not rely on `async_get_or_create` to mutate existing devices. Instead, call `dev_reg.async_update_device(device.id, config_subentry_id=..., **extra_fields)` and always capture the returned entry (the helper returns a *new* object). Treat the previous `device` reference as stale and overwrite it with the returned instance before continuing.
+1. **Trigger conditions.** Only heal when a registry lookup returns an existing `DeviceEntry` with an incorrect or missing `config_subentry_id`, name, or support flag. Read the latest object immediately before scheduling the update so debug logs can reference the authoritative identifiers. Use `dev_reg.async_get(device_id)` when you already hold the registry id, and `resolve_device_by_identifiers(dev_reg, candidates, entry_id=...)` from `custom_components/googlefindmy/coordinator/helpers/registry.py` when you only hold identifiers. **Superseded instruction, do not restore:** up to and including 1.7.15.14 this bullet named `dev_reg.async_get_device` and "list iteration". `async_get_device` is deprecated from Core 2026.9 (`breaks_in_ha_version="2027.8.0"`) and is already ambiguous from 2026.8 on, because identifiers are only unique *within* a config entry. "List iteration" meant iterating `dev_reg.devices` as a mapping, which is deprecated separately (`"2027.9.0"`); iterating the result of `async_entries_for_config_entry(...)` is not deprecated and stays the right way to walk this entry's devices. Reaching for the deprecated pair because "the healing checklist says so" is that superseded rule resurfacing; see `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+2. **Apply updates via `async_update_device`.** Do not rely on `async_get_or_create` to mutate existing devices. Instead, state the ownership as an intent (`plan_device_ownership(...)` + `execute_ownership_plan(...)` from `custom_components/googlefindmy/coordinator/helpers/registry.py`, see bullet 1) and pass only the non-ownership fields to `dev_reg.async_update_device(device.id, **extra_fields)`; `async_update_device` takes no `config_subentry_id` keyword on any supported core (2026.8.2 knows `add_`/`new_`/`remove_config_subentry_id` only, and those are exactly the keywords the intent layer exists to hide). Always capture the returned entry (the helper returns a *new* object). Treat the previous `device` reference as stale and overwrite it with the returned instance before continuing.
 3. **Bookkeeping and metrics.** Count each successful heal exactly once—after `async_update_device` returns—and log the `(entry_id, device_id, identifiers, config_subentry_id)` tuple at debug level. Surface aggregate counters in telemetry or diagnostics helpers when applicable so regression tests can assert how many devices were corrected.
 4. **`_heal_tracker_device_subentry` contract.** The helper returns a tuple `(device_entry, healed)` where `device_entry` is the freshest registry object (even if no heal occurred) and `healed` flags whether an update was applied. Always propagate the refreshed `device_entry` for downstream work (name updates, via-device clearing, identifier merges) and base counters/logs on the boolean flag so heals do not masquerade as extra creations.
 
@@ -542,18 +706,23 @@ For any work that migrates entity-registry records during reload/startup flows, 
   * No background refreshes that can race with requests.
   * On refresh failure, raise `ConfigEntryAuthFailed` to trigger reauth (avoid infinite loops).
 * **Auditability:** All cache writes go through one adapter with structured debug logs (never secrets).
+* **Removals are one-directional:** `entry.data` is the source of truth for credentials and the cache mirrors it, so a credential key that is **absent** from `entry.data` must be **dropped** from the cache, never recovered from it. Replacing credentials expresses "this account has no bundle / no AAS token any more" by leaving the key out (`const.OPTIONAL_CREDENTIAL_KEYS`, written by `config_flow._merge_credential_updates`), because Home Assistant's unique-id guard merges flat and cannot remove anything. A cache-first fallback that recovers such a key hands the integration back the credentials the user just replaced. The single exception is the migration gap the credential seed exists for: an entry that carries **no** credentials of its own, where the cache is read back in full. Applies to every writing surface (discovery overwrite, watched-file import, reauth, options login) and is enforced centrally in the credential seed of `__init__.async_setup_entry`, not per flow step. The same rule holds outside Home Assistant, where it has to be enforced per site: `main._clear_stale_tokens_for_reauth` snapshots the credentials `--reauth` removes and restores them only if the login stored none of `main._REAUTH_CHAIN_ANCHORS`. Restoring the derived values key by key beside a fresh anchor is the same one-directional violation in CLI clothing: `_ensure_aas_token` returns early on any cached `aas_token`, so the next run would never exchange the new token and would keep the previous account's vault keys (Codex review, PR #1261).
 * **Tests:** Include regressions for stale tokens, cross-account bleed, and refresh races.
 
 ---
 
 ## 5) Security & privacy guards
 
-* **Never log** tokens, email addresses, precise coordinates, device IDs, or raw API payloads.
+* **Never log** tokens, email addresses, precise coordinates, raw API payloads, or class (c) identifiers in clear text. Device identifiers are graded by one question: *can somebody who holds only the log file use the value without owning this Home Assistant instance or this Google account?*
+  * (a) **Rotating identifiers** (EID, the `request_uuid` this integration generates, the BLE MAC of an FMDN advertisement that resolved to one of the user's own trackers, which rotates with the EID, or once per 24 h while unwanted-tracking mode is active, `docs/FMDN.md` S3.5): allowed at any level, in full or truncated. The MAC of an advertisement that did not resolve belongs to somebody else's tracker until proven otherwise and is class (c); a caller-supplied value (the `stop_sound` service accepts a `request_uuid`) is graded by its content, not by the parameter name; the EID is truncated by convention (`EID_LOG_PREFIX_LENGTH` in `fmdn_finder/`: 8 hex chars of `eid_hex`, 8 bytes of the raw `eid`). Truncation does not turn a stable value into class (a): a prefix or suffix of a class (b) or (c) identifier keeps its class, and class (c) may only appear in the masked form defined under (c).
+  * (b) **Registry identifiers of this instance** (`entry_id`, `config_subentry_id`, Home Assistant `device_id`) and the Google canonical ids of the user's own trackers: allowed at any level, they carry no meaning outside this instance and this account. User-provided device names are derived information (see "Redact rigorously" below). A record that can repeat unattended (polling, transport recovery, background sweeps, state-change listeners) keeps the name out of the record at INFO and above and carries it only at DEBUG; a count, an index or a class (a)/(b) identifier may stand in its place, none of them is required. The locate transport pins the Name@DEBUG half at WARNING as "Count@WARNING, Name@DEBUG" (`test_location_request_r6_name_sweep.py`), and `tests/test_guard_logging_entity_ids.py` pins the `entity_id` form package-wide at INFO and above. A record bound to one invocation (a manual locate, a button press, a service call) may name the device at any level, because the caller asked for that device by name and has to see which one failed. An automation can repeat an invocation, so a new invocation-bound record prefers the count-or-index form unless the name is what the operator has to act on; the name-carrying records above DEBUG that exist today, on the locate transport and on the poll path alike, are a documented exception, not a template, and are reduced as they are touched. A device name is the operator's own label inside the operator's own instance; the PII ban (section 1, "Behavioral safety") covers data about persons that the integration handles (e-mail addresses, account identifiers, coordinates), it does not turn every label into PII. A label that names a person other than the operator is class (c) once the log leaves the instance; the operator redacts it before attaching a log, because the integration cannot know which labels are personal. An `entity_id` is a slug of that name and follows the same rule.
+  * (c) **Hardware addresses** (BLE or Wi-Fi MAC of scanners, proxies, phones), stable identifiers of third parties (foreign trackers, other accounts) and clear-text identifiers of anybody who is not the operator: never in clear text. The permitted masked forms are the masking helpers for e-mail and account values (`_mask_email_for_logs`, `_redact_account_for_log`) and, for addresses, the last four characters (`AA:BB:CC:DD:EE:FF` becomes `...E:FF`, `_mask_address_for_logs` in `fmdn_finder/location_uploader.py`); any longer part of the value is clear text.
+  * When in doubt, treat a value as (c): a log file leaves the operator's control the moment it is attached to an issue, and a stable identifier is still valid years later, while a rotating one is stale before anybody reads it.
 * **Diagnostics redaction:** use a central `TO_REDACT` list in `diagnostics.py`.
 * **HTTP views & map tokens:** no secrets in URLs; server-side validation; short-lived, entry-scoped tokens.
 * **Data minimization:** store only what is necessary (HA Store); document retention in README.
 * **Network:** set timeouts; use backoff; fail closed on uncertainty.
-* **Redact rigorously:** ensure not only direct secrets but also potentially identifying **derived information** (e.g., user-provided device names if sensitive, correlated external IDs) are redacted from logs and diagnostics.
+* **Redact rigorously:** ensure not only direct secrets but also potentially identifying **derived information** (e.g., user-provided device names if sensitive, correlated external IDs) are redacted from diagnostics and from log records that can repeat unattended at INFO and above (the name at DEBUG only, see the graded rule above); a record bound to one invocation may name the device.
 
 ---
 
@@ -564,7 +733,7 @@ Prioritize a small but protective suite:
 1. **Config flow** — user flow (success/invalid), duplicate abort (`async_set_unique_id` + `_abort_if_unique_id_configured`), connectivity pre-check, **reauth** (success/failure → reload on success), **reconfigure** step.
 2. **Lifecycle** — `async_setup_entry`, `async_unload_entry`, **reload** (no zombie listeners; entities reattach cleanly).
 3. **Coordinator & availability** — happy path; transient errors raise `UpdateFailed`; entities flip to `unavailable`; single “down/back” log.
-4. **Diagnostics** — `diagnostics.py` returns data with strict **redaction** (no tokens/emails/locations/IDs).
+4. **Diagnostics** — `diagnostics.py` returns data with strict **redaction** (no tokens/emails/locations; device, canonical and EID keys go through `TO_REDACT`, the instance's own `entry_id` stays, section 5 class (b)).
 5. **Services** — success/error paths with localized messages; throttling/rate-limits where applicable.
 6. **Discovery & dynamic devices** (if supported) — announcement, IP update, add/remove devices post-setup.
 7. **Token cache** — expiry detection, refresh, failure propagation, no hidden fallbacks (§4).
@@ -619,6 +788,8 @@ Add to the PR description:
   * ⚠️ Hassfest rejects `config.menu` objects. When a flow shows a menu, translate the options under `config.step.<step_id>.menu_options` (or the matching `options.*`/`config_subentries.*` section) instead of adding a top-level `menu` block.
 * Translate service and exception texts (`translation_key`).
 * Update README only when user-visible behavior/options change.
+* Program output quoted verbatim in a guide is a claim like any other, and one message per code path is not the same as one message for several: `docker-login/README.md` once printed the closed-window line for the timeout path too, so a user diagnosing a timeout was told to look for words that path cannot emit. Guard such a quote by rendering it through the real code path and locating it in the fenced block that directly follows its own lead-in sentence; a "the text appears somewhere in the file" check passes on a guide that files two messages under one heading, and a "somewhere after the lead-in" check passes when the message sits under a later one. Extent today, stated so it is not mistaken for coverage: three such guards exist. `tests/test_auth_flow.py::test_the_docker_login_guide_quotes_each_abort_message` covers the two `LoginAborted` messages under `## Cancelling a login`, each located in the fenced block that follows its own lead-in. `tests/test_auth_flow.py::test_the_guide_describes_the_driver_timeout_path_it_can_actually_produce` covers the driver-timeout bullet in `## Troubleshooting`, where the quotation is inline rather than fenced: it renders the failure through the flow, asserts the guide names the type that came out, and takes the denied exit status from `main._EXIT_LOGIN_ABORTED` instead of from the prose. Its reach stops at `_run_oauth_flow_or_exit`; a blanket handler further out in `main._main` could still falsify the bullet without turning it red. Every other quotation of program output in that guide, fenced or inline, is unguarded. `tests/test_main_cli_exit_paths.py::test_the_guide_quotes_each_reauth_restore_message` covers two of the four messages `main._restore_cleared_tokens` can print (the successful and the declined restore), in the `--reauth` paragraph of the same `## Cancelling a login` section: it renders each one through the real function (both interpolate — a token count, the anchor name) and locates it in the fenced block after its own lead-in. Its other two messages -- the unreadable file and the failed write -- stay unguarded, because the guide paraphrases them rather than quoting them. `tests/test_docker_login_hardening.py` couples README prose to code as well, but by asserting phrases, not by rendering messages. Extend the guard when you quote a new message there.
+* A setting the user can switch off needs an off switch **every supported launcher can type**, and `cmd.exe` cannot type an empty one: `set VAR=` deletes the name there, so bash's empty-but-present state has no Windows equivalent and `if defined` is the counterpart of `${VAR+set}`, not of `${VAR:-}`. `GFMY_LOCALE` therefore takes the POSIX `C`/`POSIX` locale as a stated absence of a preference and drops it without the warning a typo earns, which gives `login.sh`, `login.cmd` and a bare `docker compose run` one spelling in common. Reading a shell locale with `:-` cannot tell "said nothing" from "said no preference" and silently overwrites the second; use `+set` wherever an empty value is a documented answer. The rule lives twice on purpose, as a `case` arm in `login.sh` (host locale) and as `_NO_LOCALE_PATTERN` in `chrome_driver.py` (explicit value); extend both together. Extent today, stated so it is not mistaken for coverage: `tests/test_docker_login_hardening.py::test_both_halves_agree_on_what_counts_as_no_preference` pins the pair over twelve values, six POSIX spellings and six real locales, and nothing outside that set. What carries the container side is the ABSENCE OF A WARNING; the `None` is asserted too but proves nothing on its own: `C` and `POSIX` are no language tags either way, so a `None` check is satisfied by the warning branch too and would not notice the rule being deleted.
 <a id="rule-9doc-canonical"></a>
 * **Rule §9.DOC (canonical):** Keep documentation and docstrings accurate for existing features by correcting errors and augmenting missing details without shortening or deleting content. When functionality is intentionally removed or deprecated, remove or reduce the corresponding documentation to reflect that change while preserving historical clarity.
   * **Decision algorithm:** IF functionality is intentionally removed/deprecated → update or remove the related documentation to match the removal (include deprecation context as needed); ELSE → correct/augment the documentation without shortening it.
@@ -638,14 +809,16 @@ Add to the PR description:
   > mode requires, eliminating interactive prompts during local or CI runs. When
   > invoking mypy against a subset of files, append
   > `--install-types --non-interactive` as well (for example,
-  > `mypy path/to/file.py --install-types --non-interactive`). CI logs are audited
-  > for this flag to prevent hung jobs waiting for stub-install confirmation.
+  > `mypy path/to/file.py --install-types --non-interactive`). The CI mypy job always
+  > passes these flags (`.github/workflows/ci.yml`) so strict runs never stall on an
+  > interactive stub-install prompt; no separate step scans the logs for the flag.
 
 > **Hassfest runs in CI.** The `.github/workflows/hassfest-auto-fix.yml` workflow
-> validates manifests on every push/PR and auto-commits any key ordering fixes.
+> validates manifests on every PR, auto-committing any key
+> ordering fixes (the blocking manifest gate is the `hassfest` job in `ci.yml`).
 > Review the workflow output instead of attempting a local run; when you need a
-> fresh validation, use the **Run workflow** button in the Actions tab or re-run
-> the job from the PR UI.
+> fresh validation, re-run the job from the PR UI (the workflow has no
+> `workflow_dispatch` trigger).
 
 ### 10.1 Type-checking policy — mypy strict on edited Python files
 
@@ -687,6 +860,17 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ## 11) Clean & Secure Coding Standard (Python 3.13 + Home Assistant 2025.10)
 
+> **Two separate axes, do not conflate them.** The *language level* this code is
+> written against is Python 3.13, enforced by `ruff target-version = "py313"` and
+> `mypy python_version = "3.13"`; the integration has to keep running on Home
+> Assistant Core 2025.9.1, which ships 3.13. The *development and test
+> environment* resolves for Python 3.14.2 and above, because Core requires that
+> from 2026.3.0 onwards and pins its dependencies exactly, so a 3.13 resolution
+> would permanently hold nine packages at vulnerable versions. The 3.13 runtime
+> axis is kept under test by the lock-free `test_legacy_python` CI job. Raising
+> the language level is therefore a separate decision from the lock constraint,
+> and neither implies the other.
+
 ### 11.1 Language & style (self-documenting)
 
 #### Logging formatting (ruff G004)
@@ -722,18 +906,129 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 **Logging & privacy**
 
-* **Redact** tokens, PII, coordinates, device IDs.
+* **Redact** tokens, PII, coordinates, and class (c) identifiers (section 5); class (b) identifiers may appear at any level.
 * Use a central redaction list in diagnostics; keep logs actionable yet non-sensitive.
 
 **Supply chain**
 
-* Pin dependencies and enable pip **hash checking** (`--require-hashes`).
-* Generate an **SBOM** (CycloneDX) and scan it (e.g., Dependency-Track).
-* Fail CI on known critical vulnerabilities.
+* The **entire runtime stack** uses lower-bound (`>=`) floors rather than exact
+  pins or `--require-hashes`: every entry in
+  `custom_components/googlefindmy/requirements.txt` and every `manifest.json`
+  requirement uses a `>=` floor (aiohttp, cryptography, protobuf, gpsoauth and the
+  rest, alongside Selenium and undetected-chromedriver). What is **scoped to the
+  browser-facing** packages (undetected-chromedriver, Selenium and their
+  transitive stack) is the **Chrome-currency rationale**: those must track the
+  current Chrome/ChromeDriver upstream by design and therefore must not be
+  exact-pinned; the remaining runtime packages simply follow the same floor
+  convention (upgrade-friendly, not hash-locked).
+* **Most test and tooling** dependencies use the same lower-bound (`>=`) ranges as
+  the runtime stack (for example `bandit>=1.7`, `mypy>=1.11`, `pytest>=8.3` and
+  `ruff>=0.14.1` in `custom_components/googlefindmy/requirements-dev.txt`, and the
+  Poetry `dev`/`test` groups in `pyproject.toml`), so they are **not** reproducibly
+  pinned either. Only a small **explicitly constrained** subset is exact-pinned and
+  must not be relaxed under the Chrome-currency rationale:
+  `custom_components/googlefindmy/requirements-dev.txt` pins `pytest-asyncio==1.3.0`,
+  and `custom_components/googlefindmy/constraints-test-stubs.txt` pins
+  `homeassistant==2025.12.1` and `pytest-homeassistant-custom-component==0.13.299`; it
+  also caps `pycares<5` (an upper bound, not an exact pin; the runtime floor
+  `pycares>=4.4.0` lives in `requirements-dev.txt`).
+* Actual coverage today (each claim cites the workflow proving its *effective*
+  behaviour):
+  * **`pip-audit` on PRs is report-only.** `.github/workflows/pip-audit.yml`
+    guards the PR job with `if: github.event_name == 'pull_request'` and runs it
+    as "Audit requirements (report-only; keep CI green)", failing only on a
+    pip-audit *tool* error (`exit "$status"`), never on a discovered advisory:
+    findings surface as job-summary warnings, they do not fail the PR.
+  * **A weekly `pip-audit` auto-fix job** (`schedule: cron '23 3 * * 2'`, job
+    guarded by `if: github.event_name != 'pull_request'`) opens automated
+    security-update PRs via `peter-evans/create-pull-request` for fixable
+    advisories.
+  * **Semgrep SAST runs on PRs only.** `.github/workflows/semgrep.yml` triggers
+    on `pull_request` alone and scans the PR head against its base commit
+    (`--baseline-commit`). Semgrep resolves the baseline to
+    `git merge-base <base> HEAD`, which on the `pull_request` merge ref equals
+    `base.sha`, so commits that reached the base branch after the PR branched
+    are not attributed to the PR. The full-tree scan of `main` is CodeQL's job
+    (next bullet). Its gate step fails the job on any new finding of severity
+    `ERROR`, `HIGH` or `CRITICAL` (both Semgrep severity scales); `WARNING`,
+    `MEDIUM` and below are uploaded to the Security tab but do not fail the job.
+    The gate only counts what the scan produced: a scan that itself fails
+    (Semgrep exit code 2, e.g. registry unreachable) uploads an empty artifact
+    with a `::notice` and leaves the job green. The workflow writes its own
+    `.semgrepignore` at run time (a committed one would be overwritten); it
+    excludes `custom_components/googlefindmy/vendor/leaflet/`, an unmodified
+    third-party copy pinned by the hashes in its `VERSION` file.
+    `vendor/openlocationcode` is a modified extract and stays in the scan.
+  * **CodeQL scans the full tree.** `.github/workflows/codeql.yml` (advanced
+    setup) analyzes `python` and `actions` on the merge ref of every
+    `pull_request`, on every `push` to `main`, and on a weekly `schedule`;
+    an inline `paths-ignore` excludes generated `*_pb2*.py` modules and
+    `custom_components/googlefindmy/vendor/`. Results upload under the SARIF
+    categories `/language:python` and `/language:actions`. The pass/fail
+    verdict of the PR check is not decided by the workflow file: it comes from
+    the repository's code scanning setting "check failure" (newly introduced
+    alerts of error level or high/critical security severity). Merging into
+    `main` IS blocked on CodeQL: the repository ruleset on `main` (`gh api
+    repos/<owner>/<repo>/rules/branches/main`) carries a `code_scanning` rule
+    for the tool `CodeQL` (`security_alerts_threshold: high_or_higher`,
+    `alerts_threshold: errors`), which blocks the merge while the analysis is
+    pending, when no CodeQL analysis exists for the merge ref, or when the PR
+    introduces alerts at or above those thresholds (repository admins can
+    bypass via the PR bypass path, like every rule of that ruleset). Measured
+    on 2026-09-17 with probe PR #1299 (two new CodeQL alerts, `error`/`high`;
+    `CI Success` green; merge state `BLOCKED`) against control PR #1300 (no
+    new alerts; `CLEAN`).
+  * **Not every change is human-reviewed.** `.github/workflows/release-stamp.yml`
+    can push a version stamp directly to the owning branch (or, when branch
+    rules reject the direct push, step "Resolve the owning branch and push the
+    stamp" opens a stamp PR that a maintainer merges by hand; no review
+    requirement), and
+    `.github/workflows/hassfest-auto-fix.yml` commits manifest key-sorts via
+    `stefanzweifel/git-auto-commit-action`. Human review is the norm for feature
+    PRs, not a guarantee on every commit. Known limit: when
+    `hassfest-auto-fix.yml` pushes a sort commit onto a PR head with
+    `GITHUB_TOKEN`, GitHub creates the `pull_request` runs for that commit "in an
+    approval-required state" (docs: actions/concepts/security/github_token), so
+    `CI Success` is missing until a maintainer approves the runs in the Actions
+    UI or the author pushes again.
+  * **A narrow manifest CVE gate does block PRs.** The `test` job
+    (`.github/workflows/ci.yml`, `poetry run pytest`), aggregated into the
+    required `CI Success` check (job `ci-success`, `needs:` all CI jobs;
+    required by the repository ruleset on `main`), runs
+    `tests/test_pip_audit_security.py::TestManifestOnlyPipAuditGate::test_no_fixable_integration_owned_vulnerability`,
+    which fails the PR when `script/audit_manifest.py` finds an actionable,
+    fixable, integration-owned manifest or transitive-dependency vulnerability
+    (HA-governed and unfixable advisories do not block). What is **absent** is a
+    **broad, full-dependency-tree CVE scan** and any **SBOM scan** blocking a PR.
+* Hardening targets (not yet implemented): generate a CycloneDX **SBOM** and scan
+  it (e.g., Dependency-Track); fail CI on known critical vulnerabilities.
+* **Control claims must be grounded (no aspirational controls), in every
+  direction.** Grounding is symmetric across three claim polarities, because a
+  claim can drift from reality by asserting too much, too little, or the wrong
+  extent:
+  * **Positive** ("control X *exists* / *blocks* / *runs daily* / *fails the
+    PR*"): cite the workflow file and the line proving its *effective*
+    behaviour, not its declared intent.
+  * **Negative** ("there is **no** X", "not enforced", "does not block"): before
+    asserting an absence, search for the counterexample that would falsify it,
+    and treat a **gate embedded in the `test` job behind the required
+    `CI Success` check** (a pytest test that fails the PR) as a real gate even
+    when no dedicated workflow exists. A false "no gate" is the same drift as
+    a false "gate exists".
+  * **Scope / quantifier** ("scoped to X", "**only** X", "**every** / **all**
+    X"): enumerate the full set (e.g. grep every entry in `requirements.txt`,
+    not just the named packages) and check the stated boundary against it. State
+    the mechanism's true extent separately from any narrower *rationale*.
+  Two recurring traps for positive claims: (a) `report-only` /
+  `continue-on-error` / "keep CI green" is a report, not a blocking gate; (b) a
+  declared `schedule:` / `push:` trigger whose only job is guarded by
+  `if: github.event_name == 'pull_request'` gives no scheduled or push coverage.
+  Describe what runs, not what is aspired to; if a control is only planned, list
+  it under "Hardening targets", never as current coverage.
 
 ### 11.3 Async, concurrency & cancellation
 
-* **Async-first**: no event-loop blocking; for blocking work use `asyncio.to_thread`.
+* **Async-first**: no event-loop blocking. In new code that has a `hass` in reach, prefer `await hass.async_add_executor_job(...)`: it registers the job in `hass._tasks`, so shutdown waits for it. The thread pool is the same either way (Home Assistant installs it as the loop's default executor), so `asyncio.to_thread` stays correct where no `hass` is available, which is the case for the crypto and token paths that use it today. This mirrors the remediation in [`docs/AI_MAINTENANCE_TASKLIST.md`](docs/AI_MAINTENANCE_TASKLIST.md) § 4.
 * Use **`asyncio.TaskGroup`** for structured concurrency where suitable.
 * Cancel correctly (`task.cancel(); await task`) and handle `CancelledError`. Use `asyncio.shield` only for small critical sections.
 
@@ -783,7 +1078,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ### 11.8 Release & operations
 
-* CI **security gate**: lint/type/tests/SBOM scan must pass.
+* CI **security gate**: lint/type/tests must pass and roll up into `CI Success`, a required status check of the `main` ruleset (together with the `code_scanning` rule for CodeQL); the `test` job enforces a **narrow** manifest CVE gate (the `test_no_fixable_integration_owned_vulnerability` pytest gate over `audit_manifest`), while the separate `pip-audit` workflow runs report-only; a broad full-tree CVE scan and an SBOM scan remain hardening targets, not yet enforced.
 * Logs are **incident-ready** but privacy-preserving (use OWASP vocabulary).
 * All doc updates comply with **Rule §9.DOC**.
 
@@ -794,8 +1089,8 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] No `eval/exec`; subprocess without `shell=True`; parameterized I/O; safe loaders.
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
-* [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] Dependencies pinned; pip `--require-hashes`; CycloneDX SBOM generated and scanned.
+* [ ] Logs redact tokens, PII, coordinates and class (c) identifiers (section 5) at every level, and derived identifiers (user-provided names, `entity_id`) from records that can repeat unattended at INFO and above; diagnostics redact device, canonical and EID keys through `TO_REDACT` (the instance's own `entry_id` is class (b) and stays).
+* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the `test` job (behind the required `CI Success` check of the `main` ruleset) enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); CodeQL scans the full tree (PR merge ref, push to `main`, weekly) and blocks merges into `main` via the ruleset's `code_scanning` rule; not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
@@ -906,6 +1201,11 @@ Confidence is < 90 % whenever, for example:
 ### 2. Mandatory evidence
 
 Every recommendation—code, architecture, migration, best practice—must reference a verifiable source inside the project reality.
+
+*Verifiable* means a reader of this repository can open it. A path inside an agent's private memory or
+home configuration (`memory/<scope>/<file>.md`, `~/.claude/<file>`) is not a source, however real the
+underlying measurement was: commit a redacted artefact under `docs/` and cite that instead. Enforced by
+`tests/test_guard_prose_contract.py` over Python prose, Markdown and workflow files.
 
 Acceptable sources include:
 

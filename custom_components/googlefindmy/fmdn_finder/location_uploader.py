@@ -25,6 +25,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+# Module-level import (integration setup runs in the executor): the first
+# upload used to import this on the event loop (AGENTS.md 11.3); no cycle,
+# google_uploader does not import this module. The module, not the name, so
+# tests can patch `google_uploader.async_upload_to_google_fmdn`.
+from . import google_uploader
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant, State
 
@@ -52,6 +58,25 @@ UPLOAD_CACHE_CLEANUP_COUNT = 50  # Number of old entries to remove
 
 # Log formatting
 EID_LOG_PREFIX_LENGTH = 8  # Number of hex chars to show in logs
+ADDRESS_LOG_SUFFIX_LENGTH = 4  # Chars of a scanner name/address kept in logs
+
+
+def _mask_address_for_logs(address: str | None) -> str:
+    """Return the log-safe rendering of a scanner name or hardware address.
+
+    `AGENTS.md` section 5 grades identifiers by whether somebody who holds only
+    the log file can use the value. A Bermuda scanner name is class (c): it is
+    the scanner device's name and falls back to a slug of the scanner's BLE MAC
+    (`bermuda_device.make_name`), which stays valid for years and can be found
+    again over the air. The contract's treatment for class (c) is a truncation
+    to the last four characters, so `AA:BB:CC:DD:EE:FF` becomes `...E:FF` and
+    `bermuda_aabbccddeeff` becomes `...eeff`: enough to tell two proxies apart
+    in a diagnosis, not enough to reconstruct the address.
+    """
+    if not address:
+        return "none"
+    return f"...{address[-ADDRESS_LOG_SUFFIX_LENGTH:]}"
+
 
 # Data storage keys
 DATA_FMDN_UPLOAD_CACHE = "fmdn_finder_upload_cache"
@@ -101,7 +126,8 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         eid: Ephemeral Identity Key (20 or 32 bytes) from FMDN beacon
         area: Bermuda area/room name
         rssi: Signal strength (dBm)
-        scanner_address: BLE scanner MAC address
+        scanner_address: Bermuda scanner name (the scanner device's name, which
+            falls back to a slug of its BLE MAC); logged masked, class (c)
         scanner_device_id: HA device registry ID of scanner
         fmdn_device_id: HA device registry ID of FMDN device
         entity_id: Bermuda entity ID for logging
@@ -128,14 +154,16 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         _LOGGER.debug(
             "No location available for scanner (area=%s, scanner=%s), skipping upload",
             area,
-            scanner_address,
+            _mask_address_for_logs(scanner_address),
         )
         return False
 
+    # Coordinates are never logged (AGENTS.md "Logging & privacy"): DEBUG logs
+    # end up in issue reports and the scanner position is usually a home. The
+    # message records that a position was resolved plus its non-location
+    # attributes, which is what the diagnosis needs.
     _LOGGER.debug(
-        "Resolved location: lat=%.6f, lon=%.6f, accuracy=%dm, zone=%s",
-        location.latitude,
-        location.longitude,
+        "Resolved location (coordinates omitted): accuracy=%dm, zone=%s",
         location.accuracy,
         location.zone_name,
     )
@@ -225,7 +253,8 @@ async def _resolve_scanner_location(
     Args:
         hass: Home Assistant instance
         area: Bermuda area/room name
-        scanner_address: BLE scanner MAC address
+        scanner_address: Bermuda scanner name (the scanner device's name, which
+            falls back to a slug of its BLE MAC); logged masked, class (c)
         scanner_device_id: HA device registry ID of scanner
 
     Returns:
@@ -553,9 +582,10 @@ async def _encrypt_and_upload_location(
     # Note: This is the inner encrypted payload, not the outer protobuf
     gps_data = f"{location.latitude:.7f},{location.longitude:.7f}".encode()
 
+    # The payload itself is never logged: DEBUG logs end up in issue reports.
+    # Only the non-location attributes are recorded.
     _LOGGER.debug(
-        "GPS data for encryption: %s (accuracy=%dm, zone=%s)",
-        gps_data.decode(),
+        "GPS data prepared for encryption (coordinates omitted): accuracy=%dm, zone=%s",
         location.accuracy,
         location.zone_name,
     )
@@ -573,11 +603,9 @@ async def _encrypt_and_upload_location(
         _LOGGER.error("Failed to encrypt location: %s", err, exc_info=True)
         raise ValueError(f"Encryption failed: {err}") from err
 
-    _LOGGER.debug(
-        "Encrypted location: %d bytes, ephemeral key Sx=%s...",
-        len(encrypted_and_tag),
-        ecdh_shared_x.hex()[:16],
-    )
+    # Ciphertext length only; the ECDH shared secret is key material and is
+    # never logged (AGENTS.md section 5).
+    _LOGGER.debug("Encrypted location: %d bytes", len(encrypted_and_tag))
 
     # 3. Create LocationReport protobuf with proper structure
     location_report = LocationReport()
@@ -635,9 +663,9 @@ async def _encrypt_and_upload_location(
     )
 
     # 5. Upload to Google FMDN backend
-    from .google_uploader import async_upload_to_google_fmdn  # noqa: PLC0415
-
-    return await async_upload_to_google_fmdn(hass, upload_bytes, eid[:10].hex())
+    return await google_uploader.async_upload_to_google_fmdn(
+        hass, upload_bytes, eid[:10].hex()
+    )
 
 
 def _update_upload_cache(

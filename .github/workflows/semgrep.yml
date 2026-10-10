@@ -1,43 +1,37 @@
 name: Semgrep (SAST)
 
 on:
-  push:
-    branches:
-      - main
+  # Pull requests only. This workflow is a baseline scan: every run compares the
+  # PR head against its base commit, so it needs a base. The former `push`,
+  # `schedule` and `workflow_dispatch` triggers were declared, but the job was
+  # guarded by `if: github.event_name == 'pull_request'` (cc671e25), so none of
+  # them ever ran. A full-tree scan of `main` is a different job with a
+  # different finding budget and must not be implied by a trigger that skips.
+  # No branch filter: development happens on the version branches (1.7), not on
+  # main, and a pull request there must be scanned like any other. Matches the
+  # unfiltered `pull_request:` entry of ci.yml and pip-audit.yml.
   pull_request:
-    branches:
-      - main
-  schedule:
-    # Runs daily at 02:12 UTC-only
-    - cron: '12 2 * * *'
-    # Runs daily at 14:12 UTC-only
-    - cron: '12 14 * * *'
-  workflow_dispatch: {}
 
 jobs:
   semgrep:
     name: Run Semgrep CE scan
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
-    env:
-      SEMGREP_HIGH_FAIL_THRESHOLD: 25
     permissions:
       contents: read
       security-events: write
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Fetch pull request base branch
-        if: ${{ github.event_name == 'pull_request' }}
         run: |
           git fetch origin "${{ github.event.pull_request.base.ref }}":refs/remotes/origin/"${{ github.event.pull_request.base.ref }}"
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
 
@@ -59,15 +53,22 @@ jobs:
           .git/
           .mypy_cache/
           __pycache__/
+          # Leaflet is an unmodified third-party copy (see its VERSION file) that
+          # is updated by replacing it, never edited here. Only this directory is
+          # excluded: vendor/openlocationcode is a modified extract and is our
+          # own code to scan.
+          custom_components/googlefindmy/vendor/leaflet/
           IGNORE
 
       - name: Run Semgrep scan (JSON)
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
-          else
-            baseline_commit=""
-          fi
+          # Semgrep does not diff against this commit literally: it resolves
+          # the baseline to `git merge-base <base> HEAD` (Semgrep CE, `git.py`,
+          # verified on release 1.177.0) and scans the merge base. On the
+          # `pull_request` merge ref checked out here, that merge base is
+          # `base.sha` itself, so commits that reached the base branch after
+          # this PR branched are not attributed to the PR.
+          baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
 
           set +e
           semgrep scan --config auto --json $baseline_commit --output=semgrep.json
@@ -90,11 +91,8 @@ jobs:
 
       - name: Run Semgrep scan (SARIF)
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
-          else
-            baseline_commit=""
-          fi
+          # Baseline semantics: see the JSON step above.
+          baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
 
           set +e
           semgrep scan --config auto --sarif $baseline_commit --output=semgrep.sarif
@@ -103,6 +101,11 @@ jobs:
 
           if [ "$semgrep_exit" -eq 2 ]; then
             echo "::notice::Semgrep returned exit code 2 for the SARIF scan; uploading an empty fallback artifact."
+            # Exit code 2 is a failed scan, not an empty one. This artifact keeps the
+            # distinct driver name "Semgrep" on purpose: GitHub closes an alert when a
+            # later analysis of the same tool and category on the same ref no longer
+            # reports it, and a failed scan must not carry the identity that closes
+            # alerts ("Semgrep OSS", see the empty-result branch below).
             printf '%s\n' \
               '{' \
               '  "version": "2.1.0",' \
@@ -128,6 +131,10 @@ jobs:
           fi
 
           if ! jq -e '(.runs // []) | map(select((.results // []) | length > 0)) | length > 0' semgrep.sarif >/dev/null 2>&1; then
+            # A successful scan with no findings: the driver name must be the one Semgrep
+            # itself emits ("Semgrep OSS"), otherwise GitHub treats this upload as a second
+            # tool and alerts raised by the real run stay open forever (seen on #1274,
+            # where five empty uploads named "Semgrep" closed nothing).
             printf '%s\n' \
               '{' \
               '  "version": "2.1.0",' \
@@ -136,7 +143,7 @@ jobs:
               '    {' \
               '      "tool": {' \
               '        "driver": {' \
-              '          "name": "Semgrep",' \
+              '          "name": "Semgrep OSS",' \
               '          "informationUri": "https://semgrep.dev/",' \
               '          "rules": []' \
               '        }' \
@@ -147,24 +154,41 @@ jobs:
               '}' > semgrep.sarif
           fi
 
-      - name: Fail on high or critical findings
+      - name: Fail on error, high or critical findings
         run: |
-          high_count=$(jq '[.results[] | select(((.extra.metadata.severity // .extra.metadata.semgrep.severity // .extra.severity // "") | ascii_upcase) as $sev | ($sev == "HIGH" or $sev == "CRITICAL"))] | length' semgrep.json)
-          threshold=${SEMGREP_HIGH_FAIL_THRESHOLD:-0}
-          # Keep large findings batches non-blocking: fail only when the high/critical count is manageable (<= threshold) and otherwise raise a visible warning.
-          if [ "$high_count" -eq 0 ]; then
+          # Semgrep rules carry one of two severity scales (semgrep_output_v1
+          # `match_severity`): the classic ERROR/WARNING/INFO and the newer
+          # CRITICAL/HIGH/MEDIUM/LOW. The registry ruleset behind `--config auto`
+          # still emits the classic scale for almost every rule: a full-tree scan
+          # of c1ea29c yielded 17 ERROR, 129 WARNING, 3 MEDIUM and no HIGH or
+          # CRITICAL at all, so a gate that only counted HIGH/CRITICAL never
+          # fired. Count the top of both scales.
+          #
+          # Any such finding new relative to the base commit fails the job. The
+          # former threshold ("keep large batches non-blocking") existed for
+          # full-tree runs; a baseline diff is small, and a finding belongs on
+          # the line that introduced it (`# nosemgrep: <rule-id>` with a reason
+          # if it is a deliberate fixture).
+          blocking='.results[] | select(((.extra.metadata.severity // .extra.metadata.semgrep.severity // .extra.severity // "") | ascii_upcase) as $sev | ($sev == "ERROR" or $sev == "HIGH" or $sev == "CRITICAL"))'
+          blocking_count=$(jq "[$blocking] | length" semgrep.json)
+          if [ "$blocking_count" -eq 0 ]; then
             exit 0
           fi
 
-          if [ "$high_count" -le "$threshold" ]; then
-            echo "::error::Semgrep reported $high_count HIGH/CRITICAL findings (threshold: $threshold)."
-            exit 1
-          fi
-
-          echo "::warning::Semgrep reported $high_count HIGH/CRITICAL findings which exceeds the fail threshold ($threshold); continuing without failure."
+          # List the findings here: the SARIF upload below is the only other
+          # place they surface, and a job log that says "3 findings" without
+          # naming them sends the reader to the Security tab first.
+          jq -r "$blocking | \"::error file=\\(.path),line=\\(.start.line)::\\(.check_id) [\\(.extra.severity)]\"" semgrep.json
+          echo "::error::Semgrep reported $blocking_count ERROR/HIGH/CRITICAL findings relative to the base commit."
+          exit 1
 
       - name: Upload Semgrep SARIF results
-        uses: github/codeql-action/upload-sarif@v3
+        # Runs after a red gate as well: the SARIF is complete before the gate
+        # step, and a blocked PR is exactly the one whose findings must reach
+        # the Security tab. Skipped only when no SARIF was written (scan step
+        # itself failed with an exit code above 2).
+        if: ${{ !cancelled() && hashFiles('semgrep.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: semgrep.sarif
           category: semgrep-ce

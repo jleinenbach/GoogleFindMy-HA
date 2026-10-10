@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 from functools import lru_cache
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -32,7 +33,22 @@ def load_googlefindmy_const_module() -> ModuleType:
         raise RuntimeError("Unable to load googlefindmy const module")
 
     module = module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Register before exec_module, as the importlib recipe for "importing a source
+    # file directly" prescribes. Skipping this half of the recipe worked only as
+    # long as const.py contained nothing that resolves its own annotations at
+    # class-creation time. @dataclass does: with `from __future__ import
+    # annotations` every field annotation is a string, and dataclasses resolves it
+    # via sys.modules[cls.__module__] to tell a KW_ONLY/ClassVar marker from a real
+    # field. Unregistered, that lookup yields None and the module fails to import
+    # with `AttributeError: 'NoneType' object has no attribute '__dict__'`, which
+    # this conftest turns into a collection error for the entire test suite.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # Do not leave a half-initialised module behind for the next importer.
+        sys.modules.pop(spec.name, None)
+        raise
     return module
 
 

@@ -919,15 +919,96 @@ class GoogleFindMyConnectivitySensor(GoogleFindMyEntity, BinarySensorEntity):
 # Per-device UWT-Mode sensor
 # --------------------------------------------------------------------------------------
 class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
-    """Per-device binary sensor indicating FMDN Unwanted Tracking (UWT) mode.
+    """Per-device binary sensor for the FMDN unwanted tracking protection mode.
 
-    Semantics:
-        - ``on``  → The tracker has entered UWT / separated state (away from
-          owner for 8-24 hours).  DULT anti-stalking sound becomes available.
-        - ``off`` → Normal operation, tracker is near owner.
+    Semantics (per the Find Hub Network Accessory Specification, sections
+    "Hashed flags" and "Unwanted tracking prevention", retrieved 2026-09-03:
+    https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn):
+        - ``on``  → The beacon reports that unwanted tracking protection mode
+          is active: spec bit 7 of the hashed-flags byte is set. Note that the
+          specification numbers hashed-flags bits MSB-first, so spec bit 7 is
+          standard bit 0; the resolver mask is therefore ``0x01`` and not
+          ``0x80`` (see ``eid_resolver.py``, which marks ``0x80`` as an
+          anti-pattern).
+        - ``off`` → The beacon reports normal operation.
+        - ``None`` → No hashed-flags byte has been decoded for this device.
+          The byte is optional: a beacon without battery indication that is not
+          in unwanted tracking protection mode may omit it entirely.
 
-    Data source: bit 7 of the FMDN hashed-flags byte, decoded by the EID
-    resolver as :pyattr:`BLEBatteryState.uwt_mode`.
+    How the mode is entered and left. The specification maps it onto DULT
+    verbatim: '"Unwanted tracking protection mode" defined in this document
+    maps to the "separated state" defined by the DULT spec', and certified
+    devices "must also meet the requirements in the implementation version of
+    the cross-platform specification for Detecting Unwanted Location Trackers
+    (DULT)". DULT defines that state autonomously, not by command: the
+    accessory "SHALL transition from near-owner mode to separated mode" once it
+    is "physically separated from the owner device for more than 30 minutes",
+    and back to near-owner mode on reunion
+    (``draft-detecting-unwanted-location-trackers-01``, sections 3.4.4 and
+    3.4.5). Data ID 0x07 (activate) and 0x08 (deactivate) on the Beacon Actions
+    characteristic are an ADDITIONAL, seeker-driven path over GATT, not the only
+    way in and out; both are authenticated with the unwanted tracking protection
+    key derived from the EIK, so neither is available to a party without the
+    owner's key material. Two consequences for automations. The mode can appear
+    and disappear with no command sent by anyone -- that follows directly from
+    the transition above. And a deactivation over GATT plausibly would not hold
+    while the separation that produced the state persists -- that is an
+    INFERENCE from the standing condition in DULT section 3.4.4, not a
+    specification statement; neither document says what happens when 0x08 meets
+    a still-separated device.
+
+    Two 24-hour figures exist and they are not the same figure:
+        - DULT ``T_(SEPARATED_UT_TIMEOUT)``, a "random value between 8-24 hours
+          chosen from a uniform distribution", after which the accessory "MUST
+          enable the motion detector" while separated and then plays a sound on
+          detected motion (DULT section 3.12.2.1 with table 16; section 3.4.4
+          carries the state transition only, not the detector). This is
+          normative, and it gates the motion-triggered chime, not the setting of
+          this bit. Two earlier revisions of this docstring misplaced the figure
+          in opposite directions; both are withdrawn, and the correction of
+          record is the attribution stated here (BSkando#210). Neither is
+          restated, so the guards in
+          ``tests/test_uwt_mode_binary_sensor.py`` need no exception for this
+          paragraph.
+        - The Find Hub specification's own "24 hours", which is the reduced MAC
+          address rotation period WHILE the mode is active.
+
+    A separation-based anti-stalking chime is therefore device behaviour in
+    exactly the state this bit reports, so the two are related rather than
+    unrelated. What the bit does not carry is whether the motion detector is
+    already armed: that depends on ``T_(SEPARATED_UT_TIMEOUT)``, which is not
+    observable from the advertisement. This sensor is consequently not a
+    separation timer and cannot be turned into one.
+
+    Why the mode is nonetheless relevant to reports of spurious ringing:
+    activation (Data ID 0x07) takes an optional control flag, ``0x01``
+    "Skip ringing authentication", specified as "When set, ringing requests
+    aren't authenticated while in unwanted tracking protection mode" (section
+    "Beacon Actions", retrieved 2026-08-05). A beacon activated with that flag
+    set still expects authentication data on a ring request but no longer
+    verifies it, so while the mode is active the OWNER ring path is reachable
+    without the ring key by any party in Bluetooth range. Two caveats, both
+    load-bearing:
+
+        - The likelier explanation for the existing reports is the DULT
+          non-owner sound path, which is unauthenticated by design and needs no
+          such flag (see ``docs/PLAY_SOUND_ARCHITECTURE.md``). The flag is
+          documented here because it is the only mechanism that also removes
+          authentication from the OWNER path, which the DULT explanation does
+          not. Neither is asserted as the cause of any particular report.
+        - The bit itself is not yet trustworthy as a trigger. Episodes of 38
+          and 57 seconds and same-second flips across two devices at home are
+          on record (BSkando#210). Treat this sensor as context for a report,
+          never as an alerting signal.
+
+    What this does establish: a chime with no cloud request behind it is
+    specification-conformant and does not imply that this integration sent
+    anything (BSkando#195, BSkando#108). This integration has no GATT write
+    path at all. The advertisement carries the mode, never the flag, so the
+    sensor can narrow such a report down but cannot confirm a cause.
+
+    Data source: spec bit 7 (standard bit 0) of the FMDN hashed-flags byte,
+    decoded by the EID resolver as :pyattr:`BLEBatteryState.uwt_mode`.
 
     Created dynamically alongside the BLE battery sensor when the resolver
     first decodes hashed-flags data for a device.
@@ -982,7 +1063,20 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """Return True when UWT / separated state is active."""
+        """Return True when the beacon reports unwanted tracking protection mode.
+
+        ``None`` means "no hashed-flags byte decoded yet", not "off": the byte
+        is optional per specification.
+
+        No BLE staleness TTL: the last decoded value is reported for as long as
+        the coordinator's TTL-smoothed presence holds. Rationale, and why this
+        is a decision rather than an oversight: the hashed-flags byte is
+        optional and may be sent rarely, so a short TTL would flap; and there is
+        no measurement in this project that would justify any particular TTL
+        value. Ageing is therefore left to the consumer, which is why
+        ``last_ble_observation`` is exposed as an attribute. Revisit when field
+        data from FMDN_FLAGS_PROBE exists (BSkando#210).
+        """
         resolver = self._get_resolver()
         if resolver is None or self._device_id is None:
             return None
@@ -993,12 +1087,23 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
 
     @property
     def icon(self) -> str:
-        """Return a dynamic icon reflecting UWT state."""
+        """Return the icon for the reported unwanted tracking protection mode.
+
+        ``mdi:shield-alert`` when the mode is reported active, ``mdi:shield-check``
+        otherwise. The undecoded ``None`` case is deliberately rendered as "no
+        alert" rather than as an alarm.
+        """
         return "mdi:shield-alert" if self.is_on else "mdi:shield-check"
 
     @property
     def available(self) -> bool:
-        """Return True when the coordinator considers the device present."""
+        """Return True when the coordinator considers the device present.
+
+        Availability follows the coordinator's TTL-smoothed presence only; it
+        carries no separate staleness rule for the decoded flags byte. See
+        :pyattr:`is_on` for why that absence is a decision rather than an
+        oversight.
+        """
         if not super().available:
             return False
         if not self.coordinator_has_device():

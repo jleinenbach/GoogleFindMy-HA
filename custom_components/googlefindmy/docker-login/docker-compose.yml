@@ -1,0 +1,137 @@
+services:
+  googlefindmy-login:
+    # One-shot login job, not a long-running service. The launcher starts it with
+    # `docker compose run --rm` (see login.sh / login.cmd): that creates a fresh
+    # ephemeral container per run and removes it on exit, so repeated logins never
+    # stack containers, and it attaches your terminal's STDIN so the CLI can ask
+    # for the account e-mail when the Chrome session does not reveal it (plain
+    # `docker compose up` does not forward STDIN).
+    build:
+      # Build context is the integration package dir (this file lives in
+      # <context>/docker-login/). It holds requirements.txt (baked in) and
+      # docker-login/entrypoint.sh. The integration *code* is NOT built in — see
+      # the read-only volume below (M2 runtime mount).
+      context: ..
+      dockerfile: docker-login/Dockerfile
+    stdin_open: true      # login: main.py may prompt for the account e-mail
+    tty: true
+    shm_size: "2g"        # headful Chrome needs shared memory
+    environment:
+      # Optional CLI flags forwarded to main.py, e.g. "--reauth" (force fresh
+      # login) or "--debug" (verbose bootstrap/FCM logging). Default: none.
+      GFMY_ARGS: "${GFMY_ARGS:-}"
+      # Persist secrets.json on the writable ./data volume (see below) instead of
+      # inside the read-only code mount. main.py honours this override and keeps
+      # the atomic write on a single writable filesystem.
+      GOOGLEFINDMY_SECRETS_PATH: "/data/secrets.json"
+      # Mark this as the docker-login container so the interactive auth flow
+      # prints container-correct instructions (open the noVNC URL) instead of
+      # the desktop text ("install Chrome on your system"), and skips the desktop
+      # Enter gate: Chrome runs inside the container and is driven through noVNC,
+      # so there is nothing for the user to confirm on this terminal first.
+      # entrypoint.sh also defaults it on, so a manual `docker run` is covered.
+      # (Historical note: this comment used to justify the variable by claiming
+      # the auth flow's `homeassistant in sys.modules` heuristic "does not fire"
+      # in the standalone process. It always fired -- main.py injects those very
+      # stubs -- which is why that heuristic was removed; the container signal is
+      # the real discriminator and always was.)
+      GOOGLEFINDMY_CONTAINER_LOGIN: "1"
+      # The browsable noVNC URL printed at the login prompt. login.sh exports the
+      # normalised host (LAN address with --ip, else loopback); a manual
+      # `docker compose run` without the launcher falls back to localhost.
+      GOOGLEFINDMY_NOVNC_URL: "http://${GFMY_NOVNC_URL_HOST:-localhost}:7900"
+      # LAN-bind hardening. The launcher (login.sh / login.cmd) raises a single
+      # verdict, GFMY_NOVNC_HARDEN, ONLY when you bind noVNC to a concrete LAN
+      # (non-loopback) address; on the loopback default it stays empty and the
+      # container keeps the base image's plain-http + "secret" behaviour. These
+      # MUST be listed here to cross the host->container boundary: a bare
+      # `docker compose run` does NOT forward the launcher's shell environment,
+      # so exporting them in login.sh/login.cmd alone would leave the container
+      # blind and the LAN login would print an https/password promise it never keeps.
+      #   GFMY_NOVNC_HARDEN   -> entrypoint.sh mints a per-run dense random password
+      #                          IN THE CONTAINER, exports SE_VNC_PASSWORD (read by
+      #                          the base image's start-vnc.sh / x11vnc, replacing
+      #                          "secret") and GOOGLEFINDMY_NOVNC_PASSWORD (the same
+      #                          value, so the printed banners show the real per-run
+      #                          password). The password never crosses this boundary,
+      #                          so both launchers get identical hardening without any
+      #                          host-side crypto.
+      #   GFMY_NOVNC_TLS      -> entrypoint.sh mints a self-signed cert and
+      #                          start-novnc.sh serves https (--ssl-only).
+      #   GFMY_NOVNC_URL_HOST -> the concrete LAN IP, used as the cert SAN.
+      #   GFMY_NOVNC_BIND     -> the host bind address (same value used in `ports:`
+      #                          below). Forwarded so a DIRECT `docker compose run`
+      #                          (which never runs a launcher) can still derive the
+      #                          verdict IN the container: entrypoint.sh treats any
+      #                          non-loopback bind as a LAN exposure and hardens it,
+      #                          so this supported path cannot publish port 7900 with
+      #                          the fixed "secret" over plain http. A launcher run
+      #                          already sets HARDEN explicitly and the derivation
+      #                          then stays a no-op (it never overrides a launcher).
+      # There is deliberately NO SE_VNC_PASSWORD / GOOGLEFINDMY_NOVNC_PASSWORD
+      # passthrough here: the container generates the password, so an absent verdict
+      # (loopback) leaves the base image's own SE_VNC_PASSWORD=secret default intact.
+      # An empty passthrough used to OVERRIDE that default, leaving the loopback
+      # viewer with no VNC password while the prompt still printed "(password: secret)";
+      # dropping it removes that trap structurally.
+      GFMY_NOVNC_HARDEN: "${GFMY_NOVNC_HARDEN:-}"
+      GFMY_NOVNC_TLS: "${GFMY_NOVNC_TLS:-}"
+      GFMY_NOVNC_URL_HOST: "${GFMY_NOVNC_URL_HOST:-}"
+      GFMY_NOVNC_BIND: "${GFMY_NOVNC_BIND:-}"
+      # Host UID/GID for the ownership handoff of the produced secrets.json. The
+      # launcher (login.sh) passes these so the finished file ends up owned by
+      # *you* with owner-only 0600 (readable/copyable by you, private from other
+      # local accounts). Unset (e.g. a manual run) → the file stays container-owned.
+      GFMY_HOST_UID: "${GFMY_HOST_UID:-}"
+      GFMY_HOST_GID: "${GFMY_HOST_GID:-}"
+      # Optional terminal handoff (default OFF; the classic file handoff through
+      # ./data is unchanged unless you opt in).
+      #   GFMY_CLEARTEXT=1 -> after login, print secrets.json in the terminal for
+      #                       manual copy/paste (no port opened) and delete it.
+      GFMY_CLEARTEXT: "${GFMY_CLEARTEXT:-}"
+      # Optional: pin Chrome's major version if auto-detection ever mismatches
+      # the bundled Chrome (undetected-chromedriver SessionNotCreatedException).
+      # GOOGLEFINDMY_CHROME_VERSION: "141"
+      # Language of the login browser and of the Google sign-in page it loads.
+      # No language is forced anywhere in this container: unset (the default)
+      # means Chrome keeps its own, which is English. login.sh fills it in from
+      # your shell locale so the sign-in speaks your language without you asking;
+      # set it yourself to override that, e.g. GFMY_LOCALE=en to stay in English,
+      # or GFMY_LOCALE=C to hand the choice back to Chrome from any caller (that
+      # is the POSIX "no localisation" locale, and the container reads it as a
+      # stated absence of a preference rather than as a broken value).
+      # The noVNC viewer around it is a separate thing and needs no setting: it
+      # follows your *browser's* language on its own.
+      GOOGLEFINDMY_LOGIN_LOCALE: "${GFMY_LOCALE:-}"
+      # Keyboard. The default (1) makes AltGr characters -- "@" on a German
+      # layout, the backslash and "|" elsewhere -- reach the browser, which they
+      # do not in the base image. Set GFMY_KEYBOARD_FIX=0 for the base behaviour.
+      GFMY_KEYBOARD_FIX: "${GFMY_KEYBOARD_FIX:-1}"
+      # Optional, and off by default: an X keyboard layout for the container,
+      # in setxkbmap's own spelling ("de", "fr", "de -variant nodeadkeys").
+      # Only needed for the rarer cases the fix above cannot reach (dead keys).
+      GFMY_KEYBOARD_LAYOUT: "${GFMY_KEYBOARD_LAYOUT:-}"
+    ports:
+      # noVNC web viewer. On the LOOPBACK default (below) it keeps the base
+      # image's fixed password "secret" over plain HTTP, safe only because
+      # loopback is not network-reachable during the Google sign-in. A LAN bind
+      # (GFMY_NOVNC_BIND, or the launcher's --ip/interactive chooser) makes the
+      # container mint a per-run password and serve self-signed HTTPS instead. To
+      # reach it from another machine prefer an SSH tunnel; on a trusted LAN
+      # prefer a concrete --ip over the GFMY_NOVNC_BIND=0.0.0.0 wildcard (see
+      # README → "noVNC access & security").
+      - "${GFMY_NOVNC_BIND:-127.0.0.1}:7900:7900"
+    volumes:
+      # M2 runtime mount of the integration code, READ-ONLY, at a FLAT path.
+      # `..` is the integration package dir, so main.py lands at /app/gfmy/main.py
+      # (parent = "app", not "custom_components") → _standalone=True: it stubs
+      # homeassistant.* and never imports the package __init__/config_flow (which
+      # need voluptuous/HA). The Auth package (token_cache.py etc.) stays present
+      # and readable; nothing is written here.
+      - ..:/app/gfmy:ro
+      # Writable, host-persisted volume for the produced secrets.json. This is
+      # the file you use in Home Assistant. Kept separate from the read-only code
+      # mount so the atomic write works and the login container never writes into
+      # your integration source. The launcher makes this dir writable by the
+      # container user (see login.sh / login.cmd).
+      - ./data:/data

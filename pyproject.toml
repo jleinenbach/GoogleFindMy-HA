@@ -11,7 +11,7 @@ name = "googlefindmy-ha"
 # script/stamp_version.py, so on those lines the hand-tag/stamp path is primary,
 # not a fallback. Canonical anchor:
 # custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
-version = "1.7.14.1"
+version = "1.7.15.19"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
@@ -25,11 +25,11 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.13.2"
+python = "^3.14.2"
 aiohttp = ">=3.11.8"
 beautifulsoup4 = ">=4.12.3"
 cryptography = ">=43.0.3"
-ecdsa = ">=0.19.1"
+ecdsa = ">=0.19.2"
 gpsoauth = ">=2.0.0"
 grpclib = ">=0.4.7"
 h2 = ">=4.1.0"
@@ -76,6 +76,8 @@ pytest-cov = ">=5.0"
 pytest-socket = ">=0.7.0"
 pytest-xdist = ">=3.5.0"
 hypothesis = ">=6.100.0"
+# GitHub's Markdown parser, used by the DocToc pre-commit hook and its tests
+cmarkgfm = ">=2025.10.22"
 
 # Home Assistant testing - ALWAYS use latest version (no upper bound)
 # This ensures we test against the latest HA compatibility
@@ -111,6 +113,7 @@ ignore = ["E501"]
 "tests/**" = [
     "PLR0912",
     "PLR0913",
+    "PLR0917",  # sibling of PLR0913; ruff 0.16 stabilised it out of preview
     "PLR0915",
     "PLR2004",
     "PLC0415",
@@ -226,6 +229,7 @@ ignore = ["E501"]
     "PLC0415",
     "PLR0912",
     "PLR0913",
+    "PLR0917",  # sibling of PLR0913; ruff 0.16 stabilised it out of preview
     "PLR0915",
     "PLR2004",
 ]
@@ -280,9 +284,24 @@ ignore = ["E501"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+# Ruff 0.16 extended the formatter to Python code blocks inside Markdown. That
+# reach arrived through a tool upgrade, not through a decision here, and it
+# rewrites hand-aligned example code in eight handbooks under docs/ and
+# agents/ (for instance the aligned parameter comments in
+# docs/PLAY_SOUND_ARCHITECTURE.md). Documentation examples are read by humans
+# and are not compiled; keeping the formatter to actual source files keeps the
+# guarantee it exists for -- one uniform style in the tree that ships -- without
+# reflowing prose artefacts nobody reviewed. Linting Markdown is unaffected.
+exclude = ["*.md"]
 
 [tool.pytest.ini_options]
-addopts = ["-q", "--cov", "--cov-report=term"]
+# No -q here on purpose: -q counts up. Every documented invocation already
+# supplies its own (`pytest -q` in AGENTS.md and README.md, the Makefile
+# targets, both CI jobs, script/local_verify.py), and a second one makes
+# pytest drop its summary line, so a red run would show FAILED lines but
+# never say how many tests failed. Measured on 2026-09-12: with one -q the
+# summary line is printed, with two it is not.
+addopts = ["--cov", "--cov-report=term"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
@@ -325,8 +344,11 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 module = [
     "bs4",
+    "cmarkgfm",
+    "cmarkgfm.*",
     "Cryptodome.*",
     "ecdsa",
+    "google.protobuf.unknown_fields",
     "h2",
     "selenium",
     "selenium.*",
@@ -389,10 +411,24 @@ skip_covered = true
 # map_view hardening series (non-finite coordinate skip, recorder fallback,
 # date-filter clearing and the _plus_code_for defensive-branch tests);
 # measured CI total is 75.40 %, so ~0.40 Pp headroom here.
-fail_under = 75
+# Raised to 77 per maintainer request to lock in the coverage gained across the
+# single-reload-owner series (reload-latch classifier, the two direct reload
+# gates and the refused-hand-off dead ends); measured CI total is 77.72 % on
+# c7443b47, so ~0.72 Pp headroom here. Keep in step with the CI-side
+# --cov-fail-under flag: tests/test_platinum_compliance.py asserts the two
+# gates declare the same floor.
+# Raised to 78 per maintainer request to lock in the coverage gained across the
+# subentry-deletion type-axis series (owner-key ranking, the type guard and the
+# frozen-observation regression tests); measured CI total is 78.36 % on
+# 04a66fc2, so ~0.36 Pp headroom here.
+# Raised to 80 per maintainer request after `if TYPE_CHECKING:` blocks left the
+# coverage denominator (#1283); measured CI total is 80.33 % on c972fd34, so
+# ~0.33 Pp headroom here.
+fail_under = 80
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
+    "if TYPE_CHECKING:",
 ]
 
 [tool.coverage.paths]
@@ -492,8 +528,8 @@ max-branches = 20
 max-statements = 100
 
 [tool.codespell]
-skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.pyi,translations,*.proto,*_pb2.py,package-lock.json"
-ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-emptive,titel"
+skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.pyi,translations,*.proto,*_pb2.py,package-lock.json,custom_components/googlefindmy/vendor"
+ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-empt,pre-empted,pre-empting,pre-emptive,pre-emptively,pre-empts,titel"
 check-filenames = true
 
 [tool.bandit]

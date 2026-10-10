@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/fmdn_finder/ble_scanner.py
 """Optional HA-Bluetooth FMDN advertisement listener.
 
 Registers a callback on Home Assistant's built-in Bluetooth scanner to capture
@@ -26,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..const import DATA_EID_RESOLVER, DOMAIN
 from ..eid_resolver import FMDN_FRAME_TYPE, MODERN_FRAME_TYPE
+from .location_uploader import _mask_address_for_logs
 
 if TYPE_CHECKING:
     from homeassistant.core import CALLBACK_TYPE, HomeAssistant
@@ -114,7 +116,15 @@ async def async_setup_ble_scanner(hass: HomeAssistant) -> bool:
         ble_address = service_info.address
         rssi = service_info.rssi
 
-        match = resolver.resolve_eid(payload, ble_address=ble_address)
+        # ``service_info.time`` is the advertisement time (monotonic clock).
+        # It matters because HA does not only deliver live advertisements:
+        # on registration it replays the last advertisement of every known
+        # address (up to 15 minutes old for non-connectable sources), and it
+        # restores that history across restarts. Without the timestamp the
+        # resolver would date every replayed sighting "now".
+        match = resolver.resolve_eid(
+            payload, ble_address=ble_address, observed_at=service_info.time
+        )
 
         if match is not None:
             _LOGGER.debug(
@@ -132,14 +142,22 @@ async def async_setup_ble_scanner(hass: HomeAssistant) -> bool:
             # Rate-limited debug log for unresolved advertisements.
             prefix = payload[:4].hex()
             now = time.monotonic()
-            last = unresolved_log_at.get(prefix, 0.0)
-            if now - last >= _UNRESOLVED_LOG_INTERVAL:
+            # The first sighting of a prefix always logs. A default of 0.0
+            # would suppress it whenever the monotonic clock is still below
+            # the interval (a freshly booted host or CI runner).
+            last = unresolved_log_at.get(prefix)
+            if last is None or now - last >= _UNRESOLVED_LOG_INTERVAL:
                 unresolved_log_at[prefix] = now
+                # An advertisement that did not resolve belongs to somebody
+                # else's tracker until proven otherwise: its MAC is class (c)
+                # (AGENTS.md section 5) and is logged masked. The resolved
+                # branch above logs the MAC of the user's own tracker in full,
+                # class (a), because it rotates with the EID.
                 _LOGGER.debug(
                     "BLE scan: unresolved FMDN adv prefix=%s "
                     "mac=%s rssi=%d frame=0x%02x len=%d",
                     prefix,
-                    ble_address,
+                    _mask_address_for_logs(ble_address),
                     rssi,
                     frame_type if frame_type is not None else 0,
                     len(payload),
@@ -150,14 +168,30 @@ async def async_setup_ble_scanner(hass: HomeAssistant) -> bool:
     # checking service_data for FEAA/FE2C.  Using BluetoothScanningMode.PASSIVE
     # avoids requesting active scans (no extra power draw).
     #
-    # Note: HA's async_register_callback does not support service_data UUID
-    # filtering natively, so we pass no matcher and filter ourselves.
-    # The overhead is minimal — the callback returns immediately for
-    # non-FMDN advertisements after a single dict lookup.
+    # Note: HA's matcher accepts a single ``service_data_uuid`` per
+    # registration. FMDN advertises under FEAA or FE2C, so instead of two
+    # registrations we accept every advertisement and filter in the callback.
+    #
+    # A falsy matcher (e.g. None) is NOT "match everything" — HA's
+    # BluetoothManager treats it as {"connectable": True}
+    # (homeassistant/components/bluetooth/manager.py), which silently drops
+    # every advertisement relayed through a non-connectable source. Shelly
+    # proxies always register as non-connectable (aioshelly creates the
+    # scanner with connectable=False). ESPHome proxies are connectable when
+    # built with ``active: true`` (the ESP32/RP2 default) and non-connectable
+    # with ``active: false`` or on advertisement-only hubs (bleak_esphome
+    # derives the flag from BluetoothProxyFeature.ACTIVE_CONNECTIONS).
+    # habluetooth only surfaces a non-connectable advertisement as connectable
+    # (``_as_connectable``) while a still-registered connectable scanner holds
+    # an unexpired history entry for the same address, so trackers heard
+    # solely by non-connectable proxies never reached this callback.
+    # Explicitly passing connectable=False disables that filter, so
+    # local-radio and every proxy-relayed advertisement reach us; the history
+    # replay HA performs on registration now covers all sources as well.
     unsub: CALLBACK_TYPE = async_register_callback(
         hass,
         _fmdn_advertisement_callback,
-        None,  # No matcher — we filter inside the callback
+        {"connectable": False},
         BluetoothScanningMode.PASSIVE,
     )
 

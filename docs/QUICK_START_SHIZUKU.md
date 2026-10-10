@@ -169,7 +169,7 @@ tail -f /home/homeassistant/.homeassistant/home-assistant.log | grep -i fmdn
 # Expected output when Bermuda detects FMDN beacon:
 # INFO: FMDN Finder enabled - will upload location reports
 # DEBUG: FMDN beacon detected: entity=sensor.bermuda_fmdn_pixel_buds, EID=0123abcd...
-# DEBUG: Resolved location: lat=52.520008, lon=13.404954, accuracy=50m, zone=living_room
+# DEBUG: Resolved location (coordinates omitted): accuracy=50m, zone=living_room
 # INFO: Uploading FMDN location report: EID=0123abcd..., zone=living_room, accuracy=50m
 # INFO: FMDN location report uploaded successfully for EID 0123abcd...
 ```
@@ -369,7 +369,7 @@ Next steps:
 # Successful upload logs:
 2026-01-02 14:23:45 INFO [googlefindmy.fmdn_finder] FMDN Finder enabled - will upload location reports for FMDN beacons detected by Bermuda
 2026-01-02 14:24:12 DEBUG [googlefindmy.fmdn_finder.bermuda_listener] FMDN beacon detected: entity=sensor.bermuda_fmdn_pixel_buds, EID=0123abcd...
-2026-01-02 14:24:12 DEBUG [googlefindmy.fmdn_finder.location_uploader] Resolved location: lat=52.520008, lon=13.404954, accuracy=50m, zone=living_room
+2026-01-02 14:24:12 DEBUG [googlefindmy.fmdn_finder.location_uploader] Resolved location (coordinates omitted): accuracy=50m, zone=living_room
 2026-01-02 14:24:13 INFO [googlefindmy.fmdn_finder.location_uploader] Uploading FMDN location report: EID=0123abcd..., zone=living_room, accuracy=50m
 2026-01-02 14:24:14 INFO [googlefindmy.fmdn_finder.google_uploader] FMDN location report uploaded successfully for EID 0123abcd...
 ```

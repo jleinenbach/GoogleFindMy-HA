@@ -3,12 +3,20 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
+import json
 import logging
+import math
 import os
+import pathlib
 import platform
+import shutil
+import signal
 import subprocess
 import sys
+import time
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -70,10 +78,23 @@ def _reset_uc(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_get_options_headless_uses_expected_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ensure headless options populate the expected Chrome arguments."""
+    """Ensure headless options populate the expected Chrome arguments.
+
+    The list is frozen deliberately, including the last two entries. Those relax
+    the browser's origin isolation and are periodically proposed for removal;
+    ``chrome_driver.get_options`` carries the reasoning. Short version: they only
+    ever apply to the manual, user-started extraction browser, never to a Home
+    Assistant runtime, and removing them cannot be verified without a real Google
+    sign-in with 2FA. If this assertion fails, the flags were changed without
+    that measurement.
+    """
 
     uc_module = chrome_driver._get_uc_module()
     monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    # The frozen list only holds if the ambient environment does not add to it:
+    # a developer with the locale variable exported would see this fail for a
+    # reason that has nothing to do with the flags it guards.
+    monkeypatch.delenv(chrome_driver.ENV_LOGIN_LOCALE, raising=False)
 
     options = chrome_driver.get_options(headless=True)
 
@@ -321,6 +342,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("GOOGLEFINDMY_CHROME_PATH", raising=False)
     monkeypatch.delenv("GOOGLEFINDMY_CHROME_VERSION", raising=False)
+    # Neutralize the container signal so the non-container kill/teardown tests
+    # observe the cleanup path regardless of the ambient environment; tests that
+    # exercise the container guard set it explicitly.
+    monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -635,19 +660,45 @@ def test_get_chrome_version_windows_prefer_binary_skips_registry(
 # ---------------------------------------------------------------------------
 
 
+def _stub_pgrep(
+    monkeypatch: pytest.MonkeyPatch, pids: list[int]
+) -> tuple[list[list[str]], list[tuple[int, int]]]:
+    """Route ``pgrep`` to *pids* and record every signal that is sent.
+
+    Returns ``(recorded_commands, recorded_kills)``. The stub answers with a
+    complete ``CompletedProcess`` shape on purpose: an incomplete stub would
+    raise ``AttributeError`` inside the helper, and both call sites swallow
+    exceptions for best-effort cleanup -- the test would then pass while
+    exercising nothing.
+    """
+
+    commands: list[list[str]] = []
+    kills: list[tuple[int, int]] = []
+
+    def _fake_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        commands.append(cmd)
+        return SimpleNamespace(
+            returncode=0 if pids else 1,
+            stdout="".join(f"{pid}\n" for pid in pids),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    return commands, kills
+
+
 def test_kill_existing_chrome_processes_non_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[list[str]] = []
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(chrome_driver.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(
-        subprocess, "run", lambda cmd, **k: calls.append(cmd) or SimpleNamespace()
-    )
+    calls, kills = _stub_pgrep(monkeypatch, [4242])
 
     chrome_driver._kill_existing_chrome_processes()
 
-    assert calls == [["pkill", "-f", "chrome"]]
+    assert calls == [["pgrep", "-f", "chrome"]]
+    assert kills == [(4242, signal.SIGTERM)]
 
 
 def test_kill_existing_chrome_processes_windows(
@@ -663,6 +714,604 @@ def test_kill_existing_chrome_processes_windows(
     chrome_driver._kill_existing_chrome_processes()
 
     assert calls == [["taskkill", "/f", "/im", "chrome.exe"]]
+
+
+def test_kill_existing_chrome_processes_spares_self_and_ancestors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the cleanup must never signal itself or one of its ancestors.
+
+    ``pkill -f chrome`` matches the *full command line*, so any process that
+    merely carries the word in its argv is a target -- including the caller's
+    own ancestry.  Measured on 2026-07-28: a pytest run that received
+    ``tests/test_chrome_driver.py`` as an argument died with exit 143
+    (SIGTERM) at exactly the test that spawns ``main`` as a subprocess.  The
+    A/B control differed only by a ``-k`` filter that matched nothing, i.e. by
+    the word in argv alone: without it exit 0, with it exit 143.  The grandchild
+    shot its grandparent.
+    """
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(chrome_driver.time, "sleep", lambda _s: None)
+
+    run_commands: list[list[str]] = []
+    own_pid = os.getpid()
+    parent_pid = os.getppid()
+
+    def _fake_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        run_commands.append(cmd)
+        # Emulate pgrep: the pattern matches our own ancestry *and* a stranger.
+        return SimpleNamespace(
+            returncode=0, stdout=f"{own_pid}\n{parent_pid}\n4242\n", stderr=""
+        )
+
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    chrome_driver._kill_existing_chrome_processes()
+
+    assert not any("pkill" in cmd for cmd in run_commands), (
+        f"the broad pattern kill must be gone; commands were {run_commands}"
+    )
+    assert killed == [(4242, signal.SIGTERM)], (
+        f"only the stranger may be signalled, got {killed}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ancestry-aware process cleanup helpers
+# ---------------------------------------------------------------------------
+
+
+def test_protected_pids_contains_self_parent_and_init() -> None:
+    """No mocks: the real ``/proc`` walk must reach the whole ancestry."""
+
+    protected = chrome_driver._protected_pids()
+
+    assert os.getpid() in protected
+    assert os.getppid() in protected
+    assert 1 in protected, f"the walk stopped early: {sorted(protected)}"
+
+
+def test_protected_pids_falls_back_to_ps_without_proc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``/proc`` (macOS) the ancestry comes from a single ``ps`` call.
+
+    The table starts at the *real* parent PID on purpose: a walk that uses the
+    protected set as its cycle guard aborts on the first step (the parent is
+    pre-seeded) and would silently return a two-element set.
+    """
+
+    own = os.getpid()
+    real_parent = os.getppid()
+    table = f"{own} {real_parent}\n{real_parent} 400\n400 1\n1 0\n"
+    monkeypatch.setattr(os.path, "isdir", lambda path: False)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
+    )
+
+    protected = chrome_driver._protected_pids()
+
+    assert {own, real_parent, 400, 1} <= protected
+
+
+def test_protected_pids_refuses_a_cyclic_ppid_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cycle terminates the walk *and* invalidates the answer.
+
+    A loop proves the PPID data is inconsistent, not that the chain was walked
+    to PID 1: some ancestor above the loop is missing from the set, and
+    signalling it is precisely the failure this helper prevents. Returning the
+    partial set would look like protection while being none.
+    """
+
+    own = os.getpid()
+    table = f"{own} 5\n5 7\n7 5\n"
+    monkeypatch.setattr(os.path, "isdir", lambda path: False)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
+    )
+
+    assert chrome_driver._protected_pids() is None
+
+
+def test_read_ppid_from_proc_returns_none_without_a_ppid_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A status file without a ``PPid:`` line is unknown, not an error."""
+
+    status = tmp_path / "status"
+    status.write_text("Name:\tsomething\nState:\tS (sleeping)\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "builtins.open", lambda _path, **_k: status.open(encoding="utf-8")
+    )
+
+    assert chrome_driver._read_ppid_from_proc(4242) is None
+
+
+def test_protected_pids_stops_at_the_depth_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pathologically deep chain terminates at the limit and refuses to answer.
+
+    Synthetic PIDs start far above ``pid_max`` defaults so they cannot collide
+    with this process' real parent, which would make the assertion flaky.
+    """
+
+    own = os.getpid()
+    depth = chrome_driver._ANCESTRY_MAX_DEPTH
+    base = 10**7
+    chain = {own: base}
+    chain.update({base + step: base + 1 + step for step in range(depth + 10)})
+    table = "".join(f"{pid} {ppid}\n" for pid, ppid in chain.items())
+
+    monkeypatch.setattr(os.path, "isdir", lambda path: False)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
+    )
+
+    # A chain that never reaches PID 1 within the limit is an incomplete answer,
+    # and an incomplete ancestry filter is what the fix exists to prevent.
+    assert chrome_driver._protected_pids() is None
+
+
+def test_protected_pids_returns_none_when_the_chain_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable ancestry (hidepid, no ps) yields ``None``, not a partial set.
+
+    A partial set is the dangerous answer: it looks like protection while the
+    grandparent -- the process that actually died in the measured incident -- is
+    already unprotected.
+    """
+
+    monkeypatch.setattr(os.path, "isdir", lambda path: True)
+    monkeypatch.setattr(chrome_driver, "_read_ppid_from_proc", lambda _pid: None)
+
+    def _no_ps(*_a: Any, **_k: Any) -> Any:
+        raise FileNotFoundError("ps missing")
+
+    monkeypatch.setattr(subprocess, "run", _no_ps)
+
+    assert chrome_driver._protected_pids() is None
+
+
+def test_protected_pids_falls_back_to_ps_when_proc_entry_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/proc`` present but an entry unreadable: ``ps`` completes the chain."""
+
+    own = os.getpid()
+    real_parent = os.getppid()
+    table = f"{own} {real_parent}\n{real_parent} 400\n400 1\n1 0\n"
+
+    monkeypatch.setattr(os.path, "isdir", lambda path: True)
+    monkeypatch.setattr(chrome_driver, "_read_ppid_from_proc", lambda _pid: None)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
+    )
+
+    protected = chrome_driver._protected_pids()
+
+    assert protected is not None
+    assert {own, real_parent, 400, 1} <= protected
+
+
+def test_terminate_matching_processes_signals_nothing_on_unknown_ancestry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With an unresolvable ancestry the cleanup is skipped, not run blindly."""
+
+    monkeypatch.setattr(chrome_driver, "_protected_pids", lambda: None)
+    monkeypatch.setattr(
+        chrome_driver,
+        "_pgrep_pids",
+        lambda _p: pytest.fail("pgrep must not even be consulted"),
+    )
+
+    def _forbidden(_pid: int, _sig: int) -> None:
+        pytest.fail("nothing may be signalled without a complete ancestry")
+
+    monkeypatch.setattr(os, "kill", _forbidden)
+
+    assert chrome_driver._terminate_matching_processes("chrome") == 0
+
+
+def test_ppid_map_from_ps_ignores_malformed_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(
+            returncode=0, stdout="10 4\nnot a row\n\n20 x\n30 6\n", stderr=""
+        ),
+    )
+
+    assert chrome_driver._ppid_map_from_ps() == {10: 4, 30: 6}
+
+
+def test_ppid_map_from_ps_returns_empty_without_ps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise FileNotFoundError("ps missing")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    assert chrome_driver._ppid_map_from_ps() == {}
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (0, "111\n222\n", [111, 222]),
+        (1, "", []),  # pgrep's "no match" is not an error
+        (0, "111\nrubbish\n222\n", [111, 222]),
+        (2, "111\n", []),  # a real failure yields nothing
+    ],
+)
+def test_pgrep_pids_parses_output(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    expected: list[int],
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(
+            returncode=returncode, stdout=stdout, stderr=""
+        ),
+    )
+
+    assert chrome_driver._pgrep_pids("chrome") == expected
+
+
+def test_pgrep_pids_returns_empty_without_pgrep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise FileNotFoundError("pgrep missing")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    assert chrome_driver._pgrep_pids("chrome") == []
+
+
+def test_terminate_matching_processes_skips_pid_one_and_vanished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PID 1 is never a target, and a process that dies mid-flight is no error."""
+
+    monkeypatch.setattr(chrome_driver, "_protected_pids", lambda: frozenset({99}))
+    monkeypatch.setattr(chrome_driver, "_pgrep_pids", lambda _p: [1, 99, 500, 501])
+
+    kills: list[int] = []
+
+    def _kill(pid: int, _sig: int) -> None:
+        if pid == 500:
+            raise ProcessLookupError
+        kills.append(pid)
+
+    monkeypatch.setattr(os, "kill", _kill)
+
+    assert chrome_driver._terminate_matching_processes("chrome") == 1
+    assert kills == [501]
+
+
+def test_terminate_matching_processes_tolerates_permission_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _nothing_protected() -> frozenset[int]:
+        return frozenset()
+
+    monkeypatch.setattr(chrome_driver, "_protected_pids", _nothing_protected)
+    monkeypatch.setattr(chrome_driver, "_pgrep_pids", lambda _p: [700])
+
+    def _kill(_pid: int, _sig: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "kill", _kill)
+
+    assert chrome_driver._terminate_matching_processes("chrome") == 0
+
+
+# The probe below spans three nested processes, each waiting on the next. Their
+# budgets are staggered on purpose: equal budgets would let the outermost fire
+# first every time, which kills only the outermost process and leaves the two
+# inner ones orphaned -- still signalling, and without their own diagnosis.
+_PGREP_VISIBILITY_TIMEOUT = 30.0
+_PROBE_CHAIN_TIMEOUT = 60
+_RELAY_TIMEOUT = _PROBE_CHAIN_TIMEOUT - 10
+_CLEANUP_TIMEOUT = _PROBE_CHAIN_TIMEOUT - 20
+_KILL_PROBE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "kill_probe"
+# The stranger has to stay alive until the cleanup asks pgrep, which is at worst
+# the visibility wait plus the outer chain budget. The two ``wait(timeout=10)``
+# calls afterwards only wait for its *death* and add nothing here. ``ceil``
+# rather than ``int`` so a fractional visibility budget cannot shrink the margin.
+_STRANGER_LIFETIME = math.ceil(_PGREP_VISIBILITY_TIMEOUT) + _PROBE_CHAIN_TIMEOUT + 60
+
+
+def _wait_until_pgrep_sees(
+    marker: str, pid: int, timeout: float = _PGREP_VISIBILITY_TIMEOUT
+) -> None:
+    """Block until ``pgrep -f marker`` reports *pid*, or fail saying exactly that.
+
+    ``Popen`` returns as soon as the child is forked, and until it reaches ``exec``
+    its command line is still the parent's, so it does not carry *marker* yet.
+    Searching inside that window finds nothing, which at the assertions below is
+    indistinguishable from "the cleanup spared it" -- the failure then blames the
+    ancestry filter for a process that was merely not visible yet.
+
+    This asks ``pgrep`` directly instead of going through
+    ``chrome_driver._pgrep_pids``: that helper is the code under test here, and a
+    wait built on it would fall silent together with it.
+    """
+
+    deadline = time.monotonic() + timeout
+    answers = 0
+    lookup_timeouts = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            # Capped by the remaining budget: a fixed per-call timeout could
+            # outlast the deadline and replace the message below with a bare
+            # TimeoutExpired, which says nothing about visibility.
+            found = subprocess.run(  # noqa: S603 - fixed argv, generated marker
+                ["pgrep", "-f", marker],
+                capture_output=True,
+                text=True,
+                timeout=min(10.0, remaining),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            # Measured on a loaded host (load average 17): pgrep itself can run
+            # for seconds. Counting these apart matters, because a run in which
+            # every lookup timed out never established anything about the
+            # process, and saying "never became visible" there would be a lie.
+            lookup_timeouts += 1
+            continue
+        answers += 1
+        if str(pid) in found.stdout.split():
+            return
+        time.sleep(0.05)
+    if answers == 0:
+        raise AssertionError(
+            f"pgrep never answered within {timeout}s ({lookup_timeouts} lookups "
+            f"timed out), so nothing is known about pid {pid}"
+        )
+    raise AssertionError(
+        f"the stranger (pid {pid}) never became visible to pgrep within {timeout}s "
+        f"({answers} answered lookups, {lookup_timeouts} timed out)"
+    )
+
+
+def _decode_probe_report(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    """Parse the cleanup child's JSON line, or fail naming what it printed.
+
+    The predecessor of this helper decoded ``result.stdout.strip() or "{}"``, so
+    a child that printed nothing yielded an empty mapping and the first assertion
+    below blamed the ancestry walk for a child that never got that far. Here a
+    silent child says so, and says what it wrote instead.
+    """
+
+    tail = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    try:
+        report = json.loads(tail)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"the cleanup child printed no usable report ({exc}); "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        ) from exc
+    if not isinstance(report, dict):
+        raise AssertionError(f"the report is not an object: {report!r}")
+    return report
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process semantics")
+@pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep not available")
+def test_terminate_matching_processes_spares_its_own_grandparent() -> None:
+    """End-to-end without mocks: the grandparent survives, a stranger dies.
+
+    Reproduction of the measured case, at its real depth: pytest -> CLI
+    subprocess -> cleanup. Every level passes the marker on as an argument, so
+    every level carries it in its argv; what makes the case is the *distance*,
+    not marker scarcity. The grandchild runs the cleanup for that very marker,
+    and before the fix this was fatal (measured as exit 143 on a pytest run).
+
+    The depth matters. A two-level version (parent -> child) would pass even with
+    the whole ancestry walk deleted, because ``_protected_pids`` seeds itself with
+    ``os.getppid()``; only from the grandparent upwards does the walk carry the
+    result. Verified by mutation: removing the walk keeps a two-level test green
+    and turns this one red.
+
+    A ``stranger`` with the same marker proves the cleanup still terminates
+    unrelated processes: the fix must be a filter, not an off switch. A unique
+    UUID marker is used instead of ``chrome`` so nothing else on the machine can
+    be hit.
+    """
+
+    marker = f"gfmy-kill-probe-{uuid.uuid4().hex}"
+
+    # The three links live in tests/fixtures/kill_probe/ so ruff reads them like
+    # any other test module. Level 3 (cleanup.py) runs the cleanup for a marker
+    # its own argv carries too and reports the very calls that decided the
+    # kill. Levels 1 and 2 are the same relay script with staggered budgets:
+    # the outermost link is the one only a complete ancestry walk can reach,
+    # the middle one buys the distance to the cleanup. The marker travels down
+    # from the outermost link, which is why every link carries it.
+    relay = str(_KILL_PROBE_DIR / "relay.py")
+    cleanup = str(_KILL_PROBE_DIR / "cleanup.py")
+
+    sleeper = f"import sys, time; time.sleep({_STRANGER_LIFETIME})"
+    stranger = subprocess.Popen(  # noqa: S603 - fixed interpreter, generated marker
+        [sys.executable, "-c", sleeper, marker],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_until_pgrep_sees(marker, stranger.pid)
+        # pgrep returns the whole three-level chain plus the stranger (measured:
+        # four). Nothing but the ancestry walk keeps the chain alive.
+        result = subprocess.run(  # noqa: S603 - fixed interpreter, generated files
+            [
+                sys.executable,
+                relay,
+                str(_RELAY_TIMEOUT),
+                relay,
+                str(_CLEANUP_TIMEOUT),
+                cleanup,
+                marker,
+                str(stranger.pid),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_CHAIN_TIMEOUT,
+            check=False,
+        )
+
+        assert result.returncode != -signal.SIGTERM, (
+            "the grandparent was killed by its own grandchild: "
+            f"rc={result.returncode} stderr={result.stderr}"
+        )
+        assert result.returncode == 0, (
+            "the probe chain failed before it could report; this is not a kill "
+            "(that is the assertion above) but a broken child. "
+            f"rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr}"
+        )
+        report = _decode_probe_report(result)
+        assert report.get("protected") is not None, (
+            "the ancestry walk bailed out, so the cleanup skipped every process "
+            "without looking at one; this is not 'the stranger survived'. "
+            f"report={report}"
+        )
+        assert report.get("protected", -1) >= 4, (
+            "the ancestry the cleanup actually used is shorter than the four "
+            "entries this construction guarantees (cleanup, relay, grandparent, "
+            "and whatever started the chain), so the walk stopped early; -1 means "
+            "it was never run. Length alone does not prove the grandparent was in "
+            "it -- that is what the return code above shows. "
+            f"report={report}"
+        )
+        assert report.get("pgrep_calls") == 1, (
+            "the cleanup looked up the candidates more than once, so the counts "
+            f"below describe the last lookup, not the deciding one. report={report}"
+        )
+        assert report.get("seen") == 4, (
+            "pgrep did not return exactly the four marked processes (grandparent, "
+            "relay, cleanup, stranger). Three things carry that number, and a "
+            "failure here means one of them broke: the marker is a fresh uuid so "
+            "nothing foreign can join, the stranger outlives the whole probe by "
+            "_STRANGER_LIFETIME so it cannot drop out, and pgrep excludes its own "
+            "marker-bearing argv. "
+            f"report={report}"
+        )
+        assert report.get("stranger_seen") is True, (
+            "the stranger was not among the candidates, so sparing it proves "
+            f"nothing about the ancestry filter. report={report}"
+        )
+        assert report.get("signalled") == 1, (
+            f"the stranger should have been signalled exactly once, report={report}"
+        )
+        assert stranger.wait(timeout=10) != 0
+    finally:
+        if stranger.poll() is None:  # pragma: no cover - cleanup path
+            stranger.kill()
+            stranger.wait(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# _is_container_login / container pre-kill + teardown guard (regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("1", True), ("0", False), ("", False), (None, False)],
+)
+def test_is_container_login_reads_env(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
+) -> None:
+    """The container signal is the exact string ``"1"`` in the shared env var."""
+
+    if value is None:
+        monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
+    else:
+        monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", value)
+
+    assert chrome_driver._is_container_login() is expected
+
+
+def test_kill_existing_chrome_processes_skipped_in_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: inside the docker-login container the broad Chrome pre-kill
+    must be skipped.
+
+    In the ``selenium/standalone-chrome`` base image matching ``chrome`` against
+    the full command line hits the Java Selenium Grid node, and its exit makes
+    supervisord tear the whole stack down (crash log:
+    ``selenium-standalone (exit status 143)`` -> ``received SIGINT`` ->
+    noVNC/vnc/xvfb stopped). Without the guard this test fails because
+    ``subprocess.run`` is invoked.
+
+    The ancestry filter added later does not replace this guard: the Grid node is
+    a sibling under supervisord, not an ancestor, so it would not be spared.
+    """
+
+    monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("no process lookup may run inside the container"),
+    )
+
+    # Must be a no-op on the kill path (no subprocess call, no raise).
+    chrome_driver._kill_existing_chrome_processes()
+
+
+def test_safe_quit_driver_skips_force_kill_in_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the teardown chromedriver force-kill is skipped in the
+    container too, so it cannot collapse the shared Selenium/noVNC stack; the
+    driver is still quit normally.
+    """
+
+    monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: pytest.fail(
+            "chromedriver force-kill must not run inside the container"
+        ),
+    )
+
+    quit_calls = {"n": 0}
+
+    class _Driver:
+        def quit(self) -> None:
+            quit_calls["n"] += 1
+
+    chrome_driver.safe_quit_driver(_Driver())  # type: ignore[arg-type]
+
+    assert quit_calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -921,11 +1570,8 @@ def test_safe_quit_driver_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_safe_quit_driver_normal_non_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[list[str]] = []
     monkeypatch.setattr(platform, "system", lambda: "Linux")
-    monkeypatch.setattr(
-        subprocess, "run", lambda cmd, **k: calls.append(cmd) or SimpleNamespace()
-    )
+    calls, kills = _stub_pgrep(monkeypatch, [4243])
 
     quit_calls = {"n": 0}
 
@@ -936,7 +1582,8 @@ def test_safe_quit_driver_normal_non_windows(
     chrome_driver.safe_quit_driver(_Driver())  # type: ignore[arg-type]
 
     assert quit_calls["n"] == 1
-    assert calls == [["pkill", "-f", "chromedriver"]]
+    assert calls == [["pgrep", "-f", "chromedriver"]]
+    assert kills == [(4243, signal.SIGTERM)]
 
 
 def test_safe_quit_driver_oserror_is_handled(
@@ -1572,8 +2219,15 @@ def test_create_driver_uses_webdriver_manager_fallback(
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
     monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
+    # ``**_`` rather than the signature of the day: this test cares that the
+    # fallback is reached, not how it is parameterised. Pinning the keywords
+    # here made a later, unrelated parameter surface as a TypeError raised from
+    # inside the code under test -- a failure of the double reported as a
+    # failure of the chain.
     monkeypatch.setattr(
-        chrome_driver, "_try_webdriver_manager_fallback", lambda: fallback_driver
+        chrome_driver,
+        "_try_webdriver_manager_fallback",
+        lambda **_: fallback_driver,
     )
 
     assert chrome_driver.create_driver(headless=True) is fallback_driver
@@ -1735,3 +2389,544 @@ def test_create_driver_inner_all_file_lock_raises_permission_on_windows(
 
     with pytest.raises(PermissionError, match="file lock"):
         chrome_driver._create_driver_inner(headless=True)
+
+
+class _FakeCapsDriver:
+    """Minimal WebDriver stand-in exposing a ``capabilities`` mapping."""
+
+    def __init__(self, capabilities: object) -> None:
+        self.capabilities = capabilities
+
+    def quit(self) -> None:  # pragma: no cover - success path never quits
+        """No-op quit for API compatibility."""
+
+
+def test_version_guard_warns_on_driver_chrome_major_mismatch(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A live session whose ChromeDriver major differs from Chrome logs a warning."""
+
+    driver = _FakeCapsDriver(
+        {
+            "browserVersion": "150.0.7258.66",
+            "chrome": {"chromedriverVersion": "151.0.7300.0 (abcdef)"},
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=150)
+
+    assert any(
+        "does not match the running Chrome major" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_version_guard_silent_when_majors_match(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Chrome 150 with ChromeDriver 150 emits no warning (the good case)."""
+
+    driver = _FakeCapsDriver(
+        {
+            "browserVersion": "150.0.7258.66",
+            "chrome": {"chromedriverVersion": "150.0.7258.66 (abcdef)"},
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=150)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_version_guard_defensive_on_incomplete_capabilities(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Missing capability keys degrade to a debug log and never raise or warn."""
+
+    driver = _FakeCapsDriver({"browserVersion": "150.0.7258.66"})  # no chrome key
+    with caplog.at_level(logging.WARNING, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=None)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("150.0.7258.66", 150),
+        ("150.0.7258.66 (abcdef)", 150),
+        ("not-a-version", None),
+        ("", None),
+        (150, None),  # not a string
+    ],
+)
+def test_major_from_version_string_parses_or_degrades(
+    value: object, expected: int | None
+) -> None:
+    """Unparseable capability strings degrade to ``None`` instead of raising.
+
+    Pre-existing gap picked up in the open diff (code-architekt rule 20): the
+    ``ValueError`` branch had no test, and covering it costs one parametrisation.
+    """
+
+    assert chrome_driver._major_from_version_string(value) == expected
+
+
+def test_version_guard_debug_logs_a_stale_detected_major(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Driver and session agree, but the earlier detection disagreed: debug only."""
+
+    driver = _FakeCapsDriver(
+        {
+            "browserVersion": "150.0.7258.66",
+            "chrome": {"chromedriverVersion": "150.0.7258.66 (abcdef)"},
+        }
+    )
+    with caplog.at_level(logging.DEBUG, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=149)
+
+    assert any(
+        "differs from the live session's Chrome" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_version_guard_never_raises_on_a_hostile_driver(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A capabilities property that raises must not break driver creation."""
+
+    class _ExplodingDriver:
+        @property
+        def capabilities(self) -> dict[str, Any]:
+            raise RuntimeError("capabilities unavailable")
+
+    with caplog.at_level(logging.DEBUG, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(
+            _ExplodingDriver(),  # type: ignore[arg-type]
+            detected_version=150,
+        )
+
+    assert any(
+        "Post-construction version guard skipped" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_create_driver_warns_but_returns_on_version_mismatch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A successful driver with a mismatched major is warned about, not rejected.
+
+    Regression for the post-construction version guard: Chrome 150 with a
+    ChromeDriver 151 must still return the working driver (the runtime guard is
+    non-fatal) while surfacing the actionable warning.
+    """
+
+    fake_driver = _FakeCapsDriver(
+        {
+            "browserVersion": "150.0.7258.66",
+            "chrome": {"chromedriverVersion": "151.0.7300.0 (abcdef)"},
+        }
+    )
+    monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
+    monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: 150)
+    monkeypatch.delenv("GOOGLEFINDMY_CHROME_PATH", raising=False)
+    monkeypatch.delenv("GOOGLEFINDMY_CHROME_VERSION", raising=False)
+
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.setattr(
+        uc_module, "Chrome", lambda *, options, version_main=None, **k: fake_driver
+    )
+
+    with caplog.at_level(logging.WARNING, logger=chrome_driver.LOGGER.name):
+        result = chrome_driver.create_driver(headless=True)
+
+    assert result is fake_driver
+    assert any(
+        "does not match the running Chrome major" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+# --- Login language ------------------------------------------------------------
+#
+# The container login used to show Google's sign-in page in English no matter who
+# was looking at it, because Chrome inherits no language in a bare image. The
+# variable below lets a user hand their own language in. The tests pin the two
+# halves of the promise: opting in localises both the browser and the request,
+# and staying silent changes nothing at all.
+
+
+def test_login_locale_adds_both_language_switches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, "de-DE")
+
+    options = chrome_driver.get_options(headless=True)
+
+    # --lang localises Chrome, --accept-lang the page Google serves. One without
+    # the other leaves the user with half a translation.
+    assert "--lang=de-DE" in options.arguments
+    assert "--accept-lang=de-DE" in options.arguments
+
+
+def test_no_locale_leaves_chrome_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default must not choose a language for anyone."""
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.delenv(chrome_driver.ENV_LOGIN_LOCALE, raising=False)
+
+    options = chrome_driver.get_options(headless=True)
+
+    assert not [arg for arg in options.arguments if "lang" in arg]
+
+
+def _fallback_options_with_env(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str | None,
+    *,
+    headless: bool = False,
+    resolved_path: str | None = None,
+) -> FakeChromeOptions:
+    """Run the webdriver-manager fallback and return the options it built.
+
+    Returns the object, not just its argument list, because not every caller
+    preference arrives as an argument: the Chrome binary is an attribute.
+
+    The fallback is strategy 5: it is reached only after the four
+    undetected-chromedriver attempts have failed, which is exactly when nobody
+    is watching closely enough to notice that the sign-in page came back in the
+    wrong language.
+    """
+    built: list[FakeChromeOptions] = []
+
+    def _make_options() -> FakeChromeOptions:
+        options = FakeChromeOptions()
+        built.append(options)
+        return options
+
+    fake_driver = object()
+
+    def _make_chrome(*, service: object, options: object) -> object:
+        # The arguments are read off built[0] further down; pin that this is the
+        # object Chrome actually received, so a builder that constructs two and
+        # passes the wrong one cannot pass by being measured on the right one.
+        assert options is built[0]
+        return fake_driver
+
+    monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", True)
+    monkeypatch.setattr(
+        chrome_driver,
+        "_selenium_webdriver",
+        SimpleNamespace(ChromeOptions=_make_options, Chrome=_make_chrome),
+    )
+    monkeypatch.setattr(
+        chrome_driver, "_chrome_service_cls", lambda path: SimpleNamespace(path=path)
+    )
+    monkeypatch.setattr(
+        chrome_driver,
+        "_chrome_driver_manager_cls",
+        lambda: SimpleNamespace(install=lambda: "/driver"),
+    )
+    if locale is None:
+        monkeypatch.delenv(chrome_driver.ENV_LOGIN_LOCALE, raising=False)
+    else:
+        monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, locale)
+
+    assert (
+        chrome_driver._try_webdriver_manager_fallback(
+            headless=headless, resolved_path=resolved_path
+        )
+        is fake_driver
+    )
+    assert len(built) == 1
+    return built[0]
+
+
+def test_webdriver_manager_fallback_honours_the_login_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strategy 5 builds its own options; the language must survive that.
+
+    Regression for the Codex finding on PR #1261, reviewed at commit 9b20e736
+    and introduced at 9d0a2841: the language was added inside get_options(), so
+    the one path that does not call it silently ignored the variable and served
+    the container default instead.
+    """
+    arguments = _fallback_options_with_env(monkeypatch, "pt-BR").arguments
+
+    assert "--lang=pt-BR" in arguments
+    assert "--accept-lang=pt-BR" in arguments
+
+
+def test_webdriver_manager_fallback_stays_silent_without_a_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opting out has to mean the same thing on every path, too.
+
+    Not a regression test: this one is green before the fix as well, because a
+    path that ignored the variable ignored it in both directions. It is here to
+    stop the fix from over-applying, i.e. from inventing a default language for
+    someone who never asked for one.
+    """
+    arguments = _fallback_options_with_env(monkeypatch, None).arguments
+
+    assert not [arg for arg in arguments if "lang" in arg]
+
+
+def test_webdriver_manager_fallback_rejects_an_invalid_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validation has to hold on this path too, not just by composition.
+
+    The value is spliced into a Chrome command line. That it is validated is
+    covered for the helper in isolation; this pins that the fallback really goes
+    through the validating helper and cannot be handed a second switch.
+    """
+    options = _fallback_options_with_env(monkeypatch, "de-DE --no-sandbox")
+    arguments = options.arguments
+
+    assert not [arg for arg in arguments if "lang" in arg]
+    # Not "--no-sandbox is present": that holds under a successful injection
+    # too, because the smuggled switch would ride inside a *different* element.
+    # What rules injection out is that no element carries a second switch.
+    assert not [arg for arg in arguments if " " in arg], arguments
+
+
+@pytest.mark.parametrize("headless", [False, True])
+def test_webdriver_manager_fallback_follows_the_requested_window_mode(
+    monkeypatch: pytest.MonkeyPatch, headless: bool
+) -> None:
+    """Same finding class as the locale, same answer.
+
+    create_driver(headless=True) reaches strategy 5, and a fallback that opens a
+    visible window fails exactly in the environment that asked for headless,
+    i.e. one without a display.
+    """
+    arguments = _fallback_options_with_env(
+        monkeypatch, None, headless=headless
+    ).arguments
+
+    assert ("--headless" in arguments) is headless
+    assert ("--start-maximized" in arguments) is not headless
+    # --disable-gpu belongs to the headless mode, not to the fallback: it is
+    # what get_options() pairs with --headless unconditionally, and headless
+    # without it is the documented failure combination on older builds and on
+    # Windows. Asserted rather than merely executed, so that dropping it turns
+    # a test red instead of only changing a coverage number.
+    assert ("--disable-gpu" in arguments) is headless
+
+
+@pytest.mark.parametrize("resolved_path", [None, "/opt/portable/chrome"])
+def test_webdriver_manager_fallback_uses_the_resolved_chrome_binary(
+    monkeypatch: pytest.MonkeyPatch, resolved_path: str | None
+) -> None:
+    """Same finding class as the locale, third instance.
+
+    The four earlier strategies all point Chrome at GOOGLEFINDMY_CHROME_PATH.
+    A fallback that does not either starts a different browser than the user
+    chose, or fails outright on a machine whose Chrome is not on PATH -- and it
+    runs precisely when the other four have already failed, so there is nothing
+    behind it to correct the mistake.
+    """
+    options = _fallback_options_with_env(monkeypatch, None, resolved_path=resolved_path)
+
+    assert options.binary_location == resolved_path
+
+
+def test_every_chrome_options_builder_applies_the_login_locale() -> None:
+    """The guard against the finding coming back through a third builder.
+
+    The tests above pin the two builders that exist today. This one pins the
+    rule, by reading the module's own syntax tree: every function that
+    constructs ChromeOptions must also call _apply_login_locale. A future
+    builder that inlines the switches again, or forgets them, is caught even
+    though no test executes it -- which a test that merely counts calls into the
+    two known builders could never do.
+    """
+    tree = ast.parse(pathlib.Path(chrome_driver.__file__).read_text(encoding="utf-8"))
+
+    def _calls(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if isinstance(func, ast.Attribute):
+                names.add(func.attr)
+            elif isinstance(func, ast.Name):
+                names.add(func.id)
+        return names
+
+    builders = {
+        node.name: _calls(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and "ChromeOptions" in _calls(node)
+    }
+
+    # Griff-Kontrolle, in both directions. Non-emptiness alone would still pass
+    # after a builder is renamed out of view, which is the failure this test
+    # exists to notice: it would then report success having lost exactly the
+    # path it was written for. Naming the two known builders costs an update
+    # when one is renamed on purpose -- and that update is the point.
+    assert {"get_options", "_try_webdriver_manager_fallback"} <= builders.keys(), (
+        f"the guard lost its grip: it sees {sorted(builders)}. If a builder was "
+        f"renamed, rename it here too; if one was removed, say so here."
+    )
+
+    missing = sorted(
+        name for name, calls in builders.items() if "_apply_login_locale" not in calls
+    )
+    assert not missing, (
+        f"these builders construct ChromeOptions without applying the user's "
+        f"language: {missing}. Call _apply_login_locale(options, os.environ)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("de", "de"),
+        ("pt-BR", "pt-BR"),
+        # What a shell actually hands out. Accepted and translated rather than
+        # rejected, because this is the value users will copy from `echo $LANG`.
+        ("de_DE.UTF-8", "de-DE"),
+        ("pt_BR@euro", "pt-BR"),
+        ("  fr-CA  ", "fr-CA"),
+    ],
+)
+def test_login_locale_accepts_tags_and_posix_locales(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+) -> None:
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+    assert chrome_driver._login_locale(os.environ) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected", "normalised"),
+    [
+        # Dropped-and-accepted: the suffix is never inspected, so this is the
+        # class the README now names instead of promising a warning for it.
+        ("de-DE.anything", "de-DE", True),
+        ("de_DE.UTF-8", "de-DE", True),
+        # Unchanged input must stay silent: a debug line per call would bury the
+        # one case worth reading.
+        ("pt-BR", "pt-BR", False),
+    ],
+)
+def test_a_shortened_locale_leaves_a_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    raw: str,
+    expected: str,
+    normalised: bool,
+) -> None:
+    """Silent shortening is the half a user cannot otherwise diagnose.
+
+    A rejected value announces itself at warning level. A value that was merely
+    cut short still reaches Chrome, and the surviving tag is already logged by
+    ``_apply_login_locale``; what was missing is the pairing with what the user
+    actually set. Kept at debug because it is a trace, not a problem -- the level
+    is asserted, or the mutation to ``warning`` would pass unnoticed.
+    """
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+
+    with caplog.at_level(logging.DEBUG, logger=chrome_driver.LOGGER.name):
+        assert chrome_driver._login_locale(os.environ) == expected
+
+    said_so = [r for r in caplog.records if "Normalised" in r.getMessage()]
+    assert bool(said_so) is normalised, (
+        f"expected normalisation trace={normalised} for {raw!r}: {caplog.text}"
+    )
+    if normalised:
+        assert said_so[0].levelno == logging.DEBUG, (
+            "the trace must stay at debug: a shortened value is not a problem, "
+            "and a warning here would fire on every well-formed POSIX locale."
+        )
+        # The order carries the meaning: raw -> normalised. Asserting only that
+        # both appear lets the two %r arguments be swapped, which turns the
+        # trace into a claim that the user set the short form and got the long
+        # one -- worse than no line at all.
+        rendered = said_so[0].getMessage()
+        assert rendered.index(repr(raw)) < rendered.index(repr(expected)), rendered
+        # The variable name is the half a user greps for; without it the trace
+        # cannot be found by the person the README sends looking for it.
+        assert chrome_driver.ENV_LOGIN_LOCALE in rendered, rendered
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "German",  # a language name, not a tag
+        "de-DE --no-sandbox",  # the reason this is validated at all
+        "../../etc/passwd",
+        "de;rm -rf /",
+    ],
+)
+def test_a_bad_locale_is_ignored_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, raw: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cosmetic preference must never be able to stop or steer the login.
+
+    The two whitespace-carrying values are the point: the value is spliced into
+    a Chrome command line, so anything that could smuggle a second switch has to
+    be refused rather than passed through.
+    """
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+
+    with caplog.at_level(logging.WARNING):
+        assert chrome_driver._login_locale(os.environ) is None
+
+    if raw.strip():
+        assert chrome_driver.ENV_LOGIN_LOCALE in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw", ["C", "POSIX", "C.UTF-8", "POSIX.UTF-8", "C@euro", "POSIX@x"]
+)
+def test_the_posix_locale_is_no_preference_not_a_broken_one(
+    monkeypatch: pytest.MonkeyPatch, raw: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Half two of the cross-platform opt-out (half one: the launcher test).
+
+    ``C`` is the POSIX locale for "no localisation", so it is a stated absence
+    of a preference, not a typo. Both readings end at ``None``, which is why the
+    SILENCE is the property under test: a warning would tell a user who opted
+    out on purpose that their setting was broken, and this is the only opt-out
+    cmd.exe can express at all -- ``set VAR=`` deletes the name there, so the
+    empty spelling does not exist on that launcher.
+    """
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+
+    with caplog.at_level(logging.WARNING):
+        assert chrome_driver._login_locale(os.environ) is None
+
+    assert not caplog.text, (
+        f"{raw!r} says 'no preference'; warning about it reads as 'your setting "
+        f"was wrong'. got {caplog.text!r}"
+    )
+
+
+@pytest.mark.parametrize("raw", ["ca", "co", "cs", "cy", "Cy-az-AZ"])
+def test_a_real_language_starting_with_c_still_gets_through(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """The no-preference rule must not swallow a language that merely looks alike.
+
+    ``ca`` (Catalan), ``co``, ``cs``, ``cy`` are real tags. A rule written as a
+    prefix rather than a whole-token match would drop every one of them, and the
+    user would see English with no warning to explain it.
+    """
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+
+    assert chrome_driver._login_locale(os.environ) == raw

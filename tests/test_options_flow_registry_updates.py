@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
-from homeassistant.config_entries import ConfigSubentry
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import frame
 
@@ -87,6 +88,7 @@ class _ManagerWithRegistries:
         self.updated: list[tuple[str, dict[str, Any]]] = []
         self.removed: list[str] = []
         self.reloads: list[str] = []
+        self.scheduled_reloads: list[str] = []
         self.setup_calls: list[str] = []
 
     def async_update_entry(self, entry: _EntryStub, *, data: dict[str, Any]) -> None:
@@ -129,14 +131,14 @@ class _ManagerWithRegistries:
 
     def async_add_subentry(self, entry: _EntryStub, subentry: ConfigSubentry) -> None:
         assert entry is self._entry
-        entry.subentries[subentry.subentry_id] = subentry
+        entry.put_subentry(subentry)
         visible = tuple(subentry.data.get("visible_device_ids", ()))
         self.entity_registry.apply(subentry.subentry_id, visible)
         self.device_registry.apply(subentry.subentry_id, visible)
 
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
         assert entry is self._entry
-        removed = entry.subentries.pop(subentry_id, None)
+        removed = entry.discard_subentry(subentry_id)
         if removed is None:
             return False
         self.entity_registry.remove_for_subentry(subentry_id)
@@ -144,7 +146,24 @@ class _ManagerWithRegistries:
         self.removed.append(subentry_id)
         return True
 
+    def async_schedule_reload(self, entry_id: str) -> None:
+        """Record the call; synchronous, like the core's ``@callback``.
+
+        The options steps own their reload through ``_schedule_claimed_reload``
+        rather than awaiting ``async_reload``. A double without this method sends
+        that helper down its "no lever" branch, where it schedules nothing at
+        all, so the absence would make every repair test here pass for the wrong
+        reason.
+        """
+
+        self.scheduled_reloads.append(entry_id)
+
     async def async_reload(self, entry_id: str) -> None:
+        """Kept next to :meth:`async_schedule_reload` as a regression tripwire.
+
+        A later fall back to the awaited variant would otherwise pass silently.
+        """
+
         self.reloads.append(entry_id)
 
     async def async_setup(self, entry_id: str) -> bool:
@@ -215,8 +234,25 @@ class _EntryStub:
         self.title = "Find My"
         self.data: dict[str, Any] = {}
         self.options: dict[str, Any] = {}
-        self.subentries: dict[str, ConfigSubentry] = {}
+        # Read-only like the core's, for the reason spelled out in
+        # ``tests/AGENTS.md`` point 10: this module reaches
+        # ``_gather_subentry_options`` through the repair steps, so a plain
+        # ``dict`` here would go on accepting an ``isinstance(..., dict)`` guard
+        # that is false for every real entry. Measured: with such a guard back
+        # in place and this stub still a ``dict``, all six tests in this file
+        # pass while the selection is dead in production.
+        self._subentry_store: dict[str, ConfigSubentry] = {}
+        self.subentries: Mapping[str, ConfigSubentry] = MappingProxyType(
+            self._subentry_store
+        )
         self.runtime_data = SimpleNamespace(coordinator=SimpleNamespace(data=[]))
+        # ``_entry_reload_is_hopeless`` reads these three through
+        # ``getattr(..., None)`` and fails open, so a stub without them lets the
+        # state gate answer "not hopeless" unconditionally and the repair tests
+        # below would exercise nothing (tests/AGENTS.md, checklist item 8).
+        self.state = ConfigEntryState.LOADED
+        self.source = "user"
+        self.disabled_by: str | None = None
 
     def add_subentry(
         self,
@@ -235,8 +271,25 @@ class _EntryStub:
             unique_id=f"{self.entry_id}-{key}",
             subentry_id=_stable_subentry_id(self.entry_id, key),
         )
-        self.subentries[subentry.subentry_id] = subentry
+        self._subentry_store[subentry.subentry_id] = subentry
         return subentry
+
+    def put_subentry(self, subentry: ConfigSubentry) -> None:
+        """Insert a subentry through the store; see ``discard_subentry``."""
+
+        self._subentry_store[subentry.subentry_id] = subentry
+
+    def discard_subentry(self, subentry_id: str) -> ConfigSubentry | None:
+        """Remove a subentry through the store rather than through the view.
+
+        Returns the removed subentry so the manager double can keep reporting
+        the core's ``bool``. Same lenience as the twin helper in
+        ``tests/test_options_flow_subentries.py``: the core raises
+        ``UnknownSubEntry`` for an unknown id and rebuilds the mapping, this
+        discards silently and mutates the shared store in place.
+        """
+
+        return self._subentry_store.pop(subentry_id, None)
 
 
 def _build_flow(entry: _EntryStub, hass: _HassStub) -> config_flow.OptionsFlowHandler:
@@ -291,7 +344,8 @@ async def test_repairs_move_updates_registries_for_devices() -> None:
     }
     assert entity_registry.by_subentry[other.subentry_id] == ()
     assert device_registry.by_subentry[other.subentry_id] == ()
-    assert manager.reloads == [entry.entry_id]
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == []
 
 
 async def test_repairs_delete_removes_registry_entries() -> None:
@@ -340,9 +394,17 @@ async def test_repairs_delete_removes_registry_entries() -> None:
     )
     assert entity_registry.removals == [removable.subentry_id]
     assert device_registry.removals == [removable.subentry_id]
+    # Same two-sided reload assertion as its move twin above. Without the second
+    # line a silent fall back from the scheduling lever to the awaited
+    # ``async_reload`` would pass here, which is exactly the regression the
+    # tripwire on the stub exists to catch.
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == []
 
 
-async def test_coordinator_propagates_visible_devices_to_registries() -> None:
+async def test_coordinator_propagates_visible_devices_to_registries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Coordinator updates must synchronize subentry visibility and registries."""
 
     entry = _EntryStub()
@@ -366,9 +428,20 @@ async def test_coordinator_propagates_visible_devices_to_registries() -> None:
             name_by_user=None,
         ),
     }
-    fake_registry = SimpleNamespace(devices=registry_devices)
-    original_async_get = dr.async_get
-    dr.async_get = lambda _hass=None: fake_registry
+    # The index asks the registry for *this entry's* devices now instead of
+    # reading the whole ``devices`` mapping, so the double has to answer that
+    # question -- ``tests/AGENTS.md``: keep stubs aligned with the runtime
+    # helpers. Filtering on ``config_entries`` mirrors the shared stub in
+    # ``conftest.py``, which is what the module-level helper delegates to.
+    fake_registry = SimpleNamespace(
+        devices=registry_devices,
+        async_entries_for_config_entry=lambda config_entry_id: [
+            device
+            for device in registry_devices.values()
+            if config_entry_id in getattr(device, "config_entries", set())
+        ],
+    )
+    monkeypatch.setattr(dr, "async_get", lambda _hass=None: fake_registry)
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     _prepare_coordinator_baseline(coordinator, hass, entry)
@@ -405,10 +478,7 @@ async def test_coordinator_propagates_visible_devices_to_registries() -> None:
     )
 
     coordinator.attach_subentry_manager(subentry_manager)
-    try:
-        coordinator._refresh_subentry_index(coordinator.data)
-    finally:
-        dr.async_get = original_async_get
+    coordinator._refresh_subentry_index(coordinator.data)
 
     core_subentry = subentry_manager.get(TRACKER_SUBENTRY_KEY)
     secondary_subentry = subentry_manager.get("secondary")
@@ -432,6 +502,257 @@ async def test_coordinator_propagates_visible_devices_to_registries() -> None:
     assert secondary_metadata is not None
     assert core_metadata.visible_device_ids == ("dev-1", "dev-2")
     assert secondary_metadata.visible_device_ids == ("dev-2",)
+
+
+async def test_a_foreign_device_with_a_legacy_identifier_stays_out_of_the_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stranger's device must not be mistaken for one of ours (``N-22``).
+
+    The index maps our canonical device ids onto registry ids. Its input used to
+    be the *whole* device registry, and the legacy branch of
+    ``parse_device_identifier`` accepts a bare ``(DOMAIN, device_id)`` tuple
+    without asking which config entry holds it. A device left behind by an older
+    entry -- the exact shape
+    ``tests/test_device_registry_single_owner_contract.py::test_scoped_lookup_ignores_a_device_owned_by_another_entry``
+    describes -- therefore parsed as cleanly as our own and, because the map is
+    built with ``setdefault``, *won* whenever the registry yielded it first.
+
+    The damage is not academic: the winning registry id is what the subentry
+    manager is told is visible, so the foreign device would be handed the
+    visibility of ours. The stranger is inserted first here on purpose, because
+    that is the order in which the old code went wrong; a test that inserted it
+    second would have passed either way.
+    """
+
+    entry = _EntryStub()
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
+
+    registry_devices = {
+        # First on purpose: ``setdefault`` lets the first match win.
+        "ha-foreign": SimpleNamespace(
+            id="ha-foreign",
+            identifiers={(DOMAIN, "dev-1")},  # unscoped, i.e. the legacy shape
+            config_entries={"a-stranger-entry"},
+            name="Device left behind by an older entry",
+            name_by_user=None,
+        ),
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(DOMAIN, f"{entry.entry_id}:dev-1")},
+            config_entries={entry.entry_id},
+            name="Device 1",
+            name_by_user=None,
+        ),
+    }
+    fake_registry = SimpleNamespace(
+        devices=registry_devices,
+        async_entries_for_config_entry=lambda config_entry_id: [
+            device
+            for device in registry_devices.values()
+            if config_entry_id in getattr(device, "config_entries", set())
+        ],
+    )
+    # ``monkeypatch`` rather than a bare assignment plus ``try``/``finally``:
+    # ``dr`` is the process-wide module every other test resolves through, and a
+    # setup step raising between the assignment and the ``finally`` would leave
+    # it patched for the rest of the session (``tests/AGENTS.md``).
+    monkeypatch.setattr(dr, "async_get", lambda _hass=None: fake_registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    _prepare_coordinator_baseline(coordinator, hass, entry)
+    coordinator.data = [{"device_id": "dev-1", "name": "Device 1"}]
+    coordinator._enabled_poll_device_ids = {"dev-1"}
+
+    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+    await subentry_manager.async_sync(
+        [
+            ConfigEntrySubentryDefinition(
+                key=TRACKER_SUBENTRY_KEY,
+                title="Core",
+                data={"features": ["device_tracker"]},
+            ),
+            ConfigEntrySubentryDefinition(
+                key=SERVICE_SUBENTRY_KEY,
+                title="Service",
+                data={"features": list(SERVICE_FEATURE_PLATFORMS)},
+                subentry_type=SUBENTRY_TYPE_SERVICE,
+            ),
+        ]
+    )
+
+    coordinator.attach_subentry_manager(subentry_manager)
+    coordinator._refresh_subentry_index(coordinator.data)
+
+    core_subentry = subentry_manager.get(TRACKER_SUBENTRY_KEY)
+    assert core_subentry is not None
+
+    written = tuple(core_subentry.data.get("visible_device_ids", ()))
+    assert written == ("ha-dev-1",), (
+        "the index resolved our canonical id onto a device owned by another "
+        f"config entry: {written}"
+    )
+
+
+async def test_without_the_per_entry_helper_the_index_stays_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No per-entry helper means no index -- and no whole-registry fallback.
+
+    Two statements in one, and the second is the reason this test exists.
+    ``N-22`` removed a three-stage cascade whose *first* stage read the whole
+    ``devices`` mapping, whose second reached for the private ``_entries``
+    attribute, and which asked the per-entry helper only last. Losing that
+    helper must therefore degrade to "nothing indexed", not to "everything
+    indexed": the registry below holds a device that either of the two removed
+    stages would have picked up.
+
+    That the fall-back is soft rather than an exception is the other half. It is
+    the documented behaviour of this block, and a core old enough to lack the
+    helper is exactly the case it was written for.
+
+    Deliberate divergence, measured: ``__init__.py::_self_heal_device_registry``
+    (line 7333) resolves the same helper in two stages and falls back to the *bound method*
+    on the registry object when the module attribute is missing. The index does
+    not, and the difference is visible right here -- the double below carries
+    neither, so both shapes would answer "nothing". Adding the second stage
+    would buy a branch that no supported core and no double in this suite can
+    reach, and it would blur the statement this test makes.
+    """
+
+    entry = _EntryStub()
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
+
+    registry_devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(DOMAIN, f"{entry.entry_id}:dev-1")},
+            config_entries={entry.entry_id},
+            name="Device 1",
+            name_by_user=None,
+        ),
+    }
+    fake_registry = SimpleNamespace(devices=registry_devices, _entries=registry_devices)
+    monkeypatch.setattr(dr, "async_get", lambda _hass=None: fake_registry)
+    # A core without the helper. Through ``monkeypatch`` on purpose: leaving
+    # this ``None`` behind would silently empty the index for every later test
+    # in the session, far away from any visible cause.
+    monkeypatch.setattr(dr, "async_entries_for_config_entry", None)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    _prepare_coordinator_baseline(coordinator, hass, entry)
+    coordinator.data = [{"device_id": "dev-1", "name": "Device 1"}]
+    coordinator._enabled_poll_device_ids = {"dev-1"}
+
+    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+    await subentry_manager.async_sync(
+        [
+            ConfigEntrySubentryDefinition(
+                key=TRACKER_SUBENTRY_KEY,
+                title="Core",
+                data={"features": ["device_tracker"]},
+            ),
+            ConfigEntrySubentryDefinition(
+                key=SERVICE_SUBENTRY_KEY,
+                title="Service",
+                data={"features": list(SERVICE_FEATURE_PLATFORMS)},
+                subentry_type=SUBENTRY_TYPE_SERVICE,
+            ),
+        ]
+    )
+
+    coordinator.attach_subentry_manager(subentry_manager)
+    coordinator._refresh_subentry_index(coordinator.data)
+
+    core_subentry = subentry_manager.get(TRACKER_SUBENTRY_KEY)
+    assert core_subentry is not None
+
+    written = tuple(core_subentry.data.get("visible_device_ids", ()))
+    assert written == ("dev-1",), (
+        "without the per-entry helper the canonical id must stay unmapped; "
+        f"a registry id here means a removed fallback came back: {written}"
+    )
+
+
+async def test_service_subentry_visibility_is_cleared_by_the_setup_roundtrip() -> None:
+    """A stale device assignment on the service subentry does not survive setup.
+
+    This is the measurement behind requirement A-11 of
+    ``PLAN_GFMY_VISIBILITY_TARGET_FILTER``: is a wrong assignment written by the
+    options flow *permanent*, which would force a migration step, or does the
+    next entry setup clear it on its own? The chain that should clear it is a
+    read across three modules, so it is measured here rather than argued.
+
+    Both halves are asserted (``tests/AGENTS.md`` rule 8): the service subentry
+    loses the id, and the tracker subentry gains it. Asserting only the first
+    would also pass if the id vanished altogether, which is a different and
+    worse outcome for the user.
+    """
+
+    entry = _EntryStub()
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
+
+    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+    core_definition = ConfigEntrySubentryDefinition(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Core",
+        data={"features": ["device_tracker"]},
+    )
+    service_definition = ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        data={"features": list(SERVICE_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    await subentry_manager.async_sync([core_definition, service_definition])
+
+    service_subentry = subentry_manager.get(SERVICE_SUBENTRY_KEY)
+    assert service_subentry is not None
+
+    # Reproduce what the options flow writes today: device ids stored on the
+    # service subentry. Written through the manager stub rather than by calling
+    # the flow, so this test stays valid once the flow can no longer produce it.
+    stale = dict(service_subentry.data)
+    stale["visible_device_ids"] = ("dev-1",)
+    hass.config_entries.async_update_subentry(
+        entry,
+        service_subentry,
+        data=stale,
+        title=service_subentry.title,
+        unique_id=service_subentry.unique_id,
+    )
+    assert tuple(
+        subentry_manager.get(SERVICE_SUBENTRY_KEY).data.get("visible_device_ids", ())
+    ) == ("dev-1",)
+
+    # The next entry setup runs the very same sync again.
+    await subentry_manager.async_sync([core_definition, service_definition])
+
+    service_after = subentry_manager.get(SERVICE_SUBENTRY_KEY)
+    core_after = subentry_manager.get(TRACKER_SUBENTRY_KEY)
+    assert service_after is not None
+    assert core_after is not None
+    assert tuple(service_after.data.get("visible_device_ids", ())) == ()
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    _prepare_coordinator_baseline(coordinator, hass, entry)
+    coordinator.data = [{"device_id": "dev-1", "name": "Device 1"}]
+    coordinator._enabled_poll_device_ids = {"dev-1"}
+    coordinator.attach_subentry_manager(subentry_manager)
+    coordinator._refresh_subentry_index(coordinator.data)
+
+    service_metadata = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    tracker_metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert service_metadata is not None
+    assert tracker_metadata is not None
+    assert service_metadata.visible_device_ids == ()
+    assert "dev-1" in tracker_metadata.visible_device_ids
 
 
 async def test_coordinator_default_features_map_to_core_group() -> None:
@@ -499,7 +820,7 @@ async def test_options_settings_repairs_missing_service_subentry() -> None:  # n
 
     service_subentry = subentry_manager.get(SERVICE_SUBENTRY_KEY)
     assert service_subentry is not None
-    entry.subentries.pop(service_subentry.subentry_id, None)
+    entry.discard_subentry(service_subentry.subentry_id)
     subentry_manager._refresh_from_entry()
     coordinator._refresh_subentry_index()
 

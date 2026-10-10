@@ -742,6 +742,54 @@ class TestApplySemanticMapping:
 
         assert coord._apply_semantic_mapping({"semantic_name": "Home"}) is False
 
+    def test_an_emptied_options_mapping_does_not_revive_the_data_copy(self) -> None:
+        """Deleting the last semantic location must actually stop the rewrite.
+
+        The options flow writes ``semantic_locations`` on every add, edit and
+        delete, so ``{}`` is a deliberate "no mappings". Reading the key by
+        truthiness sent that case on to ``entry.data``, which the soft
+        migration copies but never clears -- the deleted mapping kept
+        relabelling coordinates as ``trusted``, across restarts.
+        """
+        entry = make_config_entry(
+            entry_id="e",
+            options={"semantic_locations": {}},
+            data={
+                "semantic_locations": {
+                    "Home": {"latitude": 1.0, "longitude": 2.0, "accuracy": 50.0}
+                }
+            },
+        )
+        coord = MainCoordinatorStub(config_entry=entry)
+        payload: dict[str, Any] = {"semantic_name": "Home"}
+
+        assert coord._apply_semantic_mapping(payload) is False
+        assert "latitude" not in payload
+        assert "location_type" not in payload
+
+    def test_an_absent_options_key_still_reads_the_data_copy(self) -> None:
+        """The migration path stays intact: absence is not emptiness.
+
+        Guards the other side of the presence check above. An entry that has
+        not been through ``_async_soft_migrate_data_to_options`` yet carries
+        the mapping only in ``data``, and must still get its rewrite.
+        """
+        entry = make_config_entry(
+            entry_id="e",
+            options={},
+            data={
+                "semantic_locations": {
+                    "Home": {"latitude": 1.0, "longitude": 2.0, "accuracy": 50.0}
+                }
+            },
+        )
+        coord = MainCoordinatorStub(config_entry=entry)
+        payload: dict[str, Any] = {"semantic_name": "Home"}
+
+        assert coord._apply_semantic_mapping(payload) is True
+        assert payload["latitude"] == 1.0
+        assert payload["location_type"] == "trusted"
+
 
 class TestSemanticLabelTracking:
     """``_record_semantic_label`` + ``get_observed_semantic_labels``."""

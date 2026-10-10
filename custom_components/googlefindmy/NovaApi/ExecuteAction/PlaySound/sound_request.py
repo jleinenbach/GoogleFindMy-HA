@@ -56,19 +56,60 @@ def create_sound_request(
         should_start: True to start playing a sound, False to stop.
         canonic_device_id: Canonical device id (as returned by the device list).
         gcm_registration_id: FCM registration/token string used for push correlation.
-        request_uuid: Optional request UUID; a random one will be generated when omitted.
+        request_uuid: Optional request UUID, interpreted per action:
+
+            * start, ``None``  -> a fresh UUID is generated;
+            * start, blank     -> ``ValueError`` (see below);
+            * stop, ``None``   -> no cancel key is sent, and none is invented;
+            * stop, blank      -> same as ``None``;
+            * either, a value  -> written verbatim.
+
+            The blank-start rule is this builder's policy, not a global one.
+            ``start_sound_request`` sits above it, RETURNS the key to its
+            caller and can therefore repair a blank one by generating a fresh
+            UUID; it never forwards a blank. This builder cannot repair it,
+            because a substitute key it invented would stay inside this
+            function and a cancel key nobody holds is worth as much as none.
 
     Returns:
         Hex-encoded protobuf payload suitable for Nova transport.
 
     Raises:
-        ValueError: If required arguments are empty or malformed.
+        ValueError: If required arguments are empty or malformed, or if a start
+            request is given a blank ``request_uuid``.
     """
     # Defensive argument validation (keep server-side errors out of transport path)
     if not isinstance(canonic_device_id, str) or not canonic_device_id.strip():
         raise ValueError("canonic_device_id must be a non-empty string")
     if not isinstance(gcm_registration_id, str) or not gcm_registration_id.strip():
         raise ValueError("gcm_registration_id must be a non-empty string")
+    # Type before value, as in the sibling builder location_request.py. Both
+    # branches below call .strip(), so without this a non-string argument would
+    # die with an AttributeError deep inside the builder instead of the
+    # ValueError this docstring promises.
+    if request_uuid is not None and not isinstance(request_uuid, str):
+        raise ValueError("request_uuid must be a string or None")
+
+    # The two branches carry OPPOSITE invariants, and `should_start` is the only
+    # field that can tell them apart, so the rule lives here rather than in a
+    # sentinel value:
+    #   start -> the payload must always carry a usable cancel key;
+    #   stop  -> the payload must never carry a fabricated one.
+    # A blank string is not a key. On the wire it cannot even be one: proto3
+    # omits an implicit-presence scalar that holds its default value, so ""
+    # reaches the server as *no* requestUuid at all.
+    if should_start:
+        if request_uuid is not None and not request_uuid.strip():
+            # Not repairable here: this builder returns only the payload, so a
+            # substitute key would never reach the caller, and a cancel key the
+            # caller does not know is worth exactly as much as none.
+            raise ValueError(
+                "request_uuid must be a non-empty string for start requests"
+            )
+    else:
+        # Blank in, absent out. Without this, "   " would travel as a literal,
+        # fabricated cancel key -- the very defect this module removes.
+        request_uuid = (request_uuid or "").strip()
 
     proto_module = _load_proto_module()
     generate_random_uuid = _load_uuid_factory()

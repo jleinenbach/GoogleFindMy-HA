@@ -33,6 +33,7 @@ This module aims to be self-documenting. All public functions include precise do
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -57,6 +58,7 @@ from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
+    Final,
     Literal,
     Protocol,
     TypedDict,
@@ -179,6 +181,9 @@ from .const import (
     ISSUE_MULTIPLE_CONFIG_ENTRIES,
     ISSUE_RESTART_REQUIRED_KEY,
     LEGACY_SERVICE_IDENTIFIER,
+    LITERAL_CORE_KEY_OWNER,
+    NON_DEVICE_SUBENTRY_KEYS,
+    NON_DEVICE_SUBENTRY_TYPES,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
@@ -189,6 +194,7 @@ from .const import (
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPTION_KEYS,
+    OPTIONAL_CREDENTIAL_KEYS,
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -338,6 +344,7 @@ if TYPE_CHECKING:
         unregister_fcm_receiver_provider as ApiUnregisterFcmProviderType,
     )
     from .Auth.fcm_receiver_ha import FcmReceiverHA as FcmReceiverHAType
+    from .config_flow import _StagedCleanupTicket
     from .coordinator import GoogleFindMyCoordinator as GoogleFindMyCoordinatorType
     from .discovery import (
         DiscoveryManager as DiscoveryManagerType,
@@ -358,6 +365,9 @@ if TYPE_CHECKING:
         GoogleFindMyMapRedirectView as GoogleFindMyMapRedirectViewType,
     )
     from .map_view import (
+        GoogleFindMyMapTilesTokenView as GoogleFindMyMapTilesTokenViewType,
+    )
+    from .map_view import (
         GoogleFindMyMapView as GoogleFindMyMapViewType,
     )
     from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -369,6 +379,7 @@ if TYPE_CHECKING:
     DiscoveryManager = DiscoveryManagerType
     GoogleFindMyMapView = GoogleFindMyMapViewType
     GoogleFindMyMapRedirectView = GoogleFindMyMapRedirectViewType
+    GoogleFindMyMapTilesTokenView = GoogleFindMyMapTilesTokenViewType
     async_register_services = AsyncRegisterServicesType
     async_initialize_discovery_runtime = AsyncInitializeDiscoveryRuntimeType
     api_register_fcm_provider = ApiRegisterFcmProviderType
@@ -409,6 +420,9 @@ else:
     )
     GoogleFindMyMapRedirectView: type[Any] = cast(
         type[Any], type("GoogleFindMyMapRedirectViewPlaceholder", (object,), {})
+    )
+    GoogleFindMyMapTilesTokenView: type[Any] = cast(
+        type[Any], type("GoogleFindMyMapTilesTokenViewPlaceholder", (object,), {})
     )
 
     api_register_fcm_provider: Callable[
@@ -495,6 +509,7 @@ def _ensure_runtime_imports() -> None:
     global DiscoveryManager
     global GoogleFindMyMapView
     global GoogleFindMyMapRedirectView
+    global GoogleFindMyMapTilesTokenView
 
     if _RUNTIME_IMPORTS_LOADED:
         return
@@ -527,6 +542,9 @@ def _ensure_runtime_imports() -> None:
         GoogleFindMyMapRedirectView as _GoogleFindMyMapRedirectView,
     )
     from .map_view import (
+        GoogleFindMyMapTilesTokenView as _GoogleFindMyMapTilesTokenView,
+    )
+    from .map_view import (
         GoogleFindMyMapView as _GoogleFindMyMapView,
     )
     from .services import (  # noqa: E402
@@ -544,6 +562,7 @@ def _ensure_runtime_imports() -> None:
     DiscoveryManager = _DiscoveryManager
     GoogleFindMyMapView = _GoogleFindMyMapView
     GoogleFindMyMapRedirectView = _GoogleFindMyMapRedirectView
+    GoogleFindMyMapTilesTokenView = _GoogleFindMyMapTilesTokenView
 
     _RUNTIME_IMPORTS_LOADED = True
 
@@ -598,6 +617,40 @@ CONFIG_SCHEMA: vol.Schema = getattr(
 )(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Bundle field names that may appear in a log line. Any other field name is logged
+# as "other field": per-account fields embed the account e-mail
+# (``adm_token_<email>``).
+_LOGGABLE_BUNDLE_FIELDS: tuple[str, ...] = (
+    "aas_token",
+    "access_token",
+    "adm_token",
+    "Email",
+    "fcm_credentials",
+    "google_email",
+    "oauth_token",
+    "owner_key",
+    "shared_key",
+    "token",
+    "username",
+)
+
+
+def _optional_credential_label(key: str) -> str:
+    """Return a fixed log name for a key of ``OPTIONAL_CREDENTIAL_KEYS``.
+
+    The name is chosen by comparison and returned as a literal, so no data flows
+    from the key into the log line: the key constants look like secrets to CodeQL
+    (``DATA_SECRET_BUNDLE``), and logging the key counts as clear-text logging of
+    sensitive data. Every key has its own name (pinned by
+    ``tests/test_log_hygiene_init.py``).
+    """
+
+    if key == DATA_SECRET_BUNDLE:
+        return "secrets.json bundle"
+    if key == DATA_AAS_TOKEN:
+        return "AAS token"
+    return "optional sign-in value"
 
 
 async def _async_self_heal_duplicate_entities(
@@ -820,7 +873,7 @@ async def _async_collect_entry_tokens(
                         _add(f"{container_label}.secrets.{source}", token)
                 except Exception as err:  # pragma: no cover - defensive logging
                     _LOGGER.debug(
-                        "Secret token extraction failed for %s.%s: %s",
+                        "Reading a stored sign-in value failed for %s.%s: %s",
                         entry.entry_id,
                         container_label,
                         err,
@@ -836,7 +889,7 @@ async def _async_collect_entry_tokens(
             created_cache = await TokenCache.create(hass, entry.entry_id)
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.debug(
-                "Token cache load failed for entry %s: %s", entry.entry_id, err
+                "Cache instance load failed for entry %s: %s", entry.entry_id, err
             )
         else:
             cache = created_cache
@@ -846,7 +899,7 @@ async def _async_collect_entry_tokens(
             cached_values = await cache.all()
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.debug(
-                "Token cache read failed for entry %s: %s", entry.entry_id, err
+                "Cache instance read failed for entry %s: %s", entry.entry_id, err
             )
         else:
             if isinstance(cached_values, Mapping):
@@ -861,7 +914,7 @@ async def _async_collect_entry_tokens(
                                 _add(f"cache.secrets.{source}", token)
                         except Exception as err:  # pragma: no cover - defensive
                             _LOGGER.debug(
-                                "Secret token extraction failed for cache (%s): %s",
+                                "Reading a stored sign-in value failed for cache (%s): %s",
                                 entry.entry_id,
                                 err,
                             )
@@ -940,7 +993,7 @@ async def async_coalesce_account_entries(
         _LOGGER.warning(
             "Cannot deduplicate config entry %s: missing normalized email (raw=%s)",
             canonical_entry.entry_id,
-            raw_email or "n/a",
+            _mask_email_for_logs(raw_email),
         )
         return canonical_entry
 
@@ -996,7 +1049,7 @@ async def async_coalesce_account_entries(
 
         winner = sorted(candidate_list, key=_fallback_sort_key)[0]
         _LOGGER.warning(
-            "Account %s has no verified credentials; selected entry %s via heuristics",
+            "Account %s: selected entry %s via heuristics; no verified credentials",
             _mask_email_for_logs(normalized_email),
             winner.entry_id,
         )
@@ -1010,7 +1063,7 @@ async def async_coalesce_account_entries(
     )
 
     _LOGGER.debug(
-        "Credential health for account %s → %s",
+        "Account %s: sign-in health per entry → %s",
         _mask_email_for_logs(normalized_email),
         {entry_id: report.status for entry_id, report in health.items()},
     )
@@ -1121,6 +1174,7 @@ class ConfigEntrySubEntryManager:
         "_hass",
         "_key_field",
         "_key_aliases",
+        "_key_aliases_ambiguous",
         "_managed",
         "_managed_by_subentry_id",
         "_visibility_update_task",
@@ -1139,6 +1193,7 @@ class ConfigEntrySubEntryManager:
         self._key_field = key_field
         self._default_subentry_type = default_subentry_type
         self._key_aliases: dict[str, str] = {}
+        self._key_aliases_ambiguous: set[str] = set()
         self._managed: dict[str, ConfigSubentry] = {}
         self._managed_by_subentry_id: dict[str, str] = {}
         self._cleanup: dict[str, CleanupCallback | None] = {}
@@ -1188,6 +1243,88 @@ class ConfigEntrySubEntryManager:
         )
 
         return entry_id, subentry_id, unique_id
+
+    def _payload_preserving_stored_fields(
+        self,
+        target: ConfigSubentry | Any,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return ``payload`` widened by the stored fields it does not govern.
+
+        The core replaces ``ConfigSubentry.data`` wholesale, so handing it a
+        payload built from a definition alone *deletes* every stored field the
+        definition happens not to carry. A definition is a **partial**
+        description of the desired state: it names the fields it owns and is
+        silent about the rest, and treating that silence as "delete" is the
+        defect this helper closes.
+
+        Measured on 2026-08-06 against the production definitions, the fields
+        lost that way were exactly two, and both have owners elsewhere:
+        ``visible_device_ids`` (the device-to-subentry assignment, written by
+        the options flow and read by the coordinator) and ``feature_flags``
+        (written by ``_build_subentry_payload`` in ``config_flow.py`` and read
+        by ``SubentryOperations``). Neither is derivable from a definition, so
+        neither can be repaired by adding it to one.
+
+        The preservation is deliberately **not** an allow-list of named keys:
+        an allow-list has to be extended whenever a writer stores a new field,
+        and forgetting to extend it is precisely the silent-deletion failure
+        this fixes. The cost is named rather than hidden, and it currently has
+        no owner: a field a definition wants to *remove* can no longer be
+        removed by omission and would have to be written explicitly, and no
+        path in this integration removes a stored subentry key today. The
+        migration path is **not** that owner, although an earlier version of
+        this sentence named it: ``_migrate_entry_identifier_namespaces``
+        normalises ``visible_device_ids`` and ``OPT_IGNORED_DEVICES`` and
+        removes no key at all. Naming a place that cannot do the work would
+        read as tracked while nothing tracks it, so the gap is stated instead:
+        a deletion that must happen belongs in a path that deletes on purpose,
+        and that path has still to be written.
+
+        ``target`` is the subentry the payload is about to be written to, and
+        the argument exists because that is not always the subentry the loop
+        started from: the unique-id adoption path writes the payload onto a
+        *different* owner. Computing the merge once per loop iteration would
+        graft one subentry's stored fields onto another.
+
+        One field is exempt, and the exemption is an invariant rather than a
+        taste: a non-device group must not hold a device assignment at all. A
+        ``visible_device_ids`` stored on one is therefore legacy residue from
+        the flow that used to offer it as a target, and clearing it on the next
+        sync is the repair that keeps a wrong assignment from becoming
+        permanent -- measured by
+        ``test_service_subentry_visibility_is_cleared_by_the_setup_roundtrip``.
+        Preserving it would resurrect state the integration forbids, which is
+        the one thing a preservation must not do.
+
+        "Non-device" is decided on **both** axes, mirroring
+        ``config_flow._accepts_device_assignment``, which refuses such a
+        target: the group key first (``NON_DEVICE_SUBENTRY_KEYS``) and the
+        subentry type second (``NON_DEVICE_SUBENTRY_TYPES``). Reading only the
+        type would let a subentry that carries no usable type slip past while
+        being managed under a non-device key, and the key is the axis that
+        predicate reads first.
+        """
+
+        merged = dict(payload)
+        stored = getattr(target, "data", None)
+        if not isinstance(stored, Mapping):
+            return merged
+
+        skip: set[str] = set()
+        group_key = merged.get(self._key_field)
+        if (
+            getattr(target, "subentry_type", None) in NON_DEVICE_SUBENTRY_TYPES
+            or group_key in NON_DEVICE_SUBENTRY_KEYS
+        ):
+            skip.add("visible_device_ids")
+
+        for stored_key, stored_value in stored.items():
+            if stored_key in skip:
+                continue
+            if stored_key not in merged:
+                merged[stored_key] = stored_value
+        return merged
 
     @staticmethod
     def _is_subentry_like(candidate: Any) -> TypeGuard[ConfigSubentry]:
@@ -1259,31 +1396,194 @@ class ConfigEntrySubEntryManager:
             if existing_key is not None and existing_key != key:
                 self._pop_managed(existing_key)
 
+        # Displacing a *different* subentry from ``key`` has to take its
+        # reverse-index entry with it, or the loser keeps claiming a slot it no
+        # longer holds. The write below is keyed by ``key`` and therefore
+        # overwrites ``_managed`` cleanly, which is what made the leak easy to
+        # miss: only ``_managed_by_subentry_id`` is keyed by *identifier* and
+        # survives the overwrite.
+        #
+        # Measured rather than derived, in ``_refresh_from_entry`` with two
+        # ``tracker`` subentries both storing ``TRACKER_SUBENTRY_KEY``: iterated
+        # loser-first, ``_managed`` ends at ``{core_tracking: id-a}`` while the
+        # reverse index still maps ``id-b -> core_tracking``. The harm is not
+        # cosmetic. ``_async_adopt_existing_unique_id`` asks
+        # ``_managed_key_for_subentry_id(owner_subentry_id)`` which key the
+        # owner previously held and pops it; with the stale answer it pops the
+        # slot of the *rightful* holder, so ``core_tracking`` drops out of
+        # ``_managed`` entirely until the next refresh.
+        #
+        # The tie-break introduced with the rank made the shape reachable
+        # without any difference in identifier provenance: two otherwise equal
+        # candidates now resolve by lowest identifier, so the higher one loses
+        # deterministically instead of winning by arriving last. Read
+        # "provenance" here as the property, not as a field: the two provenance
+        # *fields* this method once consulted are gone, and their removal only
+        # widens the set of pairs that reach the tie-break, so it makes this
+        # paragraph apply more often rather than less.
+        displaced = self._managed.get(key)
+        if displaced is not None and displaced is not subentry:
+            displaced_id = getattr(displaced, "subentry_id", None)
+            if (
+                isinstance(displaced_id, str)
+                and displaced_id
+                and displaced_id != subentry_id
+                and self._managed_by_subentry_id.get(displaced_id) == key
+            ):
+                self._managed_by_subentry_id.pop(displaced_id, None)
+
         self._managed[key] = subentry
 
         if isinstance(subentry_id, str) and subentry_id:
             self._managed_by_subentry_id[subentry_id] = key
 
-    def _candidate_score(self, subentry: ConfigSubentry) -> tuple[int, int, int]:
-        """Return preference tuple for resolving duplicate managed keys."""
+    def _candidate_score(
+        self, subentry: ConfigSubentry, *, key: str
+    ) -> tuple[int, int, int]:
+        """Return preference tuple for resolving duplicate managed keys.
 
-        entry_match = int(
-            getattr(subentry, "entry_id", None)
-            == getattr(self._entry, "entry_id", None)
-        )
-        unique_id = getattr(subentry, "unique_id", None)
-        unique_match = int(
-            isinstance(unique_id, str)
-            and isinstance(self._entry.entry_id, str)
-            and self._entry.entry_id in unique_id
+        Higher wins. ``key`` is the *canonical* managed key the collision is
+        resolved for, not the key the subentry stores: an aliased subentry is
+        ranked for the slot it actually competes for.
+
+        The first three fields are the contract's ordering, spelled "higher
+        wins" here where ``config_flow.py::_resolve_existing`` and
+        ``coordinator/subentry.py`` spell it "lower wins"
+        (``agents/config_flow/AGENTS.md``: exact stored key, then literal
+        owner, then a candidate whose identifier is missing sorts last, then
+        the lowest identifier):
+
+        1. ``exact_key`` -- an exact stored-key match beats a folded twin. The
+           flow spells this as ``pool = exact or folded`` rather than as a rank
+           field, to the same effect. **Omitting this field was a measured
+           regression, not a simplification**: with only the type axis and the
+           identifier tie-break, a legacy tracker twin stored under an e-mail
+           key outranked the canonical ``core_tracking`` subentry whenever its
+           identifier happened to sort lower and took the slot. How loudly that
+           fails depends on the identifier shape: in
+           ``test_ap3_an_exact_stored_key_outranks_a_folded_twin`` the fixture
+           ids (``e1-t``, ``e1-legacy``) hold no ``f"{entry_id}-{key}"``, so
+           ``async_sync`` reaches ``_async_adopt_existing_unique_id`` for a
+           unique id no subentry holds and raises. Every production writer
+           embeds both parts, named by symbol rather than by line because an
+           earlier draft cited five line numbers that had already drifted onto
+           a ``)``, a comment and a line of prose: ``async_setup_entry`` and
+           ``ConfigEntrySubEntryManager.async_sync`` here,
+           ``SubentryOperations._build_core_subentry_definitions`` in
+           ``coordinator/subentry.py``, and
+           ``ConfigFlow._async_sync_feature_subentries`` in ``config_flow.py``.
+           Greppable as ``f"{entry_id}-{key}"`` and its ``entry.entry_id``
+           spellings. So on disk the adoption finds an
+           owner and writes the payload onto the wrong subentry instead of
+           raising. Silent misattribution rather than an exception is the worse
+           of the two, which is why this field is not optional.
+        2. ``type_match`` -- the type that literally owns this core key per
+           ``LITERAL_CORE_KEY_OWNER`` beats one that merely folds onto it. For
+           a non-core key the table yields ``None``, no candidate matches, and
+           the field is uniformly ``0``: neutral rather than a second ordering.
+        3. ``subentry_id_present`` mirrors the reading side's ``subentry_id is
+           None`` field. It **cannot discriminate at the only call site**:
+           ``_select_preferred_managed`` is the sole caller and passes both
+           operands through ``_is_subentry_like`` first, which already demands
+           a non-empty ``str`` id, so the field is uniformly ``1`` there. The
+           contract criterion it stands for is really enforced by that guard,
+           not by this tuple; the field is kept as the guard's mirror (and to
+           order duck-typed candidates handed straight to this method by a
+           test), not because it decides a production collision.
+
+        Two provenance fields used to sit **behind** those three, and they are
+        gone rather than reordered. Their removal is the point of this
+        paragraph, because an earlier draft argued them harmless and the
+        argument was wrong in a way worth keeping visible:
+
+        - ``entry_match`` (``subentry.entry_id == self._entry.entry_id``) could
+          never discriminate. ``ConfigSubentry`` declares ``data, subentry_id,
+          subentry_type, title, unique_id`` and no ``entry_id``, so the field
+          was ``getattr(..., None) == <our id>`` for every candidate.
+        - ``unique_match`` was a *substring* test (``entry_id in unique_id``),
+          and it is the field that broke the contract. Sitting between
+          "identifier presence" and the lowest-identifier tie-break, it decided
+          pairs the contract wanted decided by id. Measured on the pair
+          ``(id-a, unique_id=None)`` at ``(1,1,1,0,0)`` against
+          ``(id-b, "e1-core_tracking")`` at ``(1,1,1,0,1)``: this method took
+          ``id-b`` in **both** iteration orders where the flow's ``min(...)``
+          and the index's rank take ``id-a``. ``_refresh_subentry_index`` then
+          hands one holder's visible list to a manager naming the other, which
+          is how a group's device assignments land on the wrong subentry.
+
+        The reachability argument that kept the field is the part to remember,
+        because it was inverted rather than merely optimistic. It read "the
+        pair needs a ``unique_id`` without the entry id, and no writer in
+        ``custom_components/`` produces one". That is true of a *wrongly
+        shaped* identifier and irrelevant to the pair actually measured, whose
+        left operand is ``unique_id=None``: absence needs no writer. The core
+        builds subentries with ``unique_id=subentry_data.get("unique_id")`` in
+        ``ConfigEntry.__init__`` (``config_entries.py``, the ``subentries_data``
+        loop), so a stored subentry without the key is ``None`` on load, and
+        ``ConfigSubentryFlow.async_create_entry`` defaults the argument to
+        ``None``. "No writer produces it" was a statement about the happy path,
+        not about the data.
+
+        How long the shape survives is a *window*, not a permanent state, and
+        saying "never repaired" here was the same overreach one paragraph
+        later. Two kinds of write-back exist. The three subentry updates on
+        ``OptionsFlowHandler`` (``_async_update_feature_group_subentry``,
+        ``_async_refresh_subentry_entry_title``,
+        ``_async_assign_devices_to_subentry``) pass an existing value
+        through unchanged (``unique_id=getattr(subentry, "unique_id", None)``),
+        so they neither create nor repair a ``None``; but
+        ``ConfigFlow._async_sync_feature_subentries`` assigns
+        ``f"{entry_id}-{key}"`` to the *existing* core subentry it resolved
+        (and its nested ``_claim_unique_id`` does the same for a displaced
+        holder), so the next options-flow pass
+        normally does repair it. The divergence therefore lived between entry
+        load and the next flow run. That is long enough to matter -- the
+        runtime index and the visibility write-back both run in it -- and short
+        enough that the field's defenders could go a long time without seeing
+        it.
+
+        A full tie is broken by ``_select_preferred_managed``, not here, because
+        the reading side's final field prefers the *lowest* ``subentry_id`` and
+        that ordering cannot be spelled as a "higher wins" tuple element. With
+        the provenance fields gone, that tie-break is now reached by every pair
+        the three contract fields leave equal, which is what makes this method
+        agree with ``config_flow.py::_resolve_existing`` and the runtime index
+        instead of merely resembling them.
+
+        Three of four, not three of three, and the fourth runs first. On the
+        very pair pinned by
+        ``::test_ap8_the_manager_and_the_index_agree_when_one_identifier_is_missing``
+        the deletion path disagrees with all three:
+        ``_deduplicate_subentries``'s ``_select_canonical`` groups by
+        ``(group_key, subentry_type)`` and sorts a *present* ``unique_id``
+        first, so it keeps the higher identifier and removes the lower one --
+        the very subentry this method now names. ``async_sync`` calls it
+        unconditionally before anything else, so this is a live ordering, not a
+        latent one: a visibility write-back landing on the manager's holder can
+        be undone by the next sync. The removal itself is pre-existing
+        (``B16``, owned by ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, where the
+        input shape is now measured); what this change alters is which side of
+        it the manager stands on.
+        """
+
+        data = getattr(subentry, "data", None)
+        exact_key = int(isinstance(data, Mapping) and data.get(self._key_field) == key)
+        canonical_owner = LITERAL_CORE_KEY_OWNER.get(key)
+        type_match = int(
+            canonical_owner is not None
+            and getattr(subentry, "subentry_type", None) == canonical_owner
         )
         subentry_id_present = int(
             isinstance(getattr(subentry, "subentry_id", None), str)
         )
-        return (entry_match, unique_match, subentry_id_present)
+        return (
+            exact_key,
+            type_match,
+            subentry_id_present,
+        )
 
     def _select_preferred_managed(
-        self, existing: ConfigSubentry, candidate: ConfigSubentry
+        self, existing: ConfigSubentry, candidate: ConfigSubentry, *, key: str
     ) -> ConfigSubentry:
         """Return the preferred managed subentry when keys collide."""
 
@@ -1292,8 +1592,60 @@ class ConfigEntrySubEntryManager:
         if not self._is_subentry_like(candidate):
             return existing
 
-        if self._candidate_score(candidate) > self._candidate_score(existing):
-            return candidate
+        candidate_score = self._candidate_score(candidate, key=key)
+        existing_score = self._candidate_score(existing, key=key)
+        if candidate_score != existing_score:
+            return candidate if candidate_score > existing_score else existing
+
+        # Fully tied scores used to fall through to "whichever was iterated
+        # first", which made the winner a function of load order. Break the tie
+        # in the direction the other two sites use -- lowest ``subentry_id``
+        # wins, matching ``_resolve_existing``'s ``min(...)``, which is
+        # parametric in the key.
+        #
+        # What this buys and what it does not, kept apart because an earlier
+        # draft of this comment ran the two together. It buys determinism here.
+        # Cross-side agreement on *which* subentry holds the slot arrived with
+        # the reading side's half: ``coordinator/subentry.py`` used to wrap its
+        # whole rank in ``if group_key == SERVICE_SUBENTRY_KEY:``, so for every
+        # other key the index was last-iterated-wins and the two could name
+        # different subentries. Its rank block now covers both core keys, and
+        # the agreement is asserted rather than assumed
+        # (``::test_ap4_the_manager_and_the_index_agree_on_the_tracker_slot``,
+        # both iteration orders). What is still *not* covered by any of it:
+        # ``_deduplicate_subentries`` and ``_async_adopt_existing_unique_id``
+        # never call this method. "Decide by iteration order" was the summary
+        # here and it is only half true, which matters now that the removal of
+        # the provenance fields made the other half load-bearing:
+        # ``_async_adopt_existing_unique_id`` does take the first match, but
+        # ``_select_canonical`` sorts on identifier *presence* first, then the
+        # identifier itself, and only then falls to the index. A type field sat
+        # between those two for two stages of PR #1236 and was dropped again
+        # once the removal guard there began comparing the full ``(group_key,
+        # subentry_type)`` identity, which left the field deciding nothing
+        # (measured over every three-subentry shape). Neither direction changed
+        # anything here: the first two fields are still a real criterion, and
+        # they still point the opposite way from all three rankers for a pair
+        # whose lower identifier carries ``unique_id=None``.
+        #
+        # The both-ids-missing case never reaches this point: ``subentry_id``
+        # is read through the same ``getattr`` in ``_is_subentry_like``, which
+        # rejects anything but a non-empty ``str``, so such a pair returns
+        # ``candidate`` at the first guard above -- not the incumbent, as an
+        # earlier draft said. The ``return existing`` below is consequently
+        # unreachable from the sole call site (``_refresh_from_entry``) and
+        # exists to keep the branch total.
+        #
+        # One asymmetry remains against the index and is deliberate: it sorts
+        # on the *sanitised, provisional-filtered* identifier, this method on
+        # the raw one. ``agents/config_flow/AGENTS.md`` already names that
+        # difference between the flow and the index; the manager inherits it,
+        # and it can only separate the two for an identifier shape no site in
+        # ``custom_components/`` writes.
+        candidate_id = getattr(candidate, "subentry_id", None)
+        existing_id = getattr(existing, "subentry_id", None)
+        if isinstance(candidate_id, str) and isinstance(existing_id, str):
+            return candidate if candidate_id < existing_id else existing
         return existing
 
     def _resolve_updated_subentry(
@@ -1469,12 +1821,46 @@ class ConfigEntrySubEntryManager:
 
         return resolved
 
+    def _register_key_alias(self, key: str, canonical_key: str) -> None:
+        """Record ``key -> canonical_key`` unless the mapping is ambiguous.
+
+        Two subentries of different types can carry the same stored key, for
+        instance a service and a tracker subentry that both kept a legacy
+        owner key from an early migration. Their canonical identities differ,
+        so the alias has no single answer. Resolving it to whichever subentry
+        happened to be iterated first would silently write to an arbitrary one
+        of the two, so such a key resolves to nothing instead: ``get`` and
+        ``update_visible_device_ids`` then miss and stay inert rather than hit
+        the wrong subentry. The ambiguity is recorded rather than merely
+        dropped, so a third subentry carrying the same key cannot re-establish
+        the mapping later in the same pass.
+        """
+
+        if key in self._key_aliases_ambiguous:
+            return
+
+        existing = self._key_aliases.get(key)
+        if existing is None:
+            self._key_aliases[key] = canonical_key
+            return
+        if existing != canonical_key:
+            self._key_aliases.pop(key, None)
+            self._key_aliases_ambiguous.add(key)
+
+    def _resolve_key(self, key: str) -> str | None:
+        """Return the canonical key for ``key``, or ``None`` when ambiguous."""
+
+        if key in self._key_aliases_ambiguous:
+            return None
+        return self._key_aliases.get(key, key)
+
     def _refresh_from_entry(self) -> None:
         """Populate managed mapping from the config entry."""
 
         self._managed.clear()
         self._managed_by_subentry_id.clear()
         self._key_aliases.clear()
+        self._key_aliases_ambiguous.clear()
         subentries = getattr(self._entry, "subentries", None)
         if not isinstance(subentries, Mapping):
             return
@@ -1511,17 +1897,29 @@ class ConfigEntrySubEntryManager:
             if canonical_key is None:
                 canonical_key = self._default_subentry_type
 
-            if (
-                isinstance(key, str)
-                and key
-                and isinstance(canonical_key, str)
-                and canonical_key != key
-            ):
-                self._key_aliases.setdefault(key, canonical_key)
+            if isinstance(key, str) and key and isinstance(canonical_key, str):
+                if canonical_key == key:
+                    # A subentry whose canonical identity *is* the stored key
+                    # claims that key too. Recording the claim is what lets a
+                    # later foreign alias be recognised as a conflict instead
+                    # of taking the key uncontested: a ``hub``-typed subentry
+                    # canonicalises onto its own stored key and would
+                    # otherwise never register, leaving a service twin free to
+                    # capture it.
+                    self._register_key_alias(key, canonical_key)
+                elif key not in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY):
+                    # A core key already names a group of its own, so it must
+                    # never stand in for a different one. A service subentry
+                    # that still stores the legacy ``core_tracking`` key would
+                    # otherwise register ``core_tracking -> service`` and route
+                    # every write meant for the tracker group onto the service
+                    # twin, which is precisely the group that must not hold
+                    # devices.
+                    self._register_key_alias(key, canonical_key)
 
             existing = self._managed.get(canonical_key)
             preferred = (
-                self._select_preferred_managed(existing, subentry)
+                self._select_preferred_managed(existing, subentry, key=canonical_key)
                 if existing is not None
                 else subentry
             )
@@ -1583,10 +1981,13 @@ class ConfigEntrySubEntryManager:
             self._pop_managed(old_key)
             self._cleanup.pop(old_key, None)
 
+        # Against ``owner``, not against the subentry the caller started from:
+        # this path adopts a *different* subentry, so the fields to preserve
+        # are the ones stored on the adoptee.
         update_result = self._hass.config_entries.async_update_subentry(
             self._entry,
             owner,
-            data=payload,
+            data=self._payload_preserving_stored_fields(owner, payload),
             title=definition.title,
         )
         resolved = await self._await_subentry_result(update_result)
@@ -1638,6 +2039,23 @@ class ConfigEntrySubEntryManager:
         grouped_by_group: dict[tuple[str | None, str | None], list[ConfigSubentry]] = (
             defaultdict(list)
         )
+        # Reuse the key this loop already resolved instead of re-reading it in
+        # the removal guard below. A second reading form is exactly the drift
+        # this module keeps paying for: the flow-side and manager-side sweeps
+        # answer the same question through two readers, and neither notices
+        # when they disagree. Reading it here also keeps the guard's identity
+        # and ``grouped_by_group``'s key literally the same expression, which
+        # is what makes the subset property below checkable rather than
+        # plausible.
+        #
+        # Keyed by object identity rather than by ``subentry_id``: the loop
+        # above appends every candidate, including one whose id is missing or
+        # not a ``str``, so an id-keyed map would need a guard against a shape
+        # the core cannot build (``ConfigSubentry.subentry_id`` is a ``str``
+        # defaulting to a fresh ULID) and would collide if two such candidates
+        # ever appeared. ``id()`` is safe here because every key refers to an
+        # object held alive by ``subentries`` for the whole function.
+        stored_group_keys: dict[int, str | None] = {}
 
         for subentry in subentries:
             subentry_unique_id = getattr(subentry, "unique_id", None)
@@ -1652,6 +2070,7 @@ class ConfigEntrySubEntryManager:
             key_value = (
                 group_value if isinstance(group_value, str) and group_value else None
             )
+            stored_group_keys[id(subentry)] = key_value
             grouped_by_group[
                 (key_value, getattr(subentry, "subentry_type", None))
             ].append(subentry)
@@ -1671,7 +2090,44 @@ class ConfigEntrySubEntryManager:
                     if isinstance(candidate_subentry_id, str)
                     else ""
                 )
-                return (0 if unique_part else 1, unique_part, index, subentry_part)
+                # No type field here, and the absence is the measured half
+                # of the removal guard below rather than an omission.
+                #
+                # A type rank did sit in this tuple for two stages of PR #1236.
+                # It existed for the ``unique_id`` axis alone: candidates there
+                # are grouped *by* ``unique_id``, so fields 1 and 2 tie by
+                # construction and the survivor was whichever subentry
+                # ``entry.subentries`` happened to yield first -- the same
+                # "taking whichever came first" that
+                # ``agents/config_flow/AGENTS.md`` records as a defect on the
+                # flow side, where it silently removed the canonical service
+                # group. Ranking the literal key owner first made that
+                # deterministic, and the type guard below then decided which
+                # siblings the winner could take with it.
+                #
+                # Once that guard compares the **full** identity, the rank
+                # stops deciding anything: the surviving removals are exactly
+                # those the ``grouped_by_group`` pass makes anyway, whichever
+                # candidate this helper calls canonical. Measured rather than
+                # reasoned about, because the previous stage of this comment
+                # was wrong about a related claim in the same place: over all
+                # 19 683 three-subentry shapes, and over a 19 987-shape random
+                # sample of four- and five-subentry ones, the removal sets with
+                # the rank and with the rank neutralised are identical. It is
+                # dropped rather than left in place with a note, because a
+                # ranking field on a removal path reads as load-bearing.
+                #
+                # What still decides, in order: identifier *presence*, then the
+                # identifier itself, then load order, then ``subentry_id``. The
+                # first two are the fields ``_candidate_score`` disagrees with
+                # for a pair whose lower identifier is missing, which is
+                # ``B16`` and unchanged here.
+                return (
+                    0 if unique_part else 1,
+                    unique_part,
+                    index,
+                    subentry_part,
+                )
 
             return min(enumerate(candidates), key=_sort_key)[1]
 
@@ -1682,13 +2138,100 @@ class ConfigEntrySubEntryManager:
             if len(candidates) <= 1:
                 continue
             canonical = _select_canonical(candidates)
-            duplicate_descriptors.add(f"unique_id={unique_id}")
+            canonical_identity = (
+                stored_group_keys.get(id(canonical)),
+                getattr(canonical, "subentry_type", None),
+            )
+            removed_here = False
             for candidate in candidates:
                 if candidate is canonical:
+                    continue
+                # Sharing an identifier does not make two subentries the
+                # same logical group, so what is removed here is decided on
+                # the full ``(group_key, subentry_type)`` identity -- the same
+                # pair ``grouped_by_group`` keys on -- and not on the type
+                # alone.
+                #
+                # The type-only form was the second stage of PR #1236 and
+                # Codex flagged it against ``agents/config_flow/AGENTS.md``:
+                # two ``tracker``-typed subentries with *distinct* group keys,
+                # restored from storage under one ``unique_id``, were read as
+                # duplicate copies of each other. The rank then handed the slot
+                # to whichever tracker literally owns ``core_tracking`` and the
+                # other went to ``async_remove_subentry``, device and entity
+                # registry bindings included -- while the contract states the
+                # opposite for exactly that shape: several tracker groups with
+                # distinct keys are supported, so a shared identifier is a
+                # collision between two groups, not evidence of one group
+                # stored twice. The first stage had the same defect one axis
+                # over, with a ``hub`` beside a ``service``; both are gone now
+                # for one reason instead of two.
+                #
+                # What is *not* resolved by leaving the pair alone: the
+                # colliding identifier stays. ``_claim_unique_id`` renames such
+                # a holder, and it runs only inside
+                # ``ConfigFlow._async_sync_feature_subentries`` -- never from
+                # this manager -- so the collision persists until the next flow
+                # pass. That is the deliberate direction, and it is the same
+                # one the flow-side sweep takes: a removal takes registry
+                # bindings with it and cannot be undone, a deferred rename can.
+                #
+                # ``getattr`` on both sides for the same reason the sort key
+                # uses it: a missing type is ``None`` on both, so two untyped
+                # siblings on one key still collapse.
+                #
+                # The cost of this axis, stated because it is easy to overread
+                # what remains: the identity compared here is precisely the
+                # grouping key of the pass below, so this loop can no longer
+                # contribute a removal the group pass would not make on its
+                # own. Measured across all 19 683 three-subentry shapes and a
+                # 19 987-shape random sample of four- and five-subentry ones,
+                # its output is identical to switching the loop off entirely.
+                # It is kept for its descriptor -- the log line still names the
+                # identifier a duplicate was found under, which the group pass
+                # cannot report -- and the type rank that used to aim it was
+                # dropped in the same change.
+                #
+                # Two limits on "left alone", both measured, because an earlier
+                # draft of the contract text overstated them:
+                #
+                # * it is a statement about *this helper*. ``async_sync`` runs
+                #   a type-blind stale sweep afterwards which still removes a
+                #   spared ``hub`` that stores a legacy or absent key. Only the
+                #   production shape is verified through a whole call, by
+                #   ``::test_dedup_a_spared_hub_survives_a_whole_sync_not_just_the_helper``.
+                # * sparing is not free. Where the spared twin is the one that
+                #   then holds a core slot through its stored key, the sync's
+                #   write-back changes an identifier after all, aborts twice
+                #   and ends in ``_async_adopt_existing_unique_id``
+                #   (``::test_dedup_sparing_a_twin_can_route_a_sync_through_the_adoption_exit``).
+                #   Same holder either way, so the trade stands, but it is a
+                #   trade.
+                candidate_identity = (
+                    stored_group_keys.get(id(candidate)),
+                    getattr(candidate, "subentry_type", None),
+                )
+                if candidate_identity != canonical_identity:
                     continue
                 candidate_id = getattr(candidate, "subentry_id", None)
                 if isinstance(candidate_id, str):
                     removal_targets.add(candidate_id)
+                    removed_here = True
+            # Descriptor only where the bucket actually contributes a removal.
+            # Before the guard a multi-candidate bucket almost always did (the
+            # exception being one whose losers all lack a ``str`` identifier);
+            # now a cross-type bucket contributes nothing by design, and naming
+            # it in the log line would report a collision that was left standing
+            # as one that was cleaned up. The group loop below keeps setting its
+            # descriptor unconditionally, and that asymmetry is intended: its
+            # grouping key carries the type, so a multi-candidate bucket there
+            # is always same-typed. It is *not* guaranteed to contribute -- the
+            # same ``str``-identifier proviso named above applies there too --
+            # and an earlier draft of this sentence said "always contributes",
+            # which would have made the descriptor the reliable half of a pair
+            # whose other half it is not.
+            if removed_here:
+                duplicate_descriptors.add(f"unique_id={unique_id}")
 
         for (key_value, subentry_type), candidates in grouped_by_group.items():
             if len(candidates) <= 1:
@@ -1748,17 +2291,43 @@ class ConfigEntrySubEntryManager:
     def get(self, key: str) -> ConfigSubentry | None:
         """Return the managed subentry for a key when present."""
 
-        return self._managed.get(self._key_aliases.get(key, key))
+        resolved_key = self._resolve_key(key)
+        if resolved_key is None:
+            return None
+        return self._managed.get(resolved_key)
 
     def update_visible_device_ids(
         self, key: str, visible_device_ids: Sequence[str]
     ) -> None:
         """Update the visible device identifiers stored in a subentry."""
 
-        resolved_key = self._key_aliases.get(key, key)
+        resolved_key = self._resolve_key(key)
+        if resolved_key is None:
+            return
 
         subentry = self._managed.get(resolved_key)
         if subentry is None:
+            return
+
+        if getattr(subentry, "subentry_type", None) in NON_DEVICE_SUBENTRY_TYPES:
+            # This is the writing-side mirror of
+            # ``config_flow._accepts_device_assignment``. That predicate keeps
+            # the options flow from ever *offering* a service or hub group as
+            # an assignment target, but it lives in another module and cannot
+            # see this call. Deciding here, on the resolved subentry rather
+            # than on the key, closes the **key** axis: whichever key the
+            # caller passed and whatever the alias table made of it, a subentry
+            # of a known non-device-bearing type is never written to. The type
+            # axis stays fail-open by design, and that is stated rather than
+            # implied: a subentry with no ``subentry_type`` or an unknown one
+            # passes, mirroring ``_accepts_device_assignment``, which likewise
+            # accepts the typeless synthesised fallback. In Home Assistant
+            # ``subentry_type`` is a required field, so this is the inert
+            # direction. The caller in
+            # ``coordinator/subentry.py`` already folds such subentries onto
+            # the service key, so today this is a second barrier rather than
+            # the only one -- which is the point, because a future caller
+            # would otherwise be unguarded.
             return
 
         normalized = tuple(
@@ -2128,7 +2697,14 @@ class ConfigEntrySubEntryManager:
                     break
                 try:
                     update_kwargs: dict[str, Any] = {
-                        "data": payload,
+                        # ``existing`` and not ``payload`` alone: the core
+                        # replaces ``data`` wholesale, so a definition-built
+                        # payload would delete every stored field the
+                        # definition does not carry (measured: the device
+                        # assignment and the feature flags).
+                        "data": self._payload_preserving_stored_fields(
+                            existing, payload
+                        ),
                         "title": definition.title,
                         "unique_id": unique_id,
                     }
@@ -2202,6 +2778,53 @@ class ConfigEntrySubEntryManager:
             )
         }
 
+        # This sweep runs the *opposite* polarity of the flow-side one in
+        # ``ConfigFlow._async_cleanup_stale_subentries``, and neither sweep
+        # reads the other -- the two modules cite each other on the *ranking*
+        # axis, never on removal. There, a subentry whose stored key is **not**
+        # a core key is skipped, and the core keys themselves are additionally
+        # protected by the literal-owner type axis. Here ``desired`` *is* the
+        # core key set, so the core keys are the safe ones and every other
+        # managed key is a removal candidate -- with no type axis at all.
+        # Removal runs through ``async_remove`` into core's
+        # ``async_remove_subentry``, which takes the device and entity registry
+        # bindings with it.
+        #
+        # No *writer* in this tree produces a shape that reaches this branch,
+        # and that much is measured rather than assumed: both production
+        # callers pass exactly ``{core_tracking, service}``
+        # (``async_setup_entry`` and the repair in ``coordinator/subentry.py``,
+        # whose ``_build_core_subentry_definitions`` always returns both),
+        # every production handler stores a core key, and
+        # ``_refresh_from_entry`` folds each ``service``- or ``tracker``-typed
+        # subentry onto one before this runs -- including the one legacy shape
+        # the contract treats as real, a per-account tracker group on an e-mail
+        # key.
+        #
+        # What that does **not** establish is that the set is empty, and an
+        # earlier draft of this comment said so anyway. The claim was about
+        # stored data while the evidence covered writers only, and the fold has
+        # a gap the writer argument cannot close: it canonicalises ``service``
+        # and ``tracker`` by type but leaves ``hub`` on its **stored** key. A
+        # ``hub`` on disk under a non-core key -- from an older release or a
+        # hand-edited entry -- therefore does reach the sweep and is removed,
+        # registry bindings included. That is not hypothetical: it is pinned,
+        # as behaviour we carry rather than behaviour we want, by
+        # ``test_ap1_stale_sweep_is_decided_by_the_resolved_key`` in its
+        # ``hub-email-removed`` and ``hub-nokey-removed`` cases.
+        #
+        # No guard is added here regardless, and the reason is now the honest
+        # one: not that the set is empty, but that a second guard semantics
+        # beside the flow-side one is the very drift this axis keeps paying
+        # for, and closing the gap belongs with the type axis rather than with
+        # a local barrier.
+        #
+        # For the ``hub`` gap above the guard is owed *now*, and it widens to
+        # every managed key the moment that fold or ``_deduplicate_subentries``
+        # changes, because either can drop a group out of ``desired`` and hand
+        # it straight to this sweep. Both are owned by
+        # ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, which also carries the
+        # ratchet that watches the two counts this latency rests on.
         stale_keys: list[str] = []
         for managed_key, subentry in list(self._managed.items()):
             if managed_key in desired:
@@ -2375,6 +2998,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     ecdsa_acceleration_info: dict[str, str | None]
     entries: dict[str, RuntimeData]
     eid_resolver: GoogleFindMyEIDResolver
+    discovery_manager: DiscoveryManager
     fcm_lock: asyncio.Lock
     fcm_receiver: FcmReceiverHAType
     fcm_receivers: dict[str, FcmReceiverHAType]
@@ -2390,12 +3014,61 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     restart_check_registered: bool
     restart_check_unsub: Callable[[], None] | None
     restart_check_initial_unsub: Callable[[], None] | None
+    url_refresh_registered: bool
+    url_refresh_unsub: Callable[[], None] | None
+    url_refresh_state: str
     providers_registered: bool
     views_registered: bool
     _subentry_forward_helper_logs: set[str]
     _subentry_setup_history: dict[str, set[str]]
     pending_reconfigure_device_list_refresh: set[str]
     recent_reconfigure_markers: dict[str, float]
+    # One-shot latch per entry for the device_tracker registry self-heal reload.
+    # Deliberately kept at DOMAIN level and NOT inside ``entries``: the reload it
+    # guards tears the platform down and ``async_unload_entry`` pops the entry's
+    # ``entries`` bucket, so a marker living in either place would be gone by the
+    # time the rebuilt platform probes again -- and a permanently empty registry
+    # would then reload in a loop. Cleared only when the entry is removed.
+    registry_selfheal_reloads: set[str]
+    # Entry ids whose reload is already on its way. Home Assistant's
+    # ``async_schedule_reload`` does not coalesce -- every call adds another
+    # unload/setup cycle -- and since the credential update listener reloads the
+    # entry as well, a flow that writes credentials AND reloads the entry itself
+    # would tear it down twice in a row. Every reload that follows a CREDENTIAL
+    # write therefore claims this latch first and the second claimant stands down.
+    # The device_tracker registry self-heal claims it too -- its own one-shot latch
+    # answers a different question ("has this entry healed itself yet") and knows
+    # nothing about a reload someone else already scheduled -- and hands that
+    # one-shot back when it stands down here. The options steps for semantic
+    # locations and subentry repairs claim it as well: they schedule through the
+    # config flow's single owner, and unlike a credential write they have no
+    # fallback, because the credential update listener returns early on an
+    # unchanged fingerprint. Callers that issue the reload themselves via
+    # ``async_reload`` (the non-interactive discovery update, the reconfigure
+    # path and the credentials finalizer) claim the latch by hand rather than
+    # through the config flow's scheduling helper, but all three run the same
+    # hopeless-state check before they do, so none of them bypasses it. The
+    # tracker registry self-heal in ``device_tracker`` runs it too, which is why
+    # that check lives in ``entry_reload_gate`` beside this field rather than in
+    # the config flow: it is the one claimant whose grace timer outlives a
+    # failed unload.
+    # Released as soon as
+    # the reload arrives (unload, and setup for an entry that was not loaded), and
+    # given back by a claimant whose scheduling call failed, so a genuinely later
+    # change reloads again.
+    pending_entry_reloads: set[str]
+    # In-memory only, NEVER persisted: irreversible cleanup jobs staged by a
+    # config or options flow (watched-secrets delete, login-container ack). A
+    # FIFO list of per-flow tickets, NOT a mapping keyed by account: two
+    # overlapping flows for the same account must not share one list, and every
+    # ``async_setup_entry`` run claims at most one ticket. Create-path tickets
+    # are correlated by account and dropped again when their flow is removed
+    # without producing an entry; update-path tickets (reauth, reconfigure,
+    # options, discovery update) name their entry and additionally carry the
+    # ``modified_at`` the storage has to catch up to. The claimed jobs run only
+    # after that proof. See ``config_flow._StagedCleanupTicket`` and
+    # ``config_flow.async_schedule_pending_container_cleanup``.
+    pending_container_cleanup: list[_StagedCleanupTicket]
 
 
 # Typed hass.data key for the global domain bucket (HA 2024.6+ HassKey).
@@ -2837,40 +3510,98 @@ async def _async_purge_unloaded_subentry_registrations(
         ent_reg.async_remove(entity.entity_id)
         removed_entities += 1
 
+    # Local imports: this module cannot import the coordinator package at module
+    # level.  ``coordinator/__init__.py`` pulls in ``..api``, whose import chain
+    # comes back to this partially initialised module (measured: ImportError on
+    # ``get_proto_decoder`` from ``decrypt_locations.py``).  That is the same
+    # circularity ``_ensure_runtime_imports`` exists for.  Importing the helper
+    # module inside the functions that use it keeps the names visible to
+    # ``mypy`` and ``ruff``, which a ``getattr`` indirection would not.
+    from .coordinator.helpers.registry import (
+        OwnershipIntent,
+        detect_device_registry_capabilities,
+        execute_ownership_plan,
+        extract_subentry_links,
+        plan_device_ownership,
+        read_device_ownership,
+    )
+
+    update_call = getattr(dev_reg, "async_update_device", None)
+    caps = (
+        detect_device_registry_capabilities(update_call)
+        if callable(update_call)
+        else None
+    )
+
     devices_for_entry = dr.async_entries_for_config_entry(dev_reg, parent_entry_id)
     for device in devices_for_entry:
-        links_raw = getattr(device, "config_entries_subentries", None)
-        linked_subentries: set[str] = set()
-        if isinstance(links_raw, Mapping):
-            linked_subentries = {
-                link
-                for link in links_raw.get(parent_entry_id, set())
-                if isinstance(link, str)
-            }
-        if config_subentry_id not in linked_subentries:
+        # ``extract_subentry_links`` reads the scalar ``config_entry_id`` and
+        # ``config_subentry_id`` first (Core 2026.8+), then the
+        # ``config_entries_subentries`` mapping (the real data below 2026.8),
+        # and only then a bare ``config_subentry_id``.  The hand-written
+        # predicate this replaced had no such fallback and skipped the device
+        # instead.  No supported core reaches the last step, but a registry
+        # double can, and there it selects a device the old shape passed over.
+        if config_subentry_id not in extract_subentry_links(device, parent_entry_id):
+            continue
+        if caps is None:  # pragma: no cover - defensive guard
+            _LOGGER.debug(
+                "[%s] Purge: device registry has no async_update_device; skipping %s",
+                parent_entry_id,
+                device.id,
+            )
             continue
 
-        dev_reg.async_update_device(
-            device_id=device.id,
-            remove_config_entry_id=parent_entry_id,
-            remove_config_subentry_id=config_subentry_id,
-        )
-        refreshed = dev_reg.async_get(device.id)
+        # The intent is DETACH on one named subentry link, never the hub link.
+        # The plan the planner derives from it differs per core, and that is the
+        # point of asking it rather than writing keywords here:
+        #
+        # * From Core 2026.8 a device has one owner, so giving it up *is* the
+        #   deletion. The planner emits ``async_remove_device`` directly, and
+        #   only after it has read the current ownership; it raises rather than
+        #   guess (``plan_device_ownership``, the DETACH branch).
+        # * Below that core it emits ``async_update_device`` with the removal
+        #   pair, and Core deletes the device only when this was its last owning
+        #   entry (tag ``2025.9.1``, lines 1174-1177). That is why no
+        #   ``async_remove_device`` is written here for the legacy path: a direct
+        #   removal would take a device another config entry still owns, and on
+        #   the declared minimum core that case is real.
+        #
+        # One deliberate divergence follows from the 2026.8 form: the direct
+        # removal bypasses Core's pending-move branch (tag ``2026.8.0``, lines
+        # 2208-2231), which would *transfer* a device whose move another call
+        # armed with ``add_config_entry_id`` instead of deleting it. This
+        # integration arms no such move on that core (the planner uses the
+        # ``new_*`` pair there), and Core cancels a move armed by a *recognised*
+        # foreign integration.  Its cancellation is not unconditional: a move
+        # whose origin is undetermined survives (tag ``2026.8.0``, lines
+        # 2222-2229, "Origins from core/tests are undetermined (None) and never
+        # cancel").  So the branch is unreachable from any move this integration
+        # or a recognisable foreign one armed, which is narrower than "always".
+        try:
+            plan = plan_device_ownership(
+                OwnershipIntent.DETACH,
+                caps=caps,
+                device_id=device.id,
+                entry_id=parent_entry_id,
+                detach_subentry_id=config_subentry_id,
+                current=read_device_ownership(device),
+            )
+        except ValueError as err:
+            # The planner refuses to guess at an ownership it cannot read.
+            _LOGGER.debug(
+                "[%s] Purge: cannot detach subentry %s from %s: %s",
+                parent_entry_id,
+                config_subentry_id,
+                device.id,
+                err,
+            )
+            continue
 
-        refreshed_links_raw = getattr(refreshed, "config_entries_subentries", None)
-        refreshed_links: set[str] = set()
-        if isinstance(refreshed_links_raw, Mapping):
-            refreshed_links = {
-                link
-                for link in refreshed_links_raw.get(parent_entry_id, set())
-                if isinstance(link, str)
-            }
-        if (
-            refreshed is not None
-            and not refreshed.config_entries
-            and not refreshed_links
-        ):
-            dev_reg.async_remove_device(device.id)
+        if not plan:
+            continue
+
+        execute_ownership_plan(dev_reg, plan)
         removed_devices += 1
 
     if removed_entities or removed_devices:
@@ -2981,6 +3712,131 @@ def _ensure_recent_reconfigure_markers(
         markers = {}
         bucket["recent_reconfigure_markers"] = markers
     return markers
+
+
+def _ensure_registry_selfheal_reloads(
+    bucket: GoogleFindMyDomainData,
+) -> set[str]:
+    """Return the set of entry_ids that already used their self-heal reload."""
+
+    claimed = bucket.get("registry_selfheal_reloads")
+    if not isinstance(claimed, set):
+        claimed = set()
+        bucket["registry_selfheal_reloads"] = claimed
+    return claimed
+
+
+@callback
+def claim_registry_selfheal_reload(hass: HomeAssistant, entry_id: str) -> bool:
+    """Claim the one and only self-heal reload for ``entry_id``.
+
+    Returns ``True`` for the first caller of an entry and ``False`` for every
+    later one, including callers that run *after* the reload this claim caused.
+    That is the whole point: the reload rebuilds the device_tracker platform, so
+    any marker the platform itself held would be fresh again and a config entry
+    whose entities never reach the entity registry would reload forever.
+    """
+
+    if not entry_id:
+        return False
+    claimed = _ensure_registry_selfheal_reloads(_domain_data(hass))
+    if entry_id in claimed:
+        return False
+    claimed.add(entry_id)
+    return True
+
+
+@callback
+def discard_registry_selfheal_reload(hass: HomeAssistant, entry_id: str) -> None:
+    """Drop the self-heal latch of a removed entry.
+
+    Without this the entry_id would sit in ``hass.data`` for the rest of the
+    process lifetime, the same housekeeping rule the staged-cleanup discard in
+    ``async_remove_entry`` follows.
+    """
+
+    if not entry_id:
+        return
+    bucket = _domain_data(hass)
+    claimed = bucket.get("registry_selfheal_reloads")
+    if isinstance(claimed, set):
+        claimed.discard(entry_id)
+
+
+def _ensure_pending_entry_reloads(
+    bucket: GoogleFindMyDomainData,
+) -> set[str]:
+    """Return the set of entry_ids whose reload is already on its way."""
+
+    pending = bucket.get("pending_entry_reloads")
+    if not isinstance(pending, set):
+        pending = set()
+        bucket["pending_entry_reloads"] = pending
+    return pending
+
+
+@callback
+def claim_pending_entry_reload(hass: HomeAssistant, entry_id: str) -> bool:
+    """Claim the pending reload of ``entry_id`` for the caller.
+
+    Returns ``True`` when the caller is the one that has to schedule the reload
+    and ``False`` when a reload is already on its way and a second one would only
+    tear the entry down twice: ``async_schedule_reload`` does not coalesce, and
+    ``async_reload`` is an unload plus a setup either way.
+
+    The duplicate is not hypothetical. Every path that writes credentials into an
+    entry goes through ``async_update_entry``, which notifies the update listener
+    in :func:`async_setup_entry`, and that listener reloads the entry so the new
+    credentials take effect -- as long as it is there. An entry that is not loaded
+    has no listener any more (Home Assistant removes it on unload), so a writing
+    path cannot leave the reload to it and schedules its own: the discovery
+    fallback writer, the branch where the core's unique-id guard did the write,
+    the non-interactive discovery update, reconfigure, the options credential
+    refresher. Two of them therefore produce two reloads unless the sides agree
+    on one owner. This latch is that agreement, and it works
+    regardless of which side runs first, which no ordering rule between a
+    synchronous flow step and a listener task could guarantee.
+
+    Call this **last**, immediately before scheduling: a claim that is followed by
+    a caller-side abort leaves the latch set until the entry is next set up or
+    unloaded, and during that window a real change would not reload.
+    """
+
+    if not entry_id:
+        return False
+    pending = _ensure_pending_entry_reloads(_domain_data(hass))
+    if entry_id in pending:
+        return False
+    pending.add(entry_id)
+    return True
+
+
+@callback
+def discard_pending_entry_reload(hass: HomeAssistant, entry_id: str) -> None:
+    """Release the reload latch of ``entry_id``.
+
+    Called where the scheduled reload actually arrives: at unload, and at setup
+    for an entry that was not loaded (Home Assistant's ``async_reload`` skips the
+    unload half in that case, so setup is the only point both paths share). A
+    latch that is never released would swallow every later reload of that entry,
+    which is why both ends clear it and removal clears it too.
+    """
+
+    if not entry_id:
+        return
+    # Read-only on purpose, no ``_domain_data``: releasing a latch that was never
+    # claimed must not create the domain bucket. This runs at the very top of
+    # ``async_setup_entry``, before the entry policy has had its say, and a bucket
+    # created there would exist for entries that never got set up at all.
+    hass_data = getattr(hass, "data", None)
+    if not isinstance(hass_data, dict):
+        return
+    bucket = hass_data.get(DATA_DOMAIN)
+    if not isinstance(bucket, dict):
+        return
+    pending = bucket.get("pending_entry_reloads")
+    if isinstance(pending, set):
+        pending.discard(entry_id)
 
 
 def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]:
@@ -3275,9 +4131,20 @@ def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> st
 
     parts = ident.split(":")
 
-    config_entries: Collection[str] | None = getattr(device, "config_entries", None)
-    if config_entries:
-        while len(parts) > 1 and parts[0] in config_entries:
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import device_owning_entry_ids
+
+    # Measured, and worth knowing before touching this: the strip below cannot
+    # change the return value.  It only ever removes leading segments and stops
+    # at ``len(parts) > 1``, so ``parts[-1]`` is invariant under it -- checked
+    # exhaustively over 6216 identifier/owner combinations, zero differences.
+    # It is kept, not removed, because dropping it would leave ``device``
+    # unused and force a signature change at every call site; that is a separate
+    # change, not a device-registry migration.  Do not build new behaviour on
+    # it, and do not expect a mutant of it to fail a test.
+    owning_entries = device_owning_entry_ids(device)
+    if owning_entries:
+        while len(parts) > 1 and parts[0] in owning_entries:
             parts = parts[1:]
 
     # Prefer the final segment so trackers with entry/subentry prefixes resolve
@@ -3483,16 +4350,13 @@ class EntityRecoveryManager:
             platform = getattr(entry, "domain", None)
             if not isinstance(platform, str):
                 continue
-            owner = getattr(
-                entry,
-                "integration_domain",
-                getattr(entry, "platform", None),
-            )
+            # ``RegistryEntry.platform`` names the integration that owns the
+            # entity on every supported core; ``RegistryEntry`` has no
+            # ``integration_domain`` field.
+            owner = getattr(entry, "platform", None)
             if owner is None:
-                # Home Assistant 2025.10+ exposes ``integration_domain`` on entity
-                # registry entries while older cores only expose ``platform``.
-                # Falling back to ``DOMAIN`` keeps legacy builds compatible and
-                # documents why both attributes remain supported during recovery.
+                # The entries are already scoped to this config entry, so a
+                # registry entry without ``platform`` (partial doubles) is ours.
                 owner = DOMAIN
             if owner != DOMAIN:
                 continue
@@ -3759,11 +4623,10 @@ async def _async_relink_entities_for_entry(  # noqa: PLR0913
     The caller supplies the entity ``domain`` filter and a resolver that maps an
     entity registry entry to a target device (and optional expected subentry
     identifier). The helper guards registry acquisition across a range of Home
-    Assistant versions, normalizes the device lookup path to tolerate legacy
-    ``async_get_device`` signatures, and records a short summary once the pass
-    finishes. Callers should keep resolver logic side effect free; the helper
-    itself updates registry links when the resolver provides a valid target
-    device.
+    Assistant versions, resolves devices through the shared entry-scoped
+    resolver, and records a short summary once the pass finishes. Callers should
+    keep resolver logic side effect free; the helper itself updates registry
+    links when the resolver provides a valid target device.
     """
 
     entry_id = getattr(entry, "entry_id", "") or ""
@@ -3782,9 +4645,21 @@ async def _async_relink_entities_for_entry(  # noqa: PLR0913
         )
         return
 
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import iter_all_devices
+
     if not getattr(entity_registry, "entities", None):
         return
-    if not getattr(device_registry, "devices", None):
+    # Readiness probe only: an empty registry has nothing to relink.  Asked
+    # through the shared helper because no call site outside the translator may
+    # touch ``device_registry.devices`` at all -- neither as a mapping nor via
+    # ``getattr`` -- and the static ratchet enforces that
+    # (``tests/test_guard_device_registry_kwargs.py``).  Note that ``__len__``
+    # itself does *not* report (tag ``2026.9.0``, lines 1553-1555), so the cost
+    # here is materialising a tuple of pointers where a length would do; that is
+    # the price of having exactly one place that knows what ``devices`` means on
+    # which core.
+    if not iter_all_devices(device_registry):
         return
 
     registry_entries = _iter_config_entry_entities(entity_registry, entry_id)
@@ -3792,42 +4667,28 @@ async def _async_relink_entities_for_entry(  # noqa: PLR0913
     def lookup_device(
         identifier: tuple[str, str], *, allow_service: bool = True
     ) -> dr.DeviceEntry | Any | None:
-        device: dr.DeviceEntry | Any | None
+        """Resolve one identifier to a device owned by this config entry.
 
-        get_device = getattr(device_registry, "async_get_device", None)
-        if callable(get_device):
-            try:
-                device = get_device(identifiers={identifier})
-            except TypeError:
-                try:
-                    device = cast(
-                        Callable[[Collection[tuple[str, str]]], Any], get_device
-                    )({identifier})
-                except TypeError:
-                    device = None
-        else:
-            device = None
+        The lookup itself lives in the shared resolver; this closure only adds
+        the service-device filter its callers ask for.  The entry scoping that
+        used to be a post-filter here (``entry_id not in device.config_entries``)
+        is now part of the lookup, and that is a narrowing in one direction only:
+        the old shape searched by identifier alone, took the *first* match and
+        then threw it away when it belonged to another entry -- so a second
+        device carrying the same identifier under *our* entry was never reached.
+        The resolver asks the registry for our entry's device directly.
 
+        See ``custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md``
+        and ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI: no call site may name
+        ``async_get_device``, and none may build the entry scoping by hand.
+        """
+        # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+        from .coordinator.helpers.registry import resolve_device_by_identifiers
+
+        device = resolve_device_by_identifiers(
+            device_registry, (identifier,), entry_id=entry_id
+        )
         if device is None:
-            devices_iterable = getattr(device_registry, "devices", {})
-            if isinstance(devices_iterable, Mapping):
-                candidates = cast(Iterable[Any], devices_iterable.values())
-            else:
-                candidates = cast(Iterable[Any], devices_iterable) or ()
-
-            for candidate in candidates:
-                identifiers = getattr(candidate, "identifiers", None)
-                if not isinstance(identifiers, Collection):
-                    continue
-                if identifier in identifiers:
-                    device = candidate
-                    break
-
-        if device is None:
-            return None
-
-        config_entries = cast(Collection[str], getattr(device, "config_entries", ()))
-        if entry_id not in config_entries:
             return None
         if not allow_service and _device_is_service_device(device, entry_id):
             return None
@@ -3951,9 +4812,10 @@ async def _async_relink_button_devices(hass: HomeAssistant, entry: ConfigEntry) 
         lookup_device: _DeviceLookup,
         current_device: dr.DeviceEntry | Any | None,
     ) -> tuple[dr.DeviceEntry | Any, str | None] | None:
-        if current_device and entry.entry_id in getattr(
-            current_device, "config_entries", ()
-        ):
+        # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+        from .coordinator.helpers.registry import device_belongs_to_entry
+
+        if current_device and device_belongs_to_entry(current_device, entry.entry_id):
             if not _device_is_service_device(current_device, entry.entry_id):
                 return None
 
@@ -4152,6 +5014,11 @@ async def _async_relink_subentry_entities(
         lookup_device: _DeviceLookup,
     ) -> dr.DeviceEntry | Any | None:
         """Return the service device assigned to the service subentry."""
+        # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+        from .coordinator.helpers.registry import (
+            device_belongs_to_entry,
+            iter_all_devices,
+        )
 
         for identifier in service_identifiers:
             device = lookup_device(identifier)
@@ -4168,17 +5035,11 @@ async def _async_relink_subentry_entities(
                 continue
             return device
 
-        devices_iterable = getattr(service_device_registry, "devices", None)
-        if isinstance(devices_iterable, Mapping):
-            candidates = cast(Iterable[Any], devices_iterable.values())
-        else:
-            candidates = cast(Iterable[Any], devices_iterable) or ()
-
-        for device in candidates:
-            config_entries = cast(
-                Collection[str], getattr(device, "config_entries", ())
-            )
-            if entry_id not in config_entries:
+        # Fallback scan when the identifier lookup above found nothing.  Whole
+        # registry, then filtered to this entry, because a service device may
+        # still carry a legacy identifier the candidates do not name.
+        for device in iter_all_devices(service_device_registry):
+            if not device_belongs_to_entry(device, entry_id):
                 continue
             device_subentry = getattr(device, "config_subentry_id", None)
             if (
@@ -4600,7 +5461,9 @@ async def async_handle_manual_locate(
 
     Behavior:
         - Resolve any incoming identifier (`device_id`, `entity_id`, or canonical).
-        - On success: dispatch the request to the coordinator and log an info line.
+        - On dispatch: log what the coordinator actually returned, distinguishing
+          a locate that produced data from one that was gated away. Neither line
+          claims that the device reported its position.
         - On failure: raise HomeAssistantError and mirror a redacted error record
           into the coordinator diagnostics buffer (if present).
 
@@ -4608,8 +5471,20 @@ async def async_handle_manual_locate(
     """
     try:
         canonical_id, friendly = _resolve_canonical_from_any(hass, arg)
-        await coordinator.async_locate_device(canonical_id)
-        _LOGGER.info("Successfully submitted manual locate for %s", friendly)
+        # The return value is the evidence, so it is read rather than dropped:
+        # async_locate_device returns an empty mapping when the request was
+        # gated away (cooldown, in-flight, device absent). Logging success for
+        # that case claims an effect that never happened -- the same class of
+        # unbacked success claim as the Stop Sound report in BSkando#195.
+        location = await coordinator.async_locate_device(canonical_id)
+        if location:
+            _LOGGER.info("Manual locate returned data for %s", friendly)
+        else:
+            _LOGGER.info(
+                "Manual locate for %s was accepted but produced no location "
+                "update (gated by cooldown, an in-flight request, or absence)",
+                friendly,
+            )
     except HomeAssistantError as err:
         diag_buffer = cast(Any, getattr(coordinator, "_diag", None))
         if diag_buffer is not None and hasattr(diag_buffer, "add_error"):
@@ -4705,6 +5580,35 @@ def _primary_active_entry(entries: list[ConfigEntry]) -> ConfigEntry | None:
 # ------------------------------ Data/Options ---------------------------------
 
 
+# Keys whose change makes a reload necessary, taken from the token-cache seeding
+# in async_setup_entry: that seeding runs once per setup, so a change to any of
+# these is written but ineffective until the entry is set up again.
+_CREDENTIAL_KEYS: Final[tuple[str, ...]] = (
+    DATA_AUTH_METHOD,
+    CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+)
+
+
+def _credential_fingerprint(data: Mapping[str, Any] | None) -> str:
+    """Return a non-reversible fingerprint of the credential-relevant keys.
+
+    Deliberately a digest, not the values: this is held for the lifetime of the
+    entry and would otherwise put a second copy of the tokens into memory (and
+    one bad log line away from disk). Equality is all the caller needs.
+    """
+
+    container: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
+    material = json.dumps(
+        {key: container.get(key) for key in _CREDENTIAL_KEYS},
+        sort_keys=True,
+        default=repr,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
     """Read a configuration value, preferring options over data.
 
@@ -4736,6 +5640,81 @@ def _normalize_contributor_mode(value: Any) -> str:
         ):
             return normalized
     return DEFAULT_CONTRIBUTOR_MODE
+
+
+# Key of the stray mapping an older discovery import left inside ``entry.data``.
+# It is not a setting: the integration never writes a key called ``data`` into an
+# entry (the only similar constant is ``secrets_data``), and nothing reads one.
+_STRAY_NESTED_DATA_KEY = "data"
+
+
+def _strip_stray_nested_entry_data(
+    data: Mapping[str, Any],
+) -> tuple[dict[str, Any], int]:
+    """Return ``data`` without the stray nested ``data`` key, and how deep it went.
+
+    Discovery used to hand Home Assistant a nested ``{"data": {...}}`` payload,
+    which the core merged verbatim into ``entry.data``. The credentials therefore
+    never reached the level that is read, and the next import wrapped the whole
+    thing again: the nesting grows by one level per run, and a live installation
+    was found at depth 3 with roughly three quarters of its entry data spent on
+    the dead copies.
+
+    Removing the top key removes the whole chain, so the returned depth is a
+    report, not a loop counter. A depth of 0 means nothing was found, and the
+    returned mapping equals the input: callers must skip the write in that case
+    so a healthy entry is never touched.
+
+    Only a *mapping* is stripped. A future setting that happens to be called
+    ``data`` and holds a scalar is left alone rather than silently deleted.
+    """
+
+    cleaned = dict(data)
+    stray = cleaned.get(_STRAY_NESTED_DATA_KEY)
+    if not isinstance(stray, Mapping):
+        return cleaned, 0
+
+    depth = 0
+    while isinstance(stray, Mapping):
+        depth += 1
+        stray = stray.get(_STRAY_NESTED_DATA_KEY)
+
+    del cleaned[_STRAY_NESTED_DATA_KEY]
+    return cleaned, depth
+
+
+def _async_strip_stray_nested_entry_data(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Drop the discovery leftovers from ``entry.data``; idempotent, log-only.
+
+    Runs on every setup rather than from ``async_migrate_entry``: migration only
+    runs when the stored entry version differs from ``CONFIG_ENTRY_VERSION``, and
+    affected entries are already at the current version, so they would never be
+    reached. Bumping the version purely to trigger a cleanup would also block
+    downgrades, which is a steep price for removing a stray key. The sibling
+    ``_async_soft_migrate_data_to_options`` establishes the idiom: an idempotent
+    setup-time fixup that writes only when it has something to change.
+
+    The discarded copies are not promoted to the top level. They are ordered by
+    age only as long as nothing else wrote to the entry in between; a reauth
+    writes to the top level and inverts that order, so promoting the deeper copy
+    could replace fresh credentials with stale ones. Running the login again is
+    the reliable route, and after the discovery fix it lands correctly.
+    """
+
+    cleaned, depth = _strip_stray_nested_entry_data(entry.data)
+    if depth == 0:
+        return
+
+    _LOGGER.warning(
+        "[%s] Removing %d nested 'data' level(s) an earlier discovery import left "
+        "in the entry. The credentials stored there are discarded; run the login "
+        "again if the credentials in use are outdated.",
+        entry.entry_id,
+        depth,
+    )
+    hass.config_entries.async_update_entry(entry, data=cleaned)
 
 
 async def _async_soft_migrate_data_to_options(
@@ -4956,9 +5935,7 @@ def _migrate_legacy_unique_ids(
             _LOGGER.debug("Unique ID migration failed for %s: %s", ent.entity_id, err)
 
     try:
-        for device in list(dev_reg.devices.values()):
-            if entry.entry_id not in device.config_entries:
-                continue
+        for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
             if (DOMAIN, "integration") in device.identifiers:
                 new_identifiers = set(device.identifiers)
                 new_identifiers.remove((DOMAIN, "integration"))
@@ -5299,15 +6276,15 @@ async def _async_migrate_device_identifiers_to_entry_scope(
         - Idempotent: already namespaced identifiers are ignored.
         - Collision-aware: if a target identifier exists, it will skip and log a warning.
     """
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import iter_all_devices
+
     dev_reg = dr.async_get(hass)
     updated = 0
     skipped = 0
     collisions = 0
 
-    for device in list(dev_reg.devices.values()):
-        if entry.entry_id not in device.config_entries:
-            continue
-
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
         # Keep service/integration device untouched
         if (DOMAIN, "integration") in device.identifiers or any(
             domain == DOMAIN and str(ident).startswith("integration_")
@@ -5332,7 +6309,10 @@ async def _async_migrate_device_identifiers_to_entry_scope(
 
             # Check for collision: if any other device already uses the target ident, skip
             conflict = False
-            for dev2 in dev_reg.devices.values():
+            # Re-read on every candidate on purpose: the loop above rewrites
+            # identifiers as it goes, and a snapshot taken once would not see
+            # the target this pass just created.
+            for dev2 in iter_all_devices(dev_reg):
                 if dev2.id == device.id:
                     continue
                 if target in dev2.identifiers:
@@ -5588,16 +6568,21 @@ def _resolve_entry_email(entry: ConfigEntry) -> tuple[str | None, str | None]:
             break
 
     if raw_email is None:
-        secrets_bundle = None
+        # Only the account e-mail is read from the bundle. The local carries a
+        # neutral name on purpose: CodeQL treats any local named like a secret as
+        # sensitive and has no sanitizer for _mask_email_for_logs, so every log
+        # line showing this account's masked e-mail would count as clear-text
+        # logging of a secret (AGENTS.md, "Log hygiene for scanners").
+        bundle: Mapping[str, Any] | None = None
         for container in (getattr(entry, "data", {}), getattr(entry, "options", {})):
             if isinstance(container, Mapping):
                 bundle_candidate = container.get(DATA_SECRET_BUNDLE)
                 if isinstance(bundle_candidate, Mapping):
-                    secrets_bundle = bundle_candidate
+                    bundle = bundle_candidate
                     break
-        if isinstance(secrets_bundle, Mapping):
+        if bundle is not None:
             for key in ("google_email", "username", "Email", "email"):
-                candidate = secrets_bundle.get(key)
+                candidate = bundle.get(key)
                 if isinstance(candidate, str) and candidate.strip():
                     raw_email = candidate.strip()
                     break
@@ -5678,11 +6663,12 @@ def _label_entry_for_log(entry: ConfigEntry) -> str:
     """Return a privacy-safe label for log messages referencing ``entry``."""
 
     email = _extract_email_from_entry(entry)
-    if email:
+    if email and "@" in email:
         return _mask_email_for_logs(email)
-    title = getattr(entry, "title", None)
-    if isinstance(title, str) and title:
-        return title
+    # The entry title is never logged: the config flow sets it to the account
+    # e-mail, and a renamed title is free text that may name a person. Masking
+    # addresses inside free text cannot be made complete, and the entry ID
+    # identifies the entry just as well.
     entry_id = getattr(entry, "entry_id", None)
     if isinstance(entry_id, str) and entry_id:
         return entry_id
@@ -6194,6 +7180,53 @@ def _register_restart_required_check(
     )
 
 
+_URL_REFRESH_INTERVAL = timedelta(days=1)
+
+
+def _register_url_refresh_timer(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Refresh the device configuration URLs once a day.
+
+    Without this the URLs are rebuilt only during setup. With the weekly token
+    expiry enabled, an instance that runs across two week boundaries without a
+    restart or reload ends up with a dead Map View link on its own device page;
+    the map accepts the current and the previous week, so two boundaries is the
+    first point at which the stored link is certainly stale.
+
+    A run that changes nothing costs nothing: the device registry returns early
+    when the value is unchanged, and the periodic path reports an unreachable or
+    internal-only URL only when that situation *changes* (see
+    ``_async_refresh_device_urls``).
+    """
+
+    @callback
+    def _scheduled_refresh(_now: Any) -> None:
+        _async_create_task(
+            hass,
+            _async_refresh_device_urls(hass, periodic=True),
+            name=f"{DOMAIN}.refresh_device_urls",
+        )
+
+    bucket["url_refresh_unsub"] = async_track_time_interval(
+        hass, _scheduled_refresh, _URL_REFRESH_INTERVAL
+    )
+
+
+@callback
+def _teardown_url_refresh_timer(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Cancel the daily URL refresh (last-entry teardown)."""
+
+    unsub = bucket.pop("url_refresh_unsub", None)
+    if callable(unsub):
+        with suppress(Exception):
+            unsub()
+    bucket.pop("url_refresh_registered", None)
+    bucket.pop("url_refresh_state", None)
+
+
 @callback
 def _teardown_restart_required_check(
     hass: HomeAssistant, bucket: GoogleFindMyDomainData
@@ -6239,6 +7272,14 @@ async def _async_ensure_restart_required_check(
             _register_restart_required_check(hass, bucket)
             bucket["restart_check_registered"] = True
             _LOGGER.debug("Registered %s restart-required watchdog", DOMAIN)
+
+        url_refresh_registered = bucket.get("url_refresh_registered")
+        if not isinstance(url_refresh_registered, bool):
+            url_refresh_registered = False
+        if not url_refresh_registered:
+            _register_url_refresh_timer(hass, bucket)
+            bucket["url_refresh_registered"] = True
+            _LOGGER.debug("Registered %s daily map URL refresh", DOMAIN)
 
 
 def _log_ecdsa_acceleration(info: dict[str, str | None]) -> None:
@@ -6322,6 +7363,19 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     bucket["ecdsa_acceleration_info"] = ecdsa_info
     _log_ecdsa_acceleration(ecdsa_info)
 
+    # Arm the secrets.json discovery watcher exactly once per Home Assistant
+    # instance. The watcher polls the bundled Auth/secrets.json (plus any extra
+    # paths configured via options) and triggers discovery/reauth flows when a
+    # freshly minted bundle appears, so same-machine login containers hand off
+    # without manual copy-paste. DiscoveryManager owns its own EVENT_HOMEASSISTANT_STOP
+    # listener and _started guard; the bucket handle keeps the singleton alive and
+    # makes the start idempotent across racey setups.
+    if bucket.get("discovery_manager") is None:
+        try:
+            bucket["discovery_manager"] = await async_initialize_discovery_runtime(hass)
+        except Exception:  # noqa: BLE001 - discovery is best-effort, never fatal
+            _LOGGER.debug("Discovery runtime initialization failed", exc_info=True)
+
     return True
 
 
@@ -6332,6 +7386,9 @@ def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> Non
         "[Entry=%s] Starting self-healing cleanup of device registry...",
         entry.entry_id,
     )
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import device_belongs_to_entry
+
     dev_reg = dr.async_get(hass)
     entry_id = entry.entry_id
     correct_service_identifier = service_device_identifier(entry_id)
@@ -6354,8 +7411,14 @@ def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> Non
 
     healed_devices = 0
     for device in registry_devices:
-        config_entries: Collection[str] = getattr(device, "config_entries", ())
-        if entry_id not in config_entries:
+        # Defensive second check.  ``registry_devices`` comes from
+        # ``async_entries_for_config_entry``, which filters by entry, so against
+        # a faithful registry this is always true and no mutant of it fails a
+        # test.  It is not unreachable, though: the helper is resolved with
+        # ``getattr`` above, and a double that answers unfiltered makes this
+        # false.  Do not delete it as dead code on the strength of a green
+        # mutant run.
+        if not device_belongs_to_entry(device, entry_id):
             continue
 
         identifiers: Collection[tuple[str, str]] = getattr(device, "identifiers", ())
@@ -6928,9 +7991,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
       5) Build coordinator, register views, and synchronize subentries.
       6) Schedule initial refresh after HA is fully started.
     """
+    # A reload that was claimed has arrived: release the latch. Deliberately here
+    # and not only in the unload half, because ``async_reload`` skips the unload
+    # for an entry that was not loaded, and a latch nobody releases would swallow
+    # every later reload of this entry.
+    discard_pending_entry_reload(hass, entry.entry_id)
+
     parent_entry_id = getattr(entry, "parent_entry_id", None)
     if parent_entry_id:
         return await _async_setup_subentry(hass, entry)
+
+    # Before anything reads the entry: drop the leftovers of the discovery import
+    # defect. Deliberately first, not down with the other soft migrations, so the
+    # cleanup does not depend on the rest of the setup succeeding.
+    _async_strip_stray_nested_entry_data(hass, entry)
 
     legacy_cache: TokenCache | None = None
     cached_snapshot: Mapping[str, Any] | None = None
@@ -6973,7 +8047,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 parsed_secrets = json.loads(raw_secrets)
             except (json.JSONDecodeError, TypeError) as err:
                 _LOGGER.debug(
-                    "[%s] Legacy secrets_data parse failed: %s", entry.entry_id, err
+                    "[%s] Parsing the legacy bundle failed: %s", entry.entry_id, err
                 )
             else:
                 if isinstance(parsed_secrets, Mapping):
@@ -7107,6 +8181,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             entry.entry_id,
             _mask_email_for_logs(normalized_email),
         )
+        # Final abort (not a retryable ConfigEntryNotReady): this return never
+        # reaches the cleanup runner at the end of the function, so any job the
+        # config flow staged for this account would linger in hass.data for the
+        # whole process lifetime.
+        # Discard it instead of running it: the entry is not set up, so the
+        # credentials must stay put. The secrets watcher re-imports the file on
+        # its next scan.
+        try:
+            from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+                async_discard_pending_container_cleanup,
+                async_discard_pending_container_cleanup_for_entry,
+            )
+
+            # Two addressings, in this order and both needed. The entry-id drain
+            # first, because this entry may hold SEVERAL update-path tickets and
+            # the claim-based discard below takes at most one; running it first
+            # would consume one of those and leave the create-path ticket behind.
+            # The claim-based discard second, for exactly that uncorrelated
+            # create-path ticket, which carries no entry id and is therefore
+            # invisible to the drain.
+            discarded = async_discard_pending_container_cleanup_for_entry(
+                hass, entry_id=getattr(entry, "entry_id", None)
+            )
+            discarded += async_discard_pending_container_cleanup(
+                hass,
+                unique_id=getattr(entry, "unique_id", None),
+                entry_id=getattr(entry, "entry_id", None),
+            )
+            if discarded:
+                _LOGGER.debug(
+                    "[%s] Discarded %s staged container-login cleanup job(s) after the duplicate-account abort; credential files are kept on disk",
+                    entry.entry_id,
+                    discarded,
+                )
+        except Exception as err:  # noqa: BLE001 - housekeeping must never raise
+            _LOGGER.debug(
+                "[%s] Could not discard staged container-login cleanup: %s",
+                entry.entry_id,
+                err,
+            )
         return False
 
     pm_setup_start = time.monotonic()
@@ -7134,6 +8248,117 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop)
     )
 
+    # Refresh the running discovery watcher's paths when SECRETS_EXTRA_WATCH_PATHS
+    # changes at runtime (options flow), so a newly configured path is observed
+    # without a Home Assistant restart. The manager is a per-instance singleton and
+    # recomputes from every enabled entry, so the listener is idempotent regardless
+    # of which entry changed. It deliberately passes no exclude_entry_id: the entry
+    # that just changed is exactly the one whose new path must be adopted. This
+    # closure is only the listener adapter for Home Assistant's (hass, entry)
+    # signature; the refresh itself lives in the shared helper.
+    #
+    # Since the config flow no longer reloads (Home Assistant deprecates a
+    # reloading config-flow method on an entry that has an update listener:
+    # warning from 2026.6, error from 2026.12), this listener is also the place
+    # where changed credentials become effective. It compares a fingerprint of
+    # the credential-relevant keys, because a listener is handed the new entry
+    # and no previous state. Writing credentials without a reload would leave
+    # them stored but ineffective: the token cache is seeded below, in
+    # async_setup_entry, and a running coordinator does not pick up new tokens.
+    # Taken here on purpose: after the legacy migration above has rewritten
+    # entry.data, and before the listener is registered. Taking it earlier would
+    # make the migration itself look like a credential change and reload the
+    # entry on every setup.
+    credential_fingerprint = _credential_fingerprint(entry.data)
+
+    async def _async_refresh_watch_paths(
+        hass_arg: HomeAssistant, updated_entry: MyConfigEntry
+    ) -> None:
+        nonlocal credential_fingerprint
+
+        await _async_refresh_discovery_watch_paths(hass_arg)
+
+        # An invocation Home Assistant queued before the entry was unloaded still
+        # runs afterwards: ``async_update_entry`` creates the task immediately,
+        # while ``async_on_unload`` only takes the listener out of the entry. Such
+        # a call carries the fingerprint of a setup that is over and would compare
+        # it against data the rebuilt entry has long since adopted -- and reload an
+        # entry that was just set up. Identity in ``update_listeners`` is what
+        # separates the current invocation from the bygone one.
+        listeners = getattr(updated_entry, "update_listeners", None)
+        if isinstance(listeners, list) and _async_refresh_watch_paths not in listeners:
+            return
+
+        updated_fingerprint = _credential_fingerprint(updated_entry.data)
+        if updated_fingerprint == credential_fingerprint:
+            # Options, subentry maintenance, coalescing: everything that leaves
+            # the credentials alone must not reload the entry.
+            return
+
+        # Advance the fingerprint BEFORE scheduling, so a second notification
+        # arriving before the reload takes effect cannot schedule a second one.
+        credential_fingerprint = updated_fingerprint
+
+        schedule_reload = getattr(
+            getattr(hass_arg, "config_entries", None), "async_schedule_reload", None
+        )
+        if not callable(schedule_reload):
+            _LOGGER.debug(
+                "Credentials changed but async_schedule_reload is unavailable; "
+                "they take effect on the next restart"
+            )
+            return
+
+        # Second guard against a teardown of an entry that is already being torn
+        # down. Home Assistant removes this listener only *after*
+        # ``async_unload_entry`` returns, in ``_async_process_on_unload``, so an
+        # invocation queued before a reload can still wake up during the platform
+        # unload and pass the identity check above. Two independent things stop it
+        # there: ``async_unload_entry`` now holds the latch across the whole
+        # teardown and releases it in a ``finally``, and the core sets
+        # ``UNLOAD_IN_PROGRESS`` *before* calling it (checked in dev and in the
+        # declared floor 2025.9.1), so the state below is never ``LOADED`` inside
+        # that window. The state check is the cheaper of the two and keeps working
+        # if the latch is ever claimed by someone else; it also covers the entry
+        # that is simply not loaded. An unknown state means fail-open, as
+        # everywhere else here: a missing reload is worse than one too many, and
+        # the test stubs do not populate the field (contract in
+        # ``agents/config_flow/AGENTS.md``).
+        entry_state = getattr(updated_entry, "state", None)
+        if entry_state is not None and entry_state is not ConfigEntryState.LOADED:
+            _LOGGER.debug(
+                "Entry %s: sign-in data changed, but it is not loaded (%s); the "
+                "reload under way will pick them up",
+                updated_entry.entry_id,
+                entry_state,
+            )
+            return
+
+        # Last check before scheduling: a flow that writes credentials and reloads
+        # the entry itself has already covered this change.
+        if not claim_pending_entry_reload(hass_arg, updated_entry.entry_id):
+            _LOGGER.debug(
+                "Entry %s: sign-in data changed, but a reload is already on its "
+                "way; not scheduling a second one",
+                updated_entry.entry_id,
+            )
+            return
+
+        _LOGGER.info(
+            "Credentials changed for this account; reloading the entry so they "
+            "take effect"
+        )
+        try:
+            schedule_reload(updated_entry.entry_id)
+        except Exception:  # noqa: BLE001 - a claim that comes to nothing must be given back
+            _LOGGER.exception(
+                "Failed to schedule the reload of entry %s after a credential change",
+                updated_entry.entry_id,
+            )
+            discard_pending_entry_reload(hass_arg, updated_entry.entry_id)
+
+    entry.async_on_unload(entry.add_update_listener(_async_refresh_watch_paths))
+
     # Early, idempotent seeding of TokenCache from entry.data (authoritative SSOT)
     try:
         if DATA_AUTH_METHOD in entry.data:
@@ -7157,7 +8382,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             )
             _LOGGER.debug("Seeded google_email into TokenCache from entry.data")
     except Exception as err:
-        _LOGGER.debug("Early TokenCache seeding from entry.data failed: %s", err)
+        _LOGGER.debug("Early cache instance seeding from entry.data failed: %s", err)
 
     raw_mode = _opt(entry, OPT_CONTRIBUTOR_MODE, DEFAULT_CONTRIBUTOR_MODE)
     contributor_mode = _normalize_contributor_mode(raw_mode)
@@ -7268,21 +8493,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     aas_token_entry = entry.data.get(DATA_AAS_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
 
+    # The entry is the source of truth for credentials; the cache is a mirror of
+    # them. Recovering a value from the cache is therefore only right where the
+    # entry carries no credentials at all, which is the gap this seed was built
+    # for: a migrated installation whose credentials never reached entry.data.
+    #
+    # Where the entry does carry credentials, a *missing* optional key is a
+    # statement rather than a gap. Whoever replaced the credentials -- the
+    # discovery overwrite, the watched-file import, reauth, the options login --
+    # left the key out because the new ones no longer come with a bundle or an
+    # ``aas_et/`` token, and a flat merge cannot express that any other way.
+    # Recovering it here would hand the integration back exactly the credentials
+    # the user just replaced, so it is dropped from the cache instead: not
+    # merely skipped, because the cache-first fallbacks elsewhere (see
+    # _collect_entry_credential_tokens) would otherwise keep finding it. This
+    # mirrors what _async_seed_manual_credentials has long done for a superseded
+    # AAS token; the bundle branch below simply had no counterpart.
+    #
+    # Only the keys the entry mirrors are dropped. Material derived from a
+    # bundle (owner_key, shared_key, fcm_credentials) belongs to the same
+    # account, is refreshed in place, and stays.
+    entry_carries_credentials = bool(secrets_data or oauth_token or aas_token_entry)
+
     cache_snapshot: Mapping[str, Any] | None = None
     try:
         cache_snapshot = await cache.all()
     except Exception as err:  # pragma: no cover - defensive cache read
-        _LOGGER.debug("[%s] TokenCache snapshot read failed: %s", entry.entry_id, err)
+        _LOGGER.debug(
+            "[%s] Cache instance snapshot read failed: %s", entry.entry_id, err
+        )
 
-    if not secrets_data and cache_snapshot:
+    if entry_carries_credentials:
+        for key in OPTIONAL_CREDENTIAL_KEYS:
+            label = _optional_credential_label(key)
+            if entry.data.get(key):
+                continue
+            if not cache_snapshot or not cache_snapshot.get(key):
+                continue
+            try:
+                await cache.async_set_cached_value(key, None)
+            except Exception as err:  # pragma: no cover - defensive cache write
+                _LOGGER.debug(
+                    "[%s] Could not drop the superseded cached %s: %s",
+                    entry.entry_id,
+                    label,
+                    err,
+                )
+            else:
+                _LOGGER.debug(
+                    "[%s] Dropped the superseded cached %s; the entry no longer "
+                    "carries it",
+                    entry.entry_id,
+                    label,
+                )
+    elif cache_snapshot:
         secrets_data = cache_snapshot.get(DATA_SECRET_BUNDLE)
-    if not oauth_token and cache_snapshot:
         oauth_token = cache_snapshot.get(CONF_OAUTH_TOKEN)
-    if not aas_token_entry and cache_snapshot:
         aas_token_entry = cache_snapshot.get(DATA_AAS_TOKEN)
 
     if secrets_data:
-        await _async_save_secrets_data(cache, secrets_data)
+        await _async_save_secrets_data(
+            cache, secrets_data, account_label=_label_entry_for_log(entry)
+        )
         _LOGGER.debug("Persisted secrets.json bundle to token cache (entry-scoped)")
         if isinstance(aas_token_entry, str) and aas_token_entry:
             await cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_entry)
@@ -7519,6 +8791,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             if managed_subentry is None:
                 continue
 
+            if (
+                getattr(managed_subentry, "subentry_type", None)
+                in NON_DEVICE_SUBENTRY_TYPES
+            ):
+                # This loop calls ``async_update_subentry`` directly, so the
+                # guard inside ``update_visible_device_ids`` does not cover it.
+                # It matters because the manager canonicalises ``service`` and
+                # ``tracker`` by type but leaves ``hub`` on its stored key: a
+                # legacy hub storing ``core_tracking`` therefore *is*
+                # ``managed_subentries["core_tracking"]``, and the tracker
+                # group's ids would be written onto it. Measured against the
+                # real manager, not assumed.
+                #
+                # What changed with the rank axis in ``_candidate_score`` is
+                # only the *contested* case: beside a real ``tracker`` storing
+                # the same key the hub is now the deterministic loser rather
+                # than a winner-by-iteration-order. Uncontested it still holds
+                # the key, so this guard is narrowed in reach, not made
+                # redundant, and it stays.
+                continue
+
             desired_visible_ids = _extract_visible_ids(subentry_meta)
             existing_visible_ids = _normalize_visible_ids(
                 managed_subentry.data.get("visible_device_ids")
@@ -7634,6 +8927,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
         map_redirect_view_instance = GoogleFindMyMapRedirectView(hass)
         hass.http.register_view(map_redirect_view_instance)
+
+        map_tiles_token_view_instance = GoogleFindMyMapTilesTokenView(hass)
+        hass.http.register_view(map_tiles_token_view_instance)
         bucket["views_registered"] = True
         _LOGGER.debug("Registered map views")
 
@@ -7732,18 +9028,83 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     await _async_normalize_device_names(hass)
     await _async_refresh_device_urls(hass)
 
+    # Post-persist cleanup (P2): the config flow can only *stage* irreversible
+    # cleanups (deleting the imported secrets.json copies), because
+    # `ConfigFlow.async_create_entry` merely builds a FlowResult -- Home Assistant creates and stores the entry
+    # afterwards in `ConfigEntriesFlowManager.async_finish_flow`. Deliberately
+    # behind the whole setup core: every `ConfigEntryNotReady` above must leave
+    # the credentials on disk for the next attempt.
+    #
+    # Reaching this line proves the entry exists *in memory*, not that it has
+    # been stored: `ConfigEntries.async_add` awaits this very coroutine and only
+    # calls `_async_schedule_save` afterwards, which then saves debounced. So
+    # the jobs are only CLAIMED here (synchronously, so a reload cannot claim
+    # them twice) and executed later, by a background task that first waits for
+    # proof that the entry reached Home Assistant's storage. Everything that is
+    # not such a proof -- shutdown, unload, timeout, error -- drops the jobs and
+    # keeps the credentials on disk.
+    #
+    # Best effort in both directions: the runner isolates each job, and this
+    # guard makes sure a cleanup failure can never turn a successful setup into
+    # a failed one (the secrets watcher re-imports a surviving file on its next
+    # scan).
+    try:
+        from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+            async_schedule_pending_container_cleanup,
+        )
+
+        async_schedule_pending_container_cleanup(hass, entry)
+    except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
+        _LOGGER.warning(
+            "[%s] Deferred container-login cleanup could not be armed: %s",
+            entry.entry_id,
+            err,
+        )
+
+    # Counterpart to the refresh in `async_remove_entry`: bring this entry's
+    # SECRETS_EXTRA_WATCH_PATHS back into the running watcher. Needed because
+    # `_collect_extra_watch_paths` skips disabled entries while Home Assistant
+    # fires no update listener when an entry is enabled again, and because the
+    # discovery singleton is armed once per instance, so an entry set up later
+    # would otherwise contribute nothing until the next options update.
+    # Cheap and safe: `async_refresh_watch_paths` skips watchers whose path set
+    # is unchanged, which is the normal case for a plain setup or reload, so no
+    # rescan is triggered there. Only runs on a successful setup: every
+    # `ConfigEntryNotReady` above returns before this point.
+    #
+    # Note on ordering: the deferred cleanup above is now armed, not executed,
+    # so a rescan triggered here can still see a bundle that the cleanup will
+    # delete moments later. That is harmless -- a re-import of the very bundle
+    # this entry was created from is idempotent (same account, same content),
+    # and the delete stays account- and content-aware, so it only removes the
+    # copies the import actually consumed.
+    await _async_refresh_discovery_watch_paths(hass)
+
     return True
 
 
 async def _async_save_secrets_data(
-    cache: TokenCache, secrets_data: Mapping[str, Any]
+    cache: TokenCache,
+    secrets_data: Mapping[str, Any],
+    *,
+    account_label: str | None = None,
 ) -> None:
     """Persist a legacy secrets.json bundle into the entry-scoped token cache.
 
     Notes:
         - Store JSON-serializable values *as-is*. TokenCache validates and normalizes.
         - Uses the *entry-local* cache instance (no global facade).
+        - Log lines name the account by ``account_label`` (the caller passes
+          ``_label_entry_for_log(entry)``) or, without one, by the cache's entry
+          ID. No clear-text value of the bundle reaches a log line (the label is
+          masked or an entry ID), only the type name of a value that failed to
+          save, and a field name only if it is one of the
+          fixed names in ``_LOGGABLE_BUNDLE_FIELDS`` (taken from that tuple, not
+          from the bundle): other field names can embed the account e-mail
+          (``adm_token_<email>``), and CodeQL counts any value derived from the
+          bundle as a secret, masked or not.
     """
+    log_label = account_label or f"entry {getattr(cache, 'entry_id', '<unknown>')}"
     from .shared_helpers import normalize_secrets_bundle
 
     # Defense-in-depth: the config flow already normalizes bundles on entry, but
@@ -7767,19 +9128,19 @@ async def _async_save_secrets_data(
         # owner_key only selects how wide the outage is described.
         if owner_key:
             _LOGGER.warning(
-                "No 'shared_key' found in secrets bundle for %s. "
+                "Account %s: the imported bundle has no 'shared_key'. "
                 "Crowdsourced/FMDN locations cannot be decrypted now; "
                 "own-device locations will fail when the owner key rotates "
                 "(it can only be refreshed with the shared_key). "
                 "Re-import a complete secrets.json.",
-                google_email or "(unknown)",
+                log_label,
             )
         else:
             _LOGGER.warning(
-                "No 'shared_key' found in secrets bundle for %s. "
+                "Account %s: the imported bundle has no 'shared_key'. "
                 "No location can be decrypted. "
                 "Re-import a complete secrets.json.",
-                google_email or "(unknown)",
+                log_label,
             )
     if google_email:
         email_key = str(google_email)
@@ -7793,7 +9154,7 @@ async def _async_save_secrets_data(
         except (OSError, TypeError) as err:
             _LOGGER.warning(
                 "Failed to save encrypted key bundle to persistent cache for %s: %s",
-                email_key,
+                log_label,
                 err,
             )
 
@@ -7804,16 +9165,32 @@ async def _async_save_secrets_data(
             else:
                 await cache.async_set_cached_value(key, json.dumps(value))
         except (OSError, TypeError) as err:
-            _LOGGER.warning("Failed to save '%s' to persistent cache: %s", key, err)
+            field_name = next(
+                (name for name in _LOGGABLE_BUNDLE_FIELDS if name == key),
+                "other field",
+            )
+            _LOGGER.warning(
+                "Failed to save bundle field %s (%s) for %s to persistent cache: %s",
+                field_name,
+                type(value).__name__,
+                log_label,
+                err,
+            )
 
 
 async def _async_normalize_device_names(hass: HomeAssistant) -> None:
     """One-time normalization: strip legacy 'Find My - ' prefix from device names."""
 
     try:
+        # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+        from .coordinator.helpers.registry import iter_all_devices
+
         dev_reg = dr.async_get(hass)
         updated = 0
-        for device in list(dev_reg.devices.values()):
+        # Whole registry on purpose: this one-time pass strips a legacy name
+        # prefix from every GoogleFindMy device, including devices of entries
+        # other than the one that happens to trigger the pass.
+        for device in iter_all_devices(dev_reg):
             try:
                 if not any(
                     len(ident) == 2 and ident[0] == DOMAIN
@@ -7839,8 +9216,45 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
-async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
-    """Refresh configuration URLs for all Google Find My devices."""
+@callback
+def _url_state_changed(hass: HomeAssistant, state: str) -> bool:
+    """Record the URL situation and return whether it differs from the last one.
+
+    The marker lives in the typed domain bucket, next to the timer that reads it
+    and the teardown that clears it, rather than in a second top-level
+    ``hass.data`` key: one owner, one lifecycle.
+    """
+
+    bucket = _domain_data(hass)
+    previous: object = bucket.get("url_refresh_state")
+    bucket["url_refresh_state"] = state
+    return bool(previous != state)
+
+
+async def _async_refresh_device_urls(
+    hass: HomeAssistant, *, periodic: bool = False
+) -> None:
+    """Refresh configuration URLs for all Google Find My devices.
+
+    ``periodic`` marks the daily timer run. Those runs report an unreachable or
+    internal-only URL once per state change instead of once per run: the two
+    messages were written for a single startup, and a timer would otherwise turn
+    each of them into a daily line in every installation that has no external
+    URL. A user-triggered refresh (the ``refresh_device_urls`` service) keeps
+    reporting unconditionally, because there somebody is waiting for the answer.
+    """
+
+    def _report_once(state: str) -> bool:
+        """Record the state and return whether this run should log above debug.
+
+        The state is recorded on *every* run, the startup one included. Ordering
+        matters here: with the recording behind a short-circuiting ``or``, a
+        startup that logged the warning would not have stored it, and the first
+        daily tick would have logged the identical line again.
+        """
+
+        changed = _url_state_changed(hass, state)
+        return not periodic or changed
 
     try:
         base_url = cast(
@@ -7853,14 +9267,16 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
             ),
         )
     except (HomeAssistantError, NoURLAvailableError) as err:
-        _LOGGER.warning(
+        _LOGGER.log(
+            logging.WARNING if _report_once("no-url") else logging.DEBUG,
             "Skipping configuration URL refresh; no reachable URL available: %s",
             err,
         )
         return
 
     if not base_url or "://" not in base_url:
-        _LOGGER.warning(
+        _LOGGER.log(
+            logging.WARNING if _report_once("no-url") else logging.DEBUG,
             "Skipping configuration URL refresh; no reachable URL available",
         )
         return
@@ -7875,10 +9291,13 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
     except (HomeAssistantError, NoURLAvailableError):
         internal_url = None
     if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
-        _LOGGER.info(
+        _LOGGER.log(
+            logging.INFO if _report_once("internal-only") else logging.DEBUG,
             "Using internal URL for map view links; "
             "set an external URL in Home Assistant settings for remote access",
         )
+    else:
+        _report_once("external")
 
     base_url = base_url.rstrip("/")
 
@@ -7887,9 +9306,18 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
         entry.entry_id: entry for entry in hass.config_entries.async_entries(DOMAIN)
     }
 
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import (
+        device_owning_entry_ids,
+        iter_all_devices,
+    )
+
     dev_reg = dr.async_get(hass)
     updated_count = 0
-    for device in dev_reg.devices.values():
+    # Whole registry on purpose: this pass refreshes the map URL of every
+    # GoogleFindMy device across all entries of the domain, and picks the owning
+    # entry per device below.
+    for device in iter_all_devices(dev_reg):
         try:
             if getattr(device, "entry_type", None) == dr.DeviceEntryType.SERVICE:
                 continue
@@ -7906,8 +9334,21 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
             ):
                 continue
 
+            # Picking the first match, and ``device_owning_entry_ids`` asks its
+            # callers to say why that is allowed.  Here it is: from Core 2026.8
+            # the tuple holds exactly one id.  Below that core it can hold
+            # several, and a device shared between two GoogleFindMy entries then
+            # gets whichever the set iteration yields first -- unchanged from
+            # before this migration, and a pre-existing wart rather than a new
+            # one.  It decides only which entry seeds the map token, and both
+            # entries can serve the device.
             entry_id = next(
-                (cid for cid in device.config_entries if cid in domain_entries), None
+                (
+                    cid
+                    for cid in device_owning_entry_ids(device)
+                    if cid in domain_entries
+                ),
+                None,
             )
             if not entry_id:
                 continue
@@ -7952,7 +9393,14 @@ async def _async_seed_manual_credentials(
     aas_token_entry: str | None,
     google_email: str,
 ) -> None:
-    """Persist manual credential updates and clear stale AAS tokens when absent."""
+    """Persist manual credential updates and clear stale AAS tokens when absent.
+
+    The clearing below is now the second line of defence: the credential seed in
+    :func:`async_setup_entry` already drops a cached AAS token that the entry no
+    longer carries, for the bundle branch as well as this one. Keeping it here is
+    deliberate -- this helper is also the surface a caller reaches directly, and
+    ``cache.set(key, None)`` on an already absent key is a no-op.
+    """
 
     token_to_save = oauth_token or aas_token_entry
     if isinstance(token_to_save, str) and token_to_save:
@@ -7977,7 +9425,9 @@ async def _async_save_individual_credentials(
         await cache.async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
         await cache.async_set_cached_value(username_string, google_email)
     except OSError as err:
-        _LOGGER.warning("Failed to save individual credentials to cache: %s", err)
+        _LOGGER.warning(
+            "Failed to save the individually entered sign-in data to the cache: %s", err
+        )
 
 
 # ------------------- Device removal (HA "Delete device" hook) -------------------
@@ -7999,7 +9449,10 @@ async def async_remove_config_entry_device(
     - Never allow removing the integration's own "service" device (ident startswith 'integration').
     """
     _ensure_runtime_imports()
-    if entry.entry_id not in device_entry.config_entries:
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import device_belongs_to_entry
+
+    if not device_belongs_to_entry(device_entry, entry.entry_id):
         return False
 
     raw_ident: str | None = None
@@ -8016,6 +9469,17 @@ async def async_remove_config_entry_device(
 
     if _device_is_service_device(device_entry, entry.entry_id):
         return False
+
+    # The foreign-reading tracker is process-wide and survives reloads by
+    # design; a removed device would otherwise keep its entry until restart
+    # (CX-6). Keyed like the decoder: the parent entry's token-cache id.
+    from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        FOREIGN_READING_TRACKER,
+    )
+
+    FOREIGN_READING_TRACKER.forget_device(
+        getattr(entry, "parent_entry_id", None) or entry.entry_id, canonical_id
+    )
 
     try:
         # Prefer entry.runtime_data (2026 standard), fall back to entries bucket.
@@ -8118,7 +9582,7 @@ async def async_remove_config_entry_device(
                 "Marked device '%s' (%s) as ignored for entry '%s'",
                 name_to_store,
                 canonical_id,
-                entry.title,
+                _label_entry_for_log(entry),
             )
     except Exception as err:
         _LOGGER.debug("Persisting delete decision failed for %s: %s", canonical_id, err)
@@ -8445,12 +9909,12 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 try:
                     await cache.close()
                     _LOGGER.debug(
-                        "TokenCache for entry '%s' has been flushed and closed.",
+                        "Cache instance for entry '%s' has been flushed and closed.",
                         entry.entry_id,
                     )
                 except Exception as err:
                     _LOGGER.warning(
-                        "Closing TokenCache for entry '%s' failed: %s",
+                        "Closing the cache instance for entry '%s' failed: %s",
                         entry.entry_id,
                         err,
                     )
@@ -8515,6 +9979,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
             # and clear its issue, mirroring how other global singletons are released
             # here (Codex-P1 #1/#2).
             _teardown_restart_required_check(hass, bucket)
+            _teardown_url_refresh_timer(hass, bucket)
 
         try:
             await _maybe_close_spot_transport(entries_bucket)
@@ -8554,15 +10019,155 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     _reset_canonicless_warning_state(parent_entry_id or entry.entry_id)
 
-    if parent_entry_id:
-        return await _async_unload_subentry(hass, entry)
-    return await _async_unload_parent_entry(hass, entry)
+    try:
+        if parent_entry_id:
+            return await _async_unload_subentry(hass, entry)
+        return await _async_unload_parent_entry(hass, entry)
+    finally:
+        # The claimed reload has arrived at its unload half; release the latch so a
+        # change made after this point can schedule the next one. Deliberately in
+        # ``finally`` and not at the head of this function: the whole platform
+        # teardown runs in between, and it is the longest stretch of the reload.
+        # A latch released before it lets the schedulers that do not wait for
+        # ``LOADED`` -- the credential-writing config flows and the tracker
+        # registry probe -- claim it again and queue a second reload, even though
+        # the replacement setup that is already coming will read the newest
+        # ``entry.data`` anyway. They do consult ``entry.state`` by now, through
+        # ``entry_reload_gate``, but only for the *terminal* states:
+        # ``UNLOAD_IN_PROGRESS`` is deliberately not one of them, so the reason
+        # for releasing late is unchanged and has to stay that way. Releasing
+        # here also covers a failed unload, where no setup half follows that could
+        # release it, and an unload that is not part of a reload at all: the entry
+        # keeps no latch it would never hand back.
+        discard_pending_entry_reload(hass, entry.entry_id)
+
+
+async def _async_refresh_discovery_watch_paths(
+    hass: HomeAssistant, *, exclude_entry_id: str | None = None
+) -> None:
+    """Tell the discovery singleton to recompute its secrets watch paths.
+
+    Single owner of that step for every caller (the per-entry options update
+    listener and config entry removal), so both agree on the lookup of the
+    manager and on the failure policy. Watch-path bookkeeping is housekeeping
+    and must never break a setup, an options update or a removal:
+
+    * a missing manager or a manager without the hook (discovery never armed,
+      or a foreign object in the bucket) is ignored silently, because that is
+      the ordinary state on an instance where discovery did not start,
+    * an error raised by the hook is debug-logged with the caller's
+      ``exclude_entry_id``, which is what tells a failed removal refresh apart
+      from a failed options-update refresh in a debug log.
+
+    ``exclude_entry_id`` is forwarded to the manager and leaves that entry out
+    of the recomputation; removal passes the entry being removed.
+    """
+
+    manager = _domain_data(hass).get("discovery_manager")
+    refresh = getattr(manager, "async_refresh_watch_paths", None)
+    if not callable(refresh):
+        return
+    try:
+        await refresh(exclude_entry_id=exclude_entry_id)
+    except Exception:  # noqa: BLE001 - watcher refresh is best-effort, never fatal
+        _LOGGER.debug(
+            "Discovery watch-path refresh failed (exclude_entry_id=%s)",
+            exclude_entry_id,
+            exc_info=True,
+        )
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     """Handle removal of a config entry and purge persisted caches if requested."""
 
     _ensure_runtime_imports()
+
+    # The device_tracker self-heal latch is keyed by entry_id and survives
+    # reloads by design; once the entry is gone nothing would ever clear it.
+    discard_registry_selfheal_reload(hass, entry.entry_id)
+
+    # Same housekeeping for the reload latch: an entry that is gone will never
+    # reach the setup or unload that would otherwise release it.
+    discard_pending_entry_reload(hass, entry.entry_id)
+
+    # And for the foreign-reading tracker (CX-6): its per-device readings and
+    # once-per-device log gates survive reloads by design. Its keys carry the
+    # token-cache entry id, so a removed subentry's own id matches nothing.
+    from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        FOREIGN_READING_TRACKER,
+    )
+
+    FOREIGN_READING_TRACKER.forget_entry(entry.entry_id)
+
+    # Drop this entry's SECRETS_EXTRA_WATCH_PATHS from the running watcher. The
+    # update listener that normally recomputes them was unregistered by the
+    # unload that precedes removal, so without this the watcher keeps polling a
+    # path whose owning entry is gone until another entry update or a restart,
+    # and a bundle written there could still open a discovery flow. Runs before
+    # the teardown below so no earlier failure can skip it.
+    #
+    # The exclusion can only remove this entry's own contribution, and
+    # DiscoveryManager.async_refresh_watch_paths forces a scan only for paths
+    # that were ADDED. The ordinary removal -- the removed entry owned no extra
+    # path, or owned one that now disappears -- is therefore a strict no-op for
+    # the watcher's signature, and cannot re-import a bundle that some other
+    # account's entry is still using.
+    await _async_refresh_discovery_watch_paths(hass, exclude_entry_id=entry.entry_id)
+
+    # A staged cleanup addressed to THIS entry can never be claimed again once
+    # the entry is gone, so it would sit in hass.data for the rest of the
+    # process lifetime. Discard it instead of running it: dropping keeps the
+    # fail-safe direction (credential files stay on disk), whereas executing
+    # would delete credentials for an entry the user just removed.
+    try:
+        from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+            async_discard_pending_container_cleanup,
+            async_discard_pending_container_cleanup_for_entry,
+        )
+
+        # Two addressings, in this order and both needed -- the same pairing the
+        # duplicate-account abort in async_setup_entry uses.
+        #
+        # The entry-id drain first, in a single pass over the whole staging
+        # list: this entry may hold SEVERAL update-path tickets, the claim-based
+        # discard below takes at most one, and any upper bound would strand
+        # exactly the tickets this call exists to clear.
+        #
+        # The claim-based discard second, for the ticket that names no entry.
+        # A create-path ticket marked ``entry_promised`` deliberately carries
+        # ``entry_id is None`` (the flow could not know the id), so the drain
+        # above cannot see it. Without this second call such a ticket survives
+        # the removal for the rest of the process lifetime, and rule 2 of
+        # ``_async_claim_container_cleanup_ticket`` (uncorrelated ticket whose
+        # unique_id matches) hands it to the *next* entry the user creates for
+        # the same account, which then deletes credential copies that belong to
+        # the removed one.
+        #
+        # It costs the account fallback of the claim helper: a concurrent,
+        # still-running same-account flow could have its ticket taken instead.
+        # That direction is the fail-safe one (the credential files stay on
+        # disk), whereas leaving the ticket is the direction that deletes
+        # foreign material.
+        discarded = async_discard_pending_container_cleanup_for_entry(
+            hass, entry_id=entry.entry_id
+        )
+        discarded += async_discard_pending_container_cleanup(
+            hass,
+            unique_id=getattr(entry, "unique_id", None),
+            entry_id=entry.entry_id,
+        )
+        if discarded:
+            _LOGGER.debug(
+                "[%s] Discarded %s staged container-login cleanup job(s) on entry removal; credential files are kept on disk",
+                entry.entry_id,
+                discarded,
+            )
+    except Exception as err:  # noqa: BLE001 - housekeeping must never raise
+        _LOGGER.debug(
+            "[%s] Could not discard staged container-login cleanup on removal: %s",
+            entry.entry_id,
+            err,
+        )
 
     # Prefer entry.runtime_data (2026 standard), then clean up entries bucket.
     bucket = _domain_data(hass)
@@ -8712,7 +10317,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                     if inspect.isawaitable(result):
                         await result
                 except Exception as err:
-                    _LOGGER.debug("Closing TokenCache before removal raised: %s", err)
+                    _LOGGER.debug(
+                        "Closing the cache instance before removal raised: %s", err
+                    )
             try:
                 remove_callable = getattr(token_cache, "async_remove_store")
                 remove_result = remove_callable()
@@ -8721,7 +10328,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 removed = True
             except Exception as err:
                 _LOGGER.warning(
-                    "Removing TokenCache store for entry '%s' failed: %s",
+                    "Removing the cache store for entry '%s' failed: %s",
                     entry.entry_id,
                     err,
                 )
@@ -8737,16 +10344,16 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 removed = True
             except Exception as err:
                 _LOGGER.warning(
-                    "Removing TokenCache store for entry '%s' failed (no cache instance): %s",
+                    "Removing the cache store for entry '%s' failed (no cache instance): %s",
                     entry.entry_id,
                     err,
                 )
 
         if removed:
             _LOGGER.info(
-                "Removed TokenCache store for entry '%s' (%s).",
+                "Removed the cache store for entry '%s' (%s).",
                 entry.entry_id,
-                display_name,
+                _label_entry_for_log(entry),
             )
             issue_severity = getattr(ir, "IssueSeverity", None)
             if issue_severity is not None:
@@ -8777,9 +10384,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 )
     else:
         _LOGGER.info(
-            "Preserved TokenCache store for entry '%s' (%s); option disabled.",
+            "Preserved the cache store for entry '%s' (%s); option disabled.",
             entry.entry_id,
-            display_name,
+            _label_entry_for_log(entry),
         )
         try:
             ir.async_delete_issue(hass, DOMAIN, issue_id)

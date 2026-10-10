@@ -42,6 +42,7 @@ from custom_components.googlefindmy.const import (
     DATA_EID_RESOLVER,
     DOMAIN,
 )
+from tests.helpers.core_shutdown_state import seed_core_shutdown_state
 
 
 class _FakeLoop:
@@ -399,7 +400,9 @@ async def test_async_shutdown_cancels_pending_debounce_handles() -> None:
 
     from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
-    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator = seed_core_shutdown_state(
+        GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    )
 
     central = _FakeTimerHandle()
     # Leave the inline handle unset to also cover the ``handle is None`` skip.
@@ -438,7 +441,9 @@ async def test_async_shutdown_swallows_handle_cancel_error() -> None:
         def cancel(self) -> None:
             raise RuntimeError("boom")
 
-    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator = seed_core_shutdown_state(
+        GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    )
     coordinator._eid_refresh_debounce_handle = _RaisingHandle()
     coordinator._eid_inline_refresh_debounce_handle = _RaisingHandle()
     coordinator._cancel_pending_subentry_repair = lambda: None

@@ -34,11 +34,11 @@ import os
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 _this_dir = Path(__file__).resolve().parent
 _standalone = not (
@@ -225,6 +225,22 @@ else:  # pragma: no cover - standalone CLI stub-injection shim, structurally
         sys.modules["homeassistant.exceptions"] = _ha_exceptions
 
 
+def _resolve_secrets_path() -> Path:
+    """Resolve where the standalone CLI reads/writes ``secrets.json``.
+
+    Defaults to ``Auth/secrets.json`` next to this module (the upstream
+    GoogleFindMyTools layout). The ``GOOGLEFINDMY_SECRETS_PATH`` environment
+    variable overrides it with an explicit file path. This lets a container
+    persist the cache on a dedicated writable volume that is decoupled from a
+    read-only code mount, so the integration package can stay read-only while
+    the atomic write still happens on a single writable filesystem.
+    """
+    override = os.environ.get("GOOGLEFINDMY_SECRETS_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _this_dir / "Auth" / "secrets.json"
+
+
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     """Atomically write ``data`` as JSON to ``path`` with 0600 permissions.
 
@@ -288,7 +304,7 @@ def _register_file_cache(entry_id: str = "") -> object:
         _set_default_entry_id,
     )
 
-    secrets_path = _this_dir / "Auth" / "secrets.json"
+    secrets_path = _resolve_secrets_path()
 
     # Build a minimal TokenCache-compatible object backed by a JSON file.
     # We cannot call TokenCache() because it requires a real HomeAssistant
@@ -410,6 +426,85 @@ def _register_file_cache(entry_id: str = "") -> object:
     return file_cache
 
 
+# Exit status for a login the user ended themselves (closed window, expired
+# wait). Kept apart from 1/2, which login.sh spends on its own failures.
+_EXIT_LOGIN_ABORTED = 130
+
+
+def _run_oauth_flow_or_exit(
+    flow: Callable[[], tuple[str, str | None]],
+) -> tuple[str, str | None]:
+    """Run the Chrome login, turning a missing driver into a clean exit.
+
+    The `ImportError` guard around `auth_flow` cannot notice a missing
+    undetected-chromedriver: `chrome_driver._load_uc()` runs later, inside the
+    flow, and falls back to a stub that raises the install hint as a
+    `RuntimeError`. Without this boundary the first-run CLI ends in a traceback
+    from the bottom of the driver strategy chain instead of in the one line the
+    user needs.
+    """
+
+    from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+        INSTALL_COMMAND,
+        MISSING_BROWSER_PACKAGES_HINT,
+        BrowserPackagesUnusable,
+        browser_packages_missing,
+    )
+
+    # Safe to import here even though this boundary exists for a *missing*
+    # browser install: `_ensure_authenticated` already imported this module
+    # (behind its own ImportError guard) to obtain the flow it passes in, so by
+    # the time anything reaches this line, selenium is present.
+    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+        LoginAborted,
+    )
+
+    try:
+        return flow()
+    except LoginAborted as err:
+        # A cancelled login is a finished run, not a crash: the user closed the
+        # window or let the wait expire. Print the flow's own sentence and stop
+        # with a non-zero status -- non-zero because no token was produced and
+        # the caller (login.sh, docker compose) must not report success, but
+        # without a traceback, because there is no defect to report.
+        #
+        # 130 is the shell's "cancelled by the user" code, and it is chosen over
+        # a generic 1 for two reasons: it separates "you stopped" from "it
+        # broke" for anything scripting this run, and login.sh already spends 1
+        # and 2 on its own failures, so reusing those would make the two
+        # indistinguishable.
+        print(f"\n{err}\n")
+        raise SystemExit(_EXIT_LOGIN_ABORTED) from err
+    except BrowserPackagesUnusable as err:
+        # The typed case: the packages are there but unusable, and the type
+        # carried that through the strategy chain unchanged.
+        print(f"\n{err}\n")
+        raise SystemExit(1) from err
+    except RuntimeError as err:
+        if INSTALL_COMMAND in str(err):
+            print(f"\n{err}\n")
+            raise SystemExit(1) from err
+        # The hint does not always survive the trip. `chrome_driver.py` ends its
+        # strategy chain in a generic "Failed to start ChromeDriver" message, so
+        # matching on the text alone would let exactly the case this boundary
+        # exists for slip past. Ask the packages instead.
+        #
+        # The failure is reported first and the packages second, deliberately.
+        # Not every error on this path comes from loading the driver: the flow
+        # refuses an unattended run before it ever gets there. Leading with the
+        # install command would answer a question that user did not ask, and
+        # they would install the packages and fail again for the same reason.
+        if browser_packages_missing():
+            print(f"\n{err}\n")
+            print(
+                "The browser packages are also missing, so this run could not "
+                "have succeeded either way:\n"
+                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n"
+            )
+            raise SystemExit(1) from err
+        raise
+
+
 def _ensure_authenticated() -> None:
     """Run the Chrome-based OAuth login when no credentials exist yet.
 
@@ -419,7 +514,7 @@ def _ensure_authenticated() -> None:
     """
     import json  # noqa: PLC0415
 
-    secrets_path = _this_dir / "Auth" / "secrets.json"
+    secrets_path = _resolve_secrets_path()
     data: dict[str, object] = {}
     if secrets_path.is_file():
         try:
@@ -446,12 +541,27 @@ def _ensure_authenticated() -> None:
 
     print("No credentials found. Starting authentication flow...\n")
 
-    # 1) Get the OAuth token via Chrome login
-    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
-        request_oauth_account_token_flow,
-    )
+    # 1) Get the OAuth token via Chrome login.
+    # Selenium and undetected-chromedriver are not part of the Home Assistant
+    # requirements of this integration (nothing Home Assistant runs imports
+    # them), so this is the point where a bare copy of the directory notices
+    # they are missing. Say what to install instead of showing a traceback.
+    try:
+        from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+            request_oauth_account_token_flow,
+        )
+    except ImportError as err:
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            MISSING_BROWSER_PACKAGES_HINT,
+        )
 
-    oauth_token, detected_email = request_oauth_account_token_flow()
+        print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n")
+        print(f"Details: {err}")
+        raise SystemExit(1) from err
+
+    oauth_token, detected_email = _run_oauth_flow_or_exit(
+        request_oauth_account_token_flow
+    )
 
     # 2) Set the Google account e-mail (needed for gpsoauth exchange).
     #    Prefer the email extracted from the Chrome session; fall back to
@@ -629,7 +739,31 @@ async def _ensure_vault_keys(cache: object) -> None:
     # Shared key: essential and browser-bound. Failure is fatal.
     try:
         await _ensure_shared_key(cache)
-    except Exception:  # noqa: BLE001
+    except Exception as err:  # noqa: BLE001
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            INSTALL_COMMAND,
+            MISSING_BROWSER_PACKAGES_HINT,
+            browser_packages_missing,
+        )
+
+        # The browser packages are optional (they are not in manifest.json), so
+        # "they are not installed" is a normal way for this to fail, and the
+        # sign-in advice below is useless against it. Print what the user is
+        # actually missing instead. Two questions, because the hint is lost
+        # wherever the failure is translated on its way here: does the message
+        # say so, and failing that, are the packages actually there?
+        if INSTALL_COMMAND in str(err):
+            print(f"\n{err}\n", file=sys.stderr)
+            sys.exit(1)
+        if browser_packages_missing():
+            print(f"\n{err}\n", file=sys.stderr)
+            print(
+                "The browser packages are also missing, so this run could not "
+                "have succeeded either way:\n"
+                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(
             "\nError: vault key retrieval failed.\n"
             "Could not obtain the encryption key from Google's vault.\n"
@@ -742,26 +876,63 @@ async def _setup_fcm_receiver(cache: object) -> Any:
     return fcm
 
 
-def _clear_stale_tokens_for_reauth() -> None:
+#: Keys whose presence means a *new* credential chain has begun. Everything else
+#: ``_clear_stale_tokens_for_reauth`` removes hangs off one of these two:
+#: ``_ensure_aas_token`` exchanges ``oauth_token`` for ``aas_token``, and the
+#: vault keys follow from that exchange. They are the anchors precisely because
+#: they are what a later run *reads* to decide the chain is already in place.
+_REAUTH_CHAIN_ANCHORS: Final[tuple[str, ...]] = ("oauth_token", "aas_token")
+
+
+def _credential_is_present(value: object) -> bool:
+    """Report whether *value* is a stored credential rather than a placeholder.
+
+    Deliberately as narrow as the checks it stands in for: ``_ensure_aas_token``
+    and ``_ensure_authenticated`` both require ``isinstance(value, str)`` and a
+    non-blank value before they treat a key as a credential. Anything looser
+    here would deny a restore over a value those two would ignore -- a ``0`` or
+    a ``{}`` left by a half-written file -- and the user would lose the bundle
+    without a new chain having started. ``key in data`` is not enough for the
+    same reason.
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
     """Clear cached tokens from secrets.json to force re-authentication.
 
     Called when ``--reauth`` is passed on the CLI. Removes ``oauth_token``,
     ``aas_token``, and all derived ``adm_token_*`` / timestamp keys so that
     ``_ensure_authenticated()`` triggers the Chrome login flow.
+
+    Returns a callable that puts those keys back, or ``None`` when there was
+    nothing to clear. The clearing has to happen *before* the login -- an empty
+    cache is what makes ``_ensure_authenticated`` start the flow at all -- so a
+    login the user then cancels would leave the account signed out as the price
+    of a decision that was meant to change nothing. The caller invokes the
+    returned callable on every path that ends without a fresh token.
+
+    The restore re-reads the file rather than writing the snapshot back, and it
+    treats the cleared keys as one bundle. If the login stored a fresh chain
+    anchor (``_REAUTH_CHAIN_ANCHORS``) before it was cut short, nothing goes
+    back: the cleared values all belong to the chain that anchor replaces, and
+    mixing the two is worse than losing the old one. Otherwise the snapshot is
+    put back over the gaps. Both writes go through ``_atomic_write_json``, so an
+    interrupted write cannot truncate the token file and the 0600 mode holds.
     """
     import json  # noqa: PLC0415
 
-    secrets_path = _this_dir / "Auth" / "secrets.json"
+    secrets_path = _resolve_secrets_path()
     if not secrets_path.is_file():
-        return
+        return None
 
     try:
         with open(secrets_path, encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
-            return
+            return None
     except Exception:  # noqa: BLE001
-        return
+        return None
 
     keys_to_remove = [
         k
@@ -780,17 +951,86 @@ def _clear_stale_tokens_for_reauth() -> None:
         )
     ]
     if not keys_to_remove:
-        return
+        return None
 
-    for k in keys_to_remove:
-        del data[k]
-
-    with open(secrets_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
+    removed = {k: data.pop(k) for k in keys_to_remove}
+    _atomic_write_json(secrets_path, data)
 
     print(
         f"Cleared {len(keys_to_remove)} cached token(s). Re-authentication required.\n"
     )
+
+    def _restore_cleared_tokens() -> None:
+        """Put the cleared tokens back after a login that produced none."""
+        if secrets_path.is_file():
+            try:
+                with open(secrets_path, encoding="utf-8") as fh:
+                    current = json.load(fh)
+            except (OSError, ValueError):
+                current = None
+            if not isinstance(current, dict):
+                # The file is there but unreadable. Overwriting it with the
+                # snapshot alone would drop whatever else it holds, so the
+                # cautious move is to touch nothing and say so.
+                print(
+                    "Could not read secrets.json to restore the previous "
+                    "tokens; sign in again with --reauth.\n"
+                )
+                return
+        else:
+            # No file at all: nothing to preserve, so the snapshot is the whole
+            # truth and writing it back is safe.
+            current = {}
+
+        fresh_anchor = next(
+            (
+                k
+                for k in _REAUTH_CHAIN_ANCHORS
+                if _credential_is_present(current.get(k))
+            ),
+            None,
+        )
+        if fresh_anchor is not None:
+            # The login got far enough to store a new anchor before it was cut
+            # short. Everything this function holds belongs to the chain that
+            # anchor replaces, so putting it back would leave the old
+            # ``aas_token`` and vault keys beside the new ``oauth_token``.
+            # ``_ensure_aas_token`` returns early on any cached ``aas_token``,
+            # so the next run would never exchange the fresh one and would keep
+            # using the very chain ``--reauth`` was asked to end -- with the old
+            # account's vault keys, if the user was switching accounts. Little
+            # is lost by declining: ``_ensure_authenticated`` drops the derived
+            # tokens itself when it writes the new anchor, so those were gone
+            # either way. The vault keys it does *not* touch are gone too, but a
+            # completed ``--reauth`` would have replaced them just the same.
+            #
+            # The advice is deliberately not "--reauth again": that flag would
+            # clear the fresh anchor and force a second Chrome login, while a
+            # plain re-run finds ``username`` plus the new ``oauth_token``,
+            # returns early from ``_ensure_authenticated`` and lets
+            # ``_ensure_aas_token`` finish the exchange.
+            print(
+                f"A new {fresh_anchor} was stored before the run ended, so the "
+                "previous tokens were not put back (they belong to the old "
+                "sign-in). Run the login again (without --reauth) to finish "
+                "signing in with the new one.\n"
+            )
+            return
+
+        for key, value in removed.items():
+            current.setdefault(key, value)
+
+        try:
+            _atomic_write_json(secrets_path, current)
+        except OSError:
+            print(
+                "Could not restore the previous tokens; sign in again with --reauth.\n"
+            )
+            return
+
+        print(f"Login did not complete; restored {len(removed)} cached token(s).\n")
+
+    return _restore_cleared_tokens
 
 
 def _resolve_effective_entry_id(cli_entry: str | None, env_entry: str | None) -> str:
@@ -919,6 +1159,16 @@ def _main(argv: Sequence[str] | None = None) -> None:
     """
     import asyncio  # noqa: PLC0415
 
+    # Mark this process as the command-line tool before anything else runs. The
+    # interactive key-backup fallback used to ask "is a terminal attached",
+    # which a foreground Home Assistant also answers with yes; it now asks for
+    # this marker instead. Home Assistant never sets it, the user never has to.
+    from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (  # noqa: PLC0415
+        _ENV_CLI_PROCESS,
+    )
+
+    os.environ[_ENV_CLI_PROCESS] = "1"
+
     args = _build_cli_parser().parse_args(argv)
     _configure_cli_logging(debug_flag=args.debug, env=os.environ)
 
@@ -929,9 +1179,18 @@ def _main(argv: Sequence[str] | None = None) -> None:
     # then a cache-signal check that was always empty for a fresh shell start),
     # both of which could dead-end a repo-layout start in an opaque
     # MissingTokenCacheError instead of bootstrapping.
-    if args.reauth:
-        _clear_stale_tokens_for_reauth()
-    _ensure_authenticated()
+    restore_cleared_tokens = _clear_stale_tokens_for_reauth() if args.reauth else None
+    try:
+        _ensure_authenticated()
+    except BaseException:
+        # A cancelled login, a Ctrl+C, or the sys.exit from a driver failure all
+        # end the run without a new token -- and --reauth has already taken the
+        # old ones away. Put them back, so stopping the login costs the user
+        # nothing. BaseException is deliberate: SystemExit and KeyboardInterrupt
+        # are exactly the two paths that reach here most often.
+        if restore_cleared_tokens is not None:
+            restore_cleared_tokens()
+        raise
     # Resolve the effective entry id once (CLI > env > "") and use the SAME
     # value for both registration and hand-off, so the registry key and the
     # lookup hint can never diverge.  Forwarding the raw args.entry instead

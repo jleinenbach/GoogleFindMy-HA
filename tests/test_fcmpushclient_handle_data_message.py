@@ -219,6 +219,36 @@ class TestHandleDataMessage:
         assert client._consecutive_decrypt_failures == 0
         assert client.callback.called
 
+    def test_verbose_decrypt_record_omits_payload(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The verbose "Decrypted data" record names keys and size, never content.
+
+        `AGENTS.md` section 5: the decrypted push is the raw API payload and is
+        never logged. The record used to carry the whole decrypted mapping.
+        """
+        client = FcmHandleSlim()
+        secret = "9f3c1e7a-4b2d-4c8e-a1f6-7d5b3e9c2a41"
+        # The key of a JSON object is wire content as well: a payload may
+        # carry a value in a key, so the record counts keys, never names them.
+        _set_decrypt(client, f'{{"location": "{secret}", "{secret}": true}}'.encode())
+        msg = make_data_message(subtype="APPID")
+        caplog.set_level(logging.DEBUG, logger=client.logger.name)
+
+        assert client._handle_data_message(msg) is True
+
+        records = [
+            r.getMessage() for r in caplog.records if "Decrypted data" in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert "keys=2, bytes=" in records[0]
+        assert "location" not in records[0]
+        assert msg.persistent_id not in records[0]  # server-assigned MCS id
+        assert secret not in caplog.text
+        assert all(
+            secret[i : i + 8] not in caplog.text for i in range(0, len(secret) - 7)
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

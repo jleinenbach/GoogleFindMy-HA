@@ -26,7 +26,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ### Continuous integration checks
 
-Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, Codespell, Bandit, `mypy --strict`, and `pytest -q --cov` on Python 3.13 to protect code quality before merges.
+Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, Codespell, Bandit, `mypy --strict`, and `pytest -q --cov` on Python 3.14 to protect code quality before merges. Python 3.14 is the axis Home Assistant Core itself requires from 2026.3.0 onwards. Python 3.13 stays covered by a second, lock-free test job that runs on two axes: the floor declared in `hacs.json` (2025.9.1), and the last Home Assistant line that still supports 3.13. Together they cover what installations on Core 2025.9.1 through 2026.2.x actually run. The language level the code is written against remains 3.13 (`ruff target-version = "py313"`, `mypy python_version = "3.13"`).
 
 For the quickest way to bootstrap Home Assistant test stubs before running `pytest -q`, see the Environment verification bullets in [AGENTS.md](AGENTS.md#environment-verification).
 
@@ -44,6 +44,7 @@ For the quickest way to bootstrap Home Assistant test stubs before running `pyte
 - `make test-ha` — execute the targeted regression smoke tests (`tests/test_entity_recovery_manager.py`, `tests/test_homeassistant_callback_stub_helper.py`) and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options, or override the coverage summary with `make test-ha PYTEST_COV_FLAGS="--cov-report=term"` for slimmer output.
 - `make test-cov` — run `pytest -q --cov` with coverage reporting (output teed to `pytest_output.log`).
 - `make test-single TEST=<path>` — run a single test file with optional `PYTEST_ARGS`.
+- `make preflight` — run the full local preflight S1 to S8 before opening a pull request (format, lint, types, spelling, suite plus project coverage, patch coverage) and print every stage as `OK`, `FAILED`, `NOTE` or `NOT CHECKED` with a reason. Name one interpreter per Home Assistant track with `make preflight PREFLIGHT_PYTHONS="/track-a/bin/python /track-b/bin/python"`; the paths are machine-local, so the variable is empty by default. Details in `script/AGENTS.md`.
 - `make translation-check` — check for missing translation keys across all locale files.
 - `make check-ha-compat` — check dependency compatibility with Home Assistant.
 - `script/bootstrap_ssot_cached.sh` — stage the Home Assistant Single Source of Truth (SSoT) wheels in `.wheelhouse/ssot` and install them from the local cache. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse the cached artifacts on subsequent bootstrap runs or `PYTHON=python3.12` to target an alternate interpreter. The helper also validates `.wheelhouse/ssot` against `script/ssot_wheel_manifest.txt` (override with `SSOT_MANIFEST=…`) so repeated runs can confirm the primary wheels are cached without re-listing the full directory.
@@ -109,6 +110,7 @@ When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
 - `make test-unload`: Execute the targeted unload regression suite (`tests/test_unload_subentry_cleanup.py`) to verify the parent-unload rollback path.
 - `make test-cov`: Run `pytest -q --cov` with coverage reporting (output teed to `pytest_output.log`).
 - `make test-single TEST=<path>`: Run a single test file with optional `PYTEST_ARGS`.
+- `make preflight`: Run the local preflight S1 to S8 and print the stage report; pass the tracks with `PREFLIGHT_PYTHONS="…"` (space separated, empty by default because the paths are machine-local). Unlike the other targets this one does not go through `poetry run`, because each track is its own virtualenv.
 - `make translation-check`: Check for missing translation keys across all locale files.
 - `make check-ha-compat`: Check dependency compatibility with Home Assistant via `script/check_ha_compatibility.py`.
 - `make doctoc`: Regenerate the AGENTS.md table of contents (requires Node.js; installs DocToc via `make bootstrap-doctoc`).
@@ -151,38 +153,50 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 >[!IMPORTANT]
 >**Authentication is a 2-part process.  One part requires use of a python script to obtain a secrets.json file, which will contain all necessary keys for authentication!  This is currently the *ONLY* way to authenticate to the FindMy network.**
 
-### <ins>Authentication Part 1 (External Steps)</ins>
-1. Navigate to [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools?tab=readme-ov-file#how-to-use) repository and follow the directions on "How to use" the main.py script.
-   > [!IMPORTANT]
-   > Run the authentication script from the **same public IP address / network** that your Home Assistant instance uses, and sign in with the **same Google account** that owns the trackers. Google ties the end-to-end encryption keys in `secrets.json` to the account and may revoke them when requests arrive from a different IP or region. A mismatch produces a bundle that lists your devices and can ring them, but cannot decrypt any location reports — see [Devices appear but no location updates](#authentication-expires-repeatedly).
-2. **CRITICAL STEP!**  Complete the **ENTIRE** authentication process to generate `Auth/secrets.json`
-> [!WARNING]
->While going through the process in main.py to authenticate, you **MUST** go through **2 login processes!**  After the first login is successful, your available devices will be listed.  You must complete the next step to display location data for one of your devices.  You will then login again.  After you complete this step, you should see valid location data for your device, followed by several errors that are not important.  ONLY at this point are you ready to move on to the next step!
-3. Copy the entire contents of the secrets.json file.
-    - Specifically, open the file in a text editor, select all, and copy.
+### <ins>Authentication Part 1 (generate `secrets.json`)</ins>
+
+Generate the `secrets.json` bundle with **this repository's own login tooling**. It runs the integration's up-to-date fork code, so the bundle is exactly what Home Assistant consumes, and it retrieves **both** required keys (including the `shared_key`) automatically in a single run — no manual device selection, and none of the `keys_missing` pitfalls of the external script below.
+
 > [!IMPORTANT]
-> The encryption key (`shared_key`) is only retrieved during the **second** login, which happens when you actively **select a device to locate**. If you stop after the device list appears (skipping that step), the resulting `secrets.json` has no `shared_key` and Home Assistant will reject the import with a `keys_missing` error, because locations cannot be decrypted without it.
-> As an alternative to the external GoogleFindMyTools, this repository ships a bundled copy of the same CLI that fetches **both** keys automatically in a single run, without requiring you to select a device manually, so it is the more robust way to generate a complete `secrets.json`. **To use it for the initial login you must run it from a flat folder:** copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is required because the script auto-detects its location: when it is run in place at `custom_components/googlefindmy/main.py` it operates in Home Assistant mode and only lists devices from an **existing** `secrets.json`, so it will not open the Chrome login that creates the bundle.
+> Whichever option you pick, run the login from the **same public IP address / network** that your Home Assistant instance uses, and sign in with the **same Google account** that owns the trackers. Google ties the end-to-end encryption keys in `secrets.json` to the account and may revoke them when requests arrive from a different IP or region. A mismatch produces a bundle that lists your devices and can ring them, but cannot decrypt any location reports — see [Devices appear but no location updates](#authentication-expires-repeatedly).
+
+**Option A — Docker login helper (recommended).** Run the bundled one-command wrapper on your Docker host and complete the Google login through a browser tab: [`custom_components/googlefindmy/docker-login/`](custom_components/googlefindmy/docker-login/README.md). It runs Chrome **inside the container** at a controlled version, so you are not at the mercy of whatever Chrome your desktop auto-updates to — the exact failure that currently breaks the external browser flow ([BSkando#207](https://github.com/BSkando/GoogleFindMy-HA/issues/207)). No local Python or Chrome is required, and it works on ARM Linux too.
+
+**Option B — Bundled CLI (`main.py`).** Copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is the supported way to run it: the script resolves `Auth/secrets.json` relative to its own directory, so a run in place at `custom_components/googlefindmy/main.py` writes into your Home Assistant configuration directory instead of a scratch folder. It does **not** behave differently otherwise: `main.py` runs the token bootstrap in either layout, so an in-place run without stored credentials opens the Chrome login just as a flat run does. (An earlier version of this paragraph promised the opposite; the directory-dependent branch it described no longer exists.) Note that "without credentials" means the file has no username or no token at all: a *stale* token counts as present, and the run then stops later with an instruction to repeat it as `python main.py --reauth`. The browser packages this needs are `selenium` and `undetected-chromedriver`; install them where you run the CLI (`pip install selenium undetected-chromedriver`) — the scripts name the command themselves if they are missing. Run it from an **interactive terminal**: the desktop login opens Chrome on your own screen and asks you to confirm first, so it refuses to start when nobody can answer (see [Standalone login refuses to start](#standalone-login-refuses-to-start-attended-terminal-required)). If Chrome startup aborts with `only supports Chrome version …`, pin the version as described under [Chrome/ChromeDriver version mismatch](#chromechromedriver-version-mismatch-standalone-auth-scripts).
+
+When either option finishes, copy the entire contents of the generated `secrets.json` (open it in a text editor, select all, copy) for Part 2.
+
+<details>
+<summary><b>Fallback: the external GoogleFindMyTools script</b></summary>
+
+If you prefer the external tool, navigate to [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools?tab=readme-ov-file#how-to-use) and follow the "How to use" directions for the `main.py` script. Two caveats make the options above the more robust choice:
+
+> [!WARNING]
+> You **MUST** go through **2 login processes**. After the first login your available devices are listed; you must then **select a device to locate**, which triggers a **second** login and retrieves the `shared_key`. If you stop after the device list appears, the resulting `secrets.json` has no `shared_key` and Home Assistant rejects the import with a `keys_missing` error, because locations cannot be decrypted without it.
+
+> [!NOTE]
+> The external browser login can abort with a Chrome/ChromeDriver version mismatch ([BSkando#207](https://github.com/BSkando/GoogleFindMy-HA/issues/207)). If you follow all of Leon's steps and still cannot get through the `main.py` sequence, try [BSkando/GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools), or use Option A above, which sidesteps the desktop-Chrome dependency entirely.
+
+</details>
 
 ### <ins>Authentication Part 2 (Home Assistant Steps)</ins>
-4. Add the integration to your Home Assistant install.
-5. In Home Assistant, paste the copied text from secrets.json when prompted.
-6. After completing authentication and adding devices, RESTART Home Assistant!
-
-### Problems with Authentication?
->[!NOTE]
->Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)
+1. Add the integration to your Home Assistant install.
+2. In Home Assistant, paste the copied text from secrets.json when prompted.
+3. After completing authentication and adding devices, RESTART Home Assistant!
 
 ### Automatic discovery & credential updates
 
-- **Auth/secrets.json watcher:** Home Assistant now monitors the integration's `Auth/secrets.json` file. Dropping a new bundle into `custom_components/googlefindmy/Auth/` immediately opens the config flow with the email and tokens pre-filled, so you can confirm the entry without pasting anything manually.
+- **Secrets watcher (automatic pickup):** Home Assistant watches for a fresh `secrets.json` and, when one appears, opens the config flow with the email and tokens pre-filled, so you can confirm the entry without pasting anything manually. Out of the box it watches both the integration's `Auth/secrets.json` and the login container's `docker-login/data/secrets.json`, so the container hand-off needs no configuration at all; the integration options only add further paths for layouts that differ from these defaults. Only **one** file is ever written: the watcher observes one or more paths, it never keeps a second copy. If several watched files happen to exist at once, the newest one wins (by modification time, with a content-hash tiebreak). After a successful import Home Assistant deletes the imported bundle and any watched copy that belongs to the **same** Google account — mirroring the existing `Auth/` cleanup — so no redundant secret lingers on disk. The cleanup is also content-aware: if the login container wrote **fresher** credentials of that same account while you were still confirming the flow, only the copies carrying the imported content are removed and the newer bundle is kept, so the watcher picks it up on its next scan instead of losing it. A watched file for a **different** account is likewise kept and logged rather than being silently discarded. An aborted or failed flow deletes nothing, so you can simply retry.
 - **Update flows for existing entries:** When the watcher detects refreshed credentials for an account that is already configured, the integration pushes a `discovery_update` flow. Accepting it reauthenticates the existing entry and keeps all devices and options intact.
-- **Cloud discovery channel:** Cloud-triggered discovery continues to operate in parallel, using the same deduplication logic as the secrets watcher. Regardless of source, duplicate flows are suppressed using Home Assistant's `DiscoveryKey` mechanism.
+- **New trackers need no flow at all:** A tracker that shows up in your Google account later is added as an entity on its own, without a discovery card, a dialog or a click. The device list is refreshed on its own schedule, so a new tracker appears within a few minutes; reloading the integration makes it immediate. Discovery is reserved for what it is meant for: a new account, and refreshed credentials for an account you already have.
+- **Duplicate suppression:** Whatever opens a discovery flow, duplicates are suppressed using Home Assistant's `DiscoveryKey` mechanism, so the same bundle never queues two cards.
 
 ### Multi-account behavior and duplicate protection
 
 - Home Assistant supports connecting multiple Google accounts, but **only one config entry per email address stays active**. When duplicate entries share the same Google account, the integration automatically disables and unloads the non-authoritative entries to prevent device duplication and token conflicts.
 - The disabled entries remain visible in **Settings → Devices & Services** with an integration-managed disabled state so you can review or remove them manually. Reactivating a disabled duplicate requires removing the authoritative entry first or supplying credentials for a different Google account.
+- The login container publishes exactly one port: the noVNC viewer (7900), opened by **your** browser. Where it binds and what you are told to open are configured separately (`GFMY_NOVNC_BIND` / `GFMY_NOVNC_URL_HOST`, or simply `bash login.sh --ip <address>`). Home Assistant cannot guess which address your browser can reach, so the launcher prints the URL to open rather than the integration. Details and defaults: [`custom_components/googlefindmy/docker-login/README.md`](custom_components/googlefindmy/docker-login/README.md#the-two-address-roles).
+- If two `secrets.json` files for **different** accounts are ever present in the watched paths at the same time, only the newer file is imported; the older account's file is **kept** (not deleted) and logged, so it is discovered and offered on the next scan rather than being silently discarded. Write one bundle at a time; the login container always writes a single complete bundle, so this only matters if you place files manually.
 
 ### Interoperability and third-party linking
 
@@ -206,7 +220,7 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 
 | **Option** | **Default** | **Units** | **Description** |
 | :---: | :---: | :---: | --- |
-| `ignored_devices` | none | - | Devices hidden from tracking. Use **Manage ignored devices** to restore them. |
+| `ignored_devices` | none | - | Devices removed from tracking. Ignoring a device deletes it and its entities from the registries, so restoring it through **Manage ignored devices** reloads the integration to rebuild them. |
 | `location_poll_interval` | 300 | seconds | How often the integration runs a poll cycle for all devices. |
 | `device_poll_delay` | 5 | seconds | How much time to wait between polling devices during a poll cycle. |
 | `min_poll_interval` | 60 | seconds | Hard lower bound between poll cycles and the manual locate cooldown. |
@@ -220,6 +234,32 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
 | `stale_threshold` | 3900 | seconds | After this many seconds (default: 65 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
 | `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Excluded from Recorder history to keep DB size predictable. |
+| `speed_gate_enabled` | true | toggle | Discards a far jump that would require an implausible speed, so a single stray crowd report cannot teleport a tracker. |
+| `roundtrip_confirm_enabled` | true | toggle | Requires a second, independent report before a device that returned to a previous position is moved back there. |
+| `accuracy_gate_enabled` | true | toggle | Discards a coarse fix (200 m or more, and at least 4x worse than the cached one) when a better, still-fresh position is already known. The coarse position stays visible as `coarse_*` attributes; turning the gate off restores the previous behaviour. |
+
+### Map View link expiry (`map_view_token_expiration`)
+
+With this option **off** (the default), the Map View link on a device page is
+stable and keeps working indefinitely.
+
+With it **on**, the token rotates weekly. The map accepts the current and the
+previous bucket, but the link stored on the device page is only rebuilt when the
+integration starts up. The stored link therefore dies the moment the **second**
+weekly boundary is crossed — if the instance started shortly before a boundary,
+that can be little more than a week later — and the device page's own Map View
+link then returns "Unauthorized".
+
+You do not have to restart to fix that. Call the service
+**`googlefindmy.refresh_device_urls`** (Developer tools → Actions → *Refresh
+Device URLs*); it rewrites the configuration URL of every device that belongs to one of this
+integration's config entries with a current token, and the link works again
+immediately.
+
+One prerequisite: Home Assistant must have a reachable base URL. If none is
+configured, the service logs a warning and updates nothing, so the stale link
+stays. If the action appears to do nothing, set an internal or external URL
+under Settings → System → Network and check the log.
 
 ### Google Home filter behavior
 
@@ -271,6 +311,7 @@ Config flows communicate state transitions through **abort reasons**, which powe
 | `subentry_remove_failed` | Repairs → Delete subentry | Removing the requested feature group failed unexpectedly. |
 | `subentry_delete_success` | Repairs → Delete subentry | A feature group was deleted (after optional device reassignment). |
 | `reconfigure_successful` | Credentials refresh flow | The integration applied new credentials and refreshed the chosen feature group. |
+| `credentials_saved_not_reloaded` | Credentials refresh flow | The new credentials were stored, but the entry could not be reloaded (it is disabled, ignored, or in a state a reload cannot come back from). They take effect the next time it is set up successfully. |
 
 The `strings.json` and translation files under `custom_components/googlefindmy/translations/` provide localized messages for each key so UI notifications remain consistent.
 
@@ -281,8 +322,8 @@ The integration provides a couple of Home Assistant Actions for use with automat
 | Action | Attribute | Description |
 | :---: | :---: | --- |
 | googlefindmy.locate_device | Device ID (required) | Request fresh location data for a specific device. |
-| googlefindmy.play_sound | Device ID (required) | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. |
-| googlefindmy.stop_sound | Device ID (required) | Stop the active sound on the selected device. |
+| googlefindmy.play_sound | Device ID (required) | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. When the sound cannot be started, the action reports one of two things, and they differ in what you should do about it. *Suppressed* means the command was never sent because this instance is briefly unable to reach the device; it clears itself, and retrying shortly is the whole of the remedy. *Rejected* means the command was refused or failed for a reason this integration cannot clear by itself: the sign-in expired, the device reports that it cannot ring, a token is missing, or the server refused the request or rate-limited it. The log entry for the attempt names which one it was, and that matters, because the remedies differ: a rate limit does pass with time, an expired sign-in needs a new sign-in, and a device that cannot ring will never ring. Both are action errors, so a script or automation calling this action stops at this step unless you wrap it in `continue_on_error: true`. Note that a successful call means Google accepted the command, not that the device rang: no reply of the cloud API proves a ring. |
+| googlefindmy.stop_sound | Device ID (required), Request UUID (optional) | Stop the active sound on the selected device. Google matches a stop against the cancel key of the play request it belongs to. If this Home Assistant instance does not hold that key, because the ring was started from a phone or another instance, the stop is still submitted but the action reports that it could not be correlated and the device may keep ringing. The same report appears when the key is older than 30 minutes: it is still sent, because Google queues the command until the tracker is reachable and it may well still fit, but nothing proves it does. A key in that state is kept rather than discarded, so every further stop for that device keeps reporting "not correlated" until a new Play Sound or a restart replaces it. That report is an action error, so a script or automation calling it stops at this step unless you wrap it in `continue_on_error: true`. |
 | googlefindmy.locate_external | Device ID (required), Device Name (optional) | Trigger the locate flow via the external helper while optionally labeling logs with a human-readable device name. |
 | googlefindmy.refresh_device_urls | - | Refreshes all device Map View URLs.  Useful if you are having problems with accessing Map View pages. |
 | googlefindmy.rebuild_device_registry | - | Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry. |
@@ -303,9 +344,9 @@ The integration provides a couple of Home Assistant Actions for use with automat
 
 ### Optional: faster legacy-tracker EID computation (advanced)
 
-Only **older** FMDN trackers exercise a pure-Python elliptic-curve path
-(SECP160r1) when computing rotating EIDs. Modern trackers use P-256, which is
-already C-backed (`cryptography`), so they are unaffected. For the legacy path,
+FMDN trackers on SECP160r1, the common case, exercise a pure-Python
+elliptic-curve path when computing rotating EIDs. Trackers that use P-256 (observed as
+rare, see [`docs/FMDN.md`](docs/FMDN.md)) run on a path that is already C-backed (`cryptography`), so they are unaffected. For the legacy path,
 `python-ecdsa` automatically uses `gmpy2` (preferred) or `gmpy` for its modular
 arithmetic **if either is importable**, with no configuration. If neither is
 present, it falls back to pure Python.
@@ -354,7 +395,7 @@ by map-label changes and there is no hassfest schema risk.
 
 - **Historical data availability:** Map View history is generated locally and depends on the Recorder integration retaining statistics; pruning recorder data will remove historical traces.
 - **Offline devices:** Google only reports the last known location for powered-off or offline hardware.  Devices may appear as `unavailable` until they reconnect to the Find My network.
-- **Authentication tooling:** Generating `Auth/secrets.json` currently relies on the external GoogleFindMyTools scripts.  Future upstream changes to Google's login flow may require updated tooling before the integration can connect again.
+- **Authentication tooling:** Generating `Auth/secrets.json` requires a one-time browser login, produced either by this repository's own tooling (the Docker login helper or the bundled `main.py`, see [Authentication Part 1](#authentication-part-1-generate-secretsjson)) or by the external GoogleFindMyTools script.  Future changes to Google's login flow may require updated tooling before the integration can connect again.
 - **Multiple households:** Home Assistant imports all trackers from the authenticated Google account.  Fine-grained sharing to limit visibility per household member is not yet available and should be handled via entity permissions.
 
 ## Uninstallation / Removal
@@ -407,6 +448,68 @@ export GOOGLEFINDMY_CHROME_PATH=/usr/bin/google-chrome
 ```
 
 Run any of the scripts with `--help` to list the available options.
+
+### The standalone login closes your other Chrome windows
+
+**Before it starts its own browser, the standalone login terminates the Chrome
+processes it finds running.** This is deliberate, not a bug: the login has to
+drive a browser session it controls end to end, and an already running Chrome
+would otherwise capture the sign-in and keep the credentials out of reach.
+
+What that means in practice:
+
+- **Close your Chrome windows before you run any of the helper scripts**
+  (`get_oauth_token.py`, `Auth/auth_flow.py`, `KeyBackup/shared_key_flow.py`,
+  or `main.py`). Unsaved tabs are lost as with any forced quit.
+- **Do not start a login while other automation is using Chrome** on the same
+  machine and user account (scraping jobs, kiosk displays, printing services).
+- **The match is on the whole command line, not on the program name.** The
+  cleanup uses `pgrep -f chrome`, so anything whose command line contains
+  `chrome` is terminated too — a monitoring script called
+  `chrome_metrics.py`, for example. If you run such a process, stop it or rename
+  it before a login run.
+- The scripts protect their own process and its parents, so running them from a
+  terminal or a test runner does not terminate that terminal.
+- Inside the provided login container the cleanup is skipped, because there it
+  would tear down the container's own browser stack.
+- **In Home Assistant this does not happen — with one exception worth knowing.**
+  No module Home Assistant loads reaches `create_driver`. The exception is the
+  interactive key-backup fallback: it is loaded dynamically and, in a Home
+  Assistant process started in the foreground of a terminal whose bundle carries
+  no shared key, it used to be able to reach the same code. That guard now
+  requires the command-line tool itself, which identifies itself through the
+  `GOOGLEFINDMY_CLI_PROCESS` marker rather than through an attached terminal.
+  Exporting that marker into a Home Assistant process puts the old behaviour
+  back — it is an opt-in for wrappers, not a lock.
+
+### Standalone login refuses to start (attended terminal required)
+The desktop login opens Chrome **on your own screen** and prints a "Press Enter
+to continue" prompt first, so you decide when a browser window takes over. When
+standard input is not a terminal there is nobody to decide, and the flow aborts
+before Chrome starts:
+
+```
+RuntimeError: [AuthFlow] The interactive Chrome login needs an attended terminal
+(stdin is not a terminal).
+```
+
+This is deliberate. An unattended run would open a browser nobody is watching,
+and reading the prompt from a pipe would swallow the account e-mail that the CLI
+asks for on the same standard input a moment later. Pick the option that matches
+your situation:
+
+| Situation | What to do |
+| --- | --- |
+| Normal shell / SSH session | Nothing — this is the supported path. |
+| IDE run window (PyCharm, VS Code) that proxies stdin | `export GOOGLEFINDMY_ASSUME_INTERACTIVE=1` for that run. |
+| No graphical desktop, or you prefer a browser tab | Use the [Docker login helper](custom_components/googlefindmy/docker-login/README.md); its entrypoint sets `GOOGLEFINDMY_CONTAINER_LOGIN=1` itself, and the prompt does not apply there because Chrome runs inside the container. |
+| Automated caller (no browser window wanted) | Call the flow with `headless=True`. |
+
+> [!WARNING]
+> `GOOGLEFINDMY_ASSUME_INTERACTIVE=1` only claims "a human is sitting here"; it
+> does not make an unattended run work. Set it per invocation, not permanently
+> in a container, service unit or shell profile — that would restore exactly the
+> unattended browser start this check prevents.
 
 ### Location updates stopped after an upgrade
 Location data is fetched **outbound** from Home Assistant to Google (FCM push plus Nova/SPOT polling); it does **not** depend on your Home Assistant internal or external URL configuration. If updates stop after upgrading the integration:
@@ -501,12 +604,275 @@ configuration.
 - The regeneration also refreshes the associated metadata so subsequent
   requests resume with the updated token immediately.
 
+### Reporting P-256 tracker results (#223)
+
+Crowdsourced (foreign) reports from P-256 trackers are decrypted with
+*provisional readings*: the report does not say how its key and nonce were
+derived, so the integration tries several candidates and keeps the one that
+verifies. Which candidate real trackers use is not yet confirmed. Your result
+decides which readings stay; the code (`P256_FOREIGN_READINGS` in
+`FMDNCrypto/foreign_tracker_cryptor.py`) states when the others may be removed,
+see also "Foreign-report readings" in
+[`docs/CRYPTOGRAPHY.md`](docs/CRYPTOGRAPHY.md#foreign-report-readings).
+
+1. **Search the log for `FMDN_FOREIGN_READING`.** Each line starts with
+   `FMDN_FOREIGN_READING <status>:`, where the status is one of:
+   - `decrypted`: a report was decrypted with a provisional reading (logged at
+     **INFO**, once per device and reading);
+   - `all_failed`: reports from a tracker failed with every reading (**WARNING**);
+   - `unsupported_length`: a report's `Sx` length matches no curve (**WARNING**).
+2. **Make INFO visible.** The `decrypted` line is logged at INFO and is hidden
+   at the default level. Either call the `logger.set_level` action (no restart
+   needed; it lasts until the next restart):
+   ```yaml
+   action: logger.set_level
+   data:
+     custom_components.googlefindmy: info
+   ```
+   or add the same line to your `configuration.yaml` and restart Home Assistant:
+   ```yaml
+   logger:
+     logs:
+       custom_components.googlefindmy: info
+   ```
+   If your `configuration.yaml` already has a `logger:` section, add the line
+   under its existing `logs:` key. Do **not** add a second `logger:` section: a
+   duplicate key replaces the first one (Home Assistant only logs a warning).
+   The log view under **Settings → System → Logs** lists warnings and errors
+   only; the INFO line appears in the full log. It is written with the next
+   report that decrypts after INFO was enabled.
+3. **Diagnostics.** Download the integration's diagnostics and copy **only** the
+   `foreign_report_readings` block. It names no device and carries no ID, but
+   the rest of the diagnostics file contains the entry id in clear.
+4. **What to post:** the `FMDN_FOREIGN_READING` line(s) and/or the
+   `foreign_report_readings` block, your integration version, and whether the
+   tracker's location now updates.
+5. **Never post keys, EIDs, coordinates or IDs.** The log lines and the block
+   are built to contain none of these.
+6. **Where:** <https://github.com/BSkando/GoogleFindMy-HA/issues/223>
+
 ## Privacy and Security
 
 - All location data uses Google's end-to-end encryption
 - Authentication tokens are securely cached
-- No location data is transmitted to third parties
-- Local processing of all GPS coordinates
+- All GPS coordinates are processed locally. The integration itself sends no
+  location data anywhere except to Google, which is where it comes from.
+- **The exception, and it is yours to trigger.** Opening a Map View page
+  loads **map tiles** from OpenStreetMap, and which party OpenStreetMap sees
+  depends on your Core version. The page detects that at runtime; the minimum
+  Core version above does not change:
+  - **Core 2026.9 or newer** ships the `map_tiles` integration (a dependency of
+    `frontend`, so it is loaded in every standard installation). The page then
+    requests its tiles from your own instance (`/api/map_tiles/raster/...`),
+    and the instance forwards them to OpenStreetMap with Home Assistant's
+    application `User-Agent` and contact address, through a server-side cache.
+    OpenStreetMap sees your instance, not your browser's address and not your
+    installation URL (which the direct path below reveals through the referrer
+    when you open the page through Nabu Casa or another public hostname).
+  - **Older Cores** keep the previous behaviour: the browser fetches the tiles
+    directly from `https://tile.openstreetmap.org/...` with
+    `referrerPolicy: 'origin'`, so OpenStreetMap sees the browser's address and
+    the origin of the page, but not its path and not the access token in it.
+
+  On both paths the page fits its view to *all* locations it shows, so with
+  the default history window the requested area is the area your device moved
+  through during that window, not just its current position. The requests carry
+  no device name, no account and no coordinates as such, but the requested
+  tiles do describe that area, now as seen from the instance on the proxy path
+  and from the browser on the direct path.
+
+  The Leaflet library that draws the map is shipped with the integration and
+  embedded inline in the page: no CDN is contacted. Nothing is requested while
+  no Map View page is open, and no other page of this integration loads
+  either.
+
+## Security considerations
+
+### What is stored, and where
+
+| What | Where | Notes |
+| --- | --- | --- |
+| The credential bundle you paste during setup | Home Assistant's storage, one file per config entry: `.storage/googlefindmy_secrets_<entry_id>` | Written by the integration's token cache, not by you |
+| Google account e-mail | The config entry itself (`.storage/core.config_entries`) | Needed to restart without asking you again |
+| The location history of every tracker | Home Assistant's recorder database (`home-assistant_v2.db` by default) | Not written by this integration but by Home Assistant, recording the entities it creates, including the recorder-only `last_latitude`/`last_longitude` attributes the Map View reads back (`map_view.py`, `get_significant_states`). It is kept for as long as your `recorder` `purge_keep_days` says, and it travels with any backup that includes the database (Home Assistant's backup manager offers that as a choice; a recorder pointed at an external database is not in the backup at all). Exclude the entities under `recorder:` if you do not want that history |
+| The pasted bundle and the OAuth token | Also the config entry (`.storage/core.config_entries`) | On **initial setup** they are moved into the token cache on the first successful start and removed from the entry. Two cases keep them there indefinitely: a setup that fails before that point, and any later credential replacement (reauth or the options flow), because `config_flow.py` → `_persist_secrets_bundle` writes them back and the reload then finds a primed cache and skips the removal (`__init__.py`, the `legacy_cache_primed` branch). The copy lives beside the token cache in the same `.storage` directory, so it widens no trust boundary, and the diagnostics download redacts it |
+| Derived tokens (AAS, ADM, SPOT), FCM push identity, the shared key and the owner key | Same per-entry storage file | Refreshed automatically; the long-lived ones are what make the integration work after a restart |
+| The Map View access token | Derived on demand from the instance UUID and the entry id, and carried inside each device's `configuration_url` in `.storage/core.device_registry` | Treat that URL as long-lived bearer material: the map view is not behind Home Assistant's login, so whoever holds the link sees the device's location. The token authenticates the **config entry**, not one device (`map_view.py` → `_resolve_entry_by_token`), so a recipient who knows another device id of the same account can substitute it in the path. With the default `map_view_token_expiration` (off) the token never expires. On Core 2026.9 or newer a page opened with this token can also fetch the current map tiles access token of Core's `map_tiles` proxy (`/api/googlefindmy/map_tiles_token`, same share-token check as the page itself, with the share token sent in the `X-GoogleFindMy-Map-Token` request header rather than in the URL, so it does not land in access logs), which grants nothing but the tile and map resources of that proxy (raster and vector tiles, TileJSON, glyphs, sprites; as of Core 2026.9), rotates every 30 minutes and is already embedded in the page's HTML |
+
+`secrets.json` is **not** part of the running integration. It is produced by the
+manual command-line login, and if you paste its contents, no file by that name
+ever reaches the Home Assistant machine. Its *contents* do: `async_setup_entry`
+hands the normalised bundle to `_async_save_secrets_data`, which stores it in
+the per-entry file listed in the table above. What pasting avoids is a second,
+loose copy on disk, not storage as such.
+
+There is a second, optional hand-off that does put the file there, so it belongs
+in this list. The integration watches two paths for a dropped bundle
+(`discovery.py` → `_default_watch_paths`): the bundled `Auth/secrets.json` and
+the login container's `docker-login/data/secrets.json`. The advanced option
+`secrets_extra_watch_paths` adds any further paths you configure
+(`discovery.py` → `_collect_extra_watch_paths`), and those are watched the same
+way. A bundle found on any of them starts a discovery flow, and the copy is
+deleted once Home Assistant is observed to hold the imported credentials
+(`config_flow.py` → `_async_delete_watched_secrets`, armed by
+`async_setup_entry`). Until then — and indefinitely if you never confirm the
+flow, or if the import fails — the file stays on the Home Assistant machine in
+clear. Deletion is also best-effort: a path Home Assistant cannot write to
+keeps its copy. That one case does announce itself, in the Home Assistant log:
+`Failed to remove watched bundle file after import: <path>`
+(`config_flow.py` → `_remove_if_digest_matches`); search for it if you used a
+watched path, and remove the named file yourself. The other case is silent by
+construction: a flow you never confirmed never reaches the deletion at all, so
+no message will ever appear for it. If you use that route, remove every such
+copy yourself when you abandon an import, including the ones behind
+`secrets_extra_watch_paths`. A legacy `Auth/secrets.json` found by
+the token cache is imported once and then deleted (`Auth/token_cache.py`,
+`os.remove(legacy_path)`), best-effort in the same way: on a read-only mount
+the file stays, and the log says so
+(`Failed to remove legacy cache file after migration: <path>`). Search for that
+line too, and remove the file yourself if it appears.
+
+### Who can read it
+
+Anyone with **administrator access to Home Assistant** or **read access to its
+configuration directory**. That is not a property of this integration: the
+`.storage` directory holds the credentials of every integration you have
+installed, and the recorder database holds their history. Protect the Home
+Assistant instance and you protect these credentials; do not protect it and no
+choice this integration could make would help.
+
+Diagnostics downloads are redacted before they leave Home Assistant
+(`diagnostics.py`, `TO_REDACT` and `TO_REDACT_PREFIXES`), including the pasted
+bundle and the key names the token cache builds at run time, so an attached
+diagnostics file does not contain the token fields the integration knows
+about. In key names, every word that contains an `@` is replaced by
+`<account-N>`, so an e-mail address does not survive there either.
+Redaction of values works by field name: a value stored under a name neither
+list covers is passed through as it is. The file does contain the entry id in
+clear.
+
+### What is *not* part of the Home Assistant runtime
+
+Chrome and Selenium. The browser-based credential extraction is a manual step
+you run yourself, from a terminal, on your own machine. No module Home Assistant
+loads imports Selenium or starts a browser: an import-graph walk from every
+module Home Assistant loads on its own reaches no browser package, while the
+same walk from `chrome_driver.py` does — so the check can fire. "Every module"
+means: `__init__.py`, the entry point; the four Home Assistant looks up by
+filename (`config_flow.py`, `diagnostics.py`, `repairs.py`,
+`system_health.py`), which the check lists explicitly because that convention
+is Home Assistant's rather than ours; `eid_resolver.py`, which is an ordinary
+import of `__init__.py` and would be crawled anyway, seeded as its own entry
+because it is where the decryption path starts; and the platform modules, which
+the check reads from `PLATFORMS` because that list does change. From each of them it follows
+imports inside function bodies as well, and `importlib.import_module` calls
+whose target is a literal string, because a module reached only that way is
+reached all the same. A dynamic import whose target is assembled at run time
+is beyond it, which is a limit of reading source without executing it rather
+than an oversight. Three such calls exist here, and all three resolve from
+tables of constants in the package (`__init__.py` → `_PROTO_DECODER_PATHS`, and
+the two module names in `integration_modules.py`): protocol decoders and the
+integration's own API module, no browser among them.
+
+The interactive key-backup fallback used to be the one qualification here: it is
+loaded dynamically through `importlib`, and its guard asked whether a terminal
+was attached — a question a foreground Home Assistant answers with yes. It now
+asks two (`KeyBackup/shared_key_retrieval.py` → `_retrieve_shared_key_hex`):
+whether this process is the command-line tool, which it learns from the
+`GOOGLEFINDMY_CLI_PROCESS` marker that `main.py` sets on itself and Home
+Assistant never sets, and whether somebody is present to answer the browser
+prompt. Either answer missing is refused with a message that names what is
+missing. Read that as the default rather than as a lock: the marker is an
+environment variable and is inherited, so a Home Assistant process started with
+it exported, on a terminal, has answered both questions itself. The refusal
+message says as much, because an unforeseen command-line wrapper has to be able
+to identify itself somehow. What changed is that this now takes a deliberate
+act instead of happening to anyone who starts Home Assistant in a terminal.
+
+### If your credential bundle leaks
+
+Treat a leaked bundle as a full compromise of what this integration can reach.
+Two things have to be kept apart, because only one of them is hopeless:
+
+- **Reports the holder already received** stay readable. The keys that decrypt
+  them are in the copy, and no documented way exists for you to rotate them.
+- **Reports from now on** are a different question. Removing a tracker from Find
+  Hub is the step that touches its device-side key material, so containment is
+  not futile: step 5 below is what ends future location access, for as long as
+  the tracker stays removed. Re-pairing one to the same account can hand it
+  back; see the note under step 5.
+
+| What is in the bundle | What it opens | Can you revoke it? |
+| --- | --- | --- |
+| `aas_token` (long-lived Android account credential) | Mints fresh API tokens at will, without your password and without 2-Step Verification | Not documented. See the caveat below |
+| `adm_token_*` (short-lived API token) | Lists your devices, requests locations, rings them — but returns **ciphertext** without the keys below | Expires by itself within hours; a holder of the `aas_token` just mints another |
+| `fcm_credentials` (push identity) | Receives the push stream and decrypts its **transport** envelope (`Auth/firebase_messaging/fcmpushclient.py` → `_handle_data_message`), and presents to Google as the same device. The reports inside are still encrypted: turning them into coordinates needs the key chain in the row below (`location_request.py` → `location_callback` calls `async_decrypt_location_response_locations` with the entry cache) | Not documented for a third party's copy |
+| `shared_key` and `owner_key` | Open the **decryption chain**: the shared key unwraps the server-provided owner key, from which the tracker's identity key and finally the report key are derived. This is the step that turns "can list and ring your devices" into "can see where you are" | Not documented |
+| Your Google account e-mail, the device identifier, usage timestamps | Identifies the account and the device the tokens were issued for | Not applicable |
+
+**If you believe the leak is being used right now, do step 5 first, for every
+tracker whose location must be protected.** It is the
+only step in this list that touches the device side of the key material, and
+steps 1 to 4 have documented effects on account access but undocumented effects
+on the copy somebody already holds. In the ordinary case, work through the list
+as numbered.
+
+**What to do.** Every step below is something Google documents; where the
+documentation stops, this says so instead of guessing.
+
+1. **Change your Google password.** Google states you are then "signed out
+   everywhere except … some devices with third-party apps that you've given
+   account access"
+   ([support](https://support.google.com/accounts/answer/41078)). Whether the
+   `aas_token` falls under that exception is *not documented*, so do not treat
+   this step as sufficient.
+2. **Review your devices and sign out anything you do not recognise**
+   ([support](https://support.google.com/accounts/answer/3067630)). The page
+   does not state what signing out does to already issued tokens.
+3. **Review third-party access and remove what you do not want.** "If you remove
+   access, the app can't access your Google Account"
+   ([support](https://support.google.com/accounts/answer/13533235)). Whether a
+   grant made this way appears in that list is not documented.
+4. **Check your account's security activity and turn on 2-Step Verification**
+   ([support](https://support.google.com/accounts/answer/6294825)).
+5. **If the location itself is what you need to protect, remove every affected
+   tracker from Find Hub**: the stolen credentials list *your devices*, not one
+   of them, so removing a single tracker leaves the rest reachable. Removing a
+   tracker deletes its associated data
+   ([support](https://support.google.com/android/answer/14800516)). This is the
+   only step in the list that touches the device-side of the key material.
+
+   **Do not pair a new tracker to that account while the bundle may still
+   work.** This step contains the trackers you removed, and only while they stay
+   removed: it does not rotate the account-level material. The `aas_token` can
+   still mint fresh Spot and ADM tokens (`Auth/spot_token_retrieval.py` →
+   `_async_generate_spot_token`), and registration encrypts a new tracker's
+   identity key with the *account's* owner key
+   (`SpotApi/CreateBleDevice/create_ble_device.py` → `register_esp32`,
+   `encrypt_aes_gcm(owner_key, eik)`) — the same owner key the leaked shared key
+   unwraps. A tracker paired after the leak is therefore readable again by the
+   same copy. Use a different Google account for new trackers until you have
+   confirmation from Google that the old credentials no longer work.
+6. **Locally:** delete your copy of `secrets.json`, remove the config entry, and
+   run the login again. This gives *you* fresh credentials; it does nothing to
+   the thief's copy. If you turned the *delete caches on remove* option off,
+   removing the entry keeps `.storage/googlefindmy_secrets_<entry_id>` on disk
+   (`__init__.py` → `async_remove_entry`): turn the option back on before you
+   remove the entry, or delete that file yourself.
+
+**The uncomfortable part, stated plainly:** steps 1 to 4 all act on account and
+token access. The two items that decrypt your location, `shared_key` and
+`owner_key`, are key material the holder already has locally, and no Google
+documentation we could find describes a way for an account owner to rotate or
+revoke them. Until that changes, a leaked bundle should be assumed to keep
+decrypting whatever it already received. That is the part you cannot undo; the
+part you can is future access, and the remedy for it is step 5.
+
+### Reporting a security issue
+
+Use GitHub's private vulnerability reporting (the *Security* tab of this
+repository, *Report a vulnerability*) for anything with an attacker in it, and a
+normal issue — one per item — for hardening suggestions.
 
 ## Contributing
 
@@ -517,7 +883,7 @@ To contribute, please:
 2. Create a feature branch
 3. Install the development dependencies with `make install-dev` (or `poetry install --with dev,test`)
 4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes. If the CLI entry points are unavailable, use the `python -m` fallbacks from the [module invocation primer](AGENTS.md#module-invocation-primer) to run the same commands reliably.
-5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments).
+5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments). Before opening a pull request, `python script/local_verify.py --all` runs the wider preflight (format, lint, types, spelling, suite plus project coverage, patch coverage) and reports every stage as `OK`, `FAILED`, `NOTE` or `NOT CHECKED` with a reason; see `script/AGENTS.md`.
 6. When running pytest (either through the helper script or directly) fix any failures and address every `DeprecationWarning` you encounter—rerun with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings.
 7. Test thoroughly with your Find My devices
 8. Submit a pull request with detailed description
@@ -537,20 +903,22 @@ poetry run mypy --strict
 
 ### Development Scripts
 
-Manifest validation (`hassfest`) now runs exclusively through the
-[`hassfest-auto-fix`](.github/workflows/hassfest-auto-fix.yml) workflow. Every
-push to `main` and every pull request automatically executes the
+Manifest validation (`hassfest`) runs in CI. Every pull request executes the
+[`hassfest-auto-fix`](.github/workflows/hassfest-auto-fix.yml) workflow, which
+runs the
 [`home-assistant/actions/hassfest`](https://github.com/home-assistant/actions/tree/master/hassfest#readme)
-GitHub Action, which rewrites manifests when needed and re-runs the validator to
-confirm the fixes.
+GitHub Action, rewrites manifests when needed and re-runs the validator to
+confirm the fixes. Pushes to `main` are validated (blocking) by the `hassfest`
+job in `ci.yml`.
 
 When you need to inspect or download the results locally:
 
 1. Open the relevant workflow run from the PR or commit.
 2. Expand the **Run hassfest (may rewrite manifest)** step to review the console
    output, or download the generated artifact directly from the workflow UI.
-3. If you need a fresh validation pass, trigger the workflow manually from the
-   **Run workflow** button in the Actions tab or by re-running the job on the PR.
+3. If you need a fresh validation pass, re-run the job from the PR (the
+   workflow has no `workflow_dispatch` trigger, so there is no **Run workflow**
+   button).
 
 ## Legacy CLI helpers & token cache selection
 

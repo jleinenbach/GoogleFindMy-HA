@@ -943,3 +943,43 @@ def test_discovery_payload_accepts_when_shared_present() -> None:
     assert result.email == "user@example.com"
     assert result.secrets_bundle is not None
     assert result.secrets_bundle["shared_key"] == "DDEEFF"
+
+
+@pytest.mark.asyncio
+async def test_secrets_json_step_dead_token_reports_cannot_connect(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A complete bundle whose tokens all fail the probe shows ``cannot_connect``.
+
+    The validation failure is logged with the candidate sources only, without
+    the address.
+    """
+    flow, captured = _make_secrets_flow(monkeypatch)
+
+    async def _no_working_token(*_args: Any, **_kwargs: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _no_working_token)
+    payload = {
+        "google_email": "user@example.com",
+        "aas_token": "aas_et/FROM_SECRETS",
+        "shared_key": _SHARED_HEX,
+    }
+
+    with caplog.at_level("WARNING", logger=config_flow.__name__):
+        result = await flow.async_step_secrets_json(
+            {"secrets_json": json.dumps(payload)}
+        )
+        if inspect.isawaitable(result):
+            result = await result
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"base": "cannot_connect"}
+    assert "result" not in captured
+    failures = [
+        r for r in caplog.records if "Token validation failed" in r.getMessage()
+    ]
+    assert len(failures) == 1
+    assert failures[0].__dict__["candidate_sources"]
+    assert "email" not in failures[0].__dict__

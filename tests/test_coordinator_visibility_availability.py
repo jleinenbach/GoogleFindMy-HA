@@ -143,8 +143,25 @@ def test_refresh_normalizes_prefixed_visible_ids() -> None:
     assert metadata.visible_device_ids == ("device-1",)
 
 
-def test_refresh_recovers_devices_from_empty_visible_list() -> None:
-    """Refreshing with an empty visible list must repopulate device metadata."""
+def test_refresh_returns_an_unowned_device_through_the_merge() -> None:
+    """An unowned device reaches the tracker group even from an empty list.
+
+    Named after the mechanism rather than the trigger, because the previous
+    name (``..._recovers_devices_from_empty_visible_list``) invited the reading
+    that this guards the *allow-list*, and a review acted on that reading. It
+    does not. The single device here belongs to no group, so the
+    unassigned-device merge hands it to the tracker key whether a filter is
+    applied or not; the two mechanisms are indistinguishable at this fixture
+    size. Measured consequence: changing how an empty list is read leaves this
+    test green.
+
+    The allow-list itself is characterised in
+    ``test_coordinator_subentry_visibility.py::test_ap3_a_stored_shape_decides_what_a_group_may_see``,
+    which adds a device owned by another group so the merge cannot supply the
+    answer. Retirement condition: this test becomes redundant if a fixture
+    ever gives the tracker group a device that some group owns, since then it
+    would measure the filter too.
+    """
 
     entry = _build_entry_with_empty_visible_list()
     loop_stub = SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None)

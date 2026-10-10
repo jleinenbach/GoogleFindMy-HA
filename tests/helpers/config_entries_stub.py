@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from itertools import count
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import Any
@@ -57,7 +58,14 @@ def install_config_entries_stubs(target: ModuleType) -> None:
         pass
 
     class ConfigEntryState:
-        """Enum-like placeholder matching Home Assistant states."""
+        """Enum-like placeholder matching Home Assistant states.
+
+        The set is complete against ``homeassistant.config_entries`` on purpose:
+        a state the placeholder omits raises ``AttributeError`` in a test that
+        needs it, which reads like a broken test rather than a missing stub. Both
+        unload states were once absent, so a test could not even name the window
+        in which an unload is under way.
+        """
 
         LOADED = "loaded"
         NOT_LOADED = "not_loaded"
@@ -65,6 +73,8 @@ def install_config_entries_stubs(target: ModuleType) -> None:
         SETUP_RETRY = "setup_retry"
         SETUP_IN_PROGRESS = "setup_in_progress"
         MIGRATION_ERROR = "migration_error"
+        UNLOAD_IN_PROGRESS = "unload_in_progress"
+        FAILED_UNLOAD = "failed_unload"
 
     class ConfigEntryAuthFailed(ConfigError):
         """Exception mirroring Home Assistant's auth failure error."""
@@ -176,7 +186,16 @@ def install_config_entries_stubs(target: ModuleType) -> None:
                         None,
                     )
                     if callable(update_callable):
-                        update_callable(entry, **updates)
+                        # Home Assistant merges ``updates`` FLAT into the entry
+                        # data (``data={**entry.data, **updates}``, see
+                        # ``config_entries.ConfigFlow._abort_if_unique_id_configured``).
+                        # Splatting ``updates`` as keyword arguments instead
+                        # would accept a nested ``{"data": ...}`` payload that
+                        # the real core silently turns into a stray key, so this
+                        # double must not be more forgiving than the original.
+                        update_callable(
+                            entry, data={**dict(entry.data), **dict(updates)}
+                        )
 
                     if reload:
                         reload_callable = getattr(
@@ -219,7 +238,21 @@ def install_config_entries_stubs(target: ModuleType) -> None:
             return schema
 
     class OptionsFlowWithReload(OptionsFlow):
-        """Placeholder inheriting OptionsFlow behaviour."""
+        """Stand-in for the reloading options-flow base.
+
+        ``automatic_reload`` mirrors the real core attribute so this double
+        stays faithful to the contract it stands in for: it is the flag
+        ``OptionsFlowManager.async_finish_flow`` reads before it refuses to
+        write options for an entry that also has update listeners.
+
+        Not load-bearing for the guard in
+        ``test_config_flow_reload_latch_state_guard`` -- that one reaches the
+        real ``homeassistant.config_entries`` and stays sharp without this
+        attribute (measured). It is here so a test that *does* land on the stub
+        cannot read a falsy default and conclude the pairing is allowed.
+        """
+
+        automatic_reload: bool = True
 
     class ConfigSubentry:
         """Simple ConfigSubentry stand-in used by unit tests."""
@@ -326,6 +359,7 @@ def make_config_entry(
     pref_disable_new_entities: bool = False,
     pref_disable_polling: bool = False,
     disabled_by: str | None = None,
+    modified_at: datetime | None = None,
     **extra: Any,
 ) -> SimpleNamespace:
     """Canonical config-entry stub for tests.
@@ -344,9 +378,16 @@ def make_config_entry(
     the module fresh, so IDs are worker-isolated but not deterministic across
     test runs. Tests that assert on ``entry_id`` MUST pass ``entry_id=...``
     explicitly.
+
+    ``modified_at`` mirrors the real ``ConfigEntry`` field and defaults to an
+    aware UTC "now", because production reads it as the durability watermark of
+    an entry update (``config_flow._entry_modified_at``). A stub without it
+    would silently take the fail-safe branch there, so update-path tests would
+    pass while asserting nothing. Tests that need a specific watermark pass one.
     """
     return SimpleNamespace(
         entry_id=entry_id or f"entry-test-{next(_ENTRY_COUNTER)}",
+        modified_at=modified_at or datetime.now(UTC),
         domain=domain,
         data=dict(data or {}),
         options=dict(options or {}),

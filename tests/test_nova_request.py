@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
+import re
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -31,11 +35,13 @@ from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import 
 from custom_components.googlefindmy.NovaApi.nova_request import (
     AsyncTTLPolicy,
     NovaAuthError,
+    NovaAuthPermanentError,
     NovaError,
     NovaHTTPError,
     NovaRateLimitError,
     TTLPolicy,
     async_nova_request,
+    is_credential_rejection,
     register_cache_provider,
     unregister_cache_provider,
 )
@@ -3094,3 +3100,361 @@ async def test_both_adm_and_aas_tokens_have_min_ttl_protection() -> None:
             await cache.close()
 
     await _run()
+
+
+class TestIsCredentialRejection:
+    """The shared status criterion every NovaAuthError handler reads.
+
+    The type covers every non-retryable 4xx, so only these rows may read as
+    "your sign-in expired"; every other client rejection is the server
+    refusing the REQUEST, not the credentials.
+    """
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (401, True),
+            (403, True),
+            (400, False),
+            (404, False),
+            (405, False),
+            (409, False),
+            (422, False),
+        ],
+    )
+    def test_the_status_alone_decides_for_a_plain_error(
+        self, status: int, expected: bool
+    ) -> None:
+        assert is_credential_rejection(NovaAuthError(status, "detail")) is expected
+
+    def test_permanence_outranks_a_non_credential_status(self) -> None:
+        """is_permanent means "re-authentication is definitively required"."""
+        assert is_credential_rejection(NovaAuthError(404, "perm", is_permanent=True))
+
+    def test_the_permanent_subclass_stays_a_credential_rejection(self) -> None:
+        assert is_credential_rejection(NovaAuthPermanentError(404, "aas rejected"))
+
+    def test_an_unreadable_status_keeps_the_conservative_verdict(self) -> None:
+        """A test double or a future subclass reads as auth, not as client error.
+
+        delattr, not ``= None``: the annotation says int, and removing the
+        instance attribute is exactly what makes getattr fall back.
+        """
+        err = NovaAuthError(404, "double without a status")
+        delattr(err, "status")
+        assert is_credential_rejection(err)
+
+
+class TestTheDocumentedExtentStaysTrue:
+    """The AGENTS.md paragraph counts call sites and handlers; nothing enforced it.
+
+    `custom_components/googlefindmy/AGENTS.md` states the extent of the
+    status-based classification in prose ("six call sites in four files",
+    "ten try blocks catch NovaAuthError", "eight carry a broad except
+    Exception"). That paragraph calls itself "the only thing standing in
+    [the defect's] way", which makes an unenforced number the load-bearing
+    part of the contract: a seventh handler, or a refactor that drops one,
+    leaves the prose quietly wrong while every test stays green.
+
+    `tests/AGENTS.md` already establishes the remedy for exactly this shape --
+    a tuple that "must still equal the AST-derived set" rather than a
+    hand-maintained copy. These rows apply it to the numbers above. They are
+    deliberately AST-derived and not grep-derived: a comment mentioning the
+    predicate must not count as a call site.
+
+    The class has since grown past that one paragraph, because the same shape
+    kept recurring: a load-bearing detail stated only in prose. It now also
+    derives the guard count in `LocationRequestNotAcceptedError`'s own
+    docstring (five broad handlers with a guard in front, a sixth deliberately
+    without) and checks that every test name cited in the component's
+    `AGENTS.md` files still resolves to a test. That last one overlaps with
+    `TestTheDocumentedRejectionGuardStaysTrue` in
+    `tests/test_coordinator_semantic_mappings.py`, which already guards one
+    named list and, unlike this class, verifies its stated COUNT; the row here
+    says what it adds instead of pretending the ground was bare. Numbers and
+    names fail the same way -- silently, with a green suite -- and they are
+    pinned here for the same reason.
+
+    When the extent legitimately changes, update BOTH this test and the
+    paragraph in the same commit. A failure here is not a bug in the code; it
+    is the contract telling you it went stale.
+    """
+
+    _ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
+
+    @staticmethod
+    def _handler_names(handler: ast.ExceptHandler) -> set[str]:
+        node = handler.type
+        if node is None:
+            return {"Exception"}
+        parts = node.elts if isinstance(node, ast.Tuple) else [node]
+        out: set[str] = set()
+        for part in parts:
+            if isinstance(part, ast.Name):
+                out.add(part.id)
+            elif isinstance(part, ast.Attribute):
+                out.add(part.attr)
+        return out
+
+    def _modules(self) -> list[tuple[Path, ast.Module]]:
+        return [
+            (path, ast.parse(path.read_text(encoding="utf-8")))
+            for path in sorted(self._ROOT.rglob("*.py"))
+        ]
+
+    def test_the_predicate_has_the_documented_six_call_sites_in_four_files(
+        self,
+    ) -> None:
+        per_file: dict[str, int] = {}
+        for path, tree in self._modules():
+            calls = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "is_credential_rejection"
+            ] + [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "is_credential_rejection"
+            ]
+            if calls:
+                per_file[path.relative_to(self._ROOT).as_posix()] = len(calls)
+
+        assert sum(per_file.values()) == 6, per_file
+        assert len(per_file) == 4, per_file
+        assert per_file.get("api.py") == 3, per_file
+
+    def test_ten_try_blocks_catch_the_auth_error_and_eight_have_a_broad_handler(
+        self,
+    ) -> None:
+        """The count that gates the open follow-up (a dedicated client-error class).
+
+        Splitting NovaAuthError is only safe once every catcher is known: the
+        eight blocks with a broad `except Exception` would swallow a new class
+        silently, the two sound handlers would let it escape. Both numbers are
+        the reason that follow-up is not a one-liner, so both are pinned.
+        """
+
+        catching: list[str] = []
+        with_broad: list[str] = []
+        for path, tree in self._modules():
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Try, ast.TryStar)):
+                    continue
+                handlers = [self._handler_names(h) for h in node.handlers]
+                if not any("NovaAuthError" in names for names in handlers):
+                    continue
+                where = f"{path.relative_to(self._ROOT).as_posix()}:{node.lineno}"
+                catching.append(where)
+                if any(
+                    "Exception" in names or "BaseException" in names
+                    for names in handlers
+                ):
+                    with_broad.append(where)
+
+        assert len(catching) == 10, catching
+        assert len(with_broad) == 8, with_broad
+        assert len(catching) - len(with_broad) == 2, (catching, with_broad)
+
+    # --------------------------------------------------------------- #
+    # The second extent this file pins: the guards in front of the     #
+    # broad handlers on the LocationRequestNotAcceptedError path.      #
+    # --------------------------------------------------------------- #
+
+    def _guarded_broad_blocks(self) -> list[tuple[str, bool, bool]]:
+        """Every ``try`` that catches the signal AND has a broad handler.
+
+        Returns ``(location, guard_comes_first, guard_is_a_bare_reraise)``.
+        """
+
+        found: list[tuple[str, bool, bool]] = []
+        for path, tree in self._modules():
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Try, ast.TryStar)):
+                    continue
+                handlers = [self._handler_names(h) for h in node.handlers]
+                broad = [
+                    i
+                    for i, names in enumerate(handlers)
+                    if "Exception" in names or "BaseException" in names
+                ]
+                guard = [
+                    i
+                    for i, names in enumerate(handlers)
+                    if "LocationRequestNotAcceptedError" in names
+                ]
+                if not broad or not guard:
+                    continue
+                body = node.handlers[guard[0]].body
+                bare = (
+                    len(body) == 1
+                    and isinstance(body[0], ast.Raise)
+                    and body[0].exc is None
+                )
+                where = f"{path.relative_to(self._ROOT).as_posix()}:{node.lineno}"
+                found.append((where, guard[0] < broad[0], bare))
+        return sorted(found)
+
+    def test_every_broad_handler_that_guards_the_signal_puts_the_guard_first(
+        self,
+    ) -> None:
+        """The class docstring counts five guards; nothing derived that five.
+
+        `LocationRequestNotAcceptedError` is an `Exception`, so every broad
+        `except Exception` on its path catches it as well and turns the raise
+        back into the empty result the type was introduced to replace. Its
+        docstring names five such blocks and asserts that all five carry a
+        guard placed BEFORE the broad handler. That was a hand-counted number
+        in prose, and the failure it guards against is the silent kind: moving
+        a guard behind its broad neighbour leaves every existing test green,
+        because the observable outcome is identical to the pre-change one.
+
+        What is pinned is ORDER, MEMBERSHIP and SHAPE -- not the handler body
+        beyond telling a bare re-raise from a dedicated branch. Three of the
+        five re-raise bare; the two coordinator blocks handle the signal in a
+        branch, which is the documented design, so requiring a bare `raise`
+        everywhere would be wrong. That three is derived here rather than
+        stated: an earlier revision of this docstring wrote "two", which is
+        the failure mode this whole class exists to catch, committed inside
+        the fix for it.
+
+        "Bare" is measured as SHAPE, not meaning: one statement, a `raise` with
+        no expression. Adding a log line ahead of an otherwise bare re-raise
+        therefore turns this row red even though the handler still only
+        re-raises. That direction is loud rather than silent, and the fix is
+        one word in the sentence above, so it is left strict on purpose.
+
+        One limit, stated so this is not read as more than it is: the row
+        cannot see a NEW broad handler introduced on the path WITHOUT a guard
+        -- such a block has no `except LocationRequestNotAcceptedError` and
+        therefore never enters this set. The seam tests in
+        `tests/test_location_request_not_accepted.py` cover that direction
+        behaviourally; this row covers the direction they cannot, which is a
+        guard that still exists but no longer runs first.
+        """
+
+        blocks = self._guarded_broad_blocks()
+        assert len(blocks) == 5, blocks
+        assert all(first for _, first, _ in blocks), blocks
+        assert Counter(where.split(":")[0] for where, _, _ in blocks) == Counter(
+            {
+                "NovaApi/ExecuteAction/LocateTracker/location_request.py": 2,
+                "api.py": 1,
+                "coordinator/locate.py": 1,
+                "coordinator/polling.py": 1,
+            }
+        ), blocks
+        assert Counter(
+            where.split(":")[0] for where, _, bare in blocks if bare
+        ) == Counter(
+            {
+                "NovaApi/ExecuteAction/LocateTracker/location_request.py": 2,
+                "api.py": 1,
+            }
+        ), blocks
+
+    def test_the_sync_helper_is_the_broad_handler_deliberately_left_unguarded(
+        self,
+    ) -> None:
+        """The sixth broad handler is a contract, not an oversight -- pin it.
+
+        `api._run_sync_helper` flattens every exception to the caller's
+        default, so `api.get_device_location` hands back `{}` for this signal
+        too. The class docstring says so explicitly and calls it documented
+        rather than missed. Adding a guard there would be a behaviour change at
+        a public sync entry point AND would make that paragraph false, so this
+        row fails first and sends whoever does it to the prose.
+        """
+
+        api = self._ROOT / "api.py"
+        tree = ast.parse(api.read_text(encoding="utf-8"))
+        helper = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_run_sync_helper"
+        )
+        broad = [
+            handler
+            for node in ast.walk(helper)
+            if isinstance(node, (ast.Try, ast.TryStar))
+            for handler in node.handlers
+            if "Exception" in self._handler_names(handler)
+        ]
+        assert broad, "the sync helper no longer has a broad handler"
+        guards = [
+            handler
+            for node in ast.walk(helper)
+            if isinstance(node, (ast.Try, ast.TryStar))
+            for handler in node.handlers
+            if "LocationRequestNotAcceptedError" in self._handler_names(handler)
+        ]
+        assert guards == [], "the sync helper grew a guard; update the class docstring"
+
+    def test_every_test_name_the_component_contracts_cite_exists(self) -> None:
+        """Contract prose pins behaviour by NAME; most of those names were loose.
+
+        `AGENTS.md` closes paragraphs with lists of test names. A rename or a
+        deletion leaves such a list pointing at nothing, and the reader cannot
+        tell a stale name from a test that merely lives elsewhere -- the prose
+        reads the same either way.
+
+        Part of this was already guarded and saying otherwise would repeat the
+        defect: `TestTheDocumentedRejectionGuardStaysTrue` in
+        `tests/test_coordinator_semantic_mappings.py` reads the sentence
+        "Eight tests pin this:" out of the same file and checks BOTH its number
+        against the list it prints AND that every listed name exists. That row
+        can do something this one cannot -- verify a stated count -- so it
+        stays; do not fold the two together. What was NOT covered, and is what
+        this row adds: the second list ("Three tests pin the current state"),
+        which that sentence pattern does not match; scattered one-off citations
+        outside any list; class names, including the class you are reading, on
+        which a whole paragraph rests; and the other AGENTS.md files under this
+        component, which no row read at all.
+
+        Module paths are excluded by CONTEXT, not by name: a citation preceded
+        by `tests/` or followed by `.py` is a file reference. The obvious
+        alternative -- drop any name that also exists as a file stem under
+        `tests/` -- was tried first and is a loophole, because four names in
+        this tree are BOTH a module stem and a test function. A stale citation
+        of one of those would be skipped in silence, and adding a new module
+        could retroactively blind an existing citation. The cost of the context
+        rule is that a citation of a FILE goes unchecked; renaming a test module
+        leaves such a reference dangling and no row here notices.
+
+        Scope is every `AGENTS.md` under the component (68 citations today, all
+        of them live). `tests/AGENTS.md` is deliberately NOT included: it cites
+        at least one name as a FORMER name on purpose, so folding it in needs a
+        way to declare a citation historical, which is a change of its own.
+
+        A name written into contract prose before the test exists fails this
+        row. That is the intended direction: the contract may not promise
+        coverage that is not there yet.
+        """
+
+        pattern = (
+            r"(?<!tests/)\b(?:test_[A-Za-z0-9_]+|Test[A-Z][A-Za-z0-9_]*)\b(?!\.py)"
+        )
+        cited: dict[str, str] = {}
+        for contract in sorted(self._ROOT.rglob("AGENTS.md")):
+            where = contract.relative_to(self._ROOT).as_posix()
+            for name in re.findall(pattern, contract.read_text(encoding="utf-8")):
+                cited.setdefault(name, where)
+
+        defined: set[str] = set()
+        for path in Path(__file__).resolve().parent.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ) and node.name.startswith("test_"):
+                    defined.add(node.name)
+                elif isinstance(node, ast.ClassDef):
+                    defined.add(node.name)
+
+        assert cited, "the contracts cite no test names any more; check the pattern"
+        assert [name for name in cited if name not in defined] == [], {
+            name: where for name, where in sorted(cited.items()) if name not in defined
+        }

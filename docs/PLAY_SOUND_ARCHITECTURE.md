@@ -130,6 +130,200 @@ could be matched against the UUID from `start_sound_request()` for correlation.
 | FCM push arrives after successful commands | Whether sound-specific FCM pushes differ from location pushes |
 | `requestUuid` is sent and echoed in FCM | Whether the HTTP response also echoes it |
 
+**IRR-CA-NO-RING-CONFIRMATION (deliberate boundary).** A Nova HTTP 200 proves
+that the submission was accepted, nothing more. No `ExecuteActionResponse`
+schema exists (Path A) and no FCM callback is registered for sound (Path B),
+so on the cloud path neither delivery nor execution is observable. Every
+`ok`/`submitted`/`cancelled` produced by `api.py` and by
+`coordinator/locate.py` means exactly this and must not be worded as
+confirmation.
+
+The boundary is a property of the *cloud* path, not of the protocol. The FMDN
+specification does define a ring confirmation: when ringing starts or stops,
+the beacon emits a notification on the Beacon Actions characteristic
+(`FE2C1238-8366-4814-8EB0-01DE32100BEA`) carrying a ringing state of Started,
+Failed to start or stop, Stopped (timeout), Stopped (button press) or Stopped
+(GATT request). That signal exists on a channel this integration does not
+speak. Saying "no confirmation exists" would therefore be wrong; the accurate
+statement is that no confirmation is reachable *over Nova*.
+
+Two consequences follow, and both are already implemented:
+
+- `StopSoundOutcome` is four-valued rather than boolean, so a stop that was
+  submitted without a provable cancel key is reported as `UNCORRELATED`
+  instead of being collapsed into success (BSkando#195).
+- Even `CANCELLED` claims only "submitted with a correlated cancel key", never
+  "the device stopped".
+
+**IRR-CA-SOUND-FAILURE-CLASS (who refused, and who may be blamed).** A sound
+command can fail in ways that have nothing to do with each other, and the layer
+that knows which one happened is `api.py`. `SoundDispatchOutcome` carries that
+knowledge across the boundary instead of collapsing it into a bool:
+
+| Outcome | The server answered | May a caller arm a push cooldown |
+|---|---|---|
+| `ACCEPTED` | yes, HTTP 200 | no |
+| `REJECTED_AUTH` | yes, on credentials (HTTP 401/403, or a permanent auth error) | no |
+| `REJECTED_RATE_LIMIT` | yes, HTTP 429 | no |
+| `REJECTED_SERVER` | yes, for any other reason (5xx, a Nova logic error, and the non-credential 4xx such as 400/404) | no |
+| `TRANSPORT_FAILED` | no usable answer was obtained | **yes** (see the stop-path qualifier below) |
+| `NOT_SENT` | no transport was used at all | no |
+| `INTERNAL_ERROR` | our own defect or a broken contract | no |
+
+Only `TRANSPORT_FAILED` describes a broken push transport. Reporting anything
+else as one is what let an expired sign-in, a rate limit and a bug of our own
+each produce the same 90-second cooldown and the same `FcmStatus.DEGRADED`, and
+`can_play_sound()` reported the button as unavailable for the duration. This is
+the same failure class as `StopSoundOutcome` one layer up: a bool cannot carry
+the state space.
+
+`PlaySoundResult` pairs that outcome with the cancel key, and the two are
+deliberately independent. The key answers one question only, "may the device be
+ringing" (see IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY); the cause is read from the
+outcome and never inferred from the presence or absence of a key.
+
+The rule has exactly one consumer, and stating it in a type is not the same as
+enforcing it. `coordinator/locate.py` holds every call to
+`_note_push_transport_problem()` on the sound paths, and `async_play_sound` and
+`async_stop_sound` each arm it on `TRANSPORT_FAILED` alone. On the stop path the
+call is indirect and carries one further condition: it goes through
+`_note_stop_transport_problem_without_extending()`, which reports the failure in
+full but restores a window that was already running instead of restarting it
+(IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN below). Their blanket
+`except Exception` handlers do not arm it at all: `api.py` classifies every
+unexpected exception in band and returns `INTERNAL_ERROR` rather than raising
+(`api.py`, the final handler of both sound methods), so what still reaches those
+coordinator handlers is a failure of the coordinator's own bookkeeping around
+the call, and none of that is the push transport. The two typed handlers for
+`TimeoutError`/`ClientConnectionError`/`ClientError` do keep the cooldown: `api`
+is a Protocol, and an aiohttp error surfacing from an implementation that does
+not wrap it really is a transport failure. The `pytest.mark.parametrize` tables
+in `tests/test_coordinator_locate_basics.py` carry one row per enum member and
+are guarded against a member being added without a decision, so the "may a
+caller arm a push cooldown" column above is a measured claim, not a wish.
+
+**IRR-CA-PLAY-REMEDY-SPLIT (what the user is supposed to do about it).**
+`SoundDispatchOutcome` says who refused. It does not say what the person who
+pressed the button should do next, and that is a different question with a
+different answer set. `coordinator.async_play_sound` therefore returns its own
+type, `PlaySoundOutcome`, and `services.py` turns it into one of two messages:
+
+| `PlaySoundOutcome` | Reached by | User message | Remedy |
+|---|---|---|---|
+| `ACCEPTED` | `SoundDispatchOutcome.ACCEPTED` | none (the call succeeds) | none -- though "accepted" is still a statement about the submission, not about the device (IRR-CA-NO-RING-CONFIRMATION) |
+| `SUPPRESSED` | the readiness gate, on an active push cooldown while the ring capability is still unknown | `play_sound_suppressed` | wait; the window clears itself within 90 seconds |
+| `FAILED` | everything else: `can_ring is False`, all six non-accepting `SoundDispatchOutcome` members, `ConfigEntryAuthFailed`, a connection error, an unexpected exception, and any value from outside the enum | `play_sound_rejected` | read the log entry, then act on what it names |
+
+This is the split the stop path has carried since `StopSoundOutcome` landed, and
+the dividing line is the same: the REMEDY, not how far the request travelled.
+Two members of the readiness gate's single `False` end on opposite sides of it.
+A device whose cached capability says `can_ring is False` is `FAILED`, because
+no amount of waiting makes it ring; an active push cooldown is `SUPPRESSED`,
+because waiting is the entire fix. Those are the gate's only two `False` paths
+-- an unknown device is waved through optimistically -- so `SUPPRESSED` has
+exactly one source, and no answer of `api.py` can produce it.
+
+Two deliberate blunt edges. `REJECTED_RATE_LIMIT` does pass with time and is
+still filed under `FAILED`, matching `StopSoundOutcome.FAILED` rather than
+sorting the same condition two ways across sibling paths; the message names the
+rate limit. And `NOT_SENT` never reaches the wire and is `FAILED` all the same,
+for the reason its own docstring gives.
+
+**Why there is no third message for authentication.** `REJECTED_AUTH` looks like
+the obvious candidate for "your sign-in expired, sign in again", and it is not
+one -- not because the expired sign-in is absent from it, but because it is
+indistinguishable inside it.
+
+Three different situations arrive under that one member. A 401 that survived the
+refresh sequence is raised as `NovaAuthError(..., is_permanent=True)`
+(`nova_request.py`), and `is_credential_rejection()` answers True on the
+permanence flag before it ever looks at the status. A plain HTTP 403 answers
+True on the status. And an error with no readable status answers True as the
+conservative default. `PlaySoundResult` carries the outcome, not the permanence
+flag, so by the time the coordinator sees `REJECTED_AUTH` the three are one.
+
+Only the first of them means "sign in again". The second may not: 403 is an
+authorization verdict, and Google's own API guidance (AIP-193) requires
+`PERMISSION_DENIED` (HTTP 403) even for a resource that does not exist, with the
+permission check running *before* the existence check. A message that read
+`REJECTED_AUTH` as an expired sign-in would therefore tell the owner of a deleted
+or unshared device to check their credentials -- precisely the misreading
+`is_credential_rejection` removed once already, and its docstring says so.
+
+The fix is not a third message on an ambiguous member; it is to stop the
+ambiguity at its source by surfacing `is_permanent` in the result, which is a
+change to the `api.py` contract and is tracked separately. Until then,
+`play_sound_rejected` names the expired sign-in among the possible causes and
+points at the log, exactly as `stop_sound_rejected` does -- and the log entry
+does distinguish the three, because `nova_request.py` logs the permanent 401 in
+its own words.
+
+**IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN (the window must not silence its
+own remedy).** A play that reaches the wire and then loses the answer does two
+things in one breath: it stores a cancel key, and it correctly arms the
+90-second push cooldown. `_api_push_ready()` short-circuits on that cooldown, so
+the stop the key exists for used to be suppressed for the first 90 seconds after
+that play, which is exactly when a user reaches for the Stop button. (How long
+the ring itself lasts is a different timer on a different layer, and nothing
+here claims to know it -- see the note on the aged cached key in
+`async_stop_sound`.) `async_stop_sound` therefore passes the readiness
+gate in exactly one case: a window is running **and** the stop would be
+correlated, that is, it carries our own cached key and that key is still fresh.
+
+The polarity is deliberately the opposite of `can_play_sound()` and the manual
+locate guard, which treat a running window as the hard block and an unconfirmed
+transport as passable. Two limits keep the exception honest:
+
+- **What it can distinguish.** While a window runs, `_api_push_ready()` never
+  asks the transport, so the transport state is unknown. The guard separates
+  "not ready because a window is running" from "not ready for another reason"
+  and nothing more; a transport failure is the only thing that arms the window,
+  so the two overlap by construction.
+- **It cannot feed itself.** A broken-through stop that fails on the transport
+  must not restart the window. `_note_push_transport_problem()` sets
+  `_push_cooldown_until` absolutely, and the stop button has no availability
+  guard, so an unguarded call would let repeated presses keep Play Sound and
+  manual locate disabled indefinitely. `async_stop_sound` routes both of its
+  cooldown calls through
+  `_note_stop_transport_problem_without_extending()`, which arms a window only
+  when none is running.
+
+`_stop_would_be_correlated()` is the single definition of "correlated" behind
+both this gate and the decision to spend the cached key
+(IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY); a second inline derivation at either
+site is the drift the extraction exists to prevent, and
+`tests/test_coordinator_locate_basics.py` pins both sites to it.
+
+The exception is not free, and the price is a changed outcome class rather than
+a changed guarantee: a stop that used to end as `SUPPRESSED` now reaches the
+transport and can end as `FAILED`, which `services.py` reports with a different
+translation key (`stop_sound_rejected` instead of `stop_sound_suppressed`). It
+also removes, for the duration of a window, the only rate brake that sat in
+front of the stop dispatch -- outside a window there never was one, and a
+`REJECTED_RATE_LIMIT` answer deliberately arms no cooldown.
+
+#### Follow-up (not in this change)
+
+The play path arms the same cooldown without this guard
+(`coordinator/locate.py`, `async_play_sound`), and `can_play_sound()` returns
+early on a cached `can_ring` capability before it ever looks at the window, so a
+play can reach the arming call while a window runs. That behaviour predates the
+stop-path exception and is unchanged by it; guarding it is a separate decision
+with its own tests.
+
+Closing the boundary on the cloud path means wiring **Path B**: registering an
+FCM callback for sound events and matching the incoming
+`ExecuteActionRequestMetadata.requestUuid` against the key held by the
+coordinator. That is tracked separately and carries its own risks: the sound
+push may not carry a `DeviceUpdate` payload at all, an unmatched push
+currently falls through to the location decoder, and a callback that never
+fires would need a timeout policy of its own rather than an indefinite wait.
+
+Closing it on the local path means speaking GATT directly (`0x05` with ring
+operation `0x00`), which additionally yields a stop that is independent of who
+started the ring. That is a separate design with its own plan; see the BLE
+sections below for the protocol details.
+
 ### Upstream Parity
 
 **Our code and upstream are functionally identical for PlaySound:**
@@ -334,7 +528,7 @@ use case where the caller does NOT own the tracker.
 | CCCD Descriptor | `00002902-0000-1000-8000-00805F9B34FB` |
 | Byte Order | **Little endian** (opposite of FMDN Beacon Actions!) |
 | Authentication | **None** |
-| Availability | **Separated state only** (tracker away from owner 8-24 hours) |
+| Availability | **Separated state only**; the accessory enters that state after roughly 30 minutes without an owner device and enables the unauthenticated motion-gated sound a further 8-24 hours later (DULT `T_(SEPARATED_UT_TIMEOUT)`, a randomised value from a uniform distribution: `draft-detecting-unwanted-location-trackers-01` sections 3.4.4 and 3.12.2.1, table 16; see `docs/TRIGGER_MECHANISMS.md` sections 4.1 and 8) |
 
 ### DULT Opcodes (Little-Endian Wire Format)
 
@@ -402,8 +596,31 @@ Source: `seemoo-lab/AirGuard` — `GoogleFindMyNetwork.kt`
 account). In near-owner state, the tracker responds to DULT Sound_Start with
 `Invalid_command (0xFFFF)`.
 
-DULT only works when the tracker enters "separated state" — 8-24 hours away from any
-device logged into the owner's Google account. This is the opposite of our use case.
+DULT only works when the tracker is in "separated state". It enters that state after
+roughly 30 minutes away from any device logged into the owner's Google account, and the
+unauthenticated motion-gated sound becomes available only a further 8-24 hours later.
+This is the opposite of our use case.
+
+> **Provenance of both figures, corrected 2026-09-03:** they are normative DULT, not
+> field reports. The 30 minutes are the near-owner → separated transition, `SHALL` in
+> `draft-detecting-unwanted-location-trackers-01` section 3.4.4 with table 2 (section
+> 3.4.5 governs the way back, on reunion); the 8-24
+> hours are `T_(SEPARATED_UT_TIMEOUT)`, a "random value between 8-24 hours chosen from a
+> uniform distribution", after which the accessory "MUST enable the motion detector"
+> (section 3.12.2.1, table 16).
+>
+> **The FMDN mode is that same state, not a separate command-only concept.** The Find
+> Hub Network Accessory Specification says so in its section "Unwanted tracking
+> prevention": `"Unwanted tracking protection mode" defined in this document maps to the
+> "separated state" defined by the DULT spec`, and certified devices "must also meet the
+> requirements" of DULT (<https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>, retrieved 2026-09-03). Data ID `0x07` / `0x08`
+> on the Beacon Actions characteristic are an **additional**, seeker-driven path into and
+> out of the mode, not the only one. An earlier revision of this block claimed the
+> opposite; that claim is withdrawn.
+>
+> What survives unchanged is the operational point: the 8-24 hours gate the autonomous
+> chime, not the flag bit, so the `uwt_mode` binary sensor must not be used as a
+> separation timer ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)).
 
 **We must use FMDN Beacon Actions (authenticated ring)** because:
 1. We have the EIK → can derive the ring key
@@ -421,6 +638,40 @@ three independent ring trigger sources:
 | Non-owner BLE sound | `DULT_BT_GATT` | DULT ANOS (`15190001-12F4`) | None |
 | Motion auto-ring | `DULT_MOTION_DETECTOR` | Internal (separated state) | N/A |
 
+> **The `HMAC-SHA256` in row 1 is conditional on how UTP mode was activated.**
+> Activating unwanted tracking protection mode (Data ID `0x07`) takes an optional
+> control flag, `0x01` "Skip ringing authentication", specified as "When set, ringing
+> requests aren't authenticated while in unwanted tracking protection mode" (Find Hub
+> Network Accessory Specification, section "Beacon Actions",
+> <https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>,
+> retrieved 2026-08-05). A beacon activated with that flag set still expects
+> authentication data on a ring request but no longer verifies it, so while the mode
+> is active the owner ring path is reachable by any party in Bluetooth range without
+> the ring key.
+>
+> Three consequences, in decreasing order of confidence:
+>
+> 1. An implementation of the owner ring must not infer from a successful ring that
+>    the ring was authenticated, and must not treat the ring key as a capability that
+>    only the owner holds while the mode is active.
+> 2. A chime with no cloud request behind it is specification-conformant and does not
+>    imply a defect in this integration
+>    ([BSkando#195](https://github.com/BSkando/GoogleFindMy-HA/issues/195),
+>    [BSkando#108](https://github.com/BSkando/GoogleFindMy-HA/issues/108)).
+> 3. This flag is **not** the likeliest explanation for those reports. Row 2 of the
+>    table above, the DULT non-owner sound, is unauthenticated by design and needs no
+>    flag at all; the reporter in
+>    [BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210) attributes
+>    the observed chirps to that path, having instrumented the event bus to rule this
+>    integration out as the source. The `0x07` flag is documented here because it is
+>    the only mechanism that also removes authentication from the **owner** path,
+>    which the DULT explanation does not.
+>
+> The advertisement reports the mode (`uwt_mode` binary sensor), never the flag, and
+> the mode itself is observed to flap on timescales of under a minute
+> ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)). It is
+> context for a report, not evidence of a cause.
+
 ---
 
 ## Comparison: All Three Ring Paths
@@ -429,7 +680,7 @@ three independent ring trigger sources:
 |--------|------------------|-----------------------|---------------------------|
 | **Latency** | 2-15 seconds (FCM) | < 1 second | < 1 second |
 | **Range** | Global | ~30m BLE | ~30m BLE |
-| **Auth** | Google OAuth + FCM | HMAC-SHA256 (ring key) | None |
+| **Auth** | Google OAuth + FCM | HMAC-SHA256 (ring key), but see the UTP control-flag note above: not verified while the tracker is in unwanted tracking protection mode that was activated with flag `0x01` | None |
 | **Availability** | Always | Always (owner has key) | Separated state only |
 | **Confirmation** | None (fire-and-forget) | Ring state notification | Command_Response indication |
 | **Reliability** | FCM delivery dependent | Direct, deterministic | Direct, deterministic |
@@ -564,10 +815,10 @@ The ring key is currently only used during device registration
 | **FMDN** | Find My Device Network — Google's crowdsource tracker protocol |
 | **EIK** | Ephemeral Identity Key — 32-byte root key for tracker crypto |
 | **EID** | Ephemeral Identifier — rotating BLE address derived from EIK |
-| **Beacon Actions** | FMDN GATT characteristic (`FE2C1238`) for owner-authenticated commands (ring, UTP) |
+| **Beacon Actions** | FMDN GATT characteristic (`FE2C1238`) for owner-authenticated commands (ring, UTP); ring authentication can be waived for the duration of UTP mode by control flag `0x01` at activation |
 | **DULT** | Detecting Unwanted Location Trackers — IETF specification for anti-stalking |
 | **ANOS** | Accessory Non-Owner Service — DULT GATT service (`15190001-12F4`) for unauthenticated commands |
-| **Separated State** | Tracker state when away from owner device for 8-24 hours; enables DULT/UTP features |
+| **Separated State** | DULT accessory state, entered after roughly 30 minutes without an owner device and left on reunion (DULT sections 3.4.4 / 3.4.5); the unauthenticated DULT sound is enabled only after a further 8-24 hours (`T_(SEPARATED_UT_TIMEOUT)`, section 3.12.2.1 and table 16). Both figures are normative DULT. The Find Hub specification **maps** its unwanted tracking protection mode onto this state, so the `uwt_mode` binary sensor reports it; Data ID `0x07` / `0x08` are an additional GATT path in and out, not the only one. The 8-24 hours gate the motion-triggered chime, not the flag bit |
 | **GATT** | Generic Attribute Profile — BLE protocol for read/write operations |
 | **CCCD** | Client Characteristic Configuration Descriptor — enables BLE notifications/indications |
 | **ADM** | Android Device Management — Google auth token type |

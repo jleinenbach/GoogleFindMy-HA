@@ -60,7 +60,7 @@ IDs: section IDs like `S0`, `S3.2` are stable for internal linking.
 **Measured (peer-reviewed):**
 
 * EID / E2EE key agreement uses **NIST P-160R1** (i.e., *secp160r1*) by default in all tested trackers. (Böttger et al., 2025). ([Pet Symposium][1])
-* **P-256 EIDs** exist but were observed as rare and device-specific (e.g., Sony WH-1000XM5 in the study). (Böttger et al., 2025). ([Pet Symposium][1])
+* **P-256 EIDs** exist but were observed as rare and device-specific (e.g., Sony WH-1000XM5 in the study). (Böttger et al., 2025). ([Pet Symposium][1]) This integration decrypts crowdsourced reports from P-256 trackers with provisional readings; see "Foreign-report readings" in [`docs/CRYPTOGRAPHY.md`](CRYPTOGRAPHY.md#foreign-report-readings).
 * Finder → Owner E2EE location encryption in the measured design uses **HKDF-SHA-256** and **AES-EAX-256** (as described by the paper’s reconstruction). (Böttger et al., 2025). ([Pet Symposium][1])
 
 **Observed in your integration context:**
@@ -209,7 +209,11 @@ This is consistent with the general principle that the EIK remains within the ow
 
 **Measured (protocol behavior):** UT mode affects MAC rotation as described in S3.5. (Böttger et al., 2025). ([Pet Symposium][1])
 
-**Hypothesis:** The detailed UT byte semantics (`0x40` vs. `0x41`) and hashed-flags bit meanings are accessory-generation specific and should be treated as “not publicly fixed” unless backed by the official partner spec revision you target.
+**Resolved (specification, retrieved 2026-08-05):** the frame type is set to `0x41` while unwanted tracking protection mode is active and back to `0x40` when it is deactivated; hashed-flags spec bit 7 carries the same state redundantly. The specification also fixes the remaining bits of that byte (bits 0-4 reserved and zero, bits 5-6 battery level) and permits omitting the byte entirely only when the beacon does not support battery level indication *and* is not currently in unwanted tracking protection mode (a capability and a state, not two capabilities). ([Find Hub Network Accessory Specification][fhna-spec])
+
+**Still open:** field observations in this repository associate `0x41` with 32-byte P-256 EIDs regardless of tracking state (see [`docs/BLE_BATTERY_SENSOR.md`](BLE_BATTERY_SENSOR.md)). The specification does not couple frame type and EID length, so the two readings cannot both be complete. `FMDN_FLAGS_CONFLICT` log entries are the evidence channel that decides it; `FMDN_FLAGS_PROBE ... CANNOT_DECODE` covers the complementary case of a `0x41` frame arriving without a decodable flags byte, which the specification permits only while a beacon is not in unwanted tracking protection mode -- so a `0x41` frame arriving without one is either a beacon breaking that rule or a payload shape sliced wrongly.
+
+[fhna-spec]: https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn
 
 ---
 

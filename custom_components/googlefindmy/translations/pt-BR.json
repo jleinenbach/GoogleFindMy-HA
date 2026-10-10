@@ -8,13 +8,37 @@
     "step": {
       "user": {
         "title": "Autenticação do Google Encontrar Meu Dispositivo",
-        "description": "Escolha seu método de autenticação. ",
+        "description": "Escolha como você quer fazer login. GoogleFindMyTools secrets.json é a escolha certa se você já tem esse arquivo ou pode executar o GoogleFindMyTools com o Chrome em um computador.",
         "data": {
           "auth_method": "Método de autenticação"
         }
       },
+      "found_local_bundle": {
+        "title": "Credenciais existentes encontradas",
+        "description": "Já existe um arquivo de credenciais para {email} neste sistema:\n\n`{bundle_path}` (escrito pela última vez há {bundle_age})\n\nImporte-o agora para concluir a configuração sem fazer login no Google de novo.",
+        "data": {
+          "use_found_bundle": "Importar as credenciais encontradas"
+        },
+        "data_description": {
+          "use_found_bundle": "Mantenha esta opção ativada para importar o arquivo mostrado acima. Desative-a para escolher você mesmo um método de autenticação."
+        }
+      },
+      "discovery_confirm": {
+        "title": "Credenciais do Google Find My Device encontradas",
+        "description": "Foram encontradas credenciais para {email}.\n\nContinue para usá-las no Home Assistant. Se a conta já estiver configurada, você será perguntado antes que algo seja substituído."
+      },
+      "discovery_overwrite": {
+        "title": "Substituir as credenciais salvas?",
+        "description": "{email} já está configurado no Home Assistant e um novo arquivo de credenciais acabou de ser encontrado.\n\nA substituição grava as novas credenciais na entrada existente e a recarrega. Se você recusar, a entrada fica exatamente como está.",
+        "data": {
+          "overwrite_credentials": "Substituir as credenciais salvas"
+        },
+        "data_description": {
+          "overwrite_credentials": "Mantenha esta opção ativada se você acabou de fazer login novamente. Desative-a para manter as credenciais que o Home Assistant está usando agora."
+        }
+      },
       "secrets_json": {
-        "title": "Método 1: secrets.json do GoogleFindMyTools",
+        "title": "GoogleFindMyTools secrets.json",
         "description": "Execute o GoogleFindMyTools (Chrome) para gerar os tokens de autenticação, depois cole abaixo o conteúdo completo do arquivo Auth/secrets.json.",
         "data": {
           "secrets_json": "Conteúdo do arquivo secrets.json"
@@ -45,10 +69,11 @@
       },
       "reauth_confirm": {
         "title": "Reautenticar",
-        "description": "Suas credenciais para **{email}** parecem ser inválidas ou expiradas. ",
+        "description": "Suas credenciais para **{email}** parecem inválidas ou expiradas. Forneça novas credenciais abaixo.\n\nCole o conteúdo completo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools).\n\nObservação: o e-mail da conta é fixo para esta reautenticação; para usar uma conta diferente, remova e adicione a integração novamente.",
         "data": {
           "secrets_json": "Novo secrets.json (conteúdo completo)"
-        }
+        },
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migração concluída",
@@ -72,6 +97,8 @@
     },
     "abort": {
       "already_configured": "O Google Encontrar Meu Dispositivo já está configurado.",
+      "credentials_updated": "As credenciais salvas desta conta foram substituídas pelas que foram encontradas.",
+      "credentials_kept": "As credenciais salvas foram mantidas. Nada foi alterado.",
       "cannot_connect": "Falha ao conectar-se ao Encontre Meu Dispositivo do Google.",
       "dependency_not_ready": "As dependências do Encontre Meu Dispositivo do Google não estão instaladas. ",
       "invalid_discovery_info": "A carga de descoberta era inválida. ",
@@ -161,7 +188,7 @@
       },
       "semantic_locations_menu": {
         "title": "Localizações semânticas",
-        "description": "Gerenciar substituições de localização semântica. Mapeamentos existentes:\n{semantic_locations}",
+        "description": "Gerencie as substituições de localização semântica. Mapeamentos existentes:\n{semantic_locations}",
         "menu_options": {
           "semantic_locations_add": "Adicionar localização semântica",
           "semantic_location_edit": "Editar localização semântica",
@@ -170,7 +197,7 @@
       },
       "semantic_locations": {
         "title": "Localizações semânticas",
-        "description": "Gerenciar substituições de localização semântica. Mapeamentos existentes:\n{semantic_locations}",
+        "description": "Gerencie as substituições de localização semântica. Mapeamentos existentes:\n{semantic_locations}",
         "menu_options": {
           "semantic_locations_add": "Adicionar localização semântica",
           "semantic_locations_edit": "Editar localização semântica",
@@ -232,13 +259,13 @@
       },
       "credentials": {
         "title": "Atualizar credenciais (opcional)",
-        "description": "Atualize as credenciais sem expor os valores existentes. ",
+        "description": "Atualize suas credenciais. Os valores existentes não são exibidos por segurança.\n\nCole o conteúdo completo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools).\n\nApós o envio, as credenciais são validadas e armazenadas; a integração é recarregada sem alterar os nomes das suas entidades.",
         "data": {
           "new_secrets_json": "Novo secrets.json (conteúdo completo)",
           "subentry": "Grupo de recursos"
         },
         "data_description": {
-          "subentry": "Aplique atualizações de credenciais ao grupo de recursos selecionado. Consulte o guia [Subentradas e grupos de recursos]({subentries_docs_url}) para detalhes."
+          "subentry": "Aplique as atualizações de credenciais ao grupo de recursos selecionado. Consulte o guia [Subentradas e grupos de recursos]({subentries_docs_url}) para detalhes do fluxo de trabalho."
         }
       },
       "settings": {
@@ -249,30 +276,34 @@
           "device_poll_delay": "Intervalo entre pesquisas do dispositivo",
           "stale_threshold": "Limite de obsolescência (s)",
           "show_location_age": "Mostrar atributo de idade da localização",
-          "speed_gate_enabled": "Reject impossible location jumps",
-          "roundtrip_confirm_enabled": "Recover legitimate return trips",
+          "speed_gate_enabled": "Rejeitar saltos de localização impossíveis",
+          "roundtrip_confirm_enabled": "Recuperar viagens de retorno legítimas",
+          "accuracy_gate_enabled": "Descartar uma posição imprecisa que substituiria uma melhor",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
           "delete_caches_on_remove": "Exclua caches ao remover entrada",
           "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
           "contributor_mode": "Modo de contribuidor de localização",
-          "subentry": "Grupo de recursos"
+          "subentry": "Grupo de recursos",
+          "secrets_extra_watch_paths": "Caminhos adicionais de monitoramento do secrets.json (um por linha)"
         },
         "data_description": {
           "stale_threshold": "Após este número de segundos sem atualização de localização, o status do rastreador muda para desconhecido. Use a entidade 'Última localização' para ver sempre a última posição conhecida. Padrão: 1800 (30 minutos).",
           "show_location_age": "Quando ativado (padrão), um atributo 'location_age' (arredondado para 1 minuto) é adicionado a cada entidade rastreadora. Desative para eliminar todas as gravações de banco de dados para dispositivos estacionários. O atributo absoluto 'last_seen' e as entidades sensor.*_last_seen estão sempre disponíveis.",
-          "speed_gate_enabled": "When enabled (default), a location fix that would require physically impossible speed (for example a crowd-sourced report placing the tracker hundreds of km away within seconds) is rejected instead of teleporting the tracker. Own GPS reports always pass. Disable only if legitimate fast movements are being dropped.",
-          "roundtrip_confirm_enabled": "When enabled (default), a crowd fix that the speed gate would reject as a teleport is accepted instead if it lands back near the position from just before an earlier accepted long jump, within about 15 minutes. This recovers a legitimate return trip rather than leaving the tracker stranded at the far position. It only ever applies where the speed gate would otherwise reject. Disable if you see the tracker flapping between two places.",
+          "speed_gate_enabled": "Quando ativado (padrão), uma correção de localização que exigiria uma velocidade fisicamente impossível (por exemplo, um relatório colaborativo que coloca o rastreador a centenas de km de distância em segundos) é rejeitada em vez de teletransportar o rastreador. Relatórios do próprio GPS sempre passam. Desative apenas se movimentos rápidos legítimos estiverem sendo descartados.",
+          "roundtrip_confirm_enabled": "Quando ativado (padrão), uma correção colaborativa que o controle de velocidade rejeitaria como teletransporte é aceita, em vez disso, se ela retornar para perto da posição imediatamente anterior a um salto longo aceito anteriormente, dentro de cerca de 15 minutos. Isso recupera uma viagem de retorno legítima em vez de deixar o rastreador preso na posição distante. Aplica-se somente onde o controle de velocidade rejeitaria de outra forma. Desative se você vir o rastreador oscilando entre dois lugares.",
+          "accuracy_gate_enabled": "Quando ativado (padrão), uma posição recebida é descartada se estiver claramente fora do círculo de incerteza da posição em cache, se for pelo menos quatro vezes menos precisa que ela, tiver pelo menos 200 m de imprecisão e essa posição em cache for ao mesmo tempo confiável e recente. Nada é descartado sem uma alternativa melhor: uma posição imprecisa é sempre aceita em uma partida a frio, ou quando a posição em cache é não confiável ou está desatualizada. Isso impede que um relatório amplo da rede desloque o rastreador e que, como o Home Assistant usa o raio de precisão como tolerância de zona, ele seja indicado erroneamente como em casa. Desative apenas se suspeitar que é esta verificação que está causando um problema.",
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (todas as áreas por padrão para relatórios de crowdsourcing ou apenas áreas de alto tráfego).",
-          "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos."
+          "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos.",
+          "secrets_extra_watch_paths": "Opcional. Caminhos absolutos adicionais para arquivos secrets.json que a integração deve monitorar para captura automática, um por linha. Deixe em branco para monitorar apenas os locais padrão."
         }
       },
       "visibility": {
         "title": "Visibilidade do dispositivo",
-        "description": "Restaure dispositivos anteriormente ignorados para torná-los visíveis novamente. Selecione um ou mais dispositivos para restaurar e salve.",
+        "description": "Restaure dispositivos anteriormente ignorados para torná-los visíveis novamente. Selecione um ou mais dispositivos para restaurar e salve. Ignorar um dispositivo o remove do Home Assistant junto com suas entidades. Por isso, ao restaurá-lo a integração é recarregada para recriá-las; enquanto isso, todas as entidades desta conta ficam brevemente indisponíveis.",
         "data": {
           "unignore_devices": "Dispositivos para restaurar",
           "subentry": "Grupo de recursos"
@@ -323,6 +354,7 @@
     },
     "abort": {
       "reconfigure_successful": "Reconfiguração bem-sucedida.",
+      "credentials_saved_not_reloaded": "Credenciais salvas. Não foi possível recarregar a entrada; entram em vigor na próxima configuração bem-sucedida dela.",
       "no_ignored_devices": "Não há dispositivos ignorados para restaurar.",
       "no_semantic_locations": "Não há localizações semânticas configuradas.",
       "repairs_no_subentries": "Não há subentradas para reparar.",
@@ -356,7 +388,7 @@
     },
     "stop_sound": {
       "name": "Parar som",
-      "description": "Parar o som em um dispositivo Google Find My.",
+      "description": "Pare o som em um dispositivo Google Find My.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",
@@ -722,16 +754,16 @@
       "description": "A conexão em segundo plano com o Google está bloqueada.\n\n1. A saída pelo **porta TCP 5228** está liberada no firewall?\n2. Se a rede estiver ok, tente gerar novamente o seu `secrets.json` (as credenciais podem estar fragmentadas/revocadas)."
     },
     "fcm_reauth_required": {
-      "title": "Google Find My Device push needs re-authentication",
+      "title": "O push do Google Find My Device precisa de reautenticação",
       "fix_flow": {
         "step": {
           "confirm": {
-            "title": "Re-authenticate Google Find My Device",
-            "description": "The background push connection to Google failed for an extended period and could not recover on its own. This usually means the stored push credentials were revoked or rotated (for example after a Google password change, or when requests arrive from a new IP address or region). Less commonly, outgoing **TCP port 5228** is blocked by a firewall.\n\nSelect **Submit** to re-authenticate this account. Your device identity is preserved. If the problem persists afterwards, make sure port 5228 is allowed and regenerate your `secrets.json`."
+            "title": "Reautenticar o Google Find My Device",
+            "description": "A conexão push em segundo plano com o Google falhou por um período prolongado e não conseguiu se recuperar sozinha. Isso geralmente significa que as credenciais push armazenadas foram revogadas ou rotacionadas (por exemplo, após uma alteração de senha do Google ou quando as solicitações chegam de um novo endereço IP ou região). Menos comumente, a **TCP port 5228** de saída está bloqueada por um firewall.\n\nSelecione **Enviar** para reautenticar esta conta. A identidade do seu dispositivo é preservada. Se o problema persistir depois, verifique se a porta 5228 está liberada e gere novamente o seu `secrets.json`."
           }
         },
         "abort": {
-          "reauth_started": "Re-authentication has been started. Finish signing in to restore the background push connection. This repair stays open until the connection recovers, so the prompt is not lost if the sign-in is interrupted."
+          "reauth_started": "A reautenticação foi iniciada. Conclua o login para restaurar a conexão push em segundo plano. Este reparo permanece aberto até que a conexão se recupere, portanto o aviso não é perdido se o login for interrompido."
         }
       }
     },
@@ -748,8 +780,8 @@
       "description": "Esta conta do Google (**{email}**) já está configurada por outra entrada:\n\n{entries}\n\nDesative ou remova a entrada duplicada para que apenas uma entrada por conta permaneça ativa e, em seguida, recarregue a integração (ou reinicie o Home Assistant)."
     },
     "cache_purged": {
-      "title": "Authentication cache cleared",
-      "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
+      "title": "Cache de autenticação limpo",
+      "description": "O cache de autenticação armazenado para **{entry_title}** estava ilegível e foi limpo. Selecione **Reconfigurar** no cartão da integração para fazer login novamente e restaurar o acesso."
     },
     "fcm_short_run_crash_loop": {
       "title": "Detectado ciclo de falhas no FCM Push",
@@ -773,8 +805,26 @@
     "play_sound_failed": {
       "message": "Falha ao reproduzir som em {device_id}: {error}"
     },
+    "play_sound_rejected": {
+      "message": "Não foi possível iniciar o Play Sound para {device_id}. A entrada de log desta tentativa indica o motivo; normalmente é um login expirado, um token ausente, um erro de servidor ou de rede, ou um limite de requisições."
+    },
+    "play_sound_suppressed": {
+      "message": "O Play Sound para {device_id} não foi enviado. O Home Assistant não consegue alcançar o dispositivo no momento; tente novamente em instantes."
+    },
     "stop_sound_failed": {
       "message": "Falha ao interromper o som em {device_id}: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "O Stop Sound para {device_id} não foi enviado: o UUID da solicitação deve ser texto, mas foi fornecido {request_uuid}."
+    },
+    "stop_sound_rejected": {
+      "message": "Não foi possível concluir o Stop Sound para {device_id}. A entrada de log desta tentativa indica o motivo; normalmente é um login expirado, um token ausente, um erro de servidor ou de rede, ou um limite de requisições."
+    },
+    "stop_sound_suppressed": {
+      "message": "O Stop Sound para {device_id} não foi enviado. O Home Assistant não consegue alcançar o dispositivo no momento; tente novamente em instantes."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "O Stop Sound para {device_id} foi enviado, mas não foi possível associá-lo ao toque em andamento: ele foi iniciado em outro lugar, ou a chave que esta instância possui é antiga demais para servir de garantia. O Google pode não conseguir associar a parada ao toque, então o dispositivo pode continuar tocando. Pressione o botão no rastreador ou aguarde o toque terminar."
     },
     "missing_token_cache": {
       "message": "Cache de token ausente. "
@@ -797,6 +847,11 @@
       "options": {
         "high_traffic": "Apenas áreas de alto tráfego",
         "in_all_areas": "Todas as áreas (crowdsourcing)"
+      }
+    },
+    "auth_method": {
+      "options": {
+        "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }
   }

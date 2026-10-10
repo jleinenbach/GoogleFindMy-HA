@@ -9,6 +9,13 @@ import logging
 import pytest
 from cryptography.exceptions import InvalidTag
 
+from custom_components.googlefindmy.FMDNCrypto.foreign_report_errors import (
+    ForeignReportAuthError,
+)
+from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import (
+    SECP160R1_FOREIGN_READINGS,
+    ForeignDecryptResult,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     decrypt_locations,
 )
@@ -107,12 +114,14 @@ async def test_async_decrypt_location_response_locations_aligns_missing_network_
         return serialize_location(invalid_location)
 
     async def fake_offload_foreign(
-        _identity_key: bytes,
+        identity_keys: list[bytes],
         encrypted_location: bytes,
         *_args: object,
         **_kwargs: object,
-    ) -> bytes:
-        return await fake_offload_aes(_identity_key, encrypted_location)
+    ) -> ForeignDecryptResult:
+        return _foreign_result(
+            await fake_offload_aes(identity_keys[0], encrypted_location)
+        )
 
     monkeypatch.setattr(
         decrypt_locations, "async_retrieve_identity_key", fake_identity_key
@@ -418,6 +427,12 @@ def _valid_location_bytes() -> bytes:
     return loc.SerializeToString()
 
 
+def _foreign_result(plaintext: bytes) -> ForeignDecryptResult:
+    """Wrap a plaintext the way ``decrypt_foreign_report`` returns it."""
+
+    return ForeignDecryptResult(plaintext, 0, SECP160R1_FOREIGN_READINGS[0])
+
+
 def _add_report(
     update: DeviceUpdate_pb2.DeviceUpdate,
     *,
@@ -511,8 +526,10 @@ async def test_stale_own_reports_with_foreign_success_preserve_network_location(
     async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
         raise InvalidTag
 
-    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
-        return _valid_location_bytes()
+    async def fake_offload_foreign(
+        *_args: object, **_kwargs: object
+    ) -> ForeignDecryptResult:
+        return _foreign_result(_valid_location_bytes())
 
     monkeypatch.setattr(
         decrypt_locations, "async_retrieve_identity_key", fake_identity_key
@@ -584,8 +601,10 @@ async def test_stale_own_reports_with_undecodable_foreign_still_escalate(
         loc.altitude = ALTITUDE_METERS
         return loc.SerializeToString()
 
-    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
-        return _out_of_bounds_location_bytes()
+    async def fake_offload_foreign(
+        *_args: object, **_kwargs: object
+    ) -> ForeignDecryptResult:
+        return _foreign_result(_out_of_bounds_location_bytes())
 
     monkeypatch.setattr(
         decrypt_locations, "async_retrieve_identity_key", fake_identity_key
@@ -647,8 +666,10 @@ async def test_stale_own_reports_with_crowdsourced_own_flag_preserve_network_loc
     async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
         raise InvalidTag
 
-    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
-        return _valid_location_bytes()
+    async def fake_offload_foreign(
+        *_args: object, **_kwargs: object
+    ) -> ForeignDecryptResult:
+        return _foreign_result(_valid_location_bytes())
 
     monkeypatch.setattr(
         decrypt_locations, "async_retrieve_identity_key", fake_identity_key
@@ -762,8 +783,10 @@ async def test_foreign_failures_with_own_success_do_not_escalate(
     async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
         return _valid_location_bytes()
 
-    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
-        raise ValueError("MAC check failed")
+    async def fake_offload_foreign(
+        *_args: object, **_kwargs: object
+    ) -> ForeignDecryptResult:
+        raise ForeignReportAuthError("secp160r1", ("secp160r1/mod_n/nonce8",), 1)
 
     monkeypatch.setattr(
         decrypt_locations, "async_retrieve_identity_key", fake_identity_key
@@ -814,8 +837,10 @@ async def test_foreign_only_failure_does_not_escalate(
     async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
         return [b"\x42" * 32]
 
-    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
-        raise ValueError("MAC check failed")
+    async def fake_offload_foreign(
+        *_args: object, **_kwargs: object
+    ) -> ForeignDecryptResult:
+        raise ForeignReportAuthError("secp160r1", ("secp160r1/mod_n/nonce8",), 1)
 
     monkeypatch.setattr(
         decrypt_locations, "async_retrieve_identity_key", fake_identity_key
@@ -894,15 +919,18 @@ async def test_partial_own_success_self_heals_without_escalation(
     assert any(entry.get("metadata_only") is not True for entry in result)
 
 
-async def test_own_report_mac_valueerror_counts_as_own_failure(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_own_report_mac_text_valueerror_is_not_an_auth_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """T-D5: an own-report MAC ValueError counts as an own failure and escalates.
+    """T-D5 (replaced): a ValueError is never classified by its text.
 
-    Own reports use AES-GCM (which raises InvalidTag), but the MAC-ValueError
-    handler is mirrored defensively for any future own-report path that surfaces
-    a PyCryptodome-style ``ValueError("MAC check failed")``. This guards that the
-    defensive symmetry still feeds the own-only escalation counter.
+    Own reports use AES-GCM, which signals a tag mismatch with ``InvalidTag``;
+    that path keeps escalating (see
+    ``test_all_own_reports_failing_auth_raises_decryption_error``). A plain
+    ``ValueError`` whose message merely says "MAC check failed" is malformed
+    data: it is logged once as such, counts toward no authentication counter
+    and raises nothing. Foreign authentication failures are typed
+    (``ForeignReportAuthError``) since the multi-reading decryption.
     """
 
     base_now = 1_700_002_000.0
@@ -928,11 +956,17 @@ async def test_own_report_mac_valueerror_counts_as_own_failure(
         is_own_report=True,
         base_now=base_now,
     )
+    caplog.set_level(logging.DEBUG)
 
-    with pytest.raises(decrypt_locations.DecryptionError):
-        await decrypt_locations.async_decrypt_location_response_locations(
-            update, cache=object()
-        )
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    assert not decrypt_locations.any_real_location_record(result)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == [
+        "Failed to process one location report (malformed data): MAC check failed"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1010,3 +1044,191 @@ async def test_any_real_location_record(records: object, expected: bool) -> None
     report-less rows must return False so they cannot clear the reauth budget.
     """
     assert decrypt_locations.any_real_location_record(records) is expected
+
+
+async def test_diag_secrets_records_omit_key_material(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The `[DIAG-SECRETS]` DEBUG records describe structure, never bytes.
+
+    `AGENTS.md` section 5: key material is never logged. The structure record
+    used to carry the full hex of the encrypted identity key and the whole
+    registration message in text format (which prints the key as an escaped
+    string); the byte-scan record carried ten bytes on each side of the key.
+    Lengths, offsets and field names stay.
+    """
+    import hashlib
+
+    base_now = 1_700_100_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x41" * 32]
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    key = hashlib.sha256(b"encrypted-identity-key").digest()
+    key_hex = key.hex()
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.pairDate = int(base_now - 120)
+    registration.encryptedUserSecrets.creationDate.seconds = int(base_now - 60)
+    registration.encryptedUserSecrets.encryptedIdentityKey = key
+    caplog.set_level(logging.DEBUG)
+
+    await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    text = caplog.text
+    assert key_hex not in text
+    assert all(key_hex[i : i + 8] not in text for i in range(0, len(key_hex) - 7)), (
+        "a window of the encrypted identity key reached the log"
+    )
+    # Text-format dump of the registration message (prints the key escaped).
+    assert "encryptedIdentityKey:" not in text
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "[DIAG-SECRETS] Structure Analysis" in m and f"{len(key)} bytes" in m
+        for m in messages
+    )
+    assert any(
+        "[DIAG-SECRETS-BYTE-SCAN] Cloud key located" in m and "Prefix (" in m
+        for m in messages
+    ), "byte-scan record missing: the fixture no longer reaches that branch"
+
+
+async def test_foreign_candidate_promotion_characterized(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Pin the FIX #155 promotion of an alternate identity key candidate.
+
+    Two candidates; only the second decrypts the device's crowdsourced
+    reports. The first report promotes it: the INFO line names index 1, the
+    promoted key is reported as ``identity_key``, and the second report of the
+    same poll tries it first. ``identity_key_candidates`` in the result keeps
+    the original order: the reordered list is overwritten by the earlier
+    ``metadata`` snapshot (``payload.update(metadata)``). That is pinned here
+    as found, not endorsed; changing it is out of scope for this refactor.
+    Real SECP160R1 crypto; the key order is observed at the Table 10 PRF,
+    which every decryption path calls once per tried key, so the test does
+    not depend on the signature of ``_offload_decrypt_foreign``.
+    """
+    from custom_components.googlefindmy.FMDNCrypto import (
+        foreign_tracker_cryptor as cryptor,
+    )
+    from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
+        EidVariant,
+        generate_eid_variant,
+    )
+
+    base_now = 1_700_200_000.0
+    counter = 5 * 1024
+    stale_key = b"\x51" * 32
+    good_key = b"\x52" * 32
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [stale_key, good_key]
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    prf_keys: list[bytes] = []
+    real_prf = cryptor.prf_aes_256_ecb
+
+    def spy_prf(key: bytes, data: bytes) -> bytes:
+        prf_keys.append(bytes(key))
+        return real_prf(key, data)
+
+    monkeypatch.setattr(cryptor, "prf_aes_256_ecb", spy_prf)
+
+    eid = generate_eid_variant(good_key, counter, EidVariant.LEGACY_SECP160R1_X20_BE)
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    reports = update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
+    for seed in (1, 2):
+        encrypted, sx = cryptor.encrypt(
+            _valid_location_bytes(), bytes([seed]) * 32, eid
+        )
+        _add_report(
+            update,
+            public_key_random=sx,
+            encrypted_location=encrypted,
+            is_own_report=False,
+            base_now=base_now,
+        )
+        reports.networkLocations[-1].geoLocation.deviceTimeOffset = counter
+
+    caplog.set_level(logging.INFO)
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    records = [r for r in result if decrypt_locations.is_real_location_record(r)]
+    assert len(records) == 2
+    promotions = [
+        m
+        for m in (record.getMessage() for record in caplog.records)
+        if "alternate identity key candidate (index=1)" in m
+    ]
+    assert len(promotions) == 1
+    for record in records:
+        assert record["identity_key"] == good_key
+        assert record["identity_key_candidates"] == [stale_key, good_key]
+    # Report 1: stale key, then the good key; report 2: the promoted key first.
+    assert prf_keys == [stale_key, good_key, good_key]
+
+
+async def test_foreign_report_without_key_candidate_keeps_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No 32-byte candidate and an empty active key: no decryption attempt.
+
+    ``decrypt_foreign_report`` rejects an empty key list with a plain
+    ``ValueError`` that would land in the generic malformed-data handler. The
+    caller must not call it; the report is dropped with the same single
+    WARNING as before the multi-reading refactor.
+    """
+    base_now = 1_700_300_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b""]
+
+    calls: list[object] = []
+
+    async def fake_offload_foreign(*args: object, **_kwargs: object) -> bytes:
+        calls.append(args)
+        raise AssertionError("must not be called without a key candidate")
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"\x60" * 32,
+        encrypted_location=b"foreign",
+        is_own_report=False,
+        base_now=base_now,
+    )
+    caplog.set_level(logging.DEBUG)
+
+    await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    assert calls == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == [
+        "Decrypted location payload is not bytes (type=NoneType); dropping one report"
+    ]

@@ -44,6 +44,9 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
     OwnerKeyLookupTransientError,
     StaleOwnerKeyError,
 )
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
+)
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     NovaHTTPError,
@@ -156,18 +159,26 @@ async def test_nova_request_ladder_redacts_name(
     nova_exc: Exception,
 ) -> None:
     """RED pre-fix: rate-limit / HTTP / network / generic Nova failures logged the
-    raw device name at WARNING/ERROR. The name must move to DEBUG only."""
+    raw device name at WARNING/ERROR. The name must move to DEBUG only.
+
+    The four rungs no longer return empty -- each raises
+    ``LocationRequestNotAcceptedError`` (PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE), so
+    the call is wrapped. WHICH marker each rung carries is pinned in
+    ``tests/test_location_request_not_accepted.py``; this test is about the records,
+    and asserting the marker here too would tie the R6 sweep to a second contract it
+    does not own.
+    """
     _wire_nova_raises(monkeypatch, nova_exc=nova_exc)
     caplog.set_level(logging.DEBUG, logger=location_request.__name__)
 
-    result = await location_request.get_location_data_for_device(
-        canonic_device_id=_CANONIC,
-        name=_SENTINEL_NAME,
-        session=None,
-        username="user@example.com",
-        cache=_FakeTokenCache(),
-    )
-    assert result == []
+    with pytest.raises(LocationRequestNotAcceptedError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id=_CANONIC,
+            name=_SENTINEL_NAME,
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
     _assert_name_only_at_debug(caplog)
 
 
@@ -189,13 +200,46 @@ async def test_nova_auth_error_redacts_name_and_reraises(
             cache=_FakeTokenCache(),
         )
     _assert_name_only_at_debug(caplog)
+    # Pin the wording, not just the redaction: without this the branch could
+    # say anything at all about a 401 and stay green, which is exactly how the
+    # non-credential counterpart below would lose its only counter-test.
+    assert "Authentication error while requesting location" in caplog.text
+
+
+async def test_a_client_error_is_not_logged_as_an_authentication_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """NovaAuthError covers every non-retryable 4xx, so this WARNING must not
+    pre-empt api.py's verdict by calling a 404 an authentication problem. The
+    re-raise is unchanged: this layer still does not classify, it just stops
+    claiming to."""
+    _wire_nova_raises(monkeypatch, nova_exc=NovaAuthError(404, "gone"))
+    caplog.set_level(logging.DEBUG, logger=location_request.__name__)
+
+    with pytest.raises(NovaAuthError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id=_CANONIC,
+            name=_SENTINEL_NAME,
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
+    assert "Client error (HTTP 404) while requesting location" in caplog.text
+    assert "Authentication error" not in caplog.text
+    _assert_name_only_at_debug(caplog)
 
 
 async def test_fcm_registration_failure_redacts_name(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """RED pre-fix: a failing FCM registration logged the raw device name at ERROR."""
+    """RED pre-fix: a failing FCM registration logged the raw device name at ERROR.
+
+    The branch now raises ``LocationRequestNotAcceptedError`` instead of returning
+    empty; the ERROR record it is swept for is emitted before that raise and is
+    unchanged.
+    """
 
     class _RaisingReceiver:
         async def async_register_for_location_updates(
@@ -216,14 +260,14 @@ async def test_fcm_registration_failure_redacts_name(
     )
     caplog.set_level(logging.DEBUG, logger=location_request.__name__)
 
-    result = await location_request.get_location_data_for_device(
-        canonic_device_id=_CANONIC,
-        name=_SENTINEL_NAME,
-        session=None,
-        username="user@example.com",
-        cache=_FakeTokenCache(),
-    )
-    assert result == []
+    with pytest.raises(LocationRequestNotAcceptedError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id=_CANONIC,
+            name=_SENTINEL_NAME,
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
     _assert_name_only_at_debug(caplog)
 
 
@@ -236,6 +280,11 @@ async def test_unregister_failure_in_finally_redacts_name(
     ``create_location_request`` is forced to raise so the flow lands in the broad
     surfacing handler (already R6-clean since PR #1129) and then runs ``finally``,
     where the raising unregister exercises the swept WARNING.
+
+    That failure happens BEFORE the accept line, so the surfacing handler now
+    re-raises it as ``LocationRequestNotAcceptedError`` instead of returning empty.
+    The ``finally`` block runs either way -- which is the point of asserting the
+    unregister WARNING through a raising exit rather than a returning one.
     """
     receiver = _TokenReceiver(unregister_exc=RuntimeError("unregister backend down"))
     monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda *_a: receiver)
@@ -251,14 +300,14 @@ async def test_unregister_failure_in_finally_redacts_name(
     monkeypatch.setattr(location_request, "create_location_request", _boom)
     caplog.set_level(logging.DEBUG, logger=location_request.__name__)
 
-    result = await location_request.get_location_data_for_device(
-        canonic_device_id=_CANONIC,
-        name=_SENTINEL_NAME,
-        session=None,
-        username="user@example.com",
-        cache=_FakeTokenCache(),
-    )
-    assert result == []
+    with pytest.raises(LocationRequestNotAcceptedError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id=_CANONIC,
+            name=_SENTINEL_NAME,
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
     assert any(
         "Error during FCM unregister" in rec.getMessage()
         for rec in caplog.records

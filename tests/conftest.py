@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import sys
+import warnings
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -30,6 +31,160 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "asyncio: execute the coroutine test using an isolated event loop",
     )
+    _freeze_coordinator_identity_reference()
+
+
+#: Frozen at ``pytest_configure`` time, before the first test can patch
+#: anything.  ``None`` means the reference could not be taken; the guard then
+#: stays silent rather than reporting a leak it cannot substantiate.
+_COORDINATOR_IDENTITY_REFERENCE: type[Any] | None = None
+
+#: Module that *defines* ``GoogleFindMyCoordinator``.  Deliberately not the
+#: ``coordinator`` package: that one is the re-export other modules copy from
+#: and the one test harnesses patch, so it cannot serve as its own reference.
+_COORDINATOR_DEFINING_MODULE = "custom_components.googlefindmy.coordinator.main"
+
+#: Modules that bind ``GoogleFindMyCoordinator`` into their own namespace at
+#: import time (``from .coordinator import GoogleFindMyCoordinator`` at module
+#: level).  Each copies whatever ``coordinator`` holds at the moment of its
+#: first import, so an import that happens *inside* a patch window captures the
+#: stub permanently: ``monkeypatch`` only undoes the assignments it made itself
+#: and knows nothing about the copies.  Every harness that patches the symbol
+#: therefore imports this list before it patches anything.
+#:
+#: Lives here rather than in one test module because three harnesses need it;
+#: two of them used to carry hand-written, incomplete copies.  Derived by AST
+#: scan, pinned by ``tests/test_guard_coordinator_identity.py``.
+COORDINATOR_CONSUMER_MODULES: tuple[str, ...] = (
+    "custom_components.googlefindmy.binary_sensor",
+    "custom_components.googlefindmy.button",
+    "custom_components.googlefindmy.device_tracker",
+    "custom_components.googlefindmy.eid_resolver",
+    "custom_components.googlefindmy.entity",
+    "custom_components.googlefindmy.repairs",
+    "custom_components.googlefindmy.sensor",
+)
+
+
+def import_coordinator_consumers() -> None:
+    """Import every module of ``COORDINATOR_CONSUMER_MODULES``.
+
+    One literal ``import`` statement per module instead of a loop with
+    ``importlib.import_module``: the module set is fixed, so naming each module
+    keeps the import visible to readers, linters and SAST tools.
+    ``tests/test_guard_coordinator_identity.py`` pins that these statements name
+    exactly the modules of the tuple, so the two cannot drift apart.
+    """
+    import custom_components.googlefindmy.binary_sensor  # noqa: F401
+    import custom_components.googlefindmy.button  # noqa: F401
+    import custom_components.googlefindmy.device_tracker  # noqa: F401
+    import custom_components.googlefindmy.eid_resolver  # noqa: F401
+    import custom_components.googlefindmy.entity  # noqa: F401
+    import custom_components.googlefindmy.repairs  # noqa: F401
+    import custom_components.googlefindmy.sensor  # noqa: F401
+
+
+#: Package prefix the guard scans.  Compared as ``name == PREFIX`` or
+#: ``name.startswith(PREFIX + ".")`` so a hypothetical sibling package such as
+#: ``custom_components.googlefindmy_legacy`` is not swept in by accident.
+_INTEGRATION_PACKAGE = "custom_components.googlefindmy"
+
+#: Modules exempt from the identity check.  The integration package binds the
+#: symbol lazily through ``_ensure_runtime_imports()`` (see the teardown hook
+#: below), so a placeholder there is an expected, self-healing state rather
+#: than a leak.  This exemption alone carries that case: the healing helper does
+#: not influence it.
+_COORDINATOR_IDENTITY_EXEMPT = frozenset({_INTEGRATION_PACKAGE})
+
+
+def _freeze_coordinator_identity_reference() -> None:
+    """Remember the production coordinator class before any test runs.
+
+    Load-bearing side effect: importing ``coordinator.main`` also imports its
+    parent package ``custom_components.googlefindmy.coordinator``.  That keeps
+    the fallback branch in ``tests/test_button_setup.py`` (which would install a
+    permanent, unpatched ``ModuleType`` stub under that name) unreachable.
+    Making this reference lazy would re-open it, and the guard would then report
+    an unhealable leak.
+    """
+
+    global _COORDINATOR_IDENTITY_REFERENCE
+
+    try:
+        module = importlib.import_module(_COORDINATOR_DEFINING_MODULE)
+    except Exception as err:  # noqa: BLE001 - a missing reference disables the guard
+        # Never silent: without a reference the guard returns "no leaks" for the
+        # whole session, so the reason has to reach whoever wonders why
+        # ``test_guard_reports_a_replaced_symbol`` went red.
+        warnings.warn(
+            "coordinator identity guard disabled: could not import "
+            f"{_COORDINATOR_DEFINING_MODULE} ({err!r})",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    _COORDINATOR_IDENTITY_REFERENCE = getattr(module, "GoogleFindMyCoordinator", None)
+
+
+def detect_coordinator_identity_leaks() -> list[str]:
+    """Return the modules whose ``GoogleFindMyCoordinator`` is not the real one.
+
+    A module that does ``from .coordinator import GoogleFindMyCoordinator`` at
+    import time takes a *copy* of whatever the source module holds right then.
+    When that import happens inside a ``monkeypatch`` window, the copy is the
+    test stub, and ``monkeypatch`` cannot undo a binding it never made: the
+    stub then survives for the rest of the session and every later
+    ``isinstance`` check against the production class fails somewhere else
+    entirely.  Checking identity after each test names the culprit instead of
+    the victim.
+
+    Two blind spots, both accepted knowingly:
+
+    * The reference comes from ``coordinator.main``.  A test that patches the
+      class *there* would move the yardstick along with the measurement, which
+      is why the reference is frozen at configure time rather than read on
+      demand.
+    * ``importlib.reload(coordinator.main)`` would build a fresh class object.
+      Every consumer reloaded afterwards would then differ from the frozen
+      reference permanently, without a leak being present.  No test reloads
+      that module today.
+    """
+
+    reference = _COORDINATOR_IDENTITY_REFERENCE
+    if reference is None:
+        return []
+
+    leaked: list[str] = []
+    for name, module in list(sys.modules.items()):
+        if name != _INTEGRATION_PACKAGE and not name.startswith(
+            _INTEGRATION_PACKAGE + "."
+        ):
+            continue
+        if name in _COORDINATOR_IDENTITY_EXEMPT:
+            continue
+        current = getattr(module, "GoogleFindMyCoordinator", None)
+        if current is not None and current is not reference:
+            leaked.append(name)
+    return sorted(leaked)
+
+
+def _restore_coordinator_identity(modules: list[str]) -> None:
+    """Put the production class back into the modules a test poisoned.
+
+    Reporting alone is not enough.  The stub stays in the consumer's namespace,
+    so without this the *next* test, and every test after it, fails in teardown
+    for a leak it did not cause: one culprit turns into a red session and the
+    diagnosis gets worse, not better.  Healing keeps the failure attributable to
+    exactly one test.
+    """
+
+    reference = _COORDINATOR_IDENTITY_REFERENCE
+    if reference is None:
+        return
+    for name in modules:
+        module = sys.modules.get(name)
+        if module is not None:
+            module.GoogleFindMyCoordinator = reference
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -38,6 +193,41 @@ def enable_real_sockets() -> Iterable[None]:
 
     pytest_socket.enable_socket()
     pytest_socket.socket_allow_hosts(["127.0.0.1", "::1", "localhost"])
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _prime_leaflet_asset_cache() -> Iterable[None]:
+    """Fill ``map_view``'s Leaflet cache once per session.
+
+    In production the cache is filled by ``_async_prime_leaflet_cache`` in the
+    executor, and ``_leaflet_asset`` raises on a miss instead of reading through
+    (a read-through is the blocking call in the event loop that the indirection
+    removes). Tests that call ``_generate_map_html`` directly bypass the request
+    handler and would therefore hit that ``RuntimeError``; this fixture stands in
+    for the handler. Reading here is safe because this is a *synchronous*
+    fixture: no event loop is running while it executes. Keep it synchronous.
+
+    Tests that need a cold cache clear it locally (``monkeypatch.setattr`` on a
+    fresh dict), never by mutating this one.
+
+    Because this fixture warms the cache for the whole session, the end-to-end
+    map tests can no longer witness a return of the blocking read. The
+    compensating watchdog is ``tests/test_map_view_blocking_io.py``, which
+    clears the cache per test and asserts the reading thread. Do not delete that
+    file without replacing that measurement, or this fixture turns into a
+    cover-up.
+    """
+
+    from custom_components.googlefindmy import map_view
+
+    try:
+        map_view._LEAFLET_CACHE.update(map_view._read_leaflet_assets())
+    except (OSError, UnicodeDecodeError):
+        # An incomplete checkout must not error out every test in the session
+        # during setup. Let the map tests fail on their own, where the message
+        # points at the cause.
+        pass
     yield
 
 
@@ -89,12 +279,15 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     pytest_socket.socket_allow_hosts(["127.0.0.1", "::1", "localhost"])
 
 
+from tests.helpers import deprecation_recorder as _deprecation_recorder
 from tests.helpers import (
     install_homeassistant_core_callback_stub,
     install_homeassistant_network_stub,
 )
+from tests.helpers import single_owner_device_registry as _single_owner_registry
 from tests.helpers.config_entries_stub import install_config_entries_stubs
 from tests.helpers.constants import load_googlefindmy_const_module
+from tests.helpers.core_shutdown_state import seed_core_shutdown_state
 
 ConfigEntryAuthFailed: type[Exception] = Exception
 
@@ -142,9 +335,55 @@ def disable_http_server() -> Iterable[None]:
         yield
 
 
+_FOREIGN_READING_TRACKER_MODULE = (
+    "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker."
+    "foreign_reading_tracker"
+)
+
+
+def _reset_foreign_reading_tracker() -> None:
+    # Only when already imported: importing it here would pull the integration
+    # into tests that install their own stubs before the first import.
+    module = sys.modules.get(_FOREIGN_READING_TRACKER_MODULE)
+    if module is not None:
+        module.FOREIGN_READING_TRACKER.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_foreign_reading_tracker() -> Iterable[None]:
+    """Isolate the process-wide foreign-reading memory between tests.
+
+    The tracker keeps once-per-process log gates and remembered readings; a
+    test that runs after another could otherwise see no log line at all.
+    """
+    _reset_foreign_reading_tracker()
+    yield
+    _reset_foreign_reading_tracker()
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_teardown() -> None:
-    """Heal the lazy ``GoogleFindMyCoordinator`` symbol after each test.
+    """Heal the lazy symbol, then fail the culprit of a cross-test symbol leak.
+
+    Two independent jobs share this hook because both need the same moment:
+    after every fixture finalizer, ``monkeypatch`` included.
+
+    **Part one** heals the lazy ``GoogleFindMyCoordinator`` symbol in the
+    integration package (details below).
+
+    **Part two** is the cross-test guard:
+    :func:`detect_coordinator_identity_leaks` compares every integration
+    module's ``GoogleFindMyCoordinator`` against the class frozen at configure
+    time.  A mismatch means a stub outlived its ``monkeypatch`` window; the test
+    that caused it fails here rather than an unrelated test file failing minutes
+    later.  For that promise to hold, the symbol is *restored* before the
+    failure is raised: reporting alone would leave the stub in place and redden
+    every following test as well.
+
+    The two parts are independent, and the order between them does not matter:
+    part one only touches the integration package itself, and that package is
+    exempt from part two's check anyway (see
+    ``_COORDINATOR_IDENTITY_EXEMPT``).
 
     The integration package binds ``GoogleFindMyCoordinator`` lazily: it starts
     as a placeholder class and ``_ensure_runtime_imports()`` swaps in the real
@@ -167,6 +406,24 @@ def pytest_runtest_teardown() -> None:
     trap applies symmetrically to ``DiscoveryManager`` and the two map views.
     """
 
+    _heal_lazy_runtime_imports()
+
+    leaked = detect_coordinator_identity_leaks()
+    if leaked:
+        _restore_coordinator_identity(leaked)
+        pytest.fail(
+            "this test left a foreign GoogleFindMyCoordinator in "
+            f"{leaked}. A module that imports the symbol at module level copies "
+            "it; when that first import happens inside a monkeypatch window the "
+            "copy is the stub and monkeypatch cannot undo it. Import those "
+            "modules before patching, or patch them too.",
+            pytrace=False,
+        )
+
+
+def _heal_lazy_runtime_imports() -> None:
+    """Rebind the integration package's lazily loaded runtime classes."""
+
     integration = sys.modules.get("custom_components.googlefindmy")
     if integration is None:
         return
@@ -178,6 +435,7 @@ def pytest_runtest_teardown() -> None:
         "DiscoveryManager",
         "GoogleFindMyMapView",
         "GoogleFindMyMapRedirectView",
+        "GoogleFindMyMapTilesTokenView",
     )
     any_placeholder = any(
         "Placeholder" in getattr(getattr(integration, name, None), "__name__", "")
@@ -1499,7 +1757,17 @@ def _stub_homeassistant() -> None:
     _T = TypeVar("_T")
 
     class DataUpdateCoordinator(Generic[_T]):
-        """Minimal stub for DataUpdateCoordinator supporting subclassing."""
+        """Minimal stub for DataUpdateCoordinator supporting subclassing.
+
+        ``async_shutdown`` and the two removers it calls mirror the core
+        (``homeassistant/helpers/update_coordinator.py``, 2026.8.2, lines 210
+        to 239) line for line, because ``GoogleFindMyCoordinator.async_shutdown``
+        chains to them and the suite runs every shutdown path against this
+        stub. ``tests/test_core_shutdown_stub_parity.py`` holds the mirror to
+        the real class. The four attributes are the ones the core's
+        ``__init__`` gives them; ``_debounced_refresh`` is a two-method
+        stand-in for the ``Debouncer`` surface the core's shutdown uses.
+        """
 
         def __init__(
             self, hass=None, logger=None, name: str | None = None, update_interval=None
@@ -1508,6 +1776,31 @@ def _stub_homeassistant() -> None:
             self.logger = logger
             self.name = name or "coordinator"
             self.update_interval = update_interval
+            self._shutdown_requested = False
+            self._unsub_refresh: Callable[[], None] | None = None
+            self._unsub_shutdown: Callable[[], None] | None = None
+            self._debounced_refresh: Any = SimpleNamespace(
+                async_shutdown=lambda: None, async_cancel=lambda: None
+            )
+
+        async def async_shutdown(self) -> None:
+            """Cancel any scheduled call, and ignore new runs."""
+            self._shutdown_requested = True
+            self._async_unsub_refresh()
+            self._async_unsub_shutdown()
+            self._debounced_refresh.async_shutdown()
+
+        def _async_unsub_refresh(self) -> None:
+            """Cancel any scheduled call."""
+            if self._unsub_refresh:
+                self._unsub_refresh()
+                self._unsub_refresh = None
+
+        def _async_unsub_shutdown(self) -> None:
+            """Cancel any scheduled call."""
+            if self._unsub_shutdown:
+                self._unsub_shutdown()
+                self._unsub_shutdown = None
 
         async def async_request_refresh(
             self,
@@ -1918,6 +2211,7 @@ def fixture_coordinator_teardown_defaults() -> Callable[[Any], None]:
     def _apply(
         coordinator: Any, *, loop: asyncio.AbstractEventLoop | None = None
     ) -> None:
+        seed_core_shutdown_state(coordinator)
         if getattr(coordinator, "_dr_unsub", None) is None:
             coordinator._dr_unsub = lambda: None
         if getattr(coordinator, "_short_retry_cancel", None) is None:
@@ -2068,6 +2362,34 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 if self._snapshot_callback is not None:
                     return list(self._snapshot_callback(key, feature))
                 return list(self.data)
+
+            def get_device_label_in_subentry(
+                self, subentry_key: str | None, device_id: str
+            ) -> str | None:
+                """Mirror the coordinator's allocation-free label accessor.
+
+                Reads the same source as ``get_subentry_snapshot`` but does not
+                call it: tests asserting that the fast path never requests a
+                snapshot copy would otherwise count this stub's own call.
+                Rebuilt on every call, without a cache, because the coordinator
+                contract does not promise one.  The production accessor takes no
+                ``feature`` argument, so the callback is invoked with ``None``;
+                a test whose ``_snapshot_callback`` branches on ``feature`` will
+                see this method and ``get_subentry_snapshot`` answer from
+                different rows.
+                """
+
+                rows = (
+                    self._snapshot_callback(subentry_key, None)
+                    if self._snapshot_callback is not None
+                    else self.data
+                )
+                for row in rows:
+                    if row.get("id") != device_id:
+                        continue
+                    name = row.get("name")
+                    return name if isinstance(name, str) else None
+                return None
 
             async def async_wait_subentry_visibility_updates(self) -> None:
                 """Mirror the coordinator visibility wait helper."""
@@ -2230,6 +2552,13 @@ def use_real_homeassistant_modules() -> Iterable[None]:
 
         _aiohttp_client._async_make_resolver = _async_make_resolver  # type: ignore[attr-defined]
 
+    # The real modules were just re-imported, which discards every binding the
+    # deprecation recorder made against the stubbed ones.  Re-install it here so
+    # tests running under this fixture still observe ``report_usage`` calls;
+    # without this the recorder can only stay silent, and silence looks exactly
+    # like "no deprecation".  See tests/helpers/deprecation_recorder.py.
+    _deprecation_recorder.rebind_active()
+
     try:
         yield
     finally:
@@ -2237,3 +2566,37 @@ def use_real_homeassistant_modules() -> Iterable[None]:
             if name.startswith("homeassistant"):
                 del sys.modules[name]
         sys.modules.update(saved_modules)
+
+
+@pytest.fixture(autouse=True)
+def device_registry_deprecations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterable[_deprecation_recorder.DeprecationRecorder]:
+    """Record every ``report_usage`` call raised while a test runs.
+
+    Autouse so that no test can opt out of being observed; the recorded list is
+    only inspected where a test asks for this fixture by name.  The recorder
+    delegates to the original callable, so behaviour is unchanged: a deprecated
+    Core call made from outside ``custom_components/`` still raises, which two
+    tests in this repository depend on.
+    """
+    recorder = _deprecation_recorder.DeprecationRecorder()
+    _deprecation_recorder.install_recorder(monkeypatch, recorder)
+    try:
+        yield recorder
+    finally:
+        _deprecation_recorder.reset_active()
+
+
+@pytest.fixture
+def single_owner_device_registry() -> _single_owner_registry.SingleOwnerDeviceRegistry:
+    """Return a device registry double implementing the Core 2026.8+ rules.
+
+    Opt-in, not autouse: ``_StubDeviceRegistry`` still models the pre-2026.8
+    multi-owner world and is what several hundred existing assertions expect.
+    Switching everything at once would conflate a behaviour migration with a
+    test-harness migration.  New assertions about single ownership use this
+    fixture; ``tests/test_device_registry_single_owner_contract.py`` proves it
+    matches real Core.
+    """
+    return _single_owner_registry.SingleOwnerDeviceRegistry()

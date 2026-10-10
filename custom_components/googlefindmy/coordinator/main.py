@@ -84,10 +84,12 @@ from .helpers.cache import (
     sanitize_decoder_row as _sanitize_decoder_row,
 )
 from .helpers.geo import (
-    coerce_float as _coerce_float_impl,
+    ACCURACY_BUCKET_STATS,
+    accuracy_bucket,
+    recorded_accuracy_pair,
 )
 from .helpers.geo import (
-    recorded_accuracy_pair,
+    coerce_float as _coerce_float_impl,
 )
 from .helpers.stats import (
     ApiStatus,
@@ -129,7 +131,8 @@ else:  # pragma: no cover - typing fallback for runtime imports
 from homeassistant.config_entries import (
     ConfigEntry,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
 
@@ -250,6 +253,11 @@ _ALTITUDE_SIGNIFICANT_DELTA_M = 1.0
 # Predictive polling buffer to avoid requesting data before it is available server-side.
 _PREDICTION_BUFFER_S = 45
 
+# How long an unload waits for the startup stats load before flushing anyway. The load
+# reads two keys from an in-memory cache, so the ordinary case is sub-millisecond; the
+# bound exists so a cache that cannot answer delays the unload instead of hanging it.
+_STATS_LOAD_SHUTDOWN_WAIT_S = 5.0
+
 # Fields consumed by get_active_device_identities from cached payloads/anchors.
 _PERSISTED_METADATA_KEYS: tuple[str, ...] = (
     "battery_level",
@@ -357,29 +365,50 @@ def _resolve_last_seen_from_attributes(
 _DEVICE_TYPE_PHONE = 20
 
 
-def _accuracy_bucket(accuracy_m: Any) -> str | None:
-    """Bucket a raw accuracy radius into a coarse, non-correlating class.
+# Classification moved to coordinator.helpers.geo so the cache write path can
+# reach it too (main.py imports cache.py, so the reverse would be a cycle).
+# Re-exported under the historical private name: this module stays the caller
+# the diagnostics tests address, while geo owns the single boundary table.
+_accuracy_bucket = accuracy_bucket
 
-    Half-open intervals: ``<10`` = [0,10), ``10-50`` = [10,50), ``50-200`` =
-    [50,200), ``>200`` = [200, inf). ``None`` or a negative/non-numeric value
-    collapses to ``None`` (a raw float would be re-identifying, POPETS'25).
-    """
-    if not isinstance(accuracy_m, (int, float)) or isinstance(accuracy_m, bool):
-        return None
-    if accuracy_m < 0 or not math.isfinite(accuracy_m):
-        return None
-    if accuracy_m < 10:
-        return "<10"
-    if accuracy_m < 50:
-        return "10-50"
-    if accuracy_m < 200:
-        return "50-200"
-    return ">200"
+
+# Sub-key under which the per-device tally claims travel inside the ``integration_stats``
+# record. Reserved rather than free-form: the loader copies only known counters into
+# ``self.stats``, so this entry cannot become a phantom counter, and the writer asserts
+# that the name does not collide with a real one.
+TALLY_CLAIMS_KEY = "_tally_claims"
+
+# Mirror of the cache layer's ring length, used when merging a restored ring into a live
+# one. Imported rather than restated would couple the modules the wrong way round; the
+# value is asserted equal by a test, so a change to one of them cannot pass silently.
+TALLY_RING_LIMIT = 8
 
 
 def _round_age(age_seconds: float) -> int:
     """Round an age in seconds to the nearest 10 s (sub-poll timing is hidden)."""
     return int(round(age_seconds / 10) * 10)
+
+
+def _wall_clock_age(now_epoch: float, stamp: Any) -> int | None:
+    """Return the rounded age of a wall-clock stamp, or ``None`` if it is unusable.
+
+    A NEGATIVE age means the stamp lies in the future, which is corruption rather than
+    extreme freshness. The intake accepts a drift of
+    ``MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S``, so such a stamp really does reach the
+    snapshot and the coarse store, and the device tracker already suppresses a fix it
+    finds there. Clamping the age to zero instead would make this telemetry claim the
+    hidden fix happened "just now" and would contaminate the very numbers the accuracy
+    gate is evaluated with, so an unusable stamp reports no age at all.
+
+    Monotonic ages do not come through here: their ``max(0.0, ...)`` guards a clock that
+    ran backwards, and no reader draws a visibility decision from their sign.
+    """
+    if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+        return None
+    age = now_epoch - float(stamp)
+    if age < 0:
+        return None
+    return _round_age(age)
 
 
 def _device_class(device_type: Any) -> str:
@@ -757,10 +786,6 @@ class GoogleFindMyCoordinator(
         )  # diagnostics-only set from latest non-empty list
         self._semantic_label_cache: dict[str, SemanticLabelRecord] = {}
 
-        # Flag to separate initial discovery from later runtime additions.
-        # After the first successful non-empty device list is processed, this becomes True.
-        self._initial_discovery_done: bool = False
-
         # Presence smoothing (TTL):
         # - Per-device "last seen in full list" timestamp (monotonic)
         # - Cold-start marker: timestamp of last non-empty list (monotonic)
@@ -776,6 +801,14 @@ class GoogleFindMyCoordinator(
         # Polling state
         self._poll_lock = asyncio.Lock()
         self._is_polling = False
+        # The in-flight poll cycle, held so it can be cancelled on entry unload
+        # and on Home Assistant stop (see ``_async_cancel_poll_cycle``).
+        self._poll_cycle_task: asyncio.Task[None] | None = None
+        # Latched by ``_async_cancel_poll_cycle``; the refresh schedules no new
+        # cycle once it is set (a refresh may be mid-flight when teardown starts).
+        self._poll_cycle_teardown = False
+        # Remover of the EVENT_HOMEASSISTANT_STOP listener armed in ``async_setup``.
+        self._hass_stop_unsub: Callable[[], None] | None = None
         self._startup_complete = False
         self._last_poll_mono: float = 0.0  # monotonic timestamp for scheduling
         self._last_list_poll_mono: float = (
@@ -849,6 +882,11 @@ class GoogleFindMyCoordinator(
             "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
             "speed_gate_rejects": 0,  # fixes rejected as physically implausible (#177)
             "round_trip_recoveries": 0,  # gated fixes recovered as legitimate returns (Q2-A)
+            # Coarse fixes rejected because a better, reliable and still-fresh
+            # position was already cached (#216, core of #211). Never counts a
+            # cold start, an unreliable cached fix or a stale one - those are
+            # accepted, because a coarse position still beats none at all.
+            "accuracy_gate_rejects": 0,
             # Canonicless drops on the last main poll (transition-independent
             # diagnostics aggregate). Absolute per-poll values, not increments;
             # listed here so the restore path (iterates self.stats.keys()) and the
@@ -857,6 +895,20 @@ class GoogleFindMyCoordinator(
             "canonicless_drop_benign": 0,
             "canonicless_drop_warn": 0,
         }
+        # Distribution of the REPORTED accuracy of incoming fixes (#216). The
+        # reject counter above answers "how often did the gate fire"; it does
+        # not answer "are 200 m and factor 4 in the right place". Only the
+        # distribution answers that, and it has to be collected BEFORE the gate,
+        # or it would only ever see the fixes that got through.
+        #
+        # Keys are DERIVED from the single classification table in
+        # coordinator.helpers.geo, never listed a second time here: a class
+        # added there without a counter would otherwise fail silently
+        # (increment_stat only warns on an unknown key). Flat, not nested -
+        # increment_stat looks up ``stat_name in self.stats`` and the cache
+        # restore path iterates ``self.stats.keys()``; a nested dict would miss
+        # both.
+        self.stats.update(dict.fromkeys(ACCURACY_BUCKET_STATS.values(), 0))
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
         self._consecutive_timeouts: int = 0
@@ -883,9 +935,25 @@ class GoogleFindMyCoordinator(
         # Debounced stats persistence (avoid flushing on every increment)
         self._stats_save_task: asyncio.Task[None] | None = None
         self._stats_debounce_seconds: float = 5.0
+        # Which generation of the histogram the numbers below belong to. Bumped by a
+        # reset, read by the load below across its await, so a load that started in the
+        # previous generation cannot put it back. See ``begin_new_stats_epoch``.
+        self._stats_epoch: int = 0
+        # Devices purged while the load below is still in flight. A reset discards the
+        # whole record, but a purge is per device and must not, so the epoch cannot
+        # carry this case. Collected only until the load finishes, then dropped.
+        self._purged_before_stats_load: set[str] = set()
+        self._stats_loaded: bool = False
+        # Set when a purge inside the load window needs the record rewritten. Deferred
+        # rather than written on the spot, because a write before the merge would
+        # persist live state that is still missing everything the load carries.
+        self._save_after_stats_load: bool = False
 
-        # Load persistent statistics asynchronously (name the task for better debugging)
-        self.hass.async_create_task(
+        # Load persistent statistics asynchronously (name the task for better debugging).
+        # The handle is kept because `async_shutdown` waits for it: its flush writes the
+        # whole record from live state, which inside this window is missing everything
+        # the load has not merged yet.
+        self._stats_load_task: asyncio.Task[None] | None = self.hass.async_create_task(
             self._async_load_stats(), name=f"{DOMAIN}.load_stats"
         )
 
@@ -1048,6 +1116,13 @@ class GoogleFindMyCoordinator(
         - Ensures the per-entry "service device" exists in the Device Registry.
         - Enforces entry-scoped namespace by attaching `entry_id` to the cache object.
         """
+        # Armed first: it depends on nothing below, and the steps below can
+        # raise (the caller logs and moves on without calling this again).
+        if self._hass_stop_unsub is None:
+            self._hass_stop_unsub = self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STOP, self._async_on_hass_stop
+            )
+
         # Ensure the cache carries our entry_id namespace for downstream Nova/API helpers.
         try:
             entry = self.config_entry or getattr(self, "entry", None)
@@ -1065,6 +1140,69 @@ class GoogleFindMyCoordinator(
             self._dr_unsub = self.hass.bus.async_listen(
                 EVENT_DEVICE_REGISTRY_UPDATED, self._handle_dr_event
             )
+
+    async def _async_on_hass_stop(self, _event: Event) -> None:
+        """Cancel the in-flight poll cycle when Home Assistant stops.
+
+        This cannot be left to ``async_shutdown``: for an entry-bound coordinator
+        the core runs that only on entry unload (``config_entry.async_on_unload``
+        in ``DataUpdateCoordinator.__init__``), and a stopping Home Assistant does
+        not unload entries (``ConfigEntries._async_shutdown`` merely cancels retry
+        setups). Without this listener the tracked poll task outlives the stop
+        event and the core logs ``Task ... was still running after final writes
+        shutdown stage`` against this integration before cancelling it itself.
+
+        The one-time listener has already removed itself from the bus before it
+        invokes this handler, so the remover it handed out is spent; drop it
+        first so a later ``async_shutdown`` does not call it again.
+        """
+        self._hass_stop_unsub = None
+        await self._async_cancel_poll_cycle()
+
+    async def _async_cancel_poll_cycle(self) -> None:
+        """Cancel and settle the in-flight poll cycle, if any.
+
+        The cycle runs as a *tracked* task (``hass.async_create_task`` in
+        ``polling.py``) so ``hass.async_block_till_done`` still waits for it; the
+        price is that nobody but this coordinator cancels it. Shared by the
+        unload path (``async_shutdown``) and the stop path (``_async_on_hass_stop``).
+        Awaiting the cancelled task lets the cycle's ``finally`` settle first;
+        what that ``finally`` arms (a short retry, the EID refresh debounce) is
+        then disarmed here, so neither path leaves a raw ``call_later`` behind
+        that would fire on a stopping core. ``async_shutdown`` repeats the EID
+        cancels after its own awaits; both are idempotent.
+
+        The latch comes first: a refresh that is suspended before its scheduling
+        step when this runs would otherwise find nothing to cancel here and then
+        create a fresh cycle that nobody cancels any more.
+        """
+        self._poll_cycle_teardown = True
+        poll_task = getattr(self, "_poll_cycle_task", None)
+        self._poll_cycle_task = None
+        if poll_task is not None and not poll_task.done():
+            poll_task.cancel()
+            try:
+                await poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        for attr in (
+            "_short_retry_cancel",
+            "_eid_refresh_debounce_handle",
+            "_eid_inline_refresh_debounce_handle",
+        ):
+            handle = getattr(self, attr, None)
+            if handle is None:
+                continue
+            try:
+                # ``_short_retry_cancel`` is a remover, the others are timer handles.
+                if attr == "_short_retry_cancel":
+                    handle()
+                else:
+                    handle.cancel()
+            except Exception:
+                pass
+            finally:
+                setattr(self, attr, None)
 
     def _get_google_home_filter(self) -> GoogleHomeFilterProtocol | None:
         """Return the Google Home filter associated with this coordinator."""
@@ -1121,6 +1259,30 @@ class GoogleFindMyCoordinator(
 
     async def async_shutdown(self) -> None:
         """Clean up listeners and timers on entry unload to avoid leaks."""
+        # The core's shutdown goes first. ``DataUpdateCoordinator.async_shutdown``
+        # raises ``_shutdown_requested`` (a refresh that arrives after unload, say
+        # a push callback calling ``async_request_refresh``, returns before it
+        # touches the closed API), cancels the interval refresh that
+        # ``_schedule_refresh`` may still have armed, and shuts the request
+        # debouncer, which also drops the debouncer's hard reference to this
+        # coordinator. None of it suspends, so those doors are closed before the
+        # awaits below open a window; and it is idempotent, which matters because
+        # unload runs this method twice (``async_unload_entry`` calls it, then the
+        # ``async_on_unload`` hook the core registered in its ``__init__`` does).
+        await super().async_shutdown()
+        # Then cancel an in-flight poll cycle, so its ``finally`` (which may arm
+        # a short retry) runs before the short-retry cancel below. This is the
+        # unload path; the Home Assistant stop path is ``_async_on_hass_stop``.
+        await self._async_cancel_poll_cycle()
+        # Disarm the stop listener when the entry unloads before a stop. On the
+        # stop path the handler has already cleared this (spent remover).
+        hass_stop_unsub = getattr(self, "_hass_stop_unsub", None)
+        if hass_stop_unsub is not None:
+            try:
+                hass_stop_unsub()
+            except Exception:
+                pass
+            self._hass_stop_unsub = None
         self._cancel_pending_subentry_repair()
         # Unsubscribe DR listener
         dr_unsub = getattr(self, "_dr_unsub", None)
@@ -1130,19 +1292,73 @@ class GoogleFindMyCoordinator(
             except Exception:
                 pass
             self._dr_unsub = None
-        # Cancel short-retry callback if scheduled
-        short_retry_cancel = getattr(self, "_short_retry_cancel", None)
-        if short_retry_cancel is not None:
+        # The short-retry callback was cancelled by ``_async_cancel_poll_cycle``
+        # above; nothing between there and here suspends, so nothing can arm it
+        # again before this point.
+        # End the pending debounced stats write by WRITING it, not by dropping it.
+        # Cancelling alone loses whatever the window was still coalescing, which is every
+        # increment of the last few seconds together with the claims recorded for them.
+        #
+        # It is also the backstop for the purge. `purge_device` writes immediately rather
+        # than on the debounce, but it does so by creating a task it does not await, and
+        # an unload can outrun that task. Its removal would then exist only in memory
+        # that is about to go away, the deleted device's claim would survive in the
+        # persisted record, and a device re-added under the same id would have its first
+        # matching measurement suppressed by a claim from its previous life.
+        #
+        # The write is therefore unconditional IN THAT RESPECT: it does not ask whether a
+        # debounced task is pending. Gating it on one was the first attempt and it missed
+        # exactly the case that matters most: the purge writes through a task this
+        # attribute never holds, so when only that one is in flight there is nothing here
+        # to find and the whole block was skipped. A condition that cannot see the more
+        # important of the two writers is not a condition, and the cost of dropping it is
+        # one write per unload.
+        #
+        # One condition does apply, and it lives in the writer rather than here: while the
+        # stats load is still in flight, `_async_save_stats` defers instead of writing,
+        # because inside that window live state is missing everything the load has not
+        # merged yet and a write would replace the stored record with it. That is a
+        # different axis from the one this comment is about.
+        #
+        # The pending task is still cancelled first, so its coroutine stops waiting out
+        # its sleep. `_debounced_save_stats` swallows the cancellation and returns, so
+        # the await settles it; if it was already past the sleep and inside the write,
+        # the repeated write is the same record and costs nothing. Failures are swallowed
+        # like the other shutdown steps: an unload must not raise.
+        # Let the startup load finish first, so the flush below is outside its window and
+        # writes the merged record rather than deferring. Waiting is what makes the write
+        # possible at all here: the entry-scoped cache is closed immediately after this
+        # method returns, so a write deferred to the load's `finally` would reach a closed
+        # store and be swallowed. Waited WITHOUT cancelling and with a bound, so a load
+        # that cannot finish delays the unload by seconds rather than hanging it; if the
+        # bound is hit the window is still open, the flush defers, and the record stays as
+        # it was on disk.
+        load_task = getattr(self, "_stats_load_task", None)
+        if load_task is not None:
+            # The whole probe is inside the try, not just the wait: `done()` is the first
+            # thing touched on an attribute read with `getattr`, and a value that is not a
+            # task fails there rather than in `asyncio.wait`. An unload must not raise, and
+            # this wait is an optimisation of WHEN the flush writes - never a reason for
+            # the unload to fail. Falling through leaves the window open, so the flush
+            # below defers and the stored record stays as it was.
             try:
-                short_retry_cancel()
-            except Exception:
-                pass
-            finally:
-                self._short_retry_cancel = None
-        # Cancel pending debounced stats write
+                if not load_task.done():
+                    await asyncio.wait({load_task}, timeout=_STATS_LOAD_SHUTDOWN_WAIT_S)
+            except Exception as err:
+                _LOGGER.debug("Could not wait for the stats load on unload: %s", err)
+
         stats_save_task = getattr(self, "_stats_save_task", None)
         if stats_save_task and not stats_save_task.done():
             stats_save_task.cancel()
+            try:
+                await stats_save_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._stats_save_task = None
+        try:
+            await self._async_save_stats()
+        except Exception:
+            pass
 
         # Cancel pending EID-resolver refresh debounce timers so no
         # ``call_later`` callback fires (and creates a task) after unload.
@@ -1279,9 +1495,17 @@ class GoogleFindMyCoordinator(
         if entry is None:
             return False
 
+        # Presence, not truthiness. The options flow writes this key on every
+        # add, edit and delete, so an empty mapping is the user having removed
+        # their last semantic location -- a deliberate "no mappings", not a
+        # missing setting. Falling through to `entry.data` on a falsy value
+        # revived the pre-migration copy, which `_async_soft_migrate_data_to_
+        # options` only ever copies and never clears, so the deleted mapping
+        # kept relabelling coordinates as `trusted` and survived restarts.
         options = getattr(entry, "options", None) or {}
-        raw_mappings = options.get(OPT_SEMANTIC_LOCATIONS)
-        if not raw_mappings:
+        if OPT_SEMANTIC_LOCATIONS in options:
+            raw_mappings = options[OPT_SEMANTIC_LOCATIONS]
+        else:
             data = getattr(entry, "data", None) or {}
             raw_mappings = data.get(OPT_SEMANTIC_LOCATIONS)
         if not isinstance(raw_mappings, Mapping):
@@ -1632,8 +1856,9 @@ class GoogleFindMyCoordinator(
         """
         snapshot: list[dict[str, Any]] = []
         wall_now = time.time()
+        device_total = len(devices)
 
-        for dev in devices:
+        for device_index, dev in enumerate(devices, start=1):
             entry = self._build_base_snapshot_entry(dev)
 
             # Prefer cached result
@@ -1701,8 +1926,17 @@ class GoogleFindMyCoordinator(
 
             # Optional history fallback
             if self.allow_history_fallback:
+                # AGENTS.md section 5 (b): this record repeats on every poll,
+                # so WARNING carries the index and the name/entity_id go to DEBUG.
                 _LOGGER.warning(
-                    "No live state for %s (entity_id=%s); attempting history fallback via Recorder.",
+                    "No live state for device %d of %d; attempting history fallback via Recorder.",
+                    device_index,
+                    device_total,
+                )
+                _LOGGER.debug(
+                    "History fallback for device %d of %d: %s (entity_id=%s)",
+                    device_index,
+                    device_total,
                     entry["name"],
                     entity_id,
                 )
@@ -1715,8 +1949,15 @@ class GoogleFindMyCoordinator(
                     self.increment_stat("history_fallback_used")
                 else:
                     _LOGGER.warning(
-                        "No historical GPS data found for %s (entity_id=%s). "
+                        "No historical GPS data found for device %d of %d. "
                         "Entity may be excluded from Recorder.",
+                        device_index,
+                        device_total,
+                    )
+                    _LOGGER.debug(
+                        "No historical GPS data for device %d of %d: %s (entity_id=%s)",
+                        device_index,
+                        device_total,
                         entry["name"],
                         entity_id,
                     )
@@ -1727,17 +1968,93 @@ class GoogleFindMyCoordinator(
         return snapshot
 
     # ---------------------------- Stats persistence -------------------------
+    def begin_new_stats_epoch(self) -> bool:
+        """Start a fresh histogram generation: zero, clear, invalidate.
+
+        All three in ONE call, because the counters and the claims are two
+        halves of one fact and must not come to hang on two call sites that a
+        later edit can separate. An earlier version left the zeroing to the
+        caller and claimed to be one call anyway; that was only safe as long as
+        no ``await`` appeared between the two sites, an invariant nobody had
+        written down. Now there is nothing to keep in step.
+
+        The epoch is what makes the reset survive a load that is still in
+        flight. ``_async_load_stats`` is created as a task during setup and can
+        resume long after the user pressed the button; it adds the stored
+        counters onto the live ones and merges the stored claim rings back in.
+        Without a generation to compare against, that undoes the reset silently
+        and the debounced write then makes the old generation durable again.
+
+        Returns whether the counters were zeroed, so the caller can log a
+        coordinator without a usable ``stats`` mapping the way it did before.
+        The epoch and the claims are reset either way: a broken counter mapping
+        is no reason to let a stale generation come back.
+        """
+        self._stats_epoch = getattr(self, "_stats_epoch", 0) + 1
+        self.clear_tally_claims()
+        stats = getattr(self, "stats", None)
+        if not isinstance(stats, dict):
+            return False
+        for key in list(stats):
+            stats[key] = 0
+        return True
+
     async def _async_load_stats(self) -> None:
         """Load statistics from entry-scoped cache."""
+        epoch = getattr(self, "_stats_epoch", 0)
         try:
             cached = await self._cache.async_get_cached_value("integration_stats")
-            if cached and isinstance(cached, dict):
-                for key in self.stats.keys():
-                    if key in cached:
-                        self.stats[key] = cached[key]
+            if getattr(self, "_stats_epoch", 0) != epoch:
+                # A reset happened while this read was in flight. Both halves of the
+                # record below belong to the generation the user just discarded, so
+                # restoring either would undo the reset - the counters by addition, the
+                # claims by suppressing the very reports that would refill the fresh
+                # histogram. Dropping the read is the only outcome that keeps the pair
+                # consistent; there is nothing to merge a discarded generation into.
+                _LOGGER.debug("Discarded a stats load overtaken by a reset")
+            elif cached and isinstance(cached, dict):
+                # This load is scheduled, not awaited, so a push or the first poll can
+                # already have counted something by the time it resumes. The live value
+                # is not a newer total, it is the increments that happened since this
+                # read began - so the two are ADDED. Keeping only one of them loses the
+                # other: the persisted total if the live value wins, and an increment
+                # whose claim survives if the persisted total does. Either way the pair
+                # would disagree, and a claim without its increment permanently
+                # suppresses a measurement.
+                for key, value in self.stats.items():
+                    stored = cached.get(key)
+                    if isinstance(stored, int) and isinstance(value, int):
+                        self.stats[key] = stored + value
                 _LOGGER.debug("Loaded statistics from cache: %s", self.stats)
+                self._restore_tally_claims(cached.get(TALLY_CLAIMS_KEY))
         except Exception as err:
             _LOGGER.debug("Failed to load statistics from cache: %s", err)
+        finally:
+            # In a finally, so a failed read closes the window too: from here on a
+            # purge is the only writer of the claim store and needs no bookkeeping.
+            self._stats_loaded = True
+            purged = getattr(self, "_purged_before_stats_load", None)
+            if purged is not None:
+                purged.clear()
+            if getattr(self, "_save_after_stats_load", False):
+                # A purge landed inside the window and deferred its write to here,
+                # where live state finally carries the merged record. Immediate rather
+                # than debounced, for the reason the purge path states: a reload or
+                # shutdown inside the debounce window cancels a pending write without
+                # flushing it.
+                # Cleared only once the task exists, so the flag is never cleared for
+                # a write that did not get scheduled. Nothing reads it again after this
+                # line - this is its only reader - so a stuck True has no effect; the
+                # point is that the exception does not escape this ``finally`` and abort
+                # the sound-UUID load below.
+                try:
+                    self.hass.async_create_task(self._async_save_stats())
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Deferred stats write could not be scheduled: %s", err
+                    )
+                else:
+                    self._save_after_stats_load = False
 
         try:
             sound_request_uuids = await self._cache.async_get_cached_value(
@@ -1810,12 +2127,116 @@ class GoogleFindMyCoordinator(
                 err,
             )
 
+    def _restore_tally_claims(self, stored: Any) -> None:
+        """Restore the per-device tally claim from the stats record.
+
+        JSON has no tuples, so each stored identity comes back as a list and is turned
+        back into the tuple the comparison expects; a list never equals a tuple, and that
+        failure would be silent. The value per device is a ring of identities, so the
+        conversion runs per element rather than once. A missing sub-key is a record written before this
+        existed: the map stays empty, which is the old behaviour and not an error. An
+        entry the loader cannot read is dropped rather than half-trusted, because a
+        half-read claim would silence a report that was never counted.
+        """
+        if not isinstance(stored, dict):
+            return
+        purged = getattr(self, "_purged_before_stats_load", None) or set()
+        restored: dict[str, list[tuple[Any, ...]]] = {}
+        for device_id, ring in stored.items():
+            if not isinstance(device_id, str) or not isinstance(ring, list):
+                continue
+            if device_id in purged:
+                # Deleted while this read was in flight. Restoring it would let a
+                # device re-added under the same id have its first matching
+                # measurement suppressed by a claim from its previous life.
+                continue
+            identities = [
+                tuple(identity)
+                for identity in ring
+                if isinstance(identity, (list, tuple))
+            ]
+            if identities:
+                restored[device_id] = identities
+        if not restored:
+            return
+        # Merge rather than replace, for the same race: a claim made while this load was
+        # in flight belongs to an increment that already happened, and dropping it would
+        # let the next delivery count that report again. Stored identities are appended
+        # behind the live ones and the ring is trimmed, so the bound still holds.
+        live = getattr(self, "_last_tallied_report_id", None)
+        if not live:
+            self._last_tallied_report_id = restored
+        else:
+            for device_id, identities in restored.items():
+                current = list(live.get(device_id) or ())
+                # Restored first, live last. The ring keeps its TAIL, so the order
+                # decides who is dropped when both halves are full: with the live
+                # entries in front, a claim made during this very load would be trimmed
+                # away and the report it belongs to counted a second time. The oldest
+                # stored identity is the right thing to lose.
+                ring = [i for i in identities if i not in current] + current
+                live[device_id] = ring[-TALLY_RING_LIMIT:]
+        _LOGGER.debug("Restored %d tally claim(s) from cache", len(restored))
+
     async def _async_save_stats(self) -> None:
-        """Persist statistics to entry-scoped cache."""
+        """Persist statistics and their tally claims as ONE record.
+
+        The histogram and the claim that keeps a report out of it twice are two halves
+        of one fact. Written separately, a crash or a failed write between them leaves
+        a claim without its increment - which silences a measurement that was never
+        recorded - or an increment without its claim, which counts one twice on the next
+        delivery. One key, one write, one failure mode: either both are yesterday's
+        state or both are today's.
+
+        The claims travel under a reserved sub-key. The loader only copies keys it
+        already knows into ``self.stats``, so the extra entry cannot become a phantom
+        counter, and the name is asserted not to collide with a real one.
+
+        Nothing is written while the stats load is still in flight. This method
+        serialises the WHOLE record from live state, and inside that window live state
+        is missing everything the load has not merged yet - so a write there does not
+        add to the stored record, it REPLACES the persisted totals and every claim ring
+        with pre-load values, and the load then reads back what the write left. The
+        guard belongs here rather than at the call sites: of the four callers, one is
+        the load's own ``finally`` (by construction outside the window), one is
+        ``purge_device``, which had to learn the rule for itself, and two - the debounced
+        writer and the flush in ``async_shutdown`` - used to reach the window with
+        nothing to stop them. A rule that only one of its callers knows is not a rule.
+
+        The write is deferred, not dropped: the load's ``finally`` performs it once live
+        state carries the merged record, and that ``finally`` runs on the success path,
+        on the read-failure path and on the epoch-discard path alike.
+
+        Deferral only works while there is still somewhere to write. On an unload there
+        is not: the entry-scoped cache is closed right after ``async_shutdown`` returns,
+        and a write reaching it afterwards raises and is swallowed below. That is why
+        ``async_shutdown`` WAITS for the load task before it flushes, rather than relying
+        on the deferral - the wait closes the window, and the flush then writes the merged
+        record for real. Deferring is the answer for writers that have a future; for the
+        one that does not, the window is closed instead.
+
+        ``_stats_loaded`` defaults to True when absent, so a coordinator built without it
+        writes as before; defaulting to False would silence every such writer instead,
+        which is the mistake this direction is easy to make.
+        """
+        assert TALLY_CLAIMS_KEY not in self.stats, (
+            f"{TALLY_CLAIMS_KEY} collides with a real counter"
+        )
+        if not getattr(self, "_stats_loaded", True):
+            self._save_after_stats_load = True
+            _LOGGER.debug("Deferred a stats write issued inside the load window")
+            return
+        claims = getattr(self, "_last_tallied_report_id", None) or {}
+        record: dict[str, Any] = self.stats.copy()
+        record[TALLY_CLAIMS_KEY] = {
+            device_id: [
+                list(identity) for identity in ring if isinstance(identity, tuple)
+            ]
+            for device_id, ring in claims.items()
+            if isinstance(device_id, str) and isinstance(ring, list)
+        }
         try:
-            await self._cache.async_set_cached_value(
-                "integration_stats", self.stats.copy()
-            )
+            await self._cache.async_set_cached_value("integration_stats", record)
         except Exception as err:
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
 
@@ -1954,11 +2375,22 @@ class GoogleFindMyCoordinator(
         """Build the anonymized per-device telemetry list for diagnostics (P1-3).
 
         Each entry carries an opaque position ``index`` over ``sorted(device_ids)``
-        plus exactly seven fields: ``device_class``, ``last_poll_age_s``,
-        ``last_fix_age_s``, ``last_accuracy_bucket``, ``is_own_report``,
-        ``has_key``. No names, canonical IDs, coordinates, or clear-text keys are
-        emitted. Empty/None ``self.data`` yields ``[]``; any failure degrades to
-        ``[]`` rather than leaking a partial record.
+        plus ``device_class``, ``last_poll_age_s``, ``last_fix_age_s``,
+        ``last_accuracy_bucket``, ``is_own_report``, ``has_key`` and the two
+        accuracy-gate fields ``coarse_fix_accuracy_bucket`` /
+        ``coarse_fix_age_s``. No names, canonical IDs, coordinates, or
+        clear-text keys are emitted. Empty/None ``self.data`` yields ``[]``; any
+        failure degrades to ``[]`` rather than leaking a partial record.
+
+        Both wall-clock ages report ``None`` rather than ``0`` when their stamp lies in
+        the future, so a corrupt stamp is never dressed up as a fresh one; see
+        ``_wall_clock_age``.
+
+        The two coarse-fix fields report what the accuracy gate discarded (#216)
+        WITHOUT its coordinates: a diagnostics dump is routinely pasted into a
+        public issue, and a raw radius or position would be re-identifying
+        (P1-3). The coordinates of the discarded fix stay on the entity, where
+        the user - and only the user - can see roughly which city it named.
         """
         try:
             rows = self.data or []
@@ -1978,15 +2410,7 @@ class GoogleFindMyCoordinator(
                 row = by_id[dev_id]
                 slot = self._device_location_data.get(dev_id) or {}
 
-                last_seen = row.get("last_seen")
-                if isinstance(last_seen, (int, float)) and not isinstance(
-                    last_seen, bool
-                ):
-                    last_fix_age_s: int | None = _round_age(
-                        max(0.0, now_epoch - float(last_seen))
-                    )
-                else:
-                    last_fix_age_s = None
+                last_fix_age_s = _wall_clock_age(now_epoch, row.get("last_seen"))
 
                 poll_mono = self._present_last_seen.get(dev_id)
                 if isinstance(poll_mono, (int, float)) and not isinstance(
@@ -2007,6 +2431,13 @@ class GoogleFindMyCoordinator(
                 if accuracy_raw is None:
                     accuracy_raw = row.get("accuracy")
 
+                coarse = self.get_fresh_coarse_fix(dev_id)
+                coarse_bucket = None
+                coarse_age_s: int | None = None
+                if coarse:
+                    coarse_bucket = _accuracy_bucket(coarse.get("accuracy"))
+                    coarse_age_s = _wall_clock_age(now_epoch, coarse.get("last_seen"))
+
                 entries.append(
                     {
                         "index": index,
@@ -2016,6 +2447,8 @@ class GoogleFindMyCoordinator(
                         "last_accuracy_bucket": _accuracy_bucket(accuracy_raw),
                         "is_own_report": row.get("is_own_report", None),
                         "has_key": bool(slot.get("encrypted_identity_key")),
+                        "coarse_fix_accuracy_bucket": coarse_bucket,
+                        "coarse_fix_age_s": coarse_age_s,
                     }
                 )
             return entries
@@ -2093,6 +2526,46 @@ class GoogleFindMyCoordinator(
         self._device_last_good_location.pop(device_id, None)
         # Round-trip anchor shares the same lifecycle as the location caches above.
         self._round_trip_anchors.pop(device_id, None)
+        # The accuracy gate's coarse fix (#216) is a position too, so it follows the
+        # same lifecycle: without this a deleted device would keep leaking its last
+        # coarse position through ``coarse_latitude``/``coarse_longitude``, and a
+        # device re-added under the same id would inherit it. Read defensively
+        # (getattr) because the store is created lazily on the first rejection.
+        coarse_store = getattr(self, "_device_coarse_fix", None)
+        if coarse_store is not None:
+            coarse_store.pop(device_id, None)
+        # The tally claim is keyed by device id and is PERSISTED, so it outlives the
+        # purge unless it is dropped here: a deleted device would keep an entry in the
+        # store indefinitely, and one re-added under the same id would have its first
+        # matching measurement suppressed by a claim from its previous life.
+        # A load that is still in flight will merge the STORED rings back in, and it
+        # cannot know about a device deleted after its read began. The epoch does not
+        # help here: it discards a whole generation, while a purge removes one device
+        # from one that stays valid. So the id is remembered until the load is done,
+        # and remembered unconditionally - the claim may not even be in memory yet,
+        # which is exactly the case the pop below cannot see.
+        noted = False
+        if not getattr(self, "_stats_loaded", True):
+            purged = getattr(self, "_purged_before_stats_load", None)
+            if purged is not None:
+                purged.add(device_id)
+                noted = True
+        claims = getattr(self, "_last_tallied_report_id", None)
+        popped = claims is not None and claims.pop(device_id, None) is not None
+        if noted:
+            # Inside the load window the durable half must be corrected too - the claim
+            # is not in memory yet, so the pop finds nothing while the STORED record
+            # still lists the device. But NOT by writing now: ``_async_save_stats``
+            # serialises the whole record from live state, and live state is currently
+            # missing everything the load has not merged yet, so a write here would
+            # replace the persisted totals and every sibling ring with the pre-load
+            # values. The load's ``finally`` performs it instead, after the merge.
+            self._save_after_stats_load = True
+        elif popped:
+            # Written now, not on the debounce: a reload or shutdown inside the debounce
+            # window cancels the pending write without flushing it, and the purged
+            # device's claim would then outlive the device it was deleted with.
+            self.hass.async_create_task(self._async_save_stats())
         # Device-id-keyed timing caches follow the same lifecycle; drop them so a
         # re-added device with the same id starts with clean poll-interval state.
         self._device_update_history.pop(device_id, None)

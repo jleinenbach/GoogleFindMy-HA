@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -14,6 +15,7 @@ from custom_components.googlefindmy.fmdn_finder.location_uploader import (
     _calculate_accuracy_from_rssi,
     _haversine_distance,
     _location_from_zone_state,
+    _mask_address_for_logs,
     _should_upload_location,
     async_process_fmdn_beacon_detection,
 )
@@ -584,3 +586,163 @@ def test_calculate_accuracy_from_rssi_band_boundaries(rssi, expected_distance):
     returned value is the pure band distance and the boundary is observable.
     """
     assert _calculate_accuracy_from_rssi(rssi, zone_accuracy=1) == expected_distance
+
+
+@pytest.mark.asyncio
+async def test_debug_logs_omit_coordinates(hass_mock, caplog):
+    """AGENTS.md "Logging & privacy": coordinates never reach the log.
+
+    The scanner position is usually the user's home and DEBUG logs end up in
+    issue reports. Runs the full path from beacon detection through
+    ``_encrypt_and_upload_location`` with only the crypto and network
+    boundaries mocked, so both DEBUG sites that used to carry coordinates
+    are actually executed. Logging the (rounded or raw) coordinates at either
+    site turns the test red, while the encrypted payload keeps the full
+    precision.
+    """
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.location_uploader",
+    )
+    encrypt_mock = MagicMock(return_value=(b"\x00" * 32, b"\x11" * 20))
+    upload_mock = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(5),
+        ),
+        patch(
+            "custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor.encrypt",
+            encrypt_mock,
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.google_uploader.async_upload_to_google_fmdn",
+            upload_mock,
+        ),
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area=None,
+            rssi=None,
+            scanner_address="AA:BB:CC:DD:EE:FF",
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is True
+    upload_mock.assert_awaited_once()
+    # Both changed DEBUG sites were executed and carry only accuracy and zone.
+    assert (
+        "Resolved location (coordinates omitted): accuracy=5m, zone=home" in caplog.text
+    )
+    assert (
+        "GPS data prepared for encryption (coordinates omitted): accuracy=5m, zone=home"
+        in caplog.text
+    )
+    # Neither the raw (52.52 / 13.405) nor any rounded form may appear.
+    assert "52.5" not in caplog.text
+    assert "13.4" not in caplog.text
+    # The encrypted payload is unchanged: full precision stays in the upload.
+    encrypt_mock.assert_called_once()
+    assert encrypt_mock.call_args.kwargs["message"] == b"52.5200000,13.4050000"
+
+
+@pytest.mark.asyncio
+async def test_debug_logs_omit_ecdh_shared_secret(hass_mock, caplog):
+    """AGENTS.md section 5: key material never reaches the log.
+
+    The "Encrypted location" DEBUG record used to carry the first eight bytes
+    of the ECDH shared secret; the byte count of the ciphertext stays. Same
+    path and mocks as `test_debug_logs_omit_coordinates`, with a shared
+    secret that has no repeating pattern so a window assertion is meaningful.
+    """
+    import hashlib
+
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.location_uploader",
+    )
+    shared_x = hashlib.sha256(b"ecdh-shared-secret").digest()
+    encrypt_mock = MagicMock(return_value=(b"\x00" * 32, shared_x))
+    upload_mock = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(5),
+        ),
+        patch(
+            "custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor.encrypt",
+            encrypt_mock,
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.google_uploader.async_upload_to_google_fmdn",
+            upload_mock,
+        ),
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area=None,
+            rssi=None,
+            scanner_address="AA:BB:CC:DD:EE:FF",
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is True
+    assert "Encrypted location: 32 bytes" in caplog.text
+    sx_hex = shared_x.hex()
+    assert all(
+        sx_hex[i : i + 8] not in caplog.text for i in range(0, len(sx_hex) - 7)
+    ), "a window of the ECDH shared secret reached the log"
+
+
+def test_mask_address_for_logs_keeps_only_the_last_four_characters():
+    """AGENTS.md section 5, class (c): addresses are truncated to their last
+    four characters. Both shapes the Bermuda scanner name can take are covered:
+    a colon-separated MAC and the `bermuda_<slug>` fallback name.
+    """
+    assert _mask_address_for_logs("AA:BB:CC:DD:EE:FF") == "...E:FF"
+    assert _mask_address_for_logs("bermuda_aabbccddeeff") == "...eeff"
+    assert _mask_address_for_logs("") == "none"
+    assert _mask_address_for_logs(None) == "none"
+
+
+@pytest.mark.asyncio
+async def test_debug_log_masks_scanner_name_without_location(hass_mock, caplog):
+    """AGENTS.md section 5, class (c): the scanner name never reaches the log
+    in clear text.
+
+    The "no location" branch is the only DEBUG site that carries the scanner
+    name. The name is the Bermuda scanner device's name and falls back to a
+    slug of the scanner's BLE MAC, so it is a hardware address in disguise;
+    the log keeps four characters to tell proxies apart and nothing more.
+    """
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.location_uploader",
+    )
+    with patch(
+        "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+        return_value=None,
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area="Living room",
+            rssi=None,
+            scanner_address="bermuda_aabbccddeeff",
+            scanner_device_id=None,
+            fmdn_device_id=None,
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is False
+    assert "scanner=...eeff" in caplog.text
+    assert "bermuda_aabbccddeeff" not in caplog.text
+    assert "aabbccddeeff" not in caplog.text

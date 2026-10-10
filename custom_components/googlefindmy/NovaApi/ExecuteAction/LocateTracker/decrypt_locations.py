@@ -11,6 +11,7 @@ import hashlib
 import logging
 import math
 import time
+from collections.abc import Sequence
 from importlib import import_module
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, cast
@@ -24,7 +25,16 @@ from custom_components.googlefindmy.Auth.adm_token_retrieval import (
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
 from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import get_aesgcm_class
-from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import SECP160R1, SECP256R1
+from custom_components.googlefindmy.FMDNCrypto.foreign_report_errors import (
+    ForeignReportAuthError,
+    ForeignReportStructureError,
+    UnsupportedCurveError,
+)
+from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import (
+    ForeignDecryptResult,
+    decrypt_foreign_report,
+)
 from custom_components.googlefindmy.FMDNCrypto.mcu_utils import (
     flip_bits,
     is_mcu_tracker,
@@ -40,6 +50,11 @@ from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypted_location import (
     WrappedLocation,
+)
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+    FOREIGN_READING_TRACKER,
+    DeviceKey,
+    foreign_device_key,
 )
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_update_protobuf,
@@ -91,7 +106,7 @@ _EIK_LEN: int = 32
 # Heuristic threshold suggesting encryptedUserSecrets holds structured data rather than a raw key blob.
 # Moto Tag payloads can legitimately exceed the smaller legacy cutoff, so tolerate larger blobs before
 # raising a diagnostic warning.
-_SECRETS_STRUCT_LEN_THRESHOLD: int = 256
+_STRUCTURED_PAYLOAD_LEN_THRESHOLD: int = 256
 
 # -------------------------------------------------------------------------
 # EIK Cache (Performance Optimization)
@@ -154,8 +169,8 @@ def invalidate_eik_cache_for_key(
 ) -> int:
     """Invalidate all cached EIK entries for a specific encrypted identity key.
 
-    Called when every encrypted report in a poll cycle fails MAC/InvalidTag
-    authentication, which suggests the cached decrypted EIK is stale (e.g., after
+    Called when every key-relevant encrypted report in a poll cycle fails
+    MAC/InvalidTag authentication (key-neutral foreign reports do not count), which suggests the cached decrypted EIK is stale (e.g., after
     key rotation, re-pairing, or E2EE reset). Whether the failure is actually
     persistent is decided by the stateful callers (coordinator poll verdict / FCM
     callback), not here: this helper only drops the cache so the next poll
@@ -1051,14 +1066,25 @@ async def _offload_decrypt_aes(identity_key: bytes, encrypted_location: bytes) -
 
 
 async def _offload_decrypt_foreign(
-    identity_key: bytes,
+    identity_keys: Sequence[bytes],
     encrypted_location: bytes,
     public_key_random: bytes,
     time_offset: int,
-) -> bytes:
-    """Offload ECC-based decryption for foreign reports."""
+    preferred_reading_id: str | None,
+) -> ForeignDecryptResult:
+    """Offload ECC-based decryption of a foreign report over all key candidates.
+
+    Every key and every reading of the curve selected from
+    ``len(public_key_random)`` is tried in the worker thread; the preferred
+    reading goes first. Failures raise the ``ForeignReportError`` family.
+    """
     return await asyncio.to_thread(
-        decrypt, identity_key, encrypted_location, public_key_random, time_offset
+        decrypt_foreign_report,
+        tuple(identity_keys),
+        encrypted_location,
+        public_key_random,
+        time_offset,
+        preferred_reading_id=preferred_reading_id,
     )
 
 
@@ -1216,6 +1242,16 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
     # Extract canonical device ID for AAD envelope unwrap (matches eid_resolver)
     canonic_id = _extract_canonic_id(device_update_protobuf)
+    # One token per call: a poll and an FCM push each count as one poll for
+    # the foreign-reading feedback threshold (three reports in two polls).
+    poll_id = object()
+    # Per config entry, so two entries never share foreign-reading state; no
+    # tracking without a canonical ID. The key is case-normalized (CX-7).
+    device_key: DeviceKey | None = (
+        foreign_device_key(getattr(cache, "entry_id", None), canonic_id)
+        if canonic_id is not None
+        else None
+    )
 
     encrypted_user_secrets = device_registration.encryptedUserSecrets
     raw_encrypted_identity_key: bytes = b""
@@ -1231,7 +1267,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             serialized_length = len(secrets_blob)
         except Exception as serialize_exc:  # pragma: no cover - diagnostics only
             _LOGGER.debug(
-                "Failed to serialize encryptedUserSecrets for length check: %s",
+                "Failed to serialize the encrypted key container for length check: %s",
                 serialize_exc,
             )
 
@@ -1243,31 +1279,36 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 raw_encrypted_identity_key, cache=cache, device_id=canonic_id
             )
 
-        _LOGGER.debug(
-            "[DIAG-SECRETS] Structure Analysis:\n"
-            "  - DeviceReg String: %s\n"
-            "  - Secrets Container Type: %s\n"
-            "  - Secrets Serialized Length: %s bytes\n"
-            "  - EncryptedIdentityKey Length: %s bytes\n"
-            "  - EncryptedIdentityKey Type: %s\n"
-            "  - EncryptedIdentityKey Hex: %s",
-            device_registration,
-            type(encrypted_user_secrets),
-            serialized_length if serialized_length is not None else "Unknown",
-            len(raw_encrypted_identity_key) if raw_encrypted_identity_key else "None",
-            type(raw_encrypted_identity_key),
-            raw_encrypted_identity_key.hex() if raw_encrypted_identity_key else "None",
-        )
+        # Structure only: field names, types and lengths. Neither the
+        # registration message (its text format prints the key escaped) nor
+        # the key bytes themselves are logged (AGENTS.md section 5). Guarded:
+        # the field walk runs per device on the event loop.
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "[DIAG-SECRETS] Structure Analysis:\n"
+                "  - DeviceReg Fields: %s\n"
+                "  - Secrets Container Type: %s\n"
+                "  - Secrets Serialized Length: %s bytes\n"
+                "  - EncryptedIdentityKey Length: %s bytes\n"
+                "  - EncryptedIdentityKey Type: %s",
+                [field.name for field, _value in device_registration.ListFields()],
+                type(encrypted_user_secrets),
+                serialized_length if serialized_length is not None else "Unknown",
+                len(raw_encrypted_identity_key)
+                if raw_encrypted_identity_key
+                else "None",
+                type(raw_encrypted_identity_key),
+            )
 
         if (
             serialized_length is not None
-            and serialized_length > _SECRETS_STRUCT_LEN_THRESHOLD
+            and serialized_length > _STRUCTURED_PAYLOAD_LEN_THRESHOLD
         ):
             _LOGGER.warning(
                 "[DIAG-ALERT] encryptedUserSecrets serialized length is %d bytes (> %d)."
                 " This suggests a wrapped/structured payload instead of a raw key.",
                 serialized_length,
-                _SECRETS_STRUCT_LEN_THRESHOLD,
+                _STRUCTURED_PAYLOAD_LEN_THRESHOLD,
             )
 
         if (
@@ -1301,14 +1342,14 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 prefix_bytes = secrets_blob[prefix_start:offset]
                 suffix_start = offset + len(raw_encrypted_identity_key)
                 suffix_bytes = secrets_blob[suffix_start : suffix_start + 10]
+                # Offset and lengths only; the surrounding bytes are part of
+                # the secrets blob and are never logged (AGENTS.md section 5).
                 _LOGGER.debug(
                     "[DIAG-SECRETS-BYTE-SCAN] Cloud key located inside encryptedUserSecrets at offset %d."
-                    " Prefix (%d bytes): %s | Suffix (%d bytes): %s",
+                    " Prefix (%d bytes) | Suffix (%d bytes)",
                     offset,
                     len(prefix_bytes),
-                    prefix_bytes.hex(),
                     len(suffix_bytes),
-                    suffix_bytes.hex(),
                 )
             else:
                 _LOGGER.debug(
@@ -1316,7 +1357,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     " This suggests the blob holds a distinct container or wrapped value."
                 )
     except Exception as exc:  # pragma: no cover - diagnostics only
-        _LOGGER.warning("[DIAG-ERROR] Failed to inspect secrets: %s", exc)
+        _LOGGER.warning(
+            "[DIAG-ERROR] Failed to inspect the encrypted key container: %s", exc
+        )
         raw_encrypted_identity_key = b""
 
     raw_encrypted_identity_key = bytes(raw_encrypted_identity_key)
@@ -1567,6 +1610,18 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     _own_encrypted_report_count = 0  # Own (Owner-key) reports attempted
     _own_auth_failures = 0  # Own-report MAC / InvalidTag failures
     _own_report_success = False  # At least one own report authenticated OK
+    # P-256 crowdsourced reports that no key and no reading authenticated. Kept
+    # apart from _auth_failures: the readings are provisional, so a miss says
+    # nothing about the cached EIK and must not invalidate it (Z11).
+    _p256_auth_failures = 0
+    # The part of them counted in _auth_failures: misses on a device for which
+    # a reading has already decrypted a report.
+    _p256_counted_failures = 0
+    # Foreign reports whose outcome says nothing about the cached EIK: P-256
+    # misses, an Sx length without a curve, a malformed payload. They leave the
+    # denominator of the invalidation below, so an auth failure beside them
+    # still counts as "every key-relevant report failed" (CX-5).
+    _key_neutral_report_count = 0
 
     # FIX #155: Prepare all identity key candidates for multi-candidate retry.
     # async_retrieve_identity_key can return multiple candidates (MCU bit-flip
@@ -1648,54 +1703,60 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             else:
                 # FIX #155: Foreign/crowdsourced reports use ECDH + AES-EAX
                 # with a different key derivation path than own reports.
-                # Try all identity key candidates before giving up.
+                # decrypt_foreign_report tries every identity key candidate and
+                # every reading of the curve before giving up; failures are
+                # classified by type in the handlers below.
                 time_offset = 0 if is_mcu else loc.geoLocation.deviceTimeOffset
+                foreign_keys = all_identity_keys or (
+                    [active_identity_key] if active_identity_key else []
+                )
                 decrypted_location_raw = None
-                _last_foreign_exc: Exception | None = None
-                for _candidate_idx, candidate_key in enumerate(
-                    all_identity_keys
-                    or ([active_identity_key] if active_identity_key else [])
-                ):
-                    try:
-                        decrypted_location_raw = await _offload_decrypt_foreign(
-                            candidate_key,
-                            encrypted_location,
-                            public_key_random,
-                            time_offset,
+                # With no candidate at all, decrypt_foreign_report would reject
+                # the empty key list as a generic ValueError; skip the attempt
+                # and let the payload check below drop the report.
+                if foreign_keys:
+                    foreign_result = await _offload_decrypt_foreign(
+                        foreign_keys,
+                        encrypted_location,
+                        public_key_random,
+                        time_offset,
+                        FOREIGN_READING_TRACKER.preferred(device_key)
+                        if device_key is not None
+                        else None,
+                    )
+                    decrypted_location_raw = foreign_result.plaintext
+                    candidate_key = foreign_keys[foreign_result.key_index]
+                    # Promote successful alternate candidate for remaining reports
+                    # and sync identity_key_bytes so payload construction uses
+                    # the key that actually decrypted.
+                    if candidate_key != active_identity_key:
+                        active_identity_key = candidate_key
+                        identity_key_bytes = bytes(candidate_key)
+                        # Sync metadata_update and metadata so the
+                        # promoted key persists to cache/payload
+                        # instead of the original stale value.
+                        metadata_update["identity_key"] = identity_key_bytes
+                        metadata_update["identityKey"] = identity_key_bytes
+                        metadata["identity_key"] = identity_key_bytes
+                        metadata["identityKey"] = identity_key_bytes
+                        # Reorder candidates so the promoted key is
+                        # tried first for remaining reports.
+                        all_identity_keys.remove(candidate_key)
+                        all_identity_keys.insert(0, candidate_key)
+                        # Keep payload-facing list in sync so
+                        # persisted candidates reflect the promotion.
+                        identity_key_candidate_bytes = list(all_identity_keys)
+                        _LOGGER.info(
+                            "Foreign decryption succeeded with alternate "
+                            "identity key candidate (index=%d)",
+                            foreign_result.key_index,
                         )
-                        # Promote successful alternate candidate for remaining reports
-                        # and sync identity_key_bytes so payload construction uses
-                        # the key that actually decrypted.
-                        if candidate_key != active_identity_key:
-                            active_identity_key = candidate_key
-                            identity_key_bytes = bytes(candidate_key)
-                            # Sync metadata_update and metadata so the
-                            # promoted key persists to cache/payload
-                            # instead of the original stale value.
-                            metadata_update["identity_key"] = identity_key_bytes
-                            metadata_update["identityKey"] = identity_key_bytes
-                            metadata["identity_key"] = identity_key_bytes
-                            metadata["identityKey"] = identity_key_bytes
-                            # Reorder candidates so the promoted key is
-                            # tried first for remaining reports.
-                            all_identity_keys.remove(candidate_key)
-                            all_identity_keys.insert(0, candidate_key)
-                            # Keep payload-facing list in sync so
-                            # persisted candidates reflect the promotion.
-                            identity_key_candidate_bytes = list(all_identity_keys)
-                            _LOGGER.info(
-                                "Foreign decryption succeeded with alternate "
-                                "identity key candidate (index=%d)",
-                                _candidate_idx,
-                            )
-                        _last_foreign_exc = None
-                        break
-                    except (InvalidTag, ValueError) as _candidate_exc:
-                        _last_foreign_exc = _candidate_exc
-                        continue
-
-                if decrypted_location_raw is None and _last_foreign_exc is not None:
-                    raise _last_foreign_exc
+                    if device_key is not None:
+                        FOREIGN_READING_TRACKER.note_success(
+                            device_key,
+                            foreign_result.reading,
+                            len(public_key_random),
+                        )
 
             decrypted_location = _ensure_bytes(decrypted_location_raw)
             if decrypted_location is None:
@@ -1720,6 +1781,89 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     name="",
                 )
             )
+        except UnsupportedCurveError as unsupported_exc:
+            # The Sx length maps to no curve; no key can change that. The
+            # tracker WARNING needs a canonical ID; without one: DEBUG only.
+            _key_neutral_report_count += 1
+            if device_key is not None:
+                FOREIGN_READING_TRACKER.note_unsupported(
+                    device_key, unsupported_exc.sx_len
+                )
+            _LOGGER.debug(
+                "Skipping one foreign report: %s (time_offset=%s)",
+                unsupported_exc,
+                time_offset,
+            )
+        except ForeignReportAuthError as foreign_auth_exc:
+            if foreign_auth_exc.curve_name == SECP160R1.name and (
+                canonic_id is not None
+                and FOREIGN_READING_TRACKER.locked_curve(canonic_id) == SECP256R1.name
+            ):
+                # The resolver locked this device to a P-256 EID. A 20-byte Sx
+                # then comes from a finder that read only part of it
+                # (MODERN_P256_X20_TRUNC_*); no key can authenticate such a
+                # report, so it says nothing about the cached EIK.
+                _key_neutral_report_count += 1
+                _LOGGER.debug(
+                    "Skipping one secp160r1 foreign report of a device locked "
+                    "to a P-256 EID (time_offset=%s): %s",
+                    time_offset,
+                    foreign_auth_exc,
+                )
+            elif foreign_auth_exc.curve_name == SECP160R1.name:
+                # Same meaning as InvalidTag: the report did not authenticate
+                # with the cached key candidates.
+                _auth_failures += 1
+                _LOGGER.debug(
+                    "Decryption auth failed for foreign report "
+                    "(time_offset=%s, key_len=%s, candidates=%d): %s",
+                    time_offset,
+                    len(active_identity_key) if active_identity_key else 0,
+                    len(all_identity_keys),
+                    foreign_auth_exc,
+                )
+            else:
+                _p256_auth_failures += 1
+                if (
+                    device_key is not None
+                    and FOREIGN_READING_TRACKER.preferred(device_key) is not None
+                ):
+                    # A reading has decrypted this device before, so a miss
+                    # with every key and reading is the stale-key signal a
+                    # SECP160R1 failure gives.
+                    _auth_failures += 1
+                    _p256_counted_failures += 1
+                else:
+                    # Z11: while no reading has worked for the device, a miss
+                    # says nothing about the cached key.
+                    _key_neutral_report_count += 1
+                if device_key is not None:
+                    FOREIGN_READING_TRACKER.note_all_failed(
+                        device_key,
+                        foreign_auth_exc.curve_name,
+                        len(public_key_random),
+                        foreign_auth_exc.readings_tried,
+                        poll_id,
+                    )
+                # Per report DEBUG only; the thresholded WARNING comes from
+                # the foreign-reading tracker, which needs a canonical ID.
+                # Without one this report stays at DEBUG.
+                _LOGGER.debug(
+                    "No provisional reading authenticated one foreign report "
+                    "(time_offset=%s, candidates=%d): %s",
+                    time_offset,
+                    len(all_identity_keys),
+                    foreign_auth_exc,
+                )
+        except ForeignReportStructureError as structure_exc:
+            # Short payload or an Sx that is not on the curve: unusable
+            # independently of the key, so it is no authentication signal.
+            _key_neutral_report_count += 1
+            _LOGGER.debug(
+                "Skipping one malformed foreign report: %s (time_offset=%s)",
+                structure_exc,
+                time_offset,
+            )
         except InvalidTag:
             # InvalidTag means AES-GCM authentication failed during decryption.
             _auth_failures += 1
@@ -1742,31 +1886,13 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 len(all_identity_keys),
             )
         except ValueError as ve:
-            # FIX: PyCryptodome's AES-EAX decrypt_and_verify() raises
-            # ValueError("MAC check failed") on tag mismatch.  This is NOT
-            # malformed data — it is an authentication failure identical in
-            # meaning to InvalidTag from the cryptography library.
-            if "mac" in str(ve).lower():
-                _auth_failures += 1
-                if public_key_random == b"":  # Own-report auth failure
-                    _own_auth_failures += 1
-                # Same class as InvalidTag above (PyCryptodome AES-EAX raises
-                # ValueError("MAC check failed") on the same tag mismatch);
-                # per-report detail diagnostics, DEBUG, no reauth advice.
-                _LOGGER.debug(
-                    "Decryption auth failed (MAC check) for %s report "
-                    "(time_offset=%s, key_len=%s, candidates=%d): %s",
-                    "own" if public_key_random == b"" else "foreign",
-                    time_offset if public_key_random != b"" else "N/A",
-                    len(active_identity_key) if active_identity_key else 0,
-                    len(all_identity_keys),
-                    ve,
-                )
-            else:
-                _LOGGER.warning(
-                    "Failed to process one location report (malformed data): %s",
-                    ve,
-                )
+            # Plain ValueError: bad lengths or data outside the foreign-report
+            # taxonomy. Authentication failures are typed (InvalidTag above,
+            # ForeignReportAuthError above) and never classified by text.
+            _LOGGER.warning(
+                "Failed to process one location report (malformed data): %s",
+                ve,
+            )
         except (AttributeError, KeyError, TypeError) as expected_exc:
             # Expected errors from malformed protobuf data - log at warning level
             _LOGGER.warning(
@@ -1781,13 +1907,23 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 exc_info=True,
             )
 
+    if _p256_auth_failures:
+        _LOGGER.debug(
+            "%d crowdsourced P-256 report(s) failed with every provisional "
+            "reading; %d of them counted toward identity key cache "
+            "invalidation (a reading had decrypted the device before).",
+            _p256_auth_failures,
+            _p256_counted_failures,
+        )
+
     # FIX: When ALL encrypted reports fail authentication, the cached EIK is
     # likely stale (e.g., after key rotation, re-pairing, or E2EE reset).
     # Invalidate the cache so the next attempt forces a fresh key derivation.
+    # Key-neutral foreign reports are left out of the denominator (CX-5).
     if (
         _auth_failures > 0
         and _encrypted_report_count > 0
-        and _auth_failures >= _encrypted_report_count
+        and _auth_failures >= _encrypted_report_count - _key_neutral_report_count
         and raw_encrypted_identity_key
     ):
         owner_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
@@ -1803,7 +1939,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         # untouched.
         if removed:
             _LOGGER.debug(
-                "All %d encrypted location reports failed authentication; "
+                "All %d key-relevant encrypted location reports failed authentication; "
                 "invalidated %d cached identity key(s) to force re-derivation "
                 "on the next poll.",
                 _auth_failures,
@@ -1811,7 +1947,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             )
         else:
             _LOGGER.debug(
-                "All %d encrypted location reports failed authentication "
+                "All %d key-relevant encrypted location reports failed authentication "
                 "but no cached keys were found to invalidate.",
                 _auth_failures,
             )

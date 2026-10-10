@@ -12,12 +12,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
+from tests.helpers.single_owner_device_registry import SingleOwnerDeviceRegistry
 
 pytestmark = pytest.mark.asyncio
 
@@ -257,7 +257,17 @@ async def test_async_purge_unloaded_subentry_registrations_removes_registries() 
 
     hass = SimpleNamespace()
     ent_reg = er.async_get(hass)
-    dev_reg = dr.async_get(hass)
+    # The shared single-owner double, per ``tests/AGENTS.md``: this path gives up
+    # an ownership link, and on a single-owner core that *is* the deletion. Only
+    # a double carrying the Core 2026.8 rules can show that; the generic stub
+    # would answer "link dropped" and never remove the device.
+    #
+    # This case is green on the previous state too -- there the core-side
+    # deletion happened inside ``async_update_device``. It is a regression
+    # guard for the outcome, and the two tests below it are the ones that pin
+    # the planner path itself.
+    dev_reg = SingleOwnerDeviceRegistry()
+    hass._device_registry_stub = dev_reg  # noqa: SLF001 - conftest lookup key
 
     parent_entry_id = "parent-entry"
     config_subentry_id = "tracker-subentry"
@@ -277,21 +287,18 @@ async def test_async_purge_unloaded_subentry_registrations_removes_registries() 
         config_entry_subentry_id="other-subentry",
     )
 
-    purged_device = dev_reg.async_get_or_create(
-        config_entry_id=parent_entry_id,
+    dev_reg.add_config_entry(parent_entry_id, {config_subentry_id, "other-subentry"})
+    purged_device = dev_reg.add_device(
         identifiers={(DOMAIN, "device-to-purge")},
-        manufacturer="Apple",
-        model="iPhone",
-        name="Tracker",
-        config_subentry_id=config_subentry_id,
-    )
-    dev_reg.async_get_or_create(
         config_entry_id=parent_entry_id,
+        config_subentry_id=config_subentry_id,
+        name="Tracker",
+    )
+    dev_reg.add_device(
         identifiers={(DOMAIN, "device-keep")},
-        manufacturer="Apple",
-        model="iPad",
-        name="Other Tracker",
+        config_entry_id=parent_entry_id,
         config_subentry_id="other-subentry",
+        name="Other Tracker",
     )
 
     (
@@ -308,10 +315,15 @@ async def test_async_purge_unloaded_subentry_registrations_removes_registries() 
     assert removed_devices == 1
     assert ent_reg.async_get("device_tracker.tracker_one") is None
     assert ent_reg.async_get("device_tracker.tracker_two") is not None
-    assert purged_device.id in dev_reg.removed
+    # The resulting ownership is the assertion, not the keywords the planner
+    # picked (``tests/AGENTS.md``, registry stub checklist item 5). The device
+    # that gave up its only ownership link is gone; the one in the other
+    # subentry is untouched.
+    assert dev_reg.async_get(purged_device.id) is None
     remaining_devices = list(dev_reg.devices.values())
     assert len(remaining_devices) == 1
     assert remaining_devices[0].config_subentry_id == "other-subentry"
+    assert remaining_devices[0].config_entry_id == parent_entry_id
 
 
 async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
@@ -319,7 +331,9 @@ async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
 
     hass = SimpleNamespace()
     ent_reg = er.async_get(hass)
-    dev_reg = dr.async_get(hass)
+    # Shared single-owner double, see the purge test above.
+    dev_reg = SingleOwnerDeviceRegistry()
+    hass._device_registry_stub = dev_reg  # noqa: SLF001 - conftest lookup key
 
     parent_entry_id = "parent-entry"
     config_subentry_id = "tracker-subentry"
@@ -331,13 +345,12 @@ async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
         config_entry_id=parent_entry_id,
         config_entry_subentry_id=config_subentry_id,
     )
-    device_entry = dev_reg.async_get_or_create(
-        config_entry_id=parent_entry_id,
+    dev_reg.add_config_entry(parent_entry_id, {config_subentry_id})
+    device_entry = dev_reg.add_device(
         identifiers={(DOMAIN, "device-to-purge")},
-        manufacturer="Apple",
-        model="iPhone",
-        name="Tracker",
+        config_entry_id=parent_entry_id,
         config_subentry_id=config_subentry_id,
+        name="Tracker",
     )
 
     class _ConfigEntriesStub:
@@ -367,7 +380,7 @@ async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
     assert result is True
     assert subentry.runtime_data is None
     assert ent_reg.async_get("device_tracker.tracker_one") is None
-    assert device_entry.id in dev_reg.removed
+    assert dev_reg.async_get(device_entry.id) is None
     assert hass.config_entries.unload_calls == [(subentry, integration.PLATFORMS)]
 
 
@@ -814,3 +827,208 @@ async def test_async_unload_entry_rolls_back_when_parent_unload_fails(
     # Coordinator and token cache must not shut down on abort.
     assert coordinator.shutdown_called is False
     assert token_cache.closed is False
+
+
+async def test_purge_refuses_a_device_whose_ownership_it_cannot_read() -> None:
+    """A planner refusal ends this device, not the purge and not by guessing.
+
+    ``plan_device_ownership`` raises when it would have to guess at an ownership
+    state it cannot read. On a single-owner core a guess here means deleting a
+    device, so the purge logs and moves on to the next device rather than
+    forcing the call through.
+    """
+
+    hass = SimpleNamespace()
+    er.async_get(hass)
+    dev_reg = SingleOwnerDeviceRegistry()
+    hass._device_registry_stub = dev_reg  # noqa: SLF001 - conftest lookup key
+
+    parent_entry_id = "parent-entry"
+    config_subentry_id = "tracker-subentry"
+    dev_reg.add_config_entry(parent_entry_id, {config_subentry_id})
+    device = dev_reg.add_device(
+        identifiers={(DOMAIN, "device-to-purge")},
+        config_entry_id=parent_entry_id,
+        config_subentry_id=config_subentry_id,
+        name="Tracker",
+    )
+
+    def _refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise ValueError("ownership unknown")
+
+    with patch.object(
+        integration.coordinator.helpers.registry,
+        "plan_device_ownership",
+        _refuse,
+    ):
+        (
+            removed_entities,
+            removed_devices,
+        ) = await integration._async_purge_unloaded_subentry_registrations(  # type: ignore[arg-type]
+            hass,
+            parent_entry_id=parent_entry_id,
+            config_subentry_id=config_subentry_id,
+            entry_type=SUBENTRY_TYPE_TRACKER,
+        )
+
+    assert (removed_entities, removed_devices) == (0, 0)
+    assert dev_reg.async_get(device.id) is not None
+
+
+async def test_purge_counts_nothing_when_the_plan_is_empty() -> None:
+    """An empty plan is "nothing to do", and must not be counted as a removal.
+
+    The planner answers with an empty plan when the link the caller wants to give
+    up is not the link the device sits on. Counting that as a removed device
+    would put a number into the log that no registry operation backs.
+    """
+
+    hass = SimpleNamespace()
+    er.async_get(hass)
+    dev_reg = SingleOwnerDeviceRegistry()
+    hass._device_registry_stub = dev_reg  # noqa: SLF001 - conftest lookup key
+
+    parent_entry_id = "parent-entry"
+    config_subentry_id = "tracker-subentry"
+    dev_reg.add_config_entry(parent_entry_id, {config_subentry_id})
+    device = dev_reg.add_device(
+        identifiers={(DOMAIN, "device-to-purge")},
+        config_entry_id=parent_entry_id,
+        config_subentry_id=config_subentry_id,
+        name="Tracker",
+    )
+
+    with patch.object(
+        integration.coordinator.helpers.registry,
+        "plan_device_ownership",
+        lambda *_args, **_kwargs: (),
+    ):
+        (
+            removed_entities,
+            removed_devices,
+        ) = await integration._async_purge_unloaded_subentry_registrations(  # type: ignore[arg-type]
+            hass,
+            parent_entry_id=parent_entry_id,
+            config_subentry_id=config_subentry_id,
+            entry_type=SUBENTRY_TYPE_TRACKER,
+        )
+
+    assert (removed_entities, removed_devices) == (0, 0)
+    assert dev_reg.async_get(device.id) is not None
+
+
+class _LegacyPurgeRegistry:
+    """A pre-2026.8 device registry, as Core ``2025.9.1`` presents it.
+
+    Two properties decide this test and neither is in the shared single-owner
+    double, which models the *newer* core:
+
+    * The signature carries ``add_config_subentry_id`` and no ``new_*`` pair, so
+      ``detect_device_registry_capabilities`` reads ``single_owner_model=False``
+      and the planner takes its legacy branch (`registry.py`, the DETACH branch).
+    * ``async_update_device`` with the removal pair drops the named subentry link
+      and deletes the device **only** when this was its last owning entry, which
+      is Core's rule at tag ``2025.9.1``, lines 1174-1177. A device another entry
+      still owns survives.
+
+    Device entries carry ``config_entries`` and ``config_entries_subentries``,
+    the ownership fields of that core; they carry neither ``config_entry_id`` nor
+    ``config_subentry_id``, which that core does not have.
+    """
+
+    def __init__(self) -> None:
+        self.devices: dict[str, SimpleNamespace] = {}
+        self.removed: list[str] = []
+        self._next = 0
+
+    def add_device(
+        self, *, owners: dict[str, set[str | None]], identifiers: set[Any]
+    ) -> SimpleNamespace:
+        """Register a device owned by ``owners`` (entry id -> subentry links)."""
+        self._next += 1
+        device = SimpleNamespace(
+            id=f"legacy-device-{self._next}",
+            identifiers=set(identifiers),
+            config_entries=set(owners),
+            config_entries_subentries={k: set(v) for k, v in owners.items()},
+            name=None,
+        )
+        self.devices[device.id] = device
+        return device
+
+    def async_get(self, device_id: str) -> SimpleNamespace | None:
+        return self.devices.get(device_id)
+
+    def async_entries_for_config_entry(self, entry_id: str) -> list[SimpleNamespace]:
+        return [d for d in self.devices.values() if entry_id in d.config_entries]
+
+    def async_remove_device(self, device_id: str) -> None:
+        self.devices.pop(device_id, None)
+        self.removed.append(device_id)
+
+    def async_update_device(
+        self,
+        *,
+        device_id: str,
+        add_config_entry_id: Any = None,
+        add_config_subentry_id: Any = None,
+        remove_config_entry_id: Any = None,
+        remove_config_subentry_id: Any = None,
+        **_extra: Any,
+    ) -> SimpleNamespace | None:
+        device = self.devices[device_id]
+        if remove_config_entry_id is None:
+            return device
+        links = device.config_entries_subentries.get(remove_config_entry_id, set())
+        links.discard(remove_config_subentry_id)
+        if not links:
+            device.config_entries_subentries.pop(remove_config_entry_id, None)
+            device.config_entries.discard(remove_config_entry_id)
+        if not device.config_entries:
+            self.async_remove_device(device_id)
+            return None
+        return device
+
+
+async def test_purge_on_a_legacy_core_keeps_a_device_another_entry_owns() -> None:
+    """On Core 2025.9.1 the purge drops a link; Core decides about deletion.
+
+    This is the branch the declared minimum runs, and the one the production
+    comment calls load-bearing: no direct ``async_remove_device`` is written for
+    it, because a device that a second config entry still owns must survive
+    losing ours. The shared single-owner double cannot show this -- there a
+    device has one owner by construction.
+    """
+
+    hass = SimpleNamespace()
+    er.async_get(hass)
+    dev_reg = _LegacyPurgeRegistry()
+    hass._device_registry_stub = dev_reg  # noqa: SLF001 - conftest lookup key
+
+    parent = "parent-entry"
+    subentry = "tracker-subentry"
+
+    shared = dev_reg.add_device(
+        owners={parent: {subentry}, "other-entry": {None}},
+        identifiers={(DOMAIN, "shared-device")},
+    )
+    only_ours = dev_reg.add_device(
+        owners={parent: {subentry}},
+        identifiers={(DOMAIN, "our-device")},
+    )
+
+    _, removed_devices = await integration._async_purge_unloaded_subentry_registrations(  # type: ignore[arg-type]
+        hass,
+        parent_entry_id=parent,
+        config_subentry_id=subentry,
+        entry_type=SUBENTRY_TYPE_TRACKER,
+    )
+
+    assert removed_devices == 2
+    # The shared device lost our link and survives on the other entry.
+    surviving = dev_reg.async_get(shared.id)
+    assert surviving is not None
+    assert surviving.config_entries == {"other-entry"}
+    # The device only we owned is gone, and Core removed it, not us.
+    assert dev_reg.async_get(only_ours.id) is None
+    assert dev_reg.removed == [only_ours.id]

@@ -20,9 +20,11 @@ Empiricism trace (CA-MOCK-001 / CA-ASSERTION-EMPIRIE-001):
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -388,6 +390,38 @@ class TestMapApiExcToErrorKey:
     def test_plain_runtime_error_unknown(self) -> None:
         assert cf._map_api_exc_to_error_key(RuntimeError("boom")) == "unknown"
 
+    def test_the_two_mapper_rows_the_device_list_narrowing_relies_on(self) -> None:
+        """Characterisation of the MAPPER only; it does not pin the narrowing.
+
+        Read the name literally: this asserts the two rows of
+        `_map_api_exc_to_error_key` that the device-list change depends on, and
+        nothing more. Both rows are true with or without that change, so
+        reverting `api.py`'s client-error branch leaves this test green. The end
+        to end pin lives in
+        `tests/test_api_basics.py::TestAsyncBasicDeviceListErrorMapping::test_a_rejected_probe_reaches_the_config_flow_as_a_non_auth_key`,
+        which takes the exception from the narrowed handler itself.
+
+        The device-list handler used to raise ConfigEntryAuthFailed for every
+        non-retryable 4xx. That class carries "auth" in its name, so a probe
+        rejected with 400/404/422 showed the user ``invalid_auth`` and sent an
+        intact sign-in to the re-authentication form. It now raises
+        UpdateFailed, which matches neither the name test nor the status test
+        above and therefore ends at ``unknown``.
+
+        Both rows are already true today; this test pins the pair so the shift
+        is a recorded decision rather than a silent change of a user-facing
+        message. Retire it when a dedicated error key for "the server refused
+        the request" exists, which needs strings.json and the full translation
+        sync of its own.
+        """
+        from homeassistant.exceptions import ConfigEntryAuthFailed
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        assert cf._map_api_exc_to_error_key(UpdateFailed("x")) == "unknown"
+        assert (
+            cf._map_api_exc_to_error_key(ConfigEntryAuthFailed("x")) == "invalid_auth"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Block F: secrets extractors (cf.py lines 1167-1251)
@@ -526,14 +560,13 @@ class TestCandLabels:
 
 
 class TestLogTokenValidationFailure:
-    """Empiricism: emits a single warning with masked email + candidate sources."""
+    """Empiricism: emits a single warning with the candidate sources only."""
 
-    def test_emits_warning_with_masked_email(
+    def test_emits_warning_with_candidate_sources(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         caplog.set_level(logging.WARNING, logger=cf._LOGGER.name)
         cf._log_token_validation_failure(
-            email="user@example.com",
             candidates=[("aas_token", "x" * 16)],
         )
         assert any(
@@ -719,8 +752,13 @@ class TestInterpretReauthChoice:
         assert (method, data, err) == (None, None, "invalid_token")
 
     def test_token_only_path_falls_through_to_choose_one(self) -> None:
-        # The manual reauth token path is intentionally disabled — falls through
-        # to "choose_one" until re-enabled.
+        # The manual reauth token path was removed, not merely disabled (see
+        # agents/config_flow/AGENTS.md and tests/test_manual_reauth_removal_guard.py).
+        # The field is still read, but for this shape the read changes nothing:
+        # without it the same submission would end at the exclusivity check with
+        # the same "choose_one". The read is load-bearing only when both halves
+        # arrive at once, where it stops the bundle half from winning. Reviving
+        # the path needs an amendment to that contract, not a re-enable.
         method, data, err = cf._interpret_reauth_choice(
             {"secrets_json": "", "new_oauth_token": "a" * 32}
         )
@@ -1025,62 +1063,6 @@ class TestDiscoveryFlowError:
         assert "invalid_discovery_info" in str(err)
 
 
-class TestDiscoveryPayloadEquivalent:
-    """Empiricism: lines 1632-1646 — three layered equality checks."""
-
-    def _make(
-        self,
-        *,
-        email: str = "user@example.com",
-        uid: str = "acct:user@example.com",
-        cands: tuple[tuple[str, str], ...] = (("aas_token", "x" * 16),),
-        bundle: Any | None = None,
-        title: str | None = None,
-    ) -> cf.CloudDiscoveryData:
-        return cf.CloudDiscoveryData(
-            email=email,
-            unique_id=uid,
-            candidates=cands,
-            secrets_bundle=bundle,
-            title=title,
-        )
-
-    def test_equal_when_all_fields_match(self) -> None:
-        a = self._make()
-        b = self._make()
-        assert cf._discovery_payload_equivalent(a, b) is True
-
-    def test_differing_unique_id(self) -> None:
-        a = self._make(uid="acct:a")
-        b = self._make(uid="acct:b")
-        assert cf._discovery_payload_equivalent(a, b) is False
-
-    def test_differing_email(self) -> None:
-        a = self._make(email="a@x.com")
-        b = self._make(email="b@x.com")
-        assert cf._discovery_payload_equivalent(a, b) is False
-
-    def test_differing_candidates(self) -> None:
-        a = self._make(cands=(("x", "y" * 16),))
-        b = self._make(cands=(("x", "z" * 16),))
-        assert cf._discovery_payload_equivalent(a, b) is False
-
-    def test_both_bundles_none_remains_equal(self) -> None:
-        a = self._make(bundle=None)
-        b = self._make(bundle=None)
-        assert cf._discovery_payload_equivalent(a, b) is True
-
-    def test_one_bundle_none_is_not_equivalent(self) -> None:
-        a = self._make(bundle=None)
-        b = self._make(bundle={"k": "v"})
-        assert cf._discovery_payload_equivalent(a, b) is False
-
-    def test_equal_bundles_match(self) -> None:
-        a = self._make(bundle={"k": "v"})
-        b = self._make(bundle={"k": "v"})
-        assert cf._discovery_payload_equivalent(a, b) is True
-
-
 class TestNormalizeAndValidateDiscoveryPayload:
     """Empiricism: lines 1649-1740 — multi-branch normalizer for discovery info."""
 
@@ -1249,3 +1231,116 @@ class TestModuleConstants:
     def test_step_secrets_schema_passes_through_string(self) -> None:
         validated = cf.STEP_SECRETS_DATA_SCHEMA({"secrets_json": "{}"})
         assert validated == {"secrets_json": "{}"}
+
+
+class TestLoggingNeverLeaksAccountAddresses:
+    """No log call in the account-facing modules may pass a raw address.
+
+    `AGENTS.md` section 5 forbids logging email addresses outright. Written as
+    an AST walk rather than as a pin on the sites that were found, because the
+    leak reappears with every new log line, in a shape nobody predicted: the
+    two sites fixed here were a bare name, but an f-string, an attribute, a
+    subscript or a helpfully wrapping `str()` leak exactly as much. A value is
+    considered handled only when a *masking* helper wraps it; any other call
+    around it is treated as still leaking.
+
+    Scope is the modules this feature owns. Older subsystems (`NovaApi`,
+    `SpotApi`, `Auth`) carry the same class of leak and are deliberately NOT
+    silently included here: widening the rule without fixing them would only
+    produce a red suite, and fixing them belongs in its own change.
+    """
+
+    _MODULES = (
+        "config_flow.py",
+        "__init__.py",
+        "discovery.py",
+    )
+    _EMAIL_NAMES = frozenset(
+        {
+            "account_email",
+            "email",
+            "email_key",
+            "extracted_email",
+            "fixed_email",
+            "google_email",
+            "normalised_email",
+            "normalized_email",
+            "raw_email",
+            "user_email",
+            "username",
+        }
+    )
+    _MASKERS = frozenset({"_mask_email_for_logs", "_redact_account_for_log"})
+
+    @classmethod
+    def _leaks(cls, node: ast.AST) -> list[str]:
+        """Names of address-carrying leaves reachable without a masker."""
+
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else getattr(func, "id", "")
+            )
+            if name in cls._MASKERS:
+                return []
+
+        found: list[str] = []
+        for child in ast.iter_child_nodes(node):
+            found.extend(cls._leaks(child))
+        if isinstance(node, ast.Name) and node.id in cls._EMAIL_NAMES:
+            found.append(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in cls._EMAIL_NAMES:
+            found.append(node.attr)
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value in cls._EMAIL_NAMES
+        ):
+            found.append(str(node.slice.value))
+        return found
+
+    def test_no_log_call_passes_an_unmasked_address(self) -> None:
+        component = Path(cf.__file__).resolve().parent
+
+        offenders: list[str] = []
+        masked_calls = 0
+        for module in self._MODULES:
+            path = component / module
+            assert path.is_file(), f"{module} not found; the guard would be vacuous"
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                receiver = (
+                    func.value.id
+                    if isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    else ""
+                )
+                if "LOG" not in receiver.upper():
+                    continue
+                arguments: list[ast.AST] = [
+                    *node.args,
+                    *(kw.value for kw in node.keywords),
+                ]
+                if any(
+                    isinstance(a, ast.Call)
+                    and getattr(a.func, "id", getattr(a.func, "attr", ""))
+                    in self._MASKERS
+                    for a in arguments
+                ):
+                    masked_calls += 1
+                for argument in arguments:
+                    for leaf in self._leaks(argument):
+                        offenders.append(f"{module}:{argument.lineno}: {leaf}")
+
+        # Vacuum control: a renamed logger or a moved module would make the walk
+        # find nothing and report success. The masked calls prove it arrived.
+        assert masked_calls, "the walk reached no masked log call; the guard is vacuous"
+        assert not offenders, (
+            "log calls interpolate an unmasked address; wrap it in one of "
+            f"{sorted(self._MASKERS)}:\n" + "\n".join(sorted(set(offenders)))
+        )

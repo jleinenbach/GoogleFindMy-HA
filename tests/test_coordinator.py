@@ -329,6 +329,84 @@ def test_coordinator_propagates_timestamps_to_identity(
     assert identity.identity_key == metadata_only_payload["identity_key"]
 
 
+def test_identity_build_debug_record_omits_cached_payload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AGENTS.md section 5: the merged cache record is a payload and is not logged.
+
+    "Building Identity for ..." used to dump the merged device data; only its
+    key names may appear.
+    """
+    import hashlib
+    import logging
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
+
+    identity_key = hashlib.sha256(b"cached-identity-key").digest()
+    coordinator.update_device_cache(
+        "device-1",
+        {
+            "identity_key": identity_key,
+            "pair_date": 1_700_000_000,
+            "metadata_only": True,
+        },
+    )
+
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
+    registry_device = SimpleNamespace(
+        id="registry-id", disabled_by=None, custom_fields={"canonical_id": "device-1"}
+    )
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_get",
+        lambda hass: _StubRegistry(registry_device),
+    )
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+    caplog.set_level(logging.DEBUG, logger=coordinator_identity.__name__)
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    records = [
+        r.getMessage()
+        for r in caplog.records
+        if "Building Identity for" in r.getMessage()
+    ]
+    assert len(records) == 1
+    assert "cached_keys=" in records[0] and "identity_key" in records[0]
+    key_hex = identity_key.hex()
+    assert key_hex not in caplog.text
+    assert str(identity_key) not in caplog.text  # bytes repr form
+    assert all(
+        key_hex[i : i + 8] not in caplog.text for i in range(0, len(key_hex) - 7)
+    )
+
+
 def test_coordinator_persists_camelCase_identity_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

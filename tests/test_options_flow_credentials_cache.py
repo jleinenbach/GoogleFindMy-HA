@@ -28,6 +28,7 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
+    SoundDispatchOutcome,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
     start_sound_request as start_module,
@@ -159,10 +160,16 @@ class _DummyConfigEntries:
         self.removed_subentries.append(subentry_id)
         return True
 
-    async def async_reload(self, entry_id: str) -> None:
+    async def async_reload(self, entry_id: str) -> bool:
         assert DATA_AAS_TOKEN not in self._entry.data
         assert await self._entry.runtime_data.cache.get(DATA_AAS_TOKEN) is None
         self.reloaded.append(entry_id)
+        # The core returns ``bool`` and the release callback reads it: a falsy
+        # result means "ended without reloading" and hands the latch back. A
+        # double returning ``None`` would therefore report every successful
+        # reload as a failed one and silently defeat the coalescing this file
+        # asserts a few lines below.
+        return True
 
     async def async_setup(self, entry_id: str) -> bool:
         self.setup_calls.append(entry_id)
@@ -253,6 +260,103 @@ def test_options_flow_rotating_token_clears_cached_aas(
 
         await hass.drain_tasks()
         assert hass.config_entries.reloaded == [entry.entry_id]
+
+        # The reload is still on its way, and the entry update notifies the
+        # credential update listener as well. ``async_schedule_reload`` does not
+        # coalesce, so a second rotation must not add another unload/setup cycle.
+        second = await flow.async_step_credentials(
+            {
+                "new_oauth_token": "oauth-token-rotate-654321",
+                "subentry": TRACKER_SUBENTRY_KEY,
+            }
+        )
+        if inspect.isawaitable(second):
+            second = await second
+
+        await hass.drain_tasks()
+        assert hass.config_entries.reloaded == [entry.entry_id], (
+            "a reload is already on its way; a second one only tears the entry "
+            "down twice"
+        )
+
+    asyncio.run(_exercise())
+
+
+def test_options_flow_gives_the_latch_back_when_the_reload_dies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The options refresher reloads directly, so a dead task must free the latch.
+
+    This step claims the shared latch and then reloads in a fire-and-forget
+    task, which keeps the promise open for that task's whole lifetime. Home
+    Assistant rejects an unload for an entry in a lifecycle state that forbids
+    it, and the task dies with that rejection: none of the release points
+    (unload, setup, entry removal) runs, so a latch kept here would be permanent
+    and the *next* credential rotation would stand down with its new token
+    ineffective.
+    """
+
+    async def _exercise() -> None:
+        cache = _MemoryCache()
+        entry = _DummyEntry(
+            entry_id="entry-latch",
+            data={
+                CONF_GOOGLE_EMAIL: "user@example.com",
+                CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+            },
+            cache=cache,
+        )
+        hass = _DummyHass(entry, cache)
+
+        rejected: list[str] = []
+
+        async def _rejecting_reload(entry_id: str) -> None:
+            rejected.append(entry_id)
+            raise config_flow.OperationNotAllowed(entry_id)
+
+        hass.config_entries.async_reload = _rejecting_reload  # type: ignore[assignment]
+
+        flow = config_flow.OptionsFlowHandler()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.config_entry = entry  # type: ignore[attr-defined]
+
+        async def _fake_pick(
+            hass: Any,
+            email: str,
+            candidates: list[tuple[str, str]],
+            *,
+            secrets_bundle: dict[str, Any] | None = None,
+        ) -> str | None:
+            return candidates[0][1] if candidates else None
+
+        monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+        async def _rotate(token: str) -> None:
+            outcome = await flow.async_step_credentials(
+                {"new_oauth_token": token, "subentry": TRACKER_SUBENTRY_KEY}
+            )
+            if inspect.isawaitable(outcome):
+                await outcome
+            # The reload task raises; gathering it would re-raise here, and the
+            # rejection is the point of this test, not a failure of it.
+            await asyncio.gather(*hass._tasks, return_exceptions=True)
+            # ``gather`` returns as soon as the task is done, which is not the
+            # same instant as "every done-callback has run": the release
+            # callback and gather's own are both queued through
+            # ``loop.call_soon``. One extra turn removes the dependency on
+            # their registration order.
+            await asyncio.sleep(0)
+            hass._tasks.clear()
+
+        await _rotate("oauth-token-rotate-123456")
+        assert rejected == [entry.entry_id]
+
+        await _rotate("oauth-token-rotate-654321")
+        assert rejected == [entry.entry_id] * 2, (
+            "the first reload never arrived, so the latch had to go back; "
+            "without that release this rotation stands down and its token "
+            "stays ineffective until a restart"
+        )
 
     asyncio.run(_exercise())
 
@@ -389,10 +493,14 @@ def test_play_stop_sound_uses_entry_cache(  # noqa: PLR0915
         monkeypatch.setattr(start_module, "async_nova_request", _fake_start)
         monkeypatch.setattr(stop_module, "async_nova_request", _fake_stop)
 
-        success, request_uuid = await api_primary.async_play_sound("device-42")
+        play = await api_primary.async_play_sound("device-42")
+        success, request_uuid = play.accepted, play.cancel_key
         assert success is True
         assert request_uuid is not None
-        assert await api_primary.async_stop_sound("device-42", request_uuid)
+        assert (
+            await api_primary.async_stop_sound("device-42", request_uuid)
+            is SoundDispatchOutcome.ACCEPTED
+        )
 
         assert start_calls and stop_calls
 
@@ -551,3 +659,97 @@ def test_options_flow_secrets_reauth_guard_error_fallback_normalizes(
         await hass.drain_tasks()
 
     asyncio.run(_exercise())
+
+
+@pytest.mark.parametrize(
+    "bundle_field",
+    [
+        pytest.param({}, id="key-absent"),
+        pytest.param({"new_secrets_json": ""}, id="key-blank"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_options_flow_guard_error_without_a_bundle_reports_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_field: dict[str, str],
+) -> None:
+    """A guard error without a bundle submission must report, not raise.
+
+    Both credential branches of ``async_step_credentials`` call
+    ``_finalize_success`` inside the same ``try``, so the multi-entry-guard
+    deferral can be entered from a submission that never carried a bundle.
+    Rebuilding the payload from ``new_secrets_json`` then raises out of the
+    ``except`` handler instead of reporting the error.
+
+    This is defence in depth, not a live user path. The token field is
+    commented out of both schema branches, ``vol.Schema`` defaults to
+    ``PREVENT_EXTRA``, and the flow manager validates ``user_input`` against
+    ``data_schema`` before the step sees it, so the shapes below cannot
+    arrive through the form. They can arrive through a direct call like this
+    one, and they would arrive through the form again the day the field is
+    re-enabled.
+
+    ``key-blank`` is the discriminating parameter: it is the only one that a
+    mere key-presence check would still fail, which is why the production
+    guard tests the *value* (``has_secrets``). ``key-absent`` is kept because
+    it fails differently (``KeyError`` rather than ``JSONDecodeError``) and
+    is the shape the original report described, not because it catches a
+    regression the blank case misses.
+    ``_count_supplied_credential_methods`` ignores blank fields, so both
+    forms pass the exclusivity gate as token-only submissions.
+
+    This uses the module-local ``_DummyEntry`` rather than the canonical
+    ``make_config_entry``: the step resolves its choices through
+    ``_subentry_choice_map``, and the factory does not model ``subentries``.
+    """
+
+    cache = _MemoryCache()
+    entry = _DummyEntry(
+        entry_id="entry-1",
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+        },
+        cache=cache,
+    )
+    hass = _DummyHass(entry, cache)
+
+    calls = {"n": 0}
+
+    def _always_guard(entry_: Any, *, data: dict[str, Any]) -> None:
+        calls["n"] += 1
+        raise RuntimeError("Multiple config entries active for this domain")
+
+    hass.config_entries.async_update_entry = _always_guard  # type: ignore[assignment]
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    async def _fake_pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1] if candidates else None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+    result = await flow.async_step_credentials(
+        {
+            "new_oauth_token": "oauth-token-probe-123456",
+            "subentry": TRACKER_SUBENTRY_KEY,
+            **bundle_field,
+        }
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors")
+    # The deferral was skipped, so no second write was attempted.
+    assert calls["n"] == 1
+    await hass.drain_tasks()

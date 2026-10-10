@@ -12,6 +12,39 @@
 
 When the upstream stubs change, update this file and adjust the affected call sites so that future type-checking runs remain stable.
 
+## Classifying selenium failures in the login flow
+
+`auth_flow._describe_lost_session` decides whether a `WebDriverException` means
+"the user closed the window" (a finished run, `LoginAborted`, CLI status 130) or
+"the driver broke" (a defect, own type and traceback). Two rules hold it
+together. The first lives in `_describe_lost_session`, the second in
+`request_oauth_account_token_flow`; keep both when editing either. Everything
+stated below about selenium was measured against selenium 4.40.
+
+* **Chromedriver is not known to use the `timeout` error code to *report* a
+  gone window,** and the rule is written so that being wrong about that is the
+  cheap direction: a genuine cancellation would then be reported as a driver
+  fault with a traceback, rather than a driver fault being reported as a
+  cancellation the user never made. so a window phrase inside a `TimeoutException` message is not
+  evidence of one and the type is checked before any phrase matching. Note the
+  direction: a window that goes away mid-command often *causes* a timeout
+  ("Timed out receiving message from renderer"), which is exactly why the text
+  cannot be trusted there. Only two W3C codes map to `TimeoutException`
+  (`timeout`, `script timeout`); a gone window arrives as
+  `NoSuchWindowException` or `InvalidSessionIdException`. Without the type check
+  running first, the navigation, the poll and the cookie read can each sell a
+  stalled driver to the user as a cancellation they never made. (The e-mail
+  extraction cannot: it swallows its own failures and returns `None`.) The check
+  uses `isinstance`, so a future selenium subclass of `TimeoutException` is
+  covered; no test pins that, because no such subclass exists today.
+* **The wait's own deadline and a driver timeout raised by the predicate share
+  one type,** so `request_oauth_account_token_flow` records the predicate's
+  exception and compares by object identity. `WebDriverWait.until` lets a
+  predicate's exception propagate unchanged and builds a *new* one for the
+  deadline, which is what makes identity exact rather than a heuristic. A
+  weaker test ("a failure was recorded") passes today and stops being correct
+  the moment `ignored_exceptions` is widened.
+
 ## Linting reminder
 
 Keep `TYPE_CHECKING` aliases only when the alias is referenced in the module. Remove stale aliases during cleanups so linting runs stay predictable and reviewers can confirm no runtime imports are hidden behind unused guards.
@@ -54,7 +87,16 @@ This is architecturally an **AAS regeneration** triggered from the ADM layer. It
 | Layer | HA mode | Standalone CLI (`main.py`) |
 |-------|---------|----------------------------|
 | **Volatile** | `TokenCache` (in-memory dict) | `_FileCache._data` (in-memory dict) |
-| **Persistent** | `entry.data` (HA database) — survives `cache.set(key, None)` and is re-seeded on every restart (`__init__.py:6897-6901`) | `secrets.json` — **only store**; a naive `set(key, None)` would permanently delete the value |
+| **Persistent** | `entry.data` (HA database) — survives `cache.set(key, None)` and is re-seeded on every restart (credential seed in `__init__.async_setup_entry`) | `secrets.json` — **only store**; a naive `set(key, None)` would permanently delete the value |
+
+The seed runs in one direction only, and deliberately so: `entry.data` is the
+source of truth, the cache is its mirror. A credential key the entry *lacks* is
+therefore not recovered from the cache but dropped from it, because credentials
+that replace older ones express "this account has no bundle / no AAS token any
+more" by leaving the key out (`const.OPTIONAL_CREDENTIAL_KEYS`, written by
+`config_flow._merge_credential_updates`). The one exception is an entry that
+carries no credentials at all: that is the migration gap the seed exists for, and
+there the cache is read back in full.
 
 ### Soft invalidation (standalone)
 
@@ -98,22 +140,22 @@ When reading cookies from external authentication flows (for example, Selenium-m
 
 ## Logging guardrails
 
-* Prefer `exc_info=<err>` over interpolating exception text into log messages so token- or credential-related details remain out of the log stream while still preserving traceback context for debugging.
+* Do not attach a traceback in this package: no `exc_info=` value other than `False` or `None` (a name, `True`, an alias bound outside the handler, a tuple, `sys.exc_info()`) and no `logger.exception(...)`. The last rendered line of a traceback is `str(err)`, which for `gpsoauth`, `requests` or `aiohttp` may echo a token or a response body, and an exception this package raises `from` a foreign one renders the chained cause as well. Log `describe_exception(err)` and, for the location, `exception_origin(err)` instead.
 * When referencing account identifiers in logs, always mask them via `_mask_email_for_logs` (available from `aas_token_retrieval`) instead of embedding raw usernames or email addresses.
 
 ### Preferred logger pattern
 
-Use structured extras plus `exc_info` to keep tokens and raw error text out of messages:
+Use structured extras plus `describe_exception` to keep tokens and raw error text out of records:
 
 ```python
 _LOGGER.debug(
-    "Token probe failed; mapped error key.",
+    "Token probe failed; mapped error key (%s at %s).",
+    describe_exception(err),
+    exception_origin(err),
     extra={
-        "token_source": source,
+        "token_source": _probe_source_label(source),
         "error_key": key,
-        "email": _mask_email_for_logs(email),
     },
-    exc_info=err,
 )
 ```
 
@@ -121,15 +163,76 @@ _LOGGER.debug(
 
 ```python
 _LOGGER.info(
-    "<short summary without secrets>",
+    "<short summary without secrets>: %s at %s",
+    describe_exception(err),  # type plus error_kind, errno or withheld length
+    exception_origin(err),  # innermost frame, no text; omit when the location adds nothing
     extra={
         "user": _mask_email_for_logs(username),
         "context_key": context_value,
     },
-    exc_info=err,  # include only when a traceback is helpful
 )
 ```
 
 Keep sensitive strings (tokens, response bodies, raw exception text) out of the
 message itself and prefer short context keys in `extra` so log processing stays
 consistent and Semgrep does not flag credential leaks.
+
+The first template carries no account address on purpose: in the token probe of
+`config_flow.py` the address can be read from the secrets bundle, so CodeQL reported
+it even masked, and Home Assistant's log format does not print `extra` fields,
+so the address never reached `home-assistant.log` or a downloaded debug log.
+Add an account to `extra` only where a reader needs it, and never from a value
+read through the bundle (root `AGENTS.md`, "Log hygiene for scanners").
+
+The classified gpsoauth error code (`classify_gpsoauth_error`) stays out of
+`extra` in `_exchange_oauth_for_aas` for the same reason: the kind is already on
+the raised error (the `error_kind` attribute and `kind=` in its message), and
+`async_get_aas_token` logs it from there via `describe_exception`. CodeQL
+reported the copy in `extra` as sensitive data, although Home Assistant's log
+format does not print it. The literal kinds `auth_error` and `exchange_error` in
+the other two warnings of that function stay in `extra`; CodeQL reports no flow
+for them.
+
+Inside an `except` handler whose types are not all defined in this package
+(`except Exception as exc`, `except (OSError, ssl.SSLError) as err`, ...), pass
+the exception through `Auth.log_safety.describe_exception(exc)` instead of
+`exc`, `str(exc)` or `_clip(exc)`: it prints the type plus `error_kind` or
+`errno` when present, the message of exceptions raised by this package, the bare
+type name for an empty message, `(unprintable)` when `str()`, a metadata
+property (`error_kind`, `errno`) or the class's own name or module itself
+fails, whatever it raises (`<unnamed>` when the class name is not a plain
+`str`), and otherwise the withheld character count. A class whose
+`__module__` is not an exact `str` counts as foreign rather than as this
+package's own, so its message stays withheld. `exception_origin(exc)` names the innermost frame when a location
+is needed. The same applies to a parameter annotated with such a type
+(`def _classify(entry_id: str, err: BaseException)`): the callee logs an
+exception it did not catch, and the name is bound for the whole function;
+so is a name assigned from `task.exception()` in a done callback, and so is
+a name the same function derives from one of those in the forms the guard
+follows (an alias, attribute or subscript target, `detail = err`,
+`self.last = err`; its text or a derivation of it, `shown = str(err)`,
+`msg += str(err)`, `"x %s" % err`, `str(err) or ""`, `str(err).lower()`,
+`err.strerror`, `getattr(err, "msg")`, a container display, element or
+built-in copy such as `list(errors)`, a container mutated by `append`; a
+tuple or starred unpacking by position, or as a whole from `err.args`; a
+`for` target whose iterable mentions the name, `for i, err in
+enumerate(errors)`; a `match` capture such as `case ClientError() as err`
+or `case ClientError(args=[first])`). It makes no difference whether the
+annotation names the type outright or reaches it
+`through a local type alias defined in the same module`
+(`type X = ClientError`, `X: TypeAlias = ClientError`, or a plain
+`X = ClientError`): the alias name carries no information about the type, so
+the guard resolves it before it classifies. Inside a handler the same holds for
+the handler name (`except OSError as exc: text = str(exc)` binds `text`
+there). The guard's module docstring lists the forms it does not follow
+(a helper's return value, a lambda, a handler name aliased out of its
+handler and narrowed before the log call, `with ... as`); those remain a
+review matter, not a guard one.
+`tests/test_guard_logging_payloads.py` (shape (I)) fails the suite
+on a bare exception in such a record under `Auth/`, and on any `exc_info=`
+value other than `False`/`None` or any `logger.exception(...)` under `Auth/`,
+whatever the handler. A record whose value only looks like exception text
+(the key of a `KeyError` raised by a literal lookup on the package's own
+dict, `fcm_refresh_install_token`) is pinned in the guard's `_REVIEWED`
+set with its reason; a pin names one call by path, leaf and format-string
+prefix and fails the suite when the call is copied or disappears.

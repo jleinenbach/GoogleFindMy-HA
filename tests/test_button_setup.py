@@ -179,6 +179,10 @@ def _ensure_button_dependencies() -> None:
         coordinator_module.CoordinatorEntity = _CoordinatorEntity
         sys.modules["homeassistant.helpers.update_coordinator"] = coordinator_module
 
+    # Dead branch in practice: tests/conftest.py imports coordinator.main in
+    # pytest_configure, which pulls in this package. Should it ever become
+    # reachable again, note that it installs an unpatched module stub that
+    # survives the test, which the coordinator identity guard would flag.
     if "custom_components.googlefindmy.coordinator" not in sys.modules:
         coordinator_module = ModuleType("custom_components.googlefindmy.coordinator")
 

@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import logging
+import sys
+from collections.abc import Callable
 
 import pytest
 
+from custom_components.googlefindmy.FMDNCrypto import curve_profile
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import load_curve
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import ScalarRule
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     FHNA_K,
@@ -18,6 +22,7 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     ROTATION_PERIOD_900,
     ROTATION_PERIOD_3600,
+    VARIANT_DERIVATIONS,
     EidVariant,
     HeuristicBasis,
     HeuristicEidResult,
@@ -256,6 +261,13 @@ def test_generate_variant_rejects_wrong_key_length() -> None:
         generate_eid_variant(
             SAMPLE_EIK[:8], SAMPLE_COUNTER, EidVariant.MODERN_P256_X32_BE
         )
+
+
+def test_generate_variant_reports_unknown_variant_before_the_prf() -> None:
+    """An unknown variant is named even when ``k`` would also be rejected."""
+
+    with pytest.raises(ValueError, match="Unsupported EID variant"):
+        generate_eid_variant(SAMPLE_EIK, 0, "bogus_variant", k=9)  # type: ignore[arg-type]
 
 
 def test_generate_variant_rejects_unknown_variant() -> None:
@@ -543,3 +555,155 @@ def test_generate_heuristic_eid_swallows_derivation_errors(
         )
     assert results == []
     assert "Heuristic EID generation failed" in caplog.text
+
+
+# Heuristic EIDs pinned per variant (characterization taken on commit
+# 6f6243bc, before the derivation table replaced the per-variant formulas).
+# The heuristic PRF input differs from Table 10, so these differ from
+# GOLDEN_VECTORS. One entry per variant; new variants add their own entry.
+HEURISTIC_NOW_UNIX = 1_700_000_000
+HEURISTIC_GOLDEN_VECTORS: dict[EidVariant, str] = {
+    EidVariant.LEGACY_SECP160R1_X20_BE: "97754e8f9b5cfa37bd2a120a252a754db1c21650",
+    EidVariant.MODERN_P256_X32_BE: "a7d711fc0f8760abf4ae3444d5c56122fc74a4f76e0bd033af186102d627a839",
+    EidVariant.MODERN_P256_X20_TRUNC_BE: "a7d711fc0f8760abf4ae3444d5c56122fc74a4f7",
+    EidVariant.MODERN_P256_X32_LE_SCALAR: "383cec434412038ca6c92ed44d377c8481c10136d5c09edf27c546d1ebb65d5e",
+    EidVariant.MODERN_P256_X20_TRUNC_LE: "383cec434412038ca6c92ed44d377c8481c10136",
+}
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_hex"), list(HEURISTIC_GOLDEN_VECTORS.items())
+)
+def test_heuristic_golden_vectors(variant: EidVariant, expected_hex: str) -> None:
+    """The heuristic path emits the pinned EID bytes for every variant."""
+
+    results = [
+        result
+        for result in generate_heuristic_eid(
+            SAMPLE_EIK,
+            HEURISTIC_NOW_UNIX,
+            rotation_period=ROTATION_PERIOD_900,
+            basis=HeuristicBasis.ABSOLUTE,
+            variant=variant,
+            drift_offsets=(0,),
+        )
+        if not result.is_reversed
+    ]
+    assert len(results) == 1
+    assert results[0].eid_bytes.hex() == expected_hex
+
+
+def test_variant_derivations_cover_every_variant() -> None:
+    """Every variant, including ones a resolver lock may name, has one entry."""
+
+    assert set(VARIANT_DERIVATIONS) == set(EidVariant)
+
+
+def test_variant_derivations_are_read_only() -> None:
+    """The table cannot be changed at runtime."""
+
+    with pytest.raises(TypeError):
+        VARIANT_DERIVATIONS[EidVariant.MODERN_P256_X32_BE] = (  # type: ignore[index]
+            VARIANT_DERIVATIONS[EidVariant.LEGACY_SECP160R1_X20_BE]
+        )
+
+
+_P256_VARIANTS: tuple[EidVariant, ...] = (
+    EidVariant.MODERN_P256_X32_BE,
+    EidVariant.MODERN_P256_X20_TRUNC_BE,
+    EidVariant.MODERN_P256_X32_LE_SCALAR,
+    EidVariant.MODERN_P256_X20_TRUNC_LE,
+)
+_EXPECTED_RULE: dict[EidVariant, ScalarRule] = {
+    EidVariant.LEGACY_SECP160R1_X20_BE: ScalarRule.MOD_N,
+    **dict.fromkeys(_P256_VARIANTS, ScalarRule.PLUS_ONE),
+}
+
+
+def _scalar_paths() -> list[tuple[str, Callable[[], object], ScalarRule]]:
+    """Return every public scalar-deriving path with the rule it must apply."""
+
+    paths: list[tuple[str, Callable[[], object], ScalarRule]] = []
+    for variant, rule in _EXPECTED_RULE.items():
+        paths.append(
+            (
+                f"generate_eid_variant[{variant.value}]",
+                lambda v=variant: generate_eid_variant(SAMPLE_EIK, SAMPLE_COUNTER, v),
+                rule,
+            )
+        )
+        paths.append(
+            (
+                f"generate_heuristic_eid[{variant.value}]",
+                lambda v=variant: generate_heuristic_eid(
+                    SAMPLE_EIK,
+                    100_000,
+                    rotation_period=900,
+                    basis=HeuristicBasis.ABSOLUTE,
+                    variant=v,
+                    drift_offsets=(0,),
+                ),
+                rule,
+            )
+        )
+    paths.append(
+        (
+            "compute_flags_xor_mask[secp160r1]",
+            lambda: compute_flags_xor_mask(SAMPLE_EIK, SAMPLE_COUNTER),
+            ScalarRule.MOD_N,
+        )
+    )
+    paths.append(
+        (
+            "compute_flags_xor_mask[p256]",
+            lambda: compute_flags_xor_mask(
+                SAMPLE_EIK,
+                SAMPLE_COUNTER,
+                curve_byte_len=MODERN_EID_LENGTH,
+                curve_order=P256_ORDER,
+            ),
+            ScalarRule.MOD_N,
+        )
+    )
+    return paths
+
+
+def test_scalar_sites_route_through_reduce_scalar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every public scalar path reduces ``r'`` through ``reduce_scalar``.
+
+    The spy replaces ``reduce_scalar`` in the namespace of each loaded module
+    that imported it, so a caller that spells out its own formula again is
+    caught by behaviour, not by a text search. The recorded rule pins the
+    unchanged semantics: ``MOD_N`` for legacy EIDs and the flags mask,
+    ``PLUS_ONE`` for the persisted ``MODERN_P256_*`` variants.
+
+    Known limits: a caller that calls ``reduce_scalar`` but discards the result
+    still passes, and a caller that reaches the function through the module
+    attribute ``curve_profile.reduce_scalar`` is reported as a bypass.
+    """
+
+    original = curve_profile.reduce_scalar
+    calls: list[ScalarRule] = []
+
+    def spy(r_dash_int: int, order: int, rule: ScalarRule) -> int:
+        calls.append(ScalarRule(rule))
+        return original(r_dash_int, order, rule)
+
+    importers = [
+        name
+        for name, module in list(sys.modules.items())
+        if name.startswith("custom_components.googlefindmy")
+        and module is not curve_profile
+        and getattr(module, "reduce_scalar", None) is original
+    ]
+    assert "custom_components.googlefindmy.FMDNCrypto.eid_generator" in importers
+    for name in importers:
+        monkeypatch.setattr(sys.modules[name], "reduce_scalar", spy)
+
+    for label, call, expected_rule in _scalar_paths():
+        calls.clear()
+        call()
+        assert len(calls) >= 1, f"{label} bypassed reduce_scalar"
+        assert set(calls) == {expected_rule}, f"{label} used {calls}"

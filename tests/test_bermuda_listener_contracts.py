@@ -22,6 +22,7 @@ actually waits.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -271,3 +272,262 @@ async def test_unload_calls_unsubscribe() -> None:
 async def test_unload_without_listener_is_noop() -> None:
     hass = _hass()  # no DATA_BERMUDA_UNSUBSCRIBE registered
     await async_unload_bermuda_listener(hass)  # must not raise (line 759 branch)
+
+
+# --------------------------------------------------------------------------- #
+# AGENTS.md section 5 (b): the listener records repeat per state change, so   #
+# INFO and above carry neither the entity_id nor an area label (class (b)     #
+# identifiers and counts may stand there); both stay at DEBUG.                 #
+# --------------------------------------------------------------------------- #
+
+
+def _above_debug(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.levelno >= logging.INFO]
+
+
+def _assert_labels_only_at_debug(
+    caplog: pytest.LogCaptureFixture, *, fragment: str, areas: tuple[str, ...]
+) -> None:
+    """Nothing above DEBUG names the entity or an area; one DEBUG record
+    carries the fragment, the entity_id and every area label."""
+    for record in _above_debug(caplog):
+        message = record.getMessage()
+        assert _ENTITY not in message
+        assert all(area not in message for area in areas)
+    debug = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG
+        and fragment in r.getMessage()
+        and _ENTITY in r.getMessage()
+        and all(area in r.getMessage() for area in areas)
+    ]
+    assert len(debug) == 1
+
+
+@pytest.mark.asyncio
+async def test_area_change_record_stays_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=bl.__name__)
+    hass = _hass()
+    await async_setup_bermuda_listener(hass)
+    caplog.clear()  # the registration INFO lines are not the path under test
+    _, listener = hass.bus.async_listen.call_args[0]
+    event = SimpleNamespace(
+        data={
+            "entity_id": _ENTITY,
+            "old_state": SimpleNamespace(attributes={ATTR_AREA: "Hallway"}),
+            "new_state": SimpleNamespace(attributes={ATTR_AREA: "Kitchen"}),
+        }
+    )
+    listener(event)
+    assert _above_debug(caplog) == []
+    _assert_labels_only_at_debug(
+        caplog, fragment="area change detected", areas=("Hallway", "Kitchen")
+    )
+
+
+@pytest.mark.asyncio
+async def test_debounce_area_changed_record_stays_at_debug(
+    handle_mock: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=bl.__name__)
+    state = AreaDebounceState(_ENTITY, "Hallway", first_seen=100.0, last_seen=100.0)
+    await _run_debounce(_hass({_ENTITY: state}), "Kitchen", start=100.0)
+    handle_mock.assert_not_called()
+    assert _above_debug(caplog) == []
+    _assert_labels_only_at_debug(
+        caplog, fragment="during stabilization", areas=("Kitchen", "Hallway")
+    )
+
+
+@pytest.mark.asyncio
+async def test_debounce_upload_record_stays_at_debug(
+    handle_mock: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=bl.__name__)
+    state = AreaDebounceState(_ENTITY, "Kitchen", first_seen=100.0, last_seen=100.0)
+    await _run_debounce(_hass({_ENTITY: state}), "Kitchen", start=100.0)
+    handle_mock.assert_awaited_once()
+    assert _above_debug(caplog) == []
+    _assert_labels_only_at_debug(
+        caplog, fragment="triggering FMDN upload", areas=("Kitchen",)
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_device_warning_carries_no_identifier(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Bermuda entity without a device repeats on every area change; the
+    WARNING is raised once per entity with a running count, later repeats
+    and the entity_id stay at DEBUG."""
+    caplog.set_level(logging.DEBUG, logger=bl.__name__)
+    registry = SimpleNamespace(async_get=Mock(return_value=None))
+    monkeypatch.setattr(bl.er, "async_get", lambda hass: registry)
+    hass = _hass()
+    await bl._async_handle_area_change(hass, _ENTITY, "Kitchen", {})
+    warnings = [r.getMessage() for r in _above_debug(caplog)]
+    assert warnings == [
+        "Cannot find a device for a Bermuda tracker entity (entities currently without"
+        " a device: 1); skipping its area change"
+    ]
+    _assert_labels_only_at_debug(caplog, fragment="Cannot find device", areas=())
+
+    caplog.clear()
+    await bl._async_handle_area_change(hass, _ENTITY, "Hallway", {})
+    assert _above_debug(caplog) == []  # same entity: DEBUG only
+    assert any("without a device: 1)" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    await bl._async_handle_area_change(
+        hass, "device_tracker.other_bermuda", "Kitchen", {}
+    )
+    assert [r.getMessage() for r in _above_debug(caplog)] == [
+        "Cannot find a device for a Bermuda tracker entity (entities currently without"
+        " a device: 2); skipping its area change"
+    ]
+    assert hass.data[DOMAIN][bl.DATA_BERMUDA_ORPHANS] == {
+        _ENTITY,
+        "device_tracker.other_bermuda",
+    }
+
+
+@pytest.mark.asyncio
+async def test_missing_device_warning_creates_domain_bucket(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without a domain bucket the handler creates one, so the orphan set
+    persists and the second call of the same entity stays at DEBUG."""
+    caplog.set_level(logging.DEBUG, logger=bl.__name__)
+    registry = SimpleNamespace(async_get=Mock(return_value=None))
+    monkeypatch.setattr(bl.er, "async_get", lambda hass: registry)
+    hass = SimpleNamespace(data={})
+    await bl._async_handle_area_change(hass, _ENTITY, "Kitchen", {})
+    await bl._async_handle_area_change(hass, _ENTITY, "Hallway", {})
+    assert hass.data[DOMAIN][bl.DATA_BERMUDA_ORPHANS] == {_ENTITY}
+    assert len(_above_debug(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_device_warning_returns_after_recovery(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An entity that regains its device leaves the orphan set, so the next
+    missing-device interval is a WARNING again and the count of a second
+    orphan no longer includes it."""
+    caplog.set_level(logging.DEBUG, logger=bl.__name__)
+    registry = SimpleNamespace(async_get=Mock(return_value=None))
+    monkeypatch.setattr(bl.er, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        "homeassistant.helpers.device_registry.async_get",
+        lambda hass: SimpleNamespace(async_get=Mock(return_value=None)),
+    )
+    monkeypatch.setattr(
+        bl, "_async_find_googlefindmy_device", AsyncMock(return_value=None)
+    )
+    hass = _hass()
+
+    await bl._async_handle_area_change(hass, _ENTITY, "Kitchen", {})  # orphan
+    assert hass.data[DOMAIN][bl.DATA_BERMUDA_ORPHANS] == {_ENTITY}
+
+    registry.async_get = Mock(return_value=SimpleNamespace(device_id="ha-dev-1"))
+    await bl._async_handle_area_change(hass, _ENTITY, "Hallway", {})  # recovered
+    assert hass.data[DOMAIN][bl.DATA_BERMUDA_ORPHANS] == set()
+
+    caplog.clear()
+    registry.async_get = Mock(return_value=None)
+    other = "device_tracker.other_bermuda"
+    await bl._async_handle_area_change(hass, other, "Kitchen", {})  # second orphan
+    assert [r.getMessage() for r in _above_debug(caplog)] == [
+        "Cannot find a device for a Bermuda tracker entity (entities currently without"
+        " a device: 1); skipping its area change"
+    ]
+    assert hass.data[DOMAIN][bl.DATA_BERMUDA_ORPHANS] == {other}
+
+    caplog.clear()
+    await bl._async_handle_area_change(hass, _ENTITY, "Kitchen", {})  # orphan again
+    assert [r.getMessage() for r in _above_debug(caplog)] == [
+        "Cannot find a device for a Bermuda tracker entity (entities currently without"
+        " a device: 2); skipping its area change"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_debounce_task_waking_after_unload_does_nothing(
+    handle_mock: AsyncMock,
+) -> None:
+    """A debounce task sleeping through the unload neither uploads nor
+    recreates the orphan set; a reload starts with fresh caches."""
+    hass = _hass()
+    await async_setup_bermuda_listener(hass)
+    state = AreaDebounceState(_ENTITY, "Kitchen", first_seen=100.0, last_seen=100.0)
+    hass.data[DOMAIN][DATA_AREA_DEBOUNCE][_ENTITY] = state
+    hass.data[DOMAIN][bl.DATA_BERMUDA_ORPHANS].add(_ENTITY)
+
+    await async_unload_bermuda_listener(hass)
+    await _run_debounce(hass, "Kitchen", start=100.0)  # wakes after the unload
+
+    handle_mock.assert_not_called()
+    assert bl.DATA_BERMUDA_ORPHANS not in hass.data[DOMAIN]
+    assert DATA_AREA_DEBOUNCE not in hass.data[DOMAIN]
+
+    await async_setup_bermuda_listener(hass)
+    assert hass.data[DOMAIN][bl.DATA_BERMUDA_ORPHANS] == set()
+    assert hass.data[DOMAIN][DATA_AREA_DEBOUNCE] == {}
+
+
+@pytest.mark.asyncio
+async def test_unload_clears_orphan_set() -> None:
+    hass = _hass()
+    await async_setup_bermuda_listener(hass)
+    hass.data[DOMAIN][bl.DATA_BERMUDA_ORPHANS].add(_ENTITY)
+    await async_unload_bermuda_listener(hass)
+    assert bl.DATA_BERMUDA_ORPHANS not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
+async def test_upload_trigger_info_keeps_area_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The upload-trigger INFO names the device id and the EID prefix
+    (classes b and a); the area label moves to a DEBUG sibling."""
+    caplog.set_level(logging.DEBUG, logger=bl.__name__)
+    entity_entry = SimpleNamespace(device_id="ha-dev-1")
+    registry = SimpleNamespace(async_get=Mock(return_value=entity_entry))
+    monkeypatch.setattr(bl.er, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        "homeassistant.helpers.device_registry.async_get",
+        lambda hass: SimpleNamespace(async_get=Mock(return_value=None)),
+    )
+    monkeypatch.setattr(
+        bl,
+        "_async_find_googlefindmy_device",
+        AsyncMock(
+            return_value={
+                "device_id": "google-dev-1",
+                "config_entry_id": "entry_1",
+                "coordinator": Mock(),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        bl, "_async_get_device_eid", AsyncMock(return_value=b"\xab" * 20)
+    )
+    upload = AsyncMock()
+    monkeypatch.setattr(bl, "_async_upload_semantic_location", upload)
+
+    await bl._async_handle_area_change(_hass(), _ENTITY, "Kitchen", {})
+
+    infos = [r.getMessage() for r in _above_debug(caplog)]
+    assert infos == [
+        "Triggering FMDN upload: device=google-dev-1, EID=abababababababab..."
+    ]
+    assert any(
+        r.levelno == logging.DEBUG
+        and "Triggering FMDN upload" in r.getMessage()
+        and "Kitchen" in r.getMessage()
+        for r in caplog.records
+    )
+    upload.assert_awaited_once()

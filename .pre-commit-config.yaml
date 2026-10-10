@@ -68,6 +68,8 @@ repos:
         name: doctoc
         entry: python script/precommit_hooks/update_doctoc.py
         language: python
+        additional_dependencies:
+          - cmarkgfm>=2025.10.22
         files: ^AGENTS\.md$
 
       - id: translations-sync-check

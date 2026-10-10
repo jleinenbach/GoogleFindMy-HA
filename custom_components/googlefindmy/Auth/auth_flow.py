@@ -7,15 +7,112 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import TYPE_CHECKING, Any, cast
 
-from selenium.webdriver.support.ui import WebDriverWait
+from custom_components.googlefindmy.browser_deps import missing_browser_dependency
+
+try:
+    from selenium.common.exceptions import (
+        InvalidSessionIdException,
+        NoSuchWindowException,
+        TimeoutException,
+        WebDriverException,
+    )
+    from selenium.webdriver.support.ui import WebDriverWait
+except ImportError as _err:  # pragma: no cover - needs a selenium-less environment
+    raise missing_browser_dependency(_err) from _err
 
 from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     from selenium.webdriver.remote.webdriver import WebDriver
+
+# Opt-in for consoles that carry a user but report no tty (IDE run windows).
+_ENV_ASSUME_INTERACTIVE = "GOOGLEFINDMY_ASSUME_INTERACTIVE"
+
+# How long the flow waits for the login to produce the ``oauth_token`` cookie.
+# Named so the timeout message can quote it without the two drifting apart.
+_LOGIN_WAIT_SECONDS = 300
+
+
+class LoginAborted(Exception):
+    """The login ended without a token, and nothing went wrong.
+
+    Closing the browser window and letting the wait run out are *decisions*, not
+    failures: the user either changed their mind or could not complete the form.
+    Both used to surface as a selenium traceback from the bottom of the wait
+    (``InvalidSessionIdException: session deleted as the browser has closed the
+    connection``), which reads like a defect in the tool and buries the one line
+    that matters. This type carries that "no token, no defect" verdict up to the
+    CLI boundary, which turns it into a message and an exit code.
+
+    It is deliberately *not* a ``RuntimeError``: ``main.py`` inspects
+    ``RuntimeError`` to decide whether a missing browser package is to blame,
+    and an abort has nothing to do with the driver install.
+    """
+
+
+# Evidence that the browser *died* rather than being closed. Chromedriver
+# announces a crash through the same channels as a closed window -- an
+# ``InvalidSessionIdException``, or a ``WebDriverException`` whose message
+# mentions a lost DevTools connection -- so these phrases are what tells the two
+# apart, and they outrank every abort signal below. Reporting a crash as "you
+# cancelled" would exit 130 with a reassuring sentence and discard the traceback
+# of a real defect, which is the opposite of what this classifier is for.
+_CRASH_MARKERS = (
+    "session deleted because of page crash",
+    "chrome not reachable",
+    "tab crashed",
+    "cannot connect to chrome at",
+    "devtoolsactiveport file doesn't exist",
+)
+
+# Evidence that the *window* is gone: each phrase either names the window or
+# says the browser itself closed the connection. A bare "disconnected: not
+# connected to DevTools" is deliberately absent -- it is the generic symptom of
+# any lost connection, a crash included, so on its own it proves nothing about
+# who ended the session.
+_WINDOW_GONE_MARKERS = (
+    "no such window",
+    "target window already closed",
+    "web view not found",
+    "session deleted as the browser has closed the connection",
+)
+
+
+def _describe_lost_session(err: WebDriverException) -> str | None:
+    """Return an abort reason when *err* means "the browser window is gone".
+
+    Selenium reports that event under more than one type and, for the generic
+    ``WebDriverException``, only in the message -- so the message is read first,
+    and a crash marker ends the classification immediately. Only then do the
+    window-gone phrases and the two typed cases (``NoSuchWindowException``,
+    ``InvalidSessionIdException``) count as a cancellation: both types also fire
+    when Chrome dies on its own, and the crash check above is what keeps such a
+    failure on the traceback path instead of turning it into a friendly
+    "you cancelled" line. A ``TimeoutException`` is excluded before any of that
+    -- see the first branch.
+    """
+    if isinstance(err, TimeoutException):
+        # A timeout says a command got no answer in time. It never says the
+        # window is gone: chromedriver reports that with its own error codes
+        # ("no such window", "invalid session id"), which arrive as their own
+        # types. Reading a stray window phrase out of a *timeout* message would
+        # turn a stalled driver into a "you cancelled" line and exit 130 --
+        # at the navigation, at the poll and at the cookie read alike, not just
+        # at the wait. (The e-mail extraction is not on that list: it swallows
+        # its own failures and returns None.)
+        return None
+    message = (getattr(err, "msg", None) or str(err) or "").lower()
+    if any(marker in message for marker in _CRASH_MARKERS):
+        return None
+    if any(marker in message for marker in _WINDOW_GONE_MARKERS):
+        return "the browser window was closed"
+    if isinstance(err, (NoSuchWindowException, InvalidSessionIdException)):
+        return "the browser window was closed"
+    return None
 
 
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -41,6 +138,131 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _stdin_is_attended() -> bool:
+    """Return True when a human can answer a prompt on standard input.
+
+    ``isatty`` is the signal, with one escape hatch: an IDE console (PyCharm,
+    VS Code) proxies stdin through a pipe and reports ``isatty() == False``
+    while a user is very much sitting in front of it, and the desktop prompt
+    right below explicitly addresses PyCharm users. Setting
+    ``GOOGLEFINDMY_ASSUME_INTERACTIVE=1`` asserts "there is someone here" for
+    exactly that case; it is a deliberate opt-in, so an unattended process does
+    not get the same treatment by accident.
+
+    ``sys.stdin`` can be ``None`` (pythonw, some embeddings) and ``isatty`` can
+    raise on a closed stream, so both are treated as "nobody there".
+    """
+    if os.environ.get(_ENV_ASSUME_INTERACTIVE) == "1":
+        return True
+    stream = sys.stdin
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _announce_and_gate(*, headless: bool) -> None:
+    """Tell the user what is about to happen, and let them stop it.
+
+    Split out of ``request_oauth_account_token_flow`` so that function is left
+    with the browser work alone: everything here happens *before* a driver
+    exists, and none of it can fail in a way the caller has to clean up. It
+    raises ``RuntimeError`` when there is nobody to drive the desktop login.
+    """
+    # ``headless`` is the interactivity signal: an automated caller passes True,
+    # an attended terminal session passes False. The historical test
+    # ``"homeassistant" in sys.modules`` is NOT usable for this and was removed:
+    # it is true in *every* standalone CLI run, either because Home Assistant is
+    # installed and pulled in by the import graph, or because main.py injects
+    # ``homeassistant.*`` stubs into sys.modules itself when it is not. The CLI
+    # therefore fabricated exactly the signal the heuristic read, which silently
+    # disabled the desktop gate below and let an unattended process open a
+    # browser (measured 2026-07-28). Note that the integration itself never calls
+    # this function: the only production caller is main.py (the standalone CLI).
+    #
+    # Inside the docker-login container Chrome runs *in the container* and is
+    # driven through the noVNC viewer, not on the user's own desktop. The
+    # entrypoint sets GOOGLEFINDMY_CONTAINER_LOGIN=1 there, so without this signal
+    # the user would be told to "install Chrome on your system" -- wrong for the
+    # container, where they must open the noVNC URL.
+    is_container = os.environ.get("GOOGLEFINDMY_CONTAINER_LOGIN") == "1"
+
+    if not headless:
+        if is_container:
+            novnc_url = (
+                os.environ.get("GOOGLEFINDMY_NOVNC_URL") or "http://localhost:7900"
+            )
+            # The entrypoint mints a per-run password and exports it here for a
+            # LAN-hardened bind; on the loopback default it stays unset and the
+            # base image's fixed "secret" is what the viewer actually accepts.
+            novnc_password = os.environ.get("GOOGLEFINDMY_NOVNC_PASSWORD", "secret")
+            print(
+                "[AuthFlow] ==================================================\n"
+                "[AuthFlow] Action required to sign in to Google:\n"
+                f"[AuthFlow]   1. Open {novnc_url} in your browser "
+                f"(password: {novnc_password}).\n"
+                "[AuthFlow]   2. Chrome opens by itself in that view within a "
+                "few seconds.\n"
+                "[AuthFlow]   3. Sign in to Google there, then come back to "
+                "this terminal.\n"
+                "[AuthFlow] --------------------------------------------------\n"
+                "[AuthFlow] If a character will not type (the '@' of your "
+                "address is\n"
+                "[AuthFlow] the usual one), paste it instead: open the panel on "
+                "the left\n"
+                "[AuthFlow] edge of the viewer, put the text in the Clipboard "
+                "box, then\n"
+                "[AuthFlow] press Ctrl+V in the browser field.\n"
+                "[AuthFlow] =================================================="
+            )
+            # No stdin gate in the container: Chrome runs *inside* the container
+            # and the user drives it through noVNC. Blocking on input() here
+            # would leave that viewer showing an empty desktop until someone
+            # pressed Enter in a terminal they may not even be looking at, and
+            # the pre-start prompt used to arrive before the display was ready.
+            # The terminal still has to stay attached, because main.py asks for
+            # the account e-mail on stdin when auto-detection fails.
+        else:
+            print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
+> Please make sure that Chrome is installed on your system.
+> For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted.
+        """)
+
+            # Press enter to continue: on the desktop path Chrome takes over the
+            # user's own screen, so they get to decide when that happens. No
+            # terminal means nobody is there to decide, and launching a browser
+            # (plus its process cleanup) unattended is what let a test subprocess
+            # reach the Chrome flow at all. Abort before create_driver().
+            #
+            # The check is ``isatty``, not "does the read fail": a pipe supplies
+            # bytes without a human, and consuming a line here would eat the
+            # account e-mail that main.py reads from the same stdin afterwards.
+            # A non-tty is therefore refused rather than read. The desktop login
+            # cannot be scripted anyway -- signing in to Google happens by hand in
+            # the browser window -- so nothing usable is lost.
+            if not _stdin_is_attended():
+                msg = (
+                    "[AuthFlow] The interactive Chrome login needs an attended "
+                    "terminal (stdin is not a terminal). Run it from a terminal; "
+                    f"set {_ENV_ASSUME_INTERACTIVE}=1 if you are sitting at an "
+                    "IDE console that proxies stdin; use the docker-login "
+                    "container (GOOGLEFINDMY_CONTAINER_LOGIN=1); or call the "
+                    "flow with headless=True."
+                )
+                raise RuntimeError(msg)
+            try:
+                input("[AuthFlow] Press Enter to continue...")
+            except EOFError as err:
+                # The terminal was closed between the check and the read.
+                msg = (
+                    "[AuthFlow] Standard input closed while waiting for "
+                    "confirmation; not starting Chrome."
+                )
+                raise RuntimeError(msg) from err
+
+
 def request_oauth_account_token_flow(
     headless: bool = False,
     *,
@@ -52,21 +274,27 @@ def request_oauth_account_token_flow(
     The *email* is extracted from the Chrome session after login if possible.
     It may be ``None`` when the DOM selectors fail (e.g. Google changes their
     page layout) — callers should fall back to prompting the user.
+
+    Raises:
+        LoginAborted: The user ended the login without a token, by closing the
+            window or by letting the wait expire. A finished run, not a defect.
+        WebDriverException: The driver failed — it crashed, stalled, or timed
+            out on a command. Raised with its own type and traceback, because
+            the CLI turns only ``LoginAborted`` into a cancellation status.
+        BrowserPackagesUnusable: Selenium or Chrome is absent or broken. The CLI
+            branches on this type to print an install hint.
+        RuntimeError: The terminal is unattended, stdin closed while the gate
+            waited, the driver could not be started, or the wait completed with
+            a missing or malformed cookie.
+        OSError: The driver could not be replaced on disk — ``PermissionError``
+            from a locked ChromeDriver binary reaches the caller unchanged.
     """
-    # In Home Assistant context, skip the interactive prompts
-    is_home_assistant = "homeassistant" in sys.modules
-
-    if not headless and not is_home_assistant:
-        print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
-> Please make sure that Chrome is installed on your system.
-> For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted.
-        """)
-
-        # Press enter to continue
-        input("[AuthFlow] Press Enter to continue...")
+    # Everything the user sees before the browser exists -- the instruction
+    # block, and the gate that lets them decline -- lives in one place.
+    _announce_and_gate(headless=headless)
 
     # Automatically install and set up the Chrome driver
-    if not is_home_assistant:
+    if not headless:
         print("[AuthFlow] Installing ChromeDriver...")
 
     driver: WebDriver = create_driver(
@@ -77,13 +305,49 @@ def request_oauth_account_token_flow(
         # Open the browser and navigate to the URL
         driver.get("https://accounts.google.com/EmbeddedSetup")
 
-        # Wait until the "oauth_token" cookie is set
-        if not is_home_assistant:
+        # Wait until the "oauth_token" cookie is set.
+        #
+        # Two of the ways this wait can end without a token are decisions, not
+        # defects: the user closes the window, or they never finish the form.
+        # Those two are translated into LoginAborted here, at the only place
+        # that knows what the wait was for, so the CLI can say one sentence
+        # instead of printing a selenium stack that points at a lambda. A third
+        # way is a defect and stays one: the driver failing a poll command.
+        if not headless:
             print("[AuthFlow] Waiting for 'oauth_token' cookie to be set...")
-        WebDriverWait(driver, 300).until(
-            lambda d: d.get_cookie("oauth_token") is not None
-        )
+        # The expiring deadline and a driver that times out on a poll command
+        # raise the *same* selenium type, so the handler below cannot separate
+        # them by type. ``until`` lets a predicate's exception propagate
+        # unchanged (unless it is one of its ``ignored_exceptions``, which by
+        # default is only ``NoSuchElementException``) and constructs a *new*
+        # exception of its own when the deadline expires -- which makes
+        # identity an exact test rather than a heuristic.
+        poll_failure: TimeoutException | None = None
 
+        def _oauth_token_is_set(d: WebDriver) -> bool:
+            nonlocal poll_failure
+            try:
+                return d.get_cookie("oauth_token") is not None
+            except TimeoutException as exc:
+                poll_failure = exc
+                raise
+
+        try:
+            WebDriverWait(driver, _LOGIN_WAIT_SECONDS).until(_oauth_token_is_set)
+        except TimeoutException as err:
+            if err is poll_failure:
+                # The driver timed out on a command, and the user's deadline
+                # has not necessarily passed. Keep the type, the message and
+                # the traceback rather than reporting a cancellation that did
+                # not happen.
+                raise
+            msg = (
+                "[AuthFlow] No login completed within "
+                f"{_LOGIN_WAIT_SECONDS // 60} minutes, so no account token was "
+                "received. Nothing was saved; start the login again when you "
+                "are ready."
+            )
+            raise LoginAborted(msg) from err
         # Get the value of the "oauth_token" cookie
         cookie = driver.get_cookie("oauth_token")
         if cookie is None:
@@ -100,12 +364,30 @@ def request_oauth_account_token_flow(
         email: str | None = _extract_email_from_session(driver)
 
         # Print the value of the "oauth_token" cookie
-        if not is_home_assistant:
+        if not headless:
             print("[AuthFlow] Retrieved Account Token successfully.")
             if email:
                 print(f"[AuthFlow] Detected account: {email}")
 
         return oauth_token_value, email
+
+    except WebDriverException as err:
+        # Closing the window kills the session, and every command issued after
+        # that point reports it -- the navigation, the wait, the cookie read.
+        # (Not the e-mail extraction: that one swallows its own failures.)
+        # Catching it around the whole interaction rather
+        # than around the wait alone means the user gets the same one-line
+        # verdict wherever they happened to close it.
+        reason = _describe_lost_session(err)
+        if reason is None:
+            # Not an abort. Let the real failure keep its own type and message
+            # rather than dressing a driver defect up as a cancellation.
+            raise
+        msg = (
+            f"[AuthFlow] Login cancelled: {reason} before Google issued an "
+            "account token. Nothing was saved; start the login again to retry."
+        )
+        raise LoginAborted(msg) from err
 
     finally:
         # Close the browser (safe_quit handles WinError 6 on Windows)

@@ -25,11 +25,19 @@ from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from .._reauth_reason import ReauthReasonCode
-from ..const import DEFAULT_MIN_POLL_INTERVAL
+from ..const import (
+    DEFAULT_MIN_POLL_INTERVAL,
+    PlaySoundOutcome,
+    SoundDispatchOutcome,
+    StopSoundOutcome,
+)
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
     StaleOwnerKeyError,
+)
+from ..NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
 )
 from ..NovaApi.nova_request import (
     NovaAuthError,
@@ -37,6 +45,7 @@ from ..NovaApi.nova_request import (
     NovaLogicError,
     NovaProtobufDecodeError,
     NovaRateLimitError,
+    is_credential_rejection,
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
@@ -44,6 +53,7 @@ from .helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
     carry_reused_accuracy,
     is_sound_uuid_expired,
+    substitute_zone_accuracy,
 )
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
@@ -57,6 +67,51 @@ _COOLDOWN_OWNER_MAX_S = 600.0
 def _clamp(value: float, min_val: float, max_val: float) -> float:
     """Clamp a value between min and max."""
     return max(min_val, min(max_val, value))
+
+
+def _coordinate_in_range(value: float, bound: float) -> bool:
+    """Return True when ``value`` is finite and within ``[-bound, bound]``."""
+    return math.isfinite(value) and -bound <= value <= bound
+
+
+def _as_float(value: object) -> float | None:
+    """Return ``float(value)``, or None when it cannot be converted.
+
+    ``OverflowError`` (an integer beyond the float range) counts as not
+    convertible, so such a fix is rejected like any other bad value.
+    """
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _log_rejected_device(device_label: str | None) -> None:
+    """Name the device of a rejected fix at DEBUG only.
+
+    Polling repeats unattended, and the label can be a user-provided device
+    name, which AGENTS.md keeps out of records above DEBUG.
+    """
+    if device_label:
+        _LOGGER.debug("Rejected coordinates belong to %s", device_label)
+
+
+def _coordinate_kind(value: object) -> str:
+    """Describe a rejected coordinate without echoing it.
+
+    AGENTS.md forbids precise coordinates in logs, and a rejected value can
+    still carry one (for example ``"48.137,"``). Only a fixed label is
+    returned, so the log line names the defect, never the value.
+    """
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, (bytes, bytearray)):
+        return "bytes"
+    if isinstance(value, Mapping):
+        return "a mapping"
+    if isinstance(value, (list, tuple)):
+        return "a sequence"
+    return "another type"
 
 
 class LocateOperations(_MixinBase):
@@ -97,33 +152,32 @@ class LocateOperations(_MixinBase):
             # Missing coordinates is not an error per se (semantic-only is valid).
             return False
 
-        try:
-            lat_f, lon_f = float(lat), float(lon)
-        except (TypeError, ValueError):
+        lat_f = _as_float(lat)
+        lon_f = _as_float(lon)
+        if lat_f is None or lon_f is None:
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
+                lat_state = "ok" if lat_f is not None else f"is {_coordinate_kind(lat)}"
+                lon_state = "ok" if lon_f is not None else f"is {_coordinate_kind(lon)}"
                 _LOGGER.warning(
-                    "Ignoring invalid (non-numeric) coordinates%s: lat=%r, lon=%r",
-                    f" for {device_label}" if device_label else "",
-                    lat,
-                    lon,
+                    "Ignoring invalid (non-numeric) coordinates: lat %s, lon %s",
+                    lat_state,
+                    lon_state,
                 )
+                _log_rejected_device(device_label)
             return False
 
         if not (
-            math.isfinite(lat_f)
-            and math.isfinite(lon_f)
-            and -90.0 <= lat_f <= 90.0
-            and -180.0 <= lon_f <= 180.0
+            _coordinate_in_range(lat_f, 90.0) and _coordinate_in_range(lon_f, 180.0)
         ):
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
                 _LOGGER.warning(
-                    "Ignoring out-of-range/invalid coordinates%s: lat=%s, lon=%s",
-                    f" for {device_label}" if device_label else "",
-                    lat,
-                    lon,
+                    "Ignoring out-of-range/invalid coordinates: lat %s, lon %s",
+                    "ok" if _coordinate_in_range(lat_f, 90.0) else "invalid",
+                    "ok" if _coordinate_in_range(lon_f, 180.0) else "invalid",
                 )
+                _log_rejected_device(device_label)
             return False
 
         # Write back normalized floats
@@ -321,11 +375,24 @@ class LocateOperations(_MixinBase):
                     device_id, name
                 )
 
-                # Success path: clear any auth error state
-                self._set_auth_state(failed=False)
-
                 if not location_data:
                     return {}
+
+                # A result WITH content, and only that, proves on this path that
+                # the credentials worked -- the same rule the sound handlers
+                # state at their own sites. An empty return proves only that
+                # nothing raised, and it reaches this method from several
+                # pre-accept failures as well as from a healthy idle tag, so the
+                # guard above runs first. It used not to, and a manual locate on
+                # an idle tag then wiped a pending credential finding raised by
+                # another device.
+                #
+                # The reset sits here and NOT further down, behind the coordinate
+                # check: a record carrying only `last_seen` is an authenticated
+                # server answer. The method returns {} for it, but the account
+                # was accepted, and refusing to count that would be the same
+                # error in the opposite direction.
+                self._set_auth_state(failed=False)
 
                 # Manual locate is upward-only for the reauth budget and never
                 # consumes the poll-only decrypt-proof hint; drop it here (after the
@@ -345,6 +412,18 @@ class LocateOperations(_MixinBase):
                         is_replay = True
 
                 location_data["is_replayed"] = is_replay
+
+                # Tally the REPORTED accuracy class here (#216); see the identical
+                # call in the poll loop for the full reasoning. Same position for
+                # the same two reasons: before the fusion, which may reject and
+                # return, and before any substitution of the value (semantic
+                # mapping, Google-Home filter, semantic-only preserve). And the
+                # same replay rule: repeated manual locates without a new report
+                # must not enter the distribution more than once.
+                if self.claim_report_for_tally(device_id, location_data):
+                    self.count_accuracy_class(location_data)
+                location_data["_accuracy_counted"] = True
+
                 mapping_applied = self._apply_semantic_mapping(location_data)
 
                 # --- Parity with polling path: Google Home semantic spam filter --------
@@ -413,8 +492,9 @@ class LocateOperations(_MixinBase):
                                     "radius" in replacement_attrs
                                     and replacement_attrs.get("radius") is not None
                                 ):
-                                    location_data["accuracy"] = replacement_attrs.get(
-                                        "radius"
+                                    substitute_zone_accuracy(
+                                        location_data,
+                                        replacement_attrs["radius"],
                                     )
                             # Clear semantic name so HA Core's zone engine determines the final state.
                             location_data["semantic_name"] = None
@@ -554,6 +634,28 @@ class LocateOperations(_MixinBase):
                     pass
                 return {}
             except NovaAuthError as auth_err:
+                # Branch on the STATUS, never on the type. A device removed from
+                # the account arrived here as an auth error and flipped the
+                # integration-wide auth state: Repairs issue, EVENT_AUTH_ERROR,
+                # diagnostic sensor on. The sign-in was fine the whole time.
+                # api passes such a status through instead of returning {}, so a
+                # manual locate on a deleted tracker reaches this branch and not
+                # the success path above. That mattered more than it does now:
+                # the success path used to call _set_auth_state(failed=False)
+                # BEFORE the empty guard and would have CLEARED a pending auth
+                # error for every 5xx and every empty result. It no longer does
+                # -- the reset sits behind the empty guard now -- so this branch
+                # is the second line of defence rather than the only one.
+                if not is_credential_rejection(auth_err):
+                    _LOGGER.warning(
+                        "Manual locate for %s failed (client error): HTTP %s - %s",
+                        name,
+                        getattr(auth_err, "status", "?"),
+                        auth_err,
+                    )
+                    self.note_error(auth_err, where="async_locate_device", device=name)
+                    return {}
+
                 # Expected: Authentication/permission issue from Nova API
                 _LOGGER.warning(
                     "Manual locate for %s failed (authentication): HTTP %s - %s",
@@ -689,6 +791,103 @@ class LocateOperations(_MixinBase):
                     "(the shared key is stale); please re-authenticate."
                 )
                 raise HomeAssistantError(message) from dec_err
+            except LocationRequestNotAcceptedError as not_accepted_err:
+                # The request never got past this integration's accept point. For the
+                # manual path that is an ordinary empty result, exactly as it
+                # looks to the user today -- a locate that found nothing. What
+                # changes is what does NOT happen on the way there: the
+                # `_set_auth_state(failed=False)` on the success path above is
+                # skipped by construction, so a 5xx can no longer clear the
+                # account's auth-failure state on its way through. That skip is
+                # the whole point of catching this here.
+                #
+                # Returns rather than raises, unlike the broad handler below: a
+                # failed request is not an "unexpected error" worth a red toast
+                # in the UI, and re-wrapping it into a `HomeAssistantError` would
+                # be a behaviour change this step does not intend. It must still
+                # sit BEFORE that handler, though -- `Exception` is the base, so
+                # the broad branch would otherwise claim it first.
+                #
+                # WARNING, not DEBUG. This path runs because someone asked for
+                # it -- a button press, an automation, or the `locate_device` /
+                # `locate_external` service -- so the failure has an audience and
+                # a moment. The poll loop logs the SAME condition at DEBUG, and
+                # that is the same rule rather than an inconsistency: it runs
+                # unattended and repeatedly. Leaving it at DEBUG here would have
+                # made a user ask for a locate, get nothing, and find nothing in
+                # the log at the default level.
+                #
+                # Two neighbours could be read as precedent, and exactly one of
+                # them is. NOT the `NovaRateLimitError` / `NovaHTTPError` handlers
+                # a few branches up, however tempting the symmetry: `api.py`
+                # answers both with `return {}` of its own (in `api.py`, the
+                # `except NovaRateLimitError` branch for the 429 and the
+                # `except NovaHTTPError` branch for the non-401/403 5xx; anchors
+                # rather than line numbers, which this file has already outrun
+                # twice), so neither type ever
+                # reaches this method and those two branches are dead on this
+                # path. Nor did this branch inherit their traffic -- before the
+                # request layer started raising, a 5xx returned `[]` from
+                # `location_request` and arrived here on the SUCCESS path, which
+                # is precisely the defect this catch exists to end. The live
+                # neighbour is `OwnerKeyLookupTransientError` a few branches up,
+                # which api.py does re-raise and which logs at DEBUG; the line
+                # between them is subject, not severity. That one is a miss on one
+                # tracker's owner key while the account is otherwise fine. This
+                # one is a request that never got past the accept point, which is
+                # what the same operation already treats as WARNING when it
+                # refuses to start (the in-flight/cooldown and push-recovery
+                # guards near the top of this method).
+                #
+                # Two costs of the promotion, both weighed rather than discovered
+                # later. First, this is not the first record for the incident:
+                # `location_request` writes one before every raise of this type --
+                # measured six, four WARNING and two ERROR, not just the three
+                # transport rungs. Those records are PATH-AGNOSTIC: the identical
+                # sentence appears for an unattended poll. What this line adds is
+                # that the failed request was a USER-INITIATED one, plus the stage
+                # that says where it stopped. That is the whole of its value, and
+                # it is thin for `no_fcm_token`, whose transport record already
+                # names the operation. It does NOT tell the user WHICH device --
+                # that half is at DEBUG, see below -- so do not defend this line
+                # with an identification it no longer performs. It is one line per
+                # user action, and the poll path stays at DEBUG, so nothing
+                # repeats unattended.
+                # Second, `name` falls back to the raw canonical id when no
+                # display name is cached (see where it is bound above). The rule
+                # is AGENTS.md section 5: the canonical id is a class (b)
+                # identifier (allowed at any level), the user-provided name is
+                # derived information, and section 5 states the level split
+                # itself, the "R6 / Count@WARNING, Name@DEBUG" pattern that
+                # `test_location_request_r6_name_sweep.py` states and that the
+                # signal class itself cites in its docstring. Because `name` may
+                # fall back to the id, the split is applied to the whole value.
+                # That is why the sentence is split the way the transport
+                # layer splits its own:
+                # the WARNING carries the operation and the reason, the identified
+                # half stays at DEBUG. An earlier revision of this step logged
+                # `name` in the WARNING and defended it as consistent with the
+                # sibling branches of this method, which do the same. The defence
+                # does not hold, and the reason is worth keeping: it was THIS step
+                # that raised the line from DEBUG to WARNING, so it was this step
+                # that put a possible device name into the default log. Section 5
+                # settles the question the neighbours raised: a record that
+                # answers one user action may name the device, a record that can
+                # repeat unattended keeps the name out (a count or an index may
+                # stand in its place). This branch is
+                # one line per user action, so naming would be allowed; it keeps
+                # the split anyway, because the DEBUG record beneath it already
+                # carries the device and the test pins exactly that shape.
+                _LOGGER.warning("Manual locate failed: %s", not_accepted_err)
+                _LOGGER.debug(
+                    "Manual locate for %s failed (request not accepted): %s",
+                    name,
+                    not_accepted_err,
+                )
+                self.note_error(
+                    not_accepted_err, where="async_locate_device", device=name
+                )
+                return {}
             except Exception as err:
                 short_err = self._short_error_message(err)
                 _LOGGER.error("Manual locate for %s failed: %s", name, short_err)
@@ -720,7 +919,79 @@ class LocateOperations(_MixinBase):
             return False
         return is_sound_uuid_expired(existing_ts, time.time(), SOUND_UUID_MAX_AGE_S)
 
-    async def async_play_sound(self, device_id: str) -> bool:
+    def _note_stop_transport_problem_without_extending(self) -> None:
+        """Report a failed stop as a transport problem without LENGTHENING a live window.
+
+        ``_note_push_transport_problem()`` does two things: it flags the
+        transport ``DEGRADED``, and it sets ``_push_cooldown_until`` to
+        ``monotonic() + cooldown_s`` ABSOLUTELY. The second part means calling
+        it while a window is already running restarts that window instead of
+        topping it up. Only the restart is unwanted here, so the call is made
+        in full and the window is put back afterwards -- skipping the call
+        outright would also drop the status flag, and a transport that just
+        failed must not keep reporting itself healthy because a location push
+        happened to arrive earlier in the same window.
+
+        Reaching this code with a live window is close to new. Before the
+        correlated-stop exception in the gate, ``async_stop_sound`` returned
+        SUPPRESSED as its first statement whenever ``_api_push_ready()`` said
+        no, and a running window is one of the reasons it says no; only the
+        interleaving below could get past that.
+
+        What the restart would cost: the stop button has no availability guard
+        (there is no ``can_stop_sound`` on the coordinator, ``button.py`` only
+        probes for one), so a user pressing Stop during an outage would push the
+        end of the window forward with every press. The window would still be
+        bounded -- it never outlives ``last press + cooldown_s`` -- but it also
+        gates manual locate unconditionally (and Play Sound for every device
+        whose ``can_ring`` capability is not cached, see ``can_play_sound()``),
+        and those stay disabled for as long as the pressing goes on.
+
+        The stop itself is still sent; only the window is left alone. The same
+        rule covers a rare interleaving that predates this package: if a
+        concurrent play armed a window while this stop was in flight, that
+        window stands rather than being restarted from here.
+        """
+        now = time.monotonic()
+        window_ends_at = self._push_cooldown_until
+        self._note_push_transport_problem()
+        if now < window_ends_at:
+            self._push_cooldown_until = window_ends_at
+            _LOGGER.debug(
+                "Stop failed on the transport while a push cooldown was "
+                "already running; keeping the existing window instead of "
+                "restarting it"
+            )
+
+    def _stop_would_be_correlated(
+        self, device_id: str, request_uuid: str | None
+    ) -> bool:
+        """Return True if a stop for ``device_id`` would carry a PROVEN cancel key.
+
+        Read-only, no side effects. ``request_uuid`` must already be normalised
+        (a blank string collapsed to ``None``); ``async_stop_sound`` does that
+        at its single normalisation point before anything calls this.
+
+        Proven means exactly one thing: the key that would go on the wire is our
+        own cached key and it is still fresh. An explicitly passed foreign
+        string is a claim, not a handle, and an aged key of ours cannot vouch
+        for the ring that is audible now. Both of those end as
+        ``StopSoundOutcome.UNCORRELATED``.
+
+        This exists as one predicate because two decisions depend on the same
+        answer and must never drift apart: whether the stop may break a
+        self-inflicted push cooldown (IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN),
+        and whether an accepted stop may spend -- pop -- the cached key
+        (IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY).
+        """
+        cached_uuid = self._sound_request_uuids.get(device_id)
+        if cached_uuid is None:
+            return False
+        if request_uuid is not None and request_uuid != cached_uuid:
+            return False
+        return not self._cached_sound_uuid_is_stale(device_id)
+
+    async def async_play_sound(self, device_id: str) -> PlaySoundOutcome:
         """Play sound on a device using the native async API (no executor).
 
         Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.
@@ -733,16 +1004,66 @@ class LocateOperations(_MixinBase):
             device_id: The canonical ID of the device.
 
         Returns:
-            True if the command was submitted successfully, False otherwise.
+            A :class:`PlaySoundOutcome`. Three-valued on purpose: ``ACCEPTED``
+            (Nova took the command), ``SUPPRESSED`` (declined here by a local
+            condition that clears itself, so waiting is the whole remedy) and
+            ``FAILED`` (everything else, from a device that cannot ring to a
+            server rejection). The dividing line between the latter two is the
+            REMEDY, not where the decision was taken; see ``PlaySoundOutcome``
+            and IRR-CA-PLAY-REMEDY-SPLIT. The bool this method used to return
+            merged all three, so one message had to advise on all of them.
         """
+        # The capability verdict is read BEFORE the readiness gate, because the
+        # gate answers "may we send" with a single bool for two conditions whose
+        # remedies are opposites. ``can_ring is False`` is permanent -- waiting
+        # never makes a device ring that reports it cannot -- while the gate's
+        # only other refusal, an active push cooldown, passes on its own within
+        # ninety seconds. Those are its two ``False`` paths and there is no
+        # third: an unknown device is waved through optimistically rather than
+        # refused. Reading both as SUPPRESSED would tell the owner of a
+        # non-ringing tracker to try again in a moment, forever. The stop path
+        # has no equivalent branch: its gate checks push readiness only and
+        # never asks about capability.
+        # getattr, like the timestamp store below: some tests build the
+        # coordinator via __new__ and never run __init__, and a gate that
+        # raises AttributeError before the api call would fail them for a
+        # reason that has nothing to do with what they pin.
+        caps_by_device = getattr(self, "_device_caps", None) or {}
+        caps = caps_by_device.get(device_id)
+        if caps and caps.get("can_ring") is False:
+            # Warning, not debug: the user-facing message for FAILED points at
+            # the log as the carrier of the specific cause, and a message that
+            # points at a log which says nothing is worse than no message. This
+            # branch is reached once per explicit service call, never in a loop.
+            #
+            # No device identifier of any kind, neither the id (AGENTS.md
+            # section 5, "never log ... device IDs") nor the display name, which
+            # the same section names as derived identifying information to
+            # redact. The coordinate warnings above do carry the display name;
+            # this line does not follow them, because it is new and the
+            # attribution it would buy is already in the user-facing error, which
+            # names the device and appears at the same moment. What the log is
+            # for here is the CAUSE, and the cause is device-independent.
+            _LOGGER.warning(
+                "Play Sound was refused: the device reports it cannot ring "
+                "(can_ring is False). Waiting will not change this."
+            )
+            return PlaySoundOutcome.FAILED
         if not self.can_play_sound(device_id):
             _LOGGER.debug(
-                "Suppressing play_sound call for %s: capability/push not ready",
+                "Suppressing play_sound call for %s: push cooldown active",
                 device_id,
             )
-            return False
+            return PlaySoundOutcome.SUPPRESSED
         try:
-            ok, request_uuid = await self.api.async_play_sound(device_id)
+            play = await self.api.async_play_sound(device_id)
+            # api.async_play_sound carries two independent facts. ``accepted``
+            # answers "did Nova take the command", ``cancel_key`` answers "may
+            # the device be ringing", and ``outcome`` names WHO refused. The
+            # cause is read from ``outcome`` below and never reconstructed from
+            # the presence of a key -- that out-of-band inference is what
+            # IRR-CA-SOUND-FAILURE-CLASS removed.
+            ok, request_uuid = play.accepted, play.cancel_key
             # Decide whether to (over)write the cached Stop cancel key.
             # api.async_play_sound returns a non-None UUID in exactly the two
             # cases where a ring may be active and Stop needs the key: (1) the
@@ -761,6 +1082,12 @@ class LocateOperations(_MixinBase):
             # the reload filter would discard — the ambiguous UUID is still
             # stored, since it may be the only handle on a current ring. See
             # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            #
+            # Since the three-valued Stop outcome landed, the drop branch in
+            # async_stop_sound is additionally bound to "the key we sent was
+            # our own AND was fresh": an explicitly passed foreign key must not
+            # evict our handle. That narrows the invariant in the direction of
+            # its own purpose; the wording above is unchanged.
             existing_uuid = self._sound_request_uuids.get(device_id)
             existing_is_stale = (
                 existing_uuid is not None
@@ -778,11 +1105,34 @@ class LocateOperations(_MixinBase):
                     "Stored Play Sound UUID for %s: %s", device_id, request_uuid
                 )
                 await self._async_save_sound_uuids()
-            if not ok:
+            # Only a transport that gave us no usable answer is a push problem.
+            # A server rejection (401/403/5xx), a rate limit, a missing local
+            # action token and a bug of our own all reached this point as the
+            # same False before SoundDispatchOutcome existed, so every one of
+            # them armed the 90-second cooldown, flipped the integration to
+            # FcmStatus.DEGRADED and made can_play_sound report the button as
+            # unavailable -- an outage this integration inflicted on itself over
+            # a network that was working, and one that then also suppressed the
+            # user's follow-up Stop. See IRR-CA-SOUND-FAILURE-CLASS.
+            if play.outcome is SoundDispatchOutcome.TRANSPORT_FAILED:
                 self._note_push_transport_problem()
-            # Success implies credentials worked
-            self._set_auth_state(failed=False)
-            return bool(ok)
+            elif ok:
+                # Only an ACCEPTED submission proves the credentials worked.
+                # An auth rejection arrives as REJECTED_AUTH, indistinguishable
+                # from a read timeout before this contract existed, so clearing
+                # the auth-failure state on a failed play erased the very signal
+                # an expired sign-in produces. async_stop_sound has always
+                # applied this rule and states the reason; the two paths agree.
+                self._set_auth_state(failed=False)
+            # Negative form, as on the stop path: the safe default of this
+            # branch is failure. An ``if/elif`` cascade over the seven members
+            # of SoundDispatchOutcome would let a value from outside the enum --
+            # a bool from a stale test double, a member added later without
+            # visiting this site -- fall through to success. Only ACCEPTED is
+            # success, and only it is named here.
+            if play.outcome is not SoundDispatchOutcome.ACCEPTED:
+                return PlaySoundOutcome.FAILED
+            return PlaySoundOutcome.ACCEPTED
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
                 failed=True, reason=f"Auth failed during play_sound: {auth_exc}"
@@ -791,7 +1141,7 @@ class LocateOperations(_MixinBase):
                 await self.async_request_refresh()
             except Exception:
                 pass
-            return False
+            return PlaySoundOutcome.FAILED
         except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
             _LOGGER.warning(
                 "Connection failed during play_sound for %s: %s",
@@ -800,7 +1150,7 @@ class LocateOperations(_MixinBase):
             )
             self.note_error(conn_err, where="async_play_sound", device=device_id)
             self._note_push_transport_problem()
-            return False
+            return PlaySoundOutcome.FAILED
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error during play_sound for %s: %s",
@@ -809,72 +1159,259 @@ class LocateOperations(_MixinBase):
                 exc_info=True,
             )
             self.note_error(err, where="async_play_sound", device=device_id)
-            self._note_push_transport_problem()
-            return False
+            # No cooldown here. api.async_play_sound classifies every Exception
+            # in band and returns INTERNAL_ERROR instead of raising, so nothing
+            # that reaches this handler came from the push transport: what is
+            # left is this method's own body around the call, or an api
+            # implementation that breaks the Protocol. Blaming the transport for
+            # either is the misclassification IRR-CA-SOUND-FAILURE-CLASS stops.
+            return PlaySoundOutcome.FAILED
 
     async def async_stop_sound(
         self,
         device_id: str,
         request_uuid: str | None = None,
-    ) -> bool:
+    ) -> StopSoundOutcome:
         """Stop sound on a device using the native async API (no executor).
 
         **IMPORTANT**: This method retrieves the UUID from the previous Play Sound request
-        and uses it to cancel that specific request. Without the UUID, Google's API may
-        not properly cancel the sound and the device will continue ringing.
+        and uses it to cancel that specific request. Without it the field is absent from
+        the proto3 payload, so the server cannot correlate the stop with a running ring
+        and the device may keep ringing.
 
         Args:
             device_id: The canonical ID of the device.
             request_uuid: Optional request UUID that identifies the prior play request.
 
         Returns:
-            True if the command was submitted successfully, False otherwise.
+            A :class:`StopSoundOutcome`. The state space is four-valued on
+            purpose: ``CANCELLED`` (submitted with a correlated cancel key),
+            ``UNCORRELATED`` (submitted without one, so nothing proves an
+            effect), ``SUPPRESSED`` (declined here because the push transport is
+            not up yet, so waiting is the remedy) and ``FAILED`` (attempted and
+            unsuccessful, which includes the missing action token that never
+            reaches the wire). A bool cannot carry the middle state, and
+            collapsing it into success is what reported a stop for a ring that
+            kept playing (BSkando#195). The two failure states split by REMEDY,
+            not by distance travelled; see ``StopSoundOutcome``.
         """
-        # Less strict than can_play_sound(): stopping is harmless but still requires push readiness.
+        # Blank means "no opinion" -- an optional field left empty, a template
+        # that rendered to nothing -- so it must fall through to the cached key
+        # below, never pose as one. In-process the absence of a key already has
+        # exactly one name, None, and only that name routes into the lookup.
+        # This is the SOLE normalisation point: every caller (service handler,
+        # button via the service, direct coordinator callers) passes here, and
+        # anything below the cache is too late to restore the fallback.
+        # Post-condition: request_uuid_to_use is None or non-blank, which is
+        # what every `is not None` check below relies on.
+        request_uuid_to_use = (request_uuid or "").strip() or None
+        # True only when the key about to be sent came from our own cache AND
+        # was still fresh. An explicitly passed foreign UUID does NOT qualify:
+        # popping our cache entry on its behalf would drop the handle of a
+        # different, possibly still running ring. Decided here, ABOVE the
+        # readiness gate, because that gate needs the same answer; the single
+        # definition lives in _stop_would_be_correlated().
+        used_own_fresh_key = self._stop_would_be_correlated(
+            device_id, request_uuid_to_use
+        )
+
+        # Less strict than can_play_sound(): stopping is harmless but still
+        # requires push readiness.
         if not self._api_push_ready():
-            _LOGGER.debug(
-                "Suppressing stop_sound call for %s: push not ready", device_id
-            )
-            return False
-        request_uuid_to_use = request_uuid
+            # ... with exactly one exception, and it runs OPPOSITE to
+            # can_play_sound() and the manual-locate guard above, which treat an
+            # active cooldown as the hard block and a merely unconfirmed
+            # transport as passable.
+            #
+            # What the exception tests is narrower than "the transport is
+            # fine", and it has to be: while a cooldown runs, _api_push_ready()
+            # short-circuits on that cooldown and never asks the transport at
+            # all, so the transport state is simply unknown here. The two cases
+            # this guard can tell apart are "not ready BECAUSE a window is
+            # running" and "not ready for some other reason", and only the
+            # first is passable. Claiming it also excludes a genuinely dead
+            # transport would be untrue: a transport failure is the ONLY thing
+            # that arms this window, so the two overlap by construction.
+            #
+            # Why the first case is passable at all: a play that reached the
+            # wire and lost the answer stores a cancel key and arms the 90 s
+            # window in the same breath, so the stop that key exists for was
+            # locked out for the first 90 seconds after that play -- which is
+            # exactly when a user reaches for the Stop button
+            # (IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN). Nothing here claims
+            # to know how long the ring itself lasts; that is a different timer
+            # on a different layer, see the note on the aged cached key below.
+            # The window is global while keys are per device, so "the play that
+            # armed it" is the common case, not a proven one. What IS proven is
+            # that this stop can be correlated, and that is the entire benefit
+            # bought here.
+            #
+            # The exception is bound to a PROVEN key, so every case that could
+            # at best report UNCORRELATED stays suppressed. It is not free,
+            # though, and the price is a changed outcome CLASS: a stop that
+            # used to end as SUPPRESSED ("not sent, try again in a moment") now
+            # reaches the transport, so it can also end as FAILED, which
+            # services.py reports with a different message. That is the honest
+            # trade -- an attempt that can actually silence the device, at the
+            # cost of a report that names the transport instead of the gate --
+            # and it is pinned by a test rather than left implicit.
+            #
+            # It also cannot feed itself: a broken-through stop that fails on
+            # the transport leaves the window exactly where it was, see
+            # _note_stop_transport_problem_without_extending().
+            if used_own_fresh_key and time.monotonic() < self._push_cooldown_until:
+                _LOGGER.debug(
+                    "Push cooldown active for %s, but this stop carries our own "
+                    "fresh cancel key: sending it anyway",
+                    device_id,
+                )
+            else:
+                _LOGGER.debug(
+                    "Suppressing stop_sound call for %s: push not ready", device_id
+                )
+                # A suppressed stop is a stop that was never sent, so it is a
+                # failure and must reach the service layer as one -- but as its
+                # own kind: nothing left this machine, and the condition clears
+                # itself.
+                return StopSoundOutcome.SUPPRESSED
+
+        cached_uuid_was_expired = False
         if request_uuid_to_use is None:
             cached_uuid = self._sound_request_uuids.get(device_id)
-            # An aged-out key is no better than no key: the ring it referenced
-            # auto-stopped long ago (the reload filter would discard it), so
-            # targeting it could miss a current ring. Treat it as absent.
-            if cached_uuid is not None and self._cached_sound_uuid_is_stale(device_id):
-                _LOGGER.debug(
-                    "Ignoring expired cached Play Sound UUID for %s", device_id
-                )
-                cached_uuid = None
+            # An aged-out key is still strictly better than no key, so it is
+            # SENT but not TRUSTED.
+            #
+            # Why sent: Nova queues an action command until the tracker becomes
+            # reachable, which can take hours to days (BSkando#108). A key that
+            # aged past SOUND_UUID_MAX_AGE_S may therefore still be the handle
+            # on the ring that is audible right now. It cannot hit a different
+            # ring -- it belongs to this device, and a fresher key would have
+            # replaced it. Dropping it traded a possible correlation for a
+            # guaranteed absence of one.
+            #
+            # Why not trusted: nothing proves the aged key references the
+            # running ring, so the outcome stays UNCORRELATED and reaches the
+            # user as such. It is also not popped afterwards: unspent, it is
+            # still the best handle a second attempt has.
+            #
+            # The previous justification ("the ring it referenced auto-stopped
+            # long ago") conflated two timers on two protocol layers. The FMDN
+            # BLE ring timeout (Data ID 0x05, at most 10 minutes) bounds how
+            # long a ring LASTS from the moment it starts; the Nova queue
+            # bounds how long DELIVERY takes. This timestamp records when we
+            # sent the play, not when the ring began, so nothing about the age
+            # of the key implies the ring is over.
+            cached_uuid_was_expired = cached_uuid is not None and (
+                self._cached_sound_uuid_is_stale(device_id)
+            )
             request_uuid_to_use = cached_uuid
-            if request_uuid_to_use is not None:
+            if request_uuid_to_use is None:
+                _LOGGER.warning(
+                    "No cancel key for %s; submitting an uncorrelated stop "
+                    "(the ring may keep playing)",
+                    device_id,
+                )
+            elif cached_uuid_was_expired:
+                _LOGGER.debug(
+                    "Using aged cached Play Sound UUID for %s (sent, but the "
+                    "outcome is reported as uncorrelated)",
+                    device_id,
+                )
+            else:
                 _LOGGER.debug(
                     "Using cached Play Sound UUID for %s: %s",
                     device_id,
                     request_uuid_to_use,
                 )
+        else:
+            # An explicitly passed key is a CLAIM of correlation, not a proof.
+            # It proves correlation in exactly one case: it IS our own fresh
+            # cached key. Any other string -- a typo, a stale template, the key
+            # of a different ring -- is unverifiable, and reporting CANCELLED
+            # for it would be BSkando#195 one layer up: success without effect.
+            # Which of the two it is was already settled by
+            # _stop_would_be_correlated() above; re-deriving the predicate here
+            # is exactly the drift this package removed. What is left for this
+            # branch is to say, per case, what it means.
+            cached_uuid = self._sound_request_uuids.get(device_id)
+            if used_own_fresh_key:
+                # It is our own live key, so spending it later is correct and
+                # not an eviction.
+                _LOGGER.debug(
+                    "Cancel key supplied for %s is our own live key: %s",
+                    device_id,
+                    request_uuid_to_use,
+                )
+            elif cached_uuid is not None and cached_uuid == request_uuid_to_use:
+                # Ours, but aged: it matches, it is simply too old to vouch
+                # for. Saying "does not match" here would be untrue, and the
+                # implicit path already distinguishes the two cases.
+                _LOGGER.debug(
+                    "Cancel key supplied for %s matches our cached key but it "
+                    "has aged out; sending it, reporting the stop as "
+                    "uncorrelated",
+                    device_id,
+                )
             else:
                 _LOGGER.warning(
-                    "Missing Play Sound UUID for %s; attempting stop without it",
+                    "Cancel key for %s was supplied by the caller and does not "
+                    "match a live Play Sound request of this integration; the "
+                    "stop cannot be correlated (the ring may keep playing)",
                     device_id,
                 )
 
         try:
-            ok = await self.api.async_stop_sound(device_id, request_uuid_to_use)
-            if not ok:
-                self._note_push_transport_problem()
-            # Success implies credentials worked
+            stop_outcome = await self.api.async_stop_sound(
+                device_id, request_uuid_to_use
+            )
+            # Same rule as on the play path above. The outer test stays in its
+            # negative form on purpose and is the single exception to the
+            # positive-list discipline: the safe default of THIS branch is
+            # FAILED, so an outcome nobody anticipated must fall through to it
+            # rather than be waved past. The cooldown inside it keeps the
+            # positive form, because there the safe default is to do nothing.
+            if stop_outcome is not SoundDispatchOutcome.ACCEPTED:
+                if stop_outcome is SoundDispatchOutcome.TRANSPORT_FAILED:
+                    self._note_stop_transport_problem_without_extending()
+                # No credential proof on any non-accepted path: an auth
+                # rejection arrives as REJECTED_AUTH, and clearing the
+                # auth-failure state here would erase the very signal an expired
+                # sign-in produces.
+                return StopSoundOutcome.FAILED
+            # An accepted submission, and only that, proves credentials worked.
             self._set_auth_state(failed=False)
-            if ok:
-                removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
-                # Use getattr for test compatibility (tests may bypass __init__)
-                timestamps = getattr(self, "_sound_request_timestamps", None)
-                if timestamps is not None:
-                    timestamps.pop(device_id, None)
-                if removed_request_uuid is not None:
-                    await self._async_save_sound_uuids()
-            return bool(ok)
+            # CANCELLED is bound to PROVEN correlation, never to "some string
+            # was sent". A key we cannot vouch for falls through to
+            # UNCORRELATED below, which is what reaches the user as an error.
+            if used_own_fresh_key:
+                # Correlated stop accepted with OUR key: it is spent. This
+                # is the ONLY branch that drops a live key --
+                # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY is unchanged, only
+                # narrowed in the direction of its own purpose.
+                #
+                # Popped by VALUE, not by device id. The key was read before
+                # the await above, and a Play that lands during the Nova
+                # round trip stores a fresher one for the same device. Popping
+                # by id would then evict the handle of a ring that just
+                # started -- exactly the eviction used_own_fresh_key exists to
+                # prevent, only through the back door of an interleaving.
+                if self._sound_request_uuids.get(device_id) == request_uuid_to_use:
+                    removed_request_uuid = self._sound_request_uuids.pop(
+                        device_id, None
+                    )
+                    # Use getattr for test compatibility (tests may bypass __init__)
+                    timestamps = getattr(self, "_sound_request_timestamps", None)
+                    if timestamps is not None:
+                        timestamps.pop(device_id, None)
+                    if removed_request_uuid is not None:
+                        await self._async_save_sound_uuids()
+                return StopSoundOutcome.CANCELLED
+            # IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY: only a stop we can vouch
+            # for spends the key. An aged key was sent unproven, so it survives
+            # -- it remains the best handle a retry has, and the reload filter
+            # clears it at the next restart anyway. Popping it here would leave
+            # a second attempt with nothing at all.
+            return StopSoundOutcome.UNCORRELATED
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
                 failed=True, reason=f"Auth failed during stop_sound: {auth_exc}"
@@ -883,7 +1420,7 @@ class LocateOperations(_MixinBase):
                 await self.async_request_refresh()
             except Exception:
                 pass
-            return False
+            return StopSoundOutcome.FAILED
         except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
             _LOGGER.warning(
                 "Connection failed during stop_sound for %s: %s",
@@ -891,8 +1428,8 @@ class LocateOperations(_MixinBase):
                 conn_err,
             )
             self.note_error(conn_err, where="async_stop_sound", device=device_id)
-            self._note_push_transport_problem()
-            return False
+            self._note_stop_transport_problem_without_extending()
+            return StopSoundOutcome.FAILED
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error during stop_sound for %s: %s",
@@ -901,5 +1438,8 @@ class LocateOperations(_MixinBase):
                 exc_info=True,
             )
             self.note_error(err, where="async_stop_sound", device=device_id)
-            self._note_push_transport_problem()
-            return False
+            # No cooldown, for the reason spelled out on the play path:
+            # api.async_stop_sound returns INTERNAL_ERROR for every unexpected
+            # Exception instead of raising, so this handler only ever sees a
+            # failure of our own bookkeeping around the call.
+            return StopSoundOutcome.FAILED

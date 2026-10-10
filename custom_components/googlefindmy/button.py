@@ -29,10 +29,11 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from homeassistant.components.button import ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity as HARestoreEntity
 from homeassistant.util import dt as dt_util
@@ -41,11 +42,6 @@ if TYPE_CHECKING:
     from .ha_typing import RestoreEntity as RestoreEntityType
 else:
     RestoreEntityType = HARestoreEntity
-
-try:
-    from homeassistant.const import EntityCategory
-except ImportError:  # Home Assistant <2025.11
-    from homeassistant.helpers.entity import EntityCategory
 
 from . import EntityRecoveryManager
 from .const import (
@@ -889,12 +885,22 @@ class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity, RestoreEnti
         """Reset coordinator statistics and refresh listeners."""
 
         hass = self.coordinator.hass
-        stats = getattr(self.coordinator, "stats", None)
-        if isinstance(stats, dict):
-            for key in list(stats.keys()):
-                stats[key] = 0
+        # Counters, tally claims and the generation marker in one call: they are
+        # halves of one fact, and the marker is what keeps a stats load that is
+        # still in flight from adding the discarded generation back. Source order
+        # against the persist below does NOT matter - that schedule only creates a
+        # task which sleeps first, and the writer reads every half live.
+        begin_epoch = getattr(self.coordinator, "begin_new_stats_epoch", None)
+        if callable(begin_epoch):
+            try:
+                if not begin_epoch():
+                    _LOGGER.debug("Stats reset: coordinator stats missing or invalid")
+            except Exception as err:  # pragma: no cover - defensive logging
+                # WARNING, unlike the DEBUG of the neighbours below: their failure
+                # is benign, this one produces exactly the state the reset forbids.
+                _LOGGER.warning("Stats reset: failed to start a new epoch: %s", err)
         else:
-            _LOGGER.debug("Stats reset skipped: coordinator stats missing or invalid")
+            _LOGGER.debug("Stats reset skipped: coordinator cannot start an epoch")
 
         diag_buffer = getattr(self.coordinator, "_diag", None)
         if diag_buffer is not None:
@@ -1128,6 +1134,12 @@ class GoogleFindMyPlaySoundButton(GoogleFindMyButtonEntity):
             _LOGGER.info(
                 "Successfully submitted Play Sound request for %s", device_name
             )
+        except ServiceValidationError:
+            # The service layer raises this to *tell the user something*, with a
+            # translated message. Swallowing it into a log line is how a
+            # deliberately written explanation never reaches the person pressing
+            # the button. Let HA surface it; it is not an unexpected crash.
+            raise
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error playing sound on %s: %s", device_name, err)
 
@@ -1225,6 +1237,12 @@ class GoogleFindMyStopSoundButton(GoogleFindMyButtonEntity):
             _LOGGER.info(
                 "Successfully submitted Stop Sound request for %s", device_name
             )
+        except ServiceValidationError:
+            # This button is the primary path for BSkando#195: it is where a
+            # user learns that the ring could not be correlated and may keep
+            # playing. That message exists in ten languages; a log line reaches
+            # none of them. Let HA show it.
+            raise
         except Exception as err:
             _LOGGER.error("Error stopping sound on %s: %s", device_name, err)
 
@@ -1316,7 +1334,16 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
                 blocking=False,  # non-blocking: avoid UI stall
             )
             self._update_last_pressed()
-            _LOGGER.info("Successfully submitted manual locate for %s", device_name)
+            # blocking=False by design (responsive UI), so the service result is
+            # never observed here. This call site therefore cannot claim
+            # success: a ServiceValidationError raised inside the handler is
+            # reported by HA core, never by the except-branch below, and a
+            # gated locate returns quietly. Say what is known -- dispatched --
+            # and nothing more.
+            _LOGGER.info(
+                "Manual locate dispatched for %s (fire-and-forget, outcome not awaited)",
+                device_name,
+            )
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error submitting manual locate for %s: %s", device_name, err)
 

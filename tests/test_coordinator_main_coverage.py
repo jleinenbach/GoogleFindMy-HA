@@ -14,12 +14,14 @@ method under test needs are set explicitly. Async paths use ``async def`` with
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 
 from custom_components.googlefindmy.const import (
     OPT_IGNORED_DEVICES,
@@ -27,11 +29,19 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_entries_stub import make_config_entry
+from tests.helpers.core_shutdown_state import seed_core_shutdown_state
 
 
 def _bare() -> Any:
-    """Return a coordinator instance without running ``__init__``."""
-    return GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    """Return a coordinator instance without running ``__init__``.
+
+    The attributes the core's ``async_shutdown`` reads are seeded, because
+    ``GoogleFindMyCoordinator.async_shutdown`` chains to it (see
+    ``tests.helpers.core_shutdown_state``).
+    """
+    return seed_core_shutdown_state(
+        GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    )
 
 
 class _Cache:
@@ -199,7 +209,14 @@ async def test_save_stats_persists_copy() -> None:
 
     await c._async_save_stats()
 
-    assert cache.saved["integration_stats"] == {"x": 1}
+    # The record carries the counters plus the tally claims that protect the accuracy
+    # histogram, under a reserved sub-key: one write, so the two halves cannot disagree
+    # after a crash. Counters are compared by projection rather than by equality, since
+    # this test is about the copy, not about the record's shape.
+    record = cache.saved["integration_stats"]
+    assert {k: v for k, v in record.items() if not k.startswith("_")} == {"x": 1}
+    assert record["_tally_claims"] == {}
+    assert record is not c.stats
 
 
 @pytest.mark.asyncio
@@ -404,10 +421,13 @@ async def test_async_setup_sets_cache_namespace_and_subscribes() -> None:
     c._ensure_service_device_exists = lambda: ensure.append(True)
     c._reindex_poll_targets_from_device_registry = lambda: reindex.append(True)
     c._dr_unsub = None
+    c._hass_stop_unsub = None
     listens: list[str] = []
+    listens_once: list[str] = []
     c.hass = SimpleNamespace(
         bus=SimpleNamespace(
-            async_listen=lambda ev, cb: (listens.append(ev), "unsub")[1]
+            async_listen=lambda ev, cb: (listens.append(ev), "unsub")[1],
+            async_listen_once=lambda ev, cb: (listens_once.append(ev), "stop")[1],
         )
     )
 
@@ -417,6 +437,8 @@ async def test_async_setup_sets_cache_namespace_and_subscribes() -> None:
     assert ensure and reindex
     assert c._dr_unsub == "unsub"
     assert listens  # subscribed to device-registry updates
+    assert listens_once == [EVENT_HOMEASSISTANT_STOP]
+    assert c._hass_stop_unsub == "stop"
 
 
 @pytest.mark.asyncio
@@ -435,10 +457,16 @@ async def test_async_setup_namespace_failure_swallowed() -> None:
     c._ensure_service_device_exists = lambda: None
     c._reindex_poll_targets_from_device_registry = lambda: None
     c._dr_unsub = "already"  # skip re-subscribe branch
-    c.hass = SimpleNamespace(bus=SimpleNamespace(async_listen=lambda *a: "x"))
+    c._hass_stop_unsub = "already"
+    c.hass = SimpleNamespace(
+        bus=SimpleNamespace(
+            async_listen=lambda *a: "x", async_listen_once=lambda *a: "y"
+        )
+    )
 
     await c.async_setup()  # must not raise
     assert c._dr_unsub == "already"
+    assert c._hass_stop_unsub == "already"
 
 
 # ---------------------------------------------------------------------------
@@ -475,13 +503,29 @@ async def test_async_shutdown_cancels_handles_and_unloads() -> None:
     c._short_retry_cancel = lambda: cancelled.append("retry")
 
     class _Task:
+        """Awaitable on purpose: shutdown now awaits the write it cancelled.
+
+        A stub without ``__await__`` still passed, because the ``TypeError`` was
+        swallowed by the same guard that swallows a failed write - so the test would
+        have stayed green with the flush deleted.
+        """
+
         def done(self) -> bool:
             return False
 
         def cancel(self) -> None:
             cancelled.append("stats")
 
+        def __await__(self):  # type: ignore[no-untyped-def]
+            return iter(())
+
     c._stats_save_task = _Task()
+    saved: list[int] = []
+
+    async def _save() -> None:
+        saved.append(1)
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
     c._eid_refresh_debounce_handle = SimpleNamespace(
         cancel=lambda: cancelled.append("eid1")
     )
@@ -498,9 +542,366 @@ async def test_async_shutdown_cancels_handles_and_unloads() -> None:
     await c.async_shutdown()
 
     assert set(cancelled) == {"dr", "retry", "stats", "eid1", "eid2"}
+    assert saved == [1], "the cancelled write is flushed, not dropped"
     assert c._dr_unsub is None
     assert c._short_retry_cancel is None
     assert unloaded
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_chains_to_the_core_before_it_suspends() -> None:
+    """The override hands the core its shutdown, and does so before any await.
+
+    ``DataUpdateCoordinator.async_shutdown`` raises ``_shutdown_requested`` (a
+    refresh arriving after unload returns at once), cancels the scheduled
+    interval refresh and shuts the request debouncer. The override never
+    chained to it, so a late ``async_request_refresh`` from a push callback ran
+    a full refresh against the closed API. The core step is synchronous and
+    the poll-cycle cancel suspends, so the core goes first: the flag must
+    already be up when the cycle sees its cancellation.
+    """
+
+    c = _bare()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+    c._hass_stop_unsub = None
+    order: list[str] = []
+    c._unsub_refresh = lambda: order.append("interval")
+    c._debounced_refresh = SimpleNamespace(
+        async_shutdown=lambda: order.append("debouncer"),
+        async_cancel=lambda: order.append("debouncer-cancel"),
+    )
+
+    async def _save() -> None:
+        order.append("stats")
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        order.append("unload")
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    flag_when_cancelled: list[bool] = []
+    started = asyncio.Event()
+
+    async def _poll_forever() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            flag_when_cancelled.append(c._shutdown_requested)
+            order.append("poll-cancelled")
+            raise
+
+    c._poll_cycle_task = asyncio.create_task(_poll_forever())
+    await started.wait()
+
+    await c.async_shutdown()
+
+    assert c._shutdown_requested is True
+    # The core's two calls come before the cycle is cancelled: raising the flag
+    # by hand and chaining to the core after the awaits would keep the flag
+    # assertion below green, and fails here.
+    assert order[:3] == ["interval", "debouncer", "poll-cancelled"], order
+    assert c._unsub_refresh is None, "the core clears the remover it called"
+    assert flag_when_cancelled == [True], (
+        "the core's flag must be up before the poll cycle is cancelled"
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_twice_hands_the_core_its_turn_each_time() -> None:
+    """Unload runs ``async_shutdown`` twice; the second pass raises nothing.
+
+    ``async_unload_entry`` calls the method explicitly and the core's
+    ``async_on_unload`` hook (registered by ``DataUpdateCoordinator.__init__``)
+    calls it again after the entry-scoped cache is closed. The core's shutdown
+    is idempotent by construction: it clears the interval remover it called,
+    and the debouncer's own shutdown is repeatable. This pins that the override
+    keeps it that way.
+    """
+
+    c = _bare()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+    c._hass_stop_unsub = None
+    calls: list[str] = []
+    c._unsub_refresh = lambda: calls.append("interval")
+    c._debounced_refresh = SimpleNamespace(
+        async_shutdown=lambda: calls.append("debouncer"),
+        async_cancel=lambda: None,
+    )
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    await c.async_shutdown()
+    await c.async_shutdown()
+
+    assert calls == ["interval", "debouncer", "debouncer"]
+    assert c._shutdown_requested is True
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_cancels_an_in_flight_poll_cycle() -> None:
+    """A poll cycle still running at entry unload is cancelled by the coordinator.
+
+    ``async_shutdown`` is the *unload* path (``config_entry.async_on_unload``);
+    without the cancel the old cycle kept running into the closed entry-scoped
+    cache. The Home Assistant *stop* path is covered separately below, because
+    the core does not unload entries on stop.
+    """
+
+    c = _bare()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+    c._hass_stop_unsub = None
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _poll_forever() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    c._poll_cycle_task = asyncio.create_task(_poll_forever())
+    await started.wait()
+
+    await c.async_shutdown()
+
+    assert cancelled.is_set(), "the in-flight poll cycle was not cancelled"
+    assert c._poll_cycle_task is None
+    assert c._poll_cycle_teardown is True
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_leaves_a_finished_poll_cycle_alone() -> None:
+    """A poll cycle that already ended is neither cancelled nor awaited again."""
+
+    c = _bare()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+    c._hass_stop_unsub = None
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    touched: list[str] = []
+
+    class _DoneTask:
+        def done(self) -> bool:
+            return True
+
+        def cancel(self) -> None:
+            touched.append("cancel")
+
+        def __await__(self):  # type: ignore[no-untyped-def]
+            touched.append("await")
+            return iter(())
+
+    c._poll_cycle_task = _DoneTask()
+
+    await c.async_shutdown()
+
+    assert touched == []
+    assert c._poll_cycle_task is None
+
+
+class _OneShotBus:
+    """Bus stub with Home Assistant's one-time listener contract.
+
+    Firing consumes the listener before the handler runs (``core.py``,
+    ``_OneTimeListener.__call__``); a remover called after that is a double
+    removal, which the real bus reports as an ERROR log line rather than an
+    exception. Every call of a handed-out remover is counted (``removals``)
+    and, within those, the calls that found the listener already consumed
+    (``double_removals``); firing itself is not counted, as in the core it is
+    the bus that consumes.
+    """
+
+    def __init__(self) -> None:
+        self.once: dict[str, list[list[Any]]] = {}
+        self.removals = 0
+        self.double_removals = 0
+
+    def async_listen(self, event: str, callback: Any) -> Any:
+        return lambda: None
+
+    def async_listen_once(self, event: str, callback: Any) -> Any:
+        token = [callback]
+        self.once.setdefault(event, []).append(token)
+
+        def _remove() -> None:
+            self.removals += 1
+            try:
+                self.once[event].remove(token)
+            except (KeyError, ValueError):
+                self.double_removals += 1
+
+        return _remove
+
+    async def async_fire(self, event: str) -> None:
+        for token in list(self.once.get(event, [])):
+            self.once[event].remove(token)
+            await token[0](SimpleNamespace(event_type=event))
+
+
+def _coordinator_with_stop_listener(bus: _OneShotBus) -> Any:
+    """Return a bare coordinator that ran ``async_setup`` against ``bus``."""
+
+    c = _bare()
+    c._cache = SimpleNamespace(entry_id="e")
+    c.config_entry = make_config_entry(entry_id="e", data={}, options={})
+    c._ensure_service_device_exists = lambda: None
+    c._reindex_poll_targets_from_device_registry = lambda: None
+    c._dr_unsub = None
+    c._hass_stop_unsub = None
+    c.hass = SimpleNamespace(bus=bus)
+    return c
+
+
+@pytest.mark.asyncio
+async def test_hass_stop_cancels_an_in_flight_poll_cycle() -> None:
+    """EVENT_HOMEASSISTANT_STOP cancels the running poll cycle.
+
+    Regression for ``Task <... googlefindmy.poll_cycle ...> was still running
+    after final writes shutdown stage``: the core does not unload entries on
+    stop, so ``async_shutdown`` never ran and the tracked task outlived the
+    stop event until the core cancelled it itself and logged the warning.
+    """
+
+    bus = _OneShotBus()
+    c = _coordinator_with_stop_listener(bus)
+    await c.async_setup()
+    assert bus.once[EVENT_HOMEASSISTANT_STOP], "stop listener not armed"
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _poll_forever() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    c._poll_cycle_task = asyncio.create_task(_poll_forever())
+    await started.wait()
+    disarmed: list[str] = []
+    c._short_retry_cancel = lambda: disarmed.append("retry")
+    c._eid_refresh_debounce_handle = SimpleNamespace(
+        cancel=lambda: disarmed.append("eid")
+    )
+    c._eid_inline_refresh_debounce_handle = SimpleNamespace(
+        cancel=lambda: disarmed.append("eid-inline")
+    )
+
+    await bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+
+    assert cancelled.is_set(), "the in-flight poll cycle was not cancelled on stop"
+    assert c._poll_cycle_task is None
+    # What the cycle's ``finally`` may have armed is disarmed on the stop path too.
+    assert disarmed == ["retry", "eid", "eid-inline"]
+    assert c._short_retry_cancel is None
+    assert c._eid_refresh_debounce_handle is None
+    assert c._eid_inline_refresh_debounce_handle is None
+    # The bus consumed the listener; the coordinator did not call the spent remover.
+    assert c._hass_stop_unsub is None
+    assert bus.removals == 0
+    assert bus.double_removals == 0
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_after_hass_stop_does_not_remove_the_spent_listener() -> (
+    None
+):
+    """An unload that follows a stop must not call the consumed remover again."""
+
+    bus = _OneShotBus()
+    c = _coordinator_with_stop_listener(bus)
+    await c.async_setup()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    await bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await c.async_shutdown()
+
+    assert bus.removals == 0
+    assert bus.double_removals == 0
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_before_hass_stop_disarms_the_stop_listener() -> None:
+    """An unload before any stop removes the listener exactly once."""
+
+    bus = _OneShotBus()
+    c = _coordinator_with_stop_listener(bus)
+    await c.async_setup()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    await c.async_shutdown()
+
+    assert c._hass_stop_unsub is None
+    assert bus.removals == 1
+    assert bus.double_removals == 0
+    assert bus.once[EVENT_HOMEASSISTANT_STOP] == []
+
+    # The real unload calls ``async_shutdown`` twice (explicitly and via the
+    # base class ``async_on_unload``); the second call must not remove again.
+    await c.async_shutdown()
+    assert bus.removals == 1
+    assert bus.double_removals == 0
 
 
 @pytest.mark.asyncio
@@ -513,6 +914,7 @@ async def test_async_shutdown_swallows_unsub_errors() -> None:
 
     c._dr_unsub = _boom
     c._short_retry_cancel = _boom
+    c._hass_stop_unsub = _boom
     c._stats_save_task = None
     c._eid_refresh_debounce_handle = SimpleNamespace(cancel=_boom)
     c._eid_inline_refresh_debounce_handle = None
@@ -524,6 +926,7 @@ async def test_async_shutdown_swallows_unsub_errors() -> None:
 
     await c.async_shutdown()  # must not raise
     assert c._dr_unsub is None
+    assert c._hass_stop_unsub is None
 
 
 @pytest.mark.asyncio
@@ -917,6 +1320,52 @@ def test_purge_device_removes_and_republishes() -> None:
     ids = {row.get("device_id") for row in published}
     assert ids == {"other"}
     assert "dev" not in c._device_location_data
+
+
+def test_purge_device_drops_the_persisted_tally_claim() -> None:
+    """A persisted, device-keyed value follows the device's lifecycle.
+
+    Two consequences if it does not, and the first is the serious one. The claim of a
+    report without a timestamp is derived from that report's position and is written to
+    a durable store, so a deleted or ignored device would leave a trace of where it was,
+    indefinitely - the one thing the rest of this feature keeps out of durable state.
+    The second: a device re-added under the same id would have its first matching
+    measurement suppressed by a claim from its previous life.
+
+    A persist is scheduled, because dropping it only in memory would restore it on the
+    next start.
+    """
+    c = _bare()
+    _purge_ready(c)
+    written: list[Any] = []
+    c.hass = SimpleNamespace(async_create_task=written.append)
+    c._last_tallied_report_id = {
+        "dev": [("fix", "deadbeefdeadbeef")],
+        "other": [("ts", 7)],
+    }
+
+    c.purge_device("dev")
+
+    assert c._last_tallied_report_id == {"other": [("ts", 7)]}
+    # Written now rather than on the debounce: a reload or shutdown inside that window
+    # cancels the pending write without flushing it, and the purged device's claim would
+    # outlive the device it was deleted with.
+    assert len(written) == 1
+    written[0].close()
+
+
+def test_purge_device_without_a_claim_schedules_no_write() -> None:
+    """No claim, no write: a purge must not churn the store for nothing."""
+    c = _bare()
+    _purge_ready(c)
+    written: list[Any] = []
+    c.hass = SimpleNamespace(async_create_task=written.append)
+    c._last_tallied_report_id = {"other": [("ts", 7)]}
+
+    c.purge_device("dev")
+
+    assert c._last_tallied_report_id == {"other": [("ts", 7)]}
+    assert written == []
 
 
 def test_purge_device_saves_sound_uuids_when_present() -> None:
