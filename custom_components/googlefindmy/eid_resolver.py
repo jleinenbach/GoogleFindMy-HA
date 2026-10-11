@@ -999,6 +999,7 @@ class UwtSource(StrEnum):
 
     FLAGS_BIT = "flags_bit"
     FRAME_TYPE = "frame_type"
+    CONFLICT = "conflict"
     UNKNOWN = "unknown"
 
 
@@ -1028,17 +1029,25 @@ def _effective_uwt_mode(
     The Find Hub Network Accessory Specification carries the mode twice: in
     the frame type (``0x41`` while unwanted tracking protection mode is
     active, ``0x40`` otherwise) and in spec bit 7 of the hashed flags. The
-    decoded bit wins when it was read at a known position (``"framed"``); a
+    decoded bit counts when it was read at a known position (``"framed"``); a
     byte found by ``_guess_flags_byte`` may be EID material and counts like no
-    byte at all. Without a usable bit the frame type decides. Without either
-    the mode is unknown, and callers must not report it as "off".
+    byte at all. When a usable bit and a ``0x40``/``0x41`` frame type
+    disagree, the advertisement contradicts itself: the mode is ``None`` with
+    source ``CONFLICT``, so no caller reports either value. Without a usable
+    bit the frame type decides. Without either the mode is unknown, and
+    callers must not report it as "off".
     """
-    if flags_origin == "framed" and flags_bit is not None:
-        return flags_bit, UwtSource.FLAGS_BIT
+    frame_mode: bool | None = None
     if frame_type == MODERN_FRAME_TYPE:
-        return True, UwtSource.FRAME_TYPE
-    if frame_type == FMDN_FRAME_TYPE:
-        return False, UwtSource.FRAME_TYPE
+        frame_mode = True
+    elif frame_type == FMDN_FRAME_TYPE:
+        frame_mode = False
+    if flags_origin == "framed" and flags_bit is not None:
+        if frame_mode is not None and frame_mode != flags_bit:
+            return None, UwtSource.CONFLICT
+        return flags_bit, UwtSource.FLAGS_BIT
+    if frame_mode is not None:
+        return frame_mode, UwtSource.FRAME_TYPE
     return None, UwtSource.UNKNOWN
 
 
@@ -3633,8 +3642,8 @@ class GoogleFindMyEIDResolver:
             # only logs a disagreement: a conflict points at a decoding or
             # firmware fault and should stay visible, not be smoothed over.
             # The finder's upload takes the mode from _effective_uwt_mode(),
-            # which prefers the bit read at a known position and falls back
-            # to the frame type.
+            # which uses the bit read at a known position, falls back to the
+            # frame type, and reports no mode at all when the two disagree.
             if observed_frame is not None:
                 self._log_frame_conflict(
                     matches=matches,

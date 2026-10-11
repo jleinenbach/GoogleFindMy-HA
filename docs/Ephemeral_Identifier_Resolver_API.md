@@ -291,11 +291,13 @@ prediction: the finder encrypts its report to that EID and sends the sighting
 time, and the owner resolves the counter over the recent past and near future.
 The sighting also carries the unwanted tracking protection mode the device
 advertised: `uwt_mode` (`True`, `False` or `None`) and `uwt_source`
-(`flags_bit`, `frame_type` or `unknown`). `_effective_uwt_mode()` takes the
-hashed-flags bit when the flags byte was read at a known position, otherwise
-the frame type (`0x41` on, `0x40` off), otherwise unknown; a flags byte found
-only by guessing its position never counts. A sighting with an unknown mode
-keeps the known mode of the previous sighting in the same window. The finder
+(`flags_bit`, `frame_type`, `conflict` or `unknown`). `_effective_uwt_mode()`
+takes the hashed-flags bit when the flags byte was read at a known position,
+otherwise the frame type (`0x41` on, `0x40` off), otherwise unknown; a flags
+byte found only by guessing its position never counts. When that bit and a
+`0x40`/`0x41` frame type disagree, the mode is `None` with source `conflict`.
+A sighting with source `unknown` keeps the known mode of the previous sighting
+in the same window; a `conflict` keeps nothing. The finder
 sends that mode, and sends nothing without a recent sighting
 or while that mode is unknown, because the upload field cannot express
 "unknown". Field data behind the frame/bit reading:

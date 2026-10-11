@@ -29,11 +29,11 @@ from tests.test_ble_battery_sensor import _make_resolver, _match
 @pytest.mark.parametrize(
     ("flags_bit", "origin", "frame_type", "expected"),
     [
-        (True, "framed", FMDN_FRAME_TYPE, (True, UwtSource.FLAGS_BIT)),
+        (True, "framed", FMDN_FRAME_TYPE, (None, UwtSource.CONFLICT)),
         (True, "framed", MODERN_FRAME_TYPE, (True, UwtSource.FLAGS_BIT)),
         (True, "framed", None, (True, UwtSource.FLAGS_BIT)),
         (False, "framed", FMDN_FRAME_TYPE, (False, UwtSource.FLAGS_BIT)),
-        (False, "framed", MODERN_FRAME_TYPE, (False, UwtSource.FLAGS_BIT)),
+        (False, "framed", MODERN_FRAME_TYPE, (None, UwtSource.CONFLICT)),
         (False, "framed", None, (False, UwtSource.FLAGS_BIT)),
         (None, "absent", FMDN_FRAME_TYPE, (False, UwtSource.FRAME_TYPE)),
         (None, "absent", MODERN_FRAME_TYPE, (True, UwtSource.FRAME_TYPE)),
@@ -48,7 +48,8 @@ def test_effective_uwt_mode(
     frame_type: int | None,
     expected: tuple[bool | None, UwtSource],
 ) -> None:
-    """A framed bit wins, a guessed bit counts like none, then the frame type."""
+    """A framed bit decides unless the frame type contradicts it (conflict);
+    a guessed bit counts like none; then the frame type."""
     assert _effective_uwt_mode(flags_bit, origin, frame_type) == expected
 
 
@@ -107,7 +108,7 @@ def test_confirmed_sighting_defaults_to_an_unknown_mode() -> None:
 def test_framed_flags_bit_is_the_source() -> None:
     """A framed advertisement with a decodable flags byte: the bit decides."""
     resolver = _resolver((0x71, 7))
-    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
     assert _mode(resolver) == (True, UwtSource.FLAGS_BIT)
 
 
@@ -128,7 +129,7 @@ def test_bare_eid_alone_is_unknown() -> None:
 def test_bare_copy_in_the_same_window_keeps_the_known_mode() -> None:
     """The bare copy of a framed advertisement does not erase its mode."""
     resolver = _resolver((0x71, 7))
-    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
     _feed(resolver, bytes([0x71]) * 20, _T + 1)
     assert _mode(resolver) == (True, UwtSource.FLAGS_BIT)
 
@@ -136,7 +137,7 @@ def test_bare_copy_in_the_same_window_keeps_the_known_mode() -> None:
 def test_bare_sighting_in_a_later_window_is_unknown() -> None:
     """An unknown mode in the next window stays unknown."""
     resolver = _resolver((0x71, 7), (0x72, 8))
-    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
     _feed(resolver, bytes([0x72]) * 20, _T + _PERIOD)
     assert resolver.last_confirmed_sighting("dev-u").window_counter == 8 * _PERIOD  # type: ignore[union-attr]
     assert _mode(resolver) == (None, UwtSource.UNKNOWN)
@@ -146,7 +147,7 @@ def test_restarted_counter_does_not_inherit_the_mode() -> None:
     """After a counter restart (smaller window, wall gap over one period)
     an unknown mode stays unknown; only the same window inherits."""
     resolver = _resolver((0x71, 9), (0x72, 2))
-    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
     _feed(resolver, bytes([0x72]) * 20, _T + 2 * _PERIOD)
     assert resolver.last_confirmed_sighting("dev-u").window_counter == 2 * _PERIOD  # type: ignore[union-attr]
     assert _mode(resolver) == (None, UwtSource.UNKNOWN)
@@ -155,7 +156,7 @@ def test_restarted_counter_does_not_inherit_the_mode() -> None:
 def test_known_mode_in_the_same_window_replaces() -> None:
     """A known new mode always replaces, also within the window."""
     resolver = _resolver((0x71, 7))
-    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
     _feed(resolver, _framed(0x71, 0x00), _T + 1)
     assert _mode(resolver) == (False, UwtSource.FLAGS_BIT)
 
@@ -172,9 +173,9 @@ def test_throwing_decoder_still_records_the_sighting(
 
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_update_ble_battery", _boom)
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
-        _feed(resolver, _framed(0x71, 0x01), _T)
-        _feed(resolver, _framed(0x71, 0x01), _T + 1)
-    assert _mode(resolver) == (False, UwtSource.FRAME_TYPE)
+        _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
+        _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T + 1)
+    assert _mode(resolver) == (True, UwtSource.FRAME_TYPE)
     failures = [
         r for r in caplog.records if "ble_battery_decode_failed" in r.getMessage()
     ]
@@ -209,3 +210,27 @@ def test_guessed_flags_byte_does_not_decide() -> None:
     assert resolver.get_ble_battery_state("dev-u") is not None
     assert resolver.get_ble_battery_state("dev-u").uwt_mode is True  # type: ignore[union-attr]
     assert _mode(resolver) == (None, UwtSource.UNKNOWN)
+
+
+def test_frame_and_bit_disagreeing_is_a_conflict() -> None:
+    """Frame 0x40 with the bit set contradicts itself: no mode, source CONFLICT."""
+    resolver = _resolver((0x71, 7))
+    _feed(resolver, _framed(0x71, 0x01), _T)
+    assert _mode(resolver) == (None, UwtSource.CONFLICT)
+
+
+def test_conflict_does_not_inherit_the_known_mode() -> None:
+    """A contradicting advertisement replaces a known mode in the same window;
+    only an UNKNOWN sighting inherits, a CONFLICT is evidence of its own."""
+    resolver = _resolver((0x71, 7))
+    _feed(resolver, _framed(0x71, 0x00), _T)
+    _feed(resolver, _framed(0x71, 0x00, MODERN_FRAME_TYPE), _T + 1)
+    assert _mode(resolver) == (None, UwtSource.CONFLICT)
+
+
+def test_bare_copy_after_a_conflict_stays_without_a_mode() -> None:
+    """The bare copy of a contradicting advertisement inherits no value."""
+    resolver = _resolver((0x71, 7))
+    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, bytes([0x71]) * 20, _T + 1)
+    assert _mode(resolver) == (None, UwtSource.CONFLICT)
