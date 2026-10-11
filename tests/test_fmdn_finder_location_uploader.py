@@ -256,6 +256,7 @@ async def test_process_fmdn_beacon_no_location(hass_mock):
             scanner_device_id="scanner_123",
             fmdn_device_id="device_456",
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
         )
 
         # No upload should occur
@@ -427,6 +428,7 @@ async def test_rssi_adjustment_before_throttle_no_phantom_upload(hass_mock):
             scanner_device_id="scanner_123",
             fmdn_device_id="device_456",
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
         )
 
     assert result is False
@@ -468,6 +470,7 @@ async def test_rssi_adjustment_cached_value_equals_uploaded_value(hass_mock):
             scanner_device_id="scanner_123",
             fmdn_device_id="device_456",
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
         )
 
     assert result is True
@@ -513,6 +516,7 @@ async def test_rssi_none_leaves_accuracy_unchanged(hass_mock):
             scanner_device_id="scanner_123",
             fmdn_device_id="device_456",
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
         )
 
     assert result is True
@@ -553,6 +557,7 @@ async def test_rssi_adjustment_does_not_lower_accuracy(hass_mock):
             scanner_device_id="scanner_123",
             fmdn_device_id="device_456",
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
         )
 
     assert result is True
@@ -630,6 +635,7 @@ async def test_debug_logs_omit_coordinates(hass_mock, caplog):
             scanner_device_id="scanner_123",
             fmdn_device_id="device_456",
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
         )
 
     assert result is True
@@ -692,6 +698,7 @@ async def test_debug_logs_omit_ecdh_shared_secret(hass_mock, caplog):
             scanner_device_id="scanner_123",
             fmdn_device_id="device_456",
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
         )
 
     assert result is True
@@ -740,6 +747,7 @@ async def test_debug_log_masks_scanner_name_without_location(hass_mock, caplog):
             scanner_device_id=None,
             fmdn_device_id=None,
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
         )
 
     assert result is False
@@ -786,6 +794,7 @@ async def test_report_time_is_the_sighting_time(hass_mock, report_time):
             scanner_device_id="scanner_123",
             fmdn_device_id="device_456",
             entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=False,
             report_time=report_time,
         )
 
@@ -794,3 +803,91 @@ async def test_report_time_is_the_sighting_time(hass_mock, report_time):
     sent.ParseFromString(upload_mock.call_args.args[1])
     expected = report_time if report_time is not None else 1_700_000_000
     assert sent.reports[0].time.seconds == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "field"), [(True, 1), (False, 0)])
+async def test_report_carries_the_observed_protection_mode(
+    hass_mock: MagicMock, mode: bool, field: int
+) -> None:
+    """The report says what the sighting showed, not a fixed ``0``.
+
+    ``unwantedTrackingModeEnabled`` is read back from the uploaded protobuf.
+    """
+    from custom_components.googlefindmy.ProtoDecoders.LocationReportsUpload_pb2 import (
+        LocationReportsUpload,
+    )
+
+    upload_mock = AsyncMock(return_value=True)
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(5),
+        ),
+        patch(
+            "custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor.encrypt",
+            MagicMock(return_value=(b"\x00" * 32, b"\x01" * 20)),
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.google_uploader.async_upload_to_google_fmdn",
+            upload_mock,
+        ),
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area=None,
+            rssi=None,
+            scanner_address=None,
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=mode,
+        )
+
+    assert result is True
+    sent = LocationReportsUpload()
+    sent.ParseFromString(upload_mock.call_args.args[1])
+    assert sent.reports[0].advertisement.unwantedTrackingModeEnabled == field
+
+
+@pytest.mark.asyncio
+async def test_unknown_protection_mode_is_not_uploaded(
+    hass_mock: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """K5: an unknown mode uploads nothing; a ``0`` would claim "off"."""
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.location_uploader",
+    )
+    upload_mock = AsyncMock(return_value=True)
+    resolve_mock = AsyncMock(return_value=_resolved_location(5))
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            resolve_mock,
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.google_uploader.async_upload_to_google_fmdn",
+            upload_mock,
+        ),
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area=None,
+            rssi=None,
+            scanner_address=None,
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+            unwanted_tracking_mode=None,
+        )
+
+    assert result is False
+    upload_mock.assert_not_awaited()
+    resolve_mock.assert_not_awaited()
+    assert any(
+        r.levelno == logging.DEBUG and "uwt_state_unknown" in r.getMessage()
+        for r in caplog.records
+    )

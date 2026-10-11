@@ -531,6 +531,7 @@ async def test_semantic_upload_debug_log_masks_scanner_name(
             eid=b"\xab" * 20,
             area="Kitchen",
             config_entry_id="entry_1",
+            unwanted_tracking_mode=False,
             scanner="AA:BB:CC:DD:EE:FF",
             google_device_id="google_dev_1",
         )
@@ -557,6 +558,7 @@ async def test_semantic_upload_passes_the_report_time_on(
             eid=b"\xab" * 20,
             area="Kitchen",
             config_entry_id="entry_1",
+            unwanted_tracking_mode=False,
             report_time=report_time,
         )
 
@@ -633,7 +635,7 @@ _UPLOAD_VARIANT_FOR_LOCK = {
 }
 
 
-def _sighting(variant: str, *, age: int = 10) -> Any:
+def _sighting(variant: str, *, age: int = 10, uwt_mode: bool | None = None) -> Any:
     from custom_components.googlefindmy.eid_resolver import ConfirmedSighting
     from custom_components.googlefindmy.FMDNCrypto.eid_generator import EidVariant
 
@@ -641,6 +643,7 @@ def _sighting(variant: str, *, age: int = 10) -> Any:
         variant=EidVariant(variant),
         window_counter=_SIGHTING_COUNTER,
         observed_at=_LOCK_NOW - age,
+        uwt_mode=uwt_mode,
     )
 
 
@@ -1034,3 +1037,35 @@ async def test_finder_reports_the_canonical_eid_of_a_reversed_advertisement() ->
     upload = await _finder_upload_at(resolver, _LOCK_NOW)
     assert upload is not None
     assert upload.eid == advertised
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [True, False, None])
+async def test_device_eid_carries_the_sighting_mode(mode: bool | None) -> None:
+    """The protection mode of the sighting travels with its EID."""
+    upload = await _upload_for(_sighting("legacy_secp160r1_x20_be", uwt_mode=mode))
+
+    assert upload is not None
+    assert upload.uwt_mode is mode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [True, False, None])
+async def test_semantic_upload_passes_the_protection_mode_on(
+    hass_mock: MagicMock, mode: bool | None
+) -> None:
+    """The mode reaches the uploader unchanged (None stays None)."""
+    upload_mock = AsyncMock()
+    with patch(
+        "custom_components.googlefindmy.fmdn_finder.location_uploader.async_process_fmdn_beacon_detection",
+        upload_mock,
+    ):
+        await _async_upload_semantic_location(
+            hass_mock,
+            eid=b"\xab" * 20,
+            area="Kitchen",
+            config_entry_id="entry_1",
+            unwanted_tracking_mode=mode,
+        )
+
+    assert upload_mock.await_args.kwargs["unwanted_tracking_mode"] is mode

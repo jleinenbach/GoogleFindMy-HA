@@ -580,6 +580,23 @@ async def test_upload_carries_the_sighting_time(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [True, False, None])
+async def test_upload_carries_the_sighting_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: bool | None
+) -> None:
+    """The protection mode handed to the uploader is the one the EID showed."""
+    upload = _patch_area_change_to_upload(
+        monkeypatch,
+        bl._UploadEid(eid=b"\xab" * 20, observed_at=1_699_999_000, uwt_mode=mode),
+    )
+
+    await bl._async_handle_area_change(_hass(), _ENTITY, "Kitchen", {})
+
+    upload.assert_awaited_once()
+    assert upload.call_args.kwargs["unwanted_tracking_mode"] is mode
+
+
+@pytest.mark.asyncio
 async def test_no_reportable_eid_skips_the_upload_at_debug(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
