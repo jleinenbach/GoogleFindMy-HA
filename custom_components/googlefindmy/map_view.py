@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import math
@@ -620,9 +621,27 @@ def _resolve_entry_by_token(
             ),
         )
         accepted = _entry_accept_tokens(hass, entry.entry_id, bool(token_exp))
-        if auth_token in accepted:
+        if _token_matches(auth_token, accepted):
             return entry, accepted
     return None, None
+
+
+def _token_matches(auth_token: str, accepted: set[str]) -> bool:
+    """Return whether ``auth_token`` is one of ``accepted``, in constant time.
+
+    The token comes from the query string, so it is attacker-controlled. Each
+    accepted token is compared with ``hmac.compare_digest`` and every one is
+    compared, so the time spent does not depend on how much of a token matched.
+    The comparison runs on UTF-8 bytes: ``compare_digest`` raises ``TypeError``
+    for a ``str`` with non-ASCII characters, which would turn ``?token=%C3%A4`` into
+    a server error instead of a refusal. Unencodable code points (lone
+    surrogates) become ``?``, which never occurs in a hex token.
+    """
+    provided = auth_token.encode("utf-8", "replace")
+    matched = False
+    for candidate in accepted:
+        matched |= hmac.compare_digest(provided, candidate.encode("utf-8"))
+    return matched
 
 
 def _is_map_view_enabled_for_entry(entry: ConfigEntry) -> bool:
