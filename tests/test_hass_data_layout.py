@@ -44,7 +44,9 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
     DOMAIN,
     MODE_MIGRATE,
+    OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_ENABLED,
+    OPT_OPTIONS_SCHEMA_VERSION,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_LOCATE_DEVICE,
     SERVICE_REBUILD_REGISTRY,
@@ -587,6 +589,50 @@ async def test_async_setup_entry_hijacks_legacy_credentials_when_cache_empty(
 
 
 @pytest.mark.asyncio
+async def test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A fresh entry keeps the options chosen during the initial setup.
+
+    The config flow stores ``CONF_OAUTH_TOKEN`` in ``entry.data`` while the
+    entry's token cache is still empty, so the first setup runs the legacy
+    migration. That migration used to replace the options with ``{}`` and
+    turned a declined Map View back on. Known option keys and the schema
+    version survive; unknown keys are still dropped.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data = {
+        DATA_AUTH_METHOD: "oauth",
+        CONF_OAUTH_TOKEN: "fresh-oauth-token",
+        CONF_GOOGLE_EMAIL: "user@example.com",
+    }
+    initial_options = {
+        OPT_MAP_VIEW_ENABLED: False,
+        OPT_LOCATION_POLL_INTERVAL: 600,
+        OPT_OPTIONS_SCHEMA_VERSION: 2,
+    }
+    entry.options = {**initial_options, "tracked_devices": ["stale-device"]}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    _, payload = hass.config_entries.entry_update_calls[0]
+    assert CONF_OAUTH_TOKEN not in payload["data"]
+    assert payload["options"] == initial_options
+    assert entry.options[OPT_MAP_VIEW_ENABLED] is False
+    assert hass.http.registered == []
+
+
+@pytest.mark.asyncio
 async def test_async_setup_entry_leaves_modern_entries_intact(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory: Callable[..., type[Any]],
@@ -660,9 +706,10 @@ async def test_async_setup_entry_skips_view_registration_when_disabled(
     )
     integration = harness.integration
     hass = harness.hass
-    # A "modern" shape (cache already primed) skips the legacy migration path,
-    # which resets ``entry.options`` to ``{}`` and would silently wipe the
-    # option under test.
+    # A "modern" shape (cache already primed) skips the legacy migration path;
+    # that path keeps the option (see
+    # ``test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry``),
+    # but this test is about view registration, not about the migration.
     harness.entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
     harness.entry.options[OPT_MAP_VIEW_ENABLED] = False
@@ -693,9 +740,10 @@ async def test_async_setup_entry_disabled_entry_does_not_block_another_entry(
     integration = harness.integration
     hass = harness.hass
     disabled_entry = harness.entry
-    # A "modern" shape (cache already primed) skips the legacy migration path,
-    # which resets ``entry.options`` to ``{}`` and would silently wipe the
-    # option under test.
+    # A "modern" shape (cache already primed) skips the legacy migration path;
+    # that path keeps the option (see
+    # ``test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry``),
+    # but this test is about view registration, not about the migration.
     disabled_entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
     disabled_entry.options[OPT_MAP_VIEW_ENABLED] = False
@@ -1038,9 +1086,10 @@ async def test_options_update_listener_never_touches_map_views_directly(
     entry = harness.entry
     hass = harness.hass
 
-    # A "modern" shape (cache already primed) skips the legacy migration path,
-    # which resets ``entry.options`` to ``{}`` and would silently wipe the
-    # option under test.
+    # A "modern" shape (cache already primed) skips the legacy migration path;
+    # that path keeps the option (see
+    # ``test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry``),
+    # but this test is about view registration, not about the migration.
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
     entry.options[OPT_MAP_VIEW_ENABLED] = False

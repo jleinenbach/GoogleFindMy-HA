@@ -8186,12 +8186,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         updated_data[CONF_GOOGLE_EMAIL] = normalized_email
         updated_data[DATA_AUTH_METHOD] = auth_method_value
 
+        # Keep every known option and the schema version. A fresh entry runs
+        # this path too (the config flow stores ``CONF_OAUTH_TOKEN`` while the
+        # new cache is still empty); replacing the options with ``{}`` would
+        # discard the choices made during setup, e.g. a declined Map View.
+        # Only keys the integration no longer knows are dropped.
+        kept_options = {
+            key: value
+            for key, value in entry.options.items()
+            if key in OPTION_KEYS or key == OPT_OPTIONS_SCHEMA_VERSION
+        }
         hass.config_entries.async_update_entry(
-            entry, data=MappingProxyType(updated_data), options={}
+            entry, data=MappingProxyType(updated_data), options=kept_options
         )
         _LOGGER.info(
-            "[%s] Migrated legacy configuration and reset entry for subentry setup",
+            "[%s] Migrated legacy configuration; kept %d known option(s)",
             entry.entry_id,
+            len(kept_options),
         )
 
     elif legacy_cache_primed:
