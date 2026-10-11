@@ -29,11 +29,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import (
-    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     LEGACY_SERVICE_IDENTIFIER,
-    OPT_MAP_VIEW_ENABLED,  # ctx provides the key but we keep a local fallback constant
     OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
     SERVICE_LOCATE_DEVICE,
@@ -60,6 +58,7 @@ from .coordinator.helpers.registry import (
     read_device_ownership,
     resolve_device_by_identifiers,
 )
+from .map_view import _is_map_view_enabled_for_entry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1139,10 +1138,6 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         opt_key = ctx.get(
             "opt_map_view_token_expiration_key", OPT_MAP_VIEW_TOKEN_EXPIRATION
         )
-        default_map_view_enabled = bool(
-            ctx.get("default_map_view_enabled", DEFAULT_MAP_VIEW_ENABLED)
-        )
-        map_view_enabled_key = ctx.get("opt_map_view_enabled_key", OPT_MAP_VIEW_ENABLED)
 
         expiration_cache: dict[str, bool] = {}
         map_view_enabled_cache: dict[str, bool] = {}
@@ -1158,9 +1153,10 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         ) -> bool:
             """Read one bool option for ``entry_id``, via the shared ``opt`` reader.
 
-            Shared by every per-entry bool option this refresh needs (map view
-            enabled, token expiration), each with its own cache so an entry's
-            option is read once per refresh regardless of device count.
+            Used for the token-expiration option, cached so an entry's option
+            is read once per refresh regardless of device count. Map View
+            enablement is read through ``map_view._is_map_view_enabled_for_entry``
+            so every call site shares one rule.
             """
             cache_key = entry_id or ""
             if cache_key in cache:
@@ -1184,12 +1180,13 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             return cache[cache_key]
 
         def _map_view_enabled(entry_id: str | None) -> bool:
-            return _read_bool_option(
-                entry_id,
-                map_view_enabled_key,
-                default_map_view_enabled,
-                map_view_enabled_cache,
-            )
+            cache_key = entry_id or ""
+            if cache_key not in map_view_enabled_cache:
+                entry = entries_by_id.get(entry_id) if entry_id else None
+                map_view_enabled_cache[cache_key] = _is_map_view_enabled_for_entry(
+                    entry
+                )
+            return map_view_enabled_cache[cache_key]
 
         def _expiration_enabled(entry_id: str | None) -> bool:
             return _read_bool_option(

@@ -209,8 +209,6 @@ def test_refresh_device_urls_clears_url_for_a_disabled_entry(
         "opt": lambda entry, key, default: entry.options.get(key, default),
         "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
         "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
-        "default_map_view_enabled": const.DEFAULT_MAP_VIEW_ENABLED,
-        "opt_map_view_enabled_key": const.OPT_MAP_VIEW_ENABLED,
         "redact_url_token": lambda url: url,
         "soft_migrate_entry": lambda hass, entry: None,
     }

@@ -172,7 +172,6 @@ from .const import (
     DEFAULT_DELETE_CACHES_ON_REMOVE,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_LOCATION_POLL_INTERVAL,
-    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
@@ -191,7 +190,6 @@ from .const import (
     OPT_DEVICE_POLL_DELAY,
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
-    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
@@ -567,6 +565,19 @@ def _ensure_runtime_imports() -> None:
     GoogleFindMyMapTilesTokenView = _GoogleFindMyMapTilesTokenView
 
     _RUNTIME_IMPORTS_LOADED = True
+
+
+def _is_map_view_enabled_for_entry_fn(entry: ConfigEntry) -> bool:
+    """Return whether Map View is enabled for ``entry`` (one shared rule).
+
+    Delegates to ``map_view._is_map_view_enabled_for_entry`` so registration,
+    the device-URL refresh, the refresh service and the views all read the
+    option the same way. Imported lazily like the other ``map_view`` names.
+    """
+
+    from .map_view import _is_map_view_enabled_for_entry
+
+    return _is_map_view_enabled_for_entry(entry)
 
 
 def _cloud_discovery_runtime(
@@ -7361,8 +7372,6 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 "opt": _opt,
                 "default_map_view_token_expiration": DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
                 "opt_map_view_token_expiration_key": OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                "default_map_view_enabled": DEFAULT_MAP_VIEW_ENABLED,
-                "opt_map_view_enabled_key": OPT_MAP_VIEW_ENABLED,
                 "redact_url_token": _redact_url_token,
                 "soft_migrate_entry": _async_soft_migrate_data_to_options,
                 "migrate_unique_ids": _async_migrate_unique_ids,
@@ -8957,10 +8966,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # the feature registers it regardless of order. Once up, views stay up for
     # the process lifetime (no unregister_view API); map_view.py's own
     # OPT_MAP_VIEW_ENABLED check turns away a since-disabled entry per-request.
-    map_view_enabled_for_entry = _opt(
-        entry, OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED
-    )
-    if map_view_enabled_for_entry:
+    if _is_map_view_enabled_for_entry_fn(entry):
         _async_ensure_map_views_registered(hass, bucket)
 
     # Run duplicate self-healing asynchronously so it also executes on reloads.
@@ -9365,10 +9371,7 @@ async def _async_refresh_device_urls(
     enabled_items: list[tuple[dr.DeviceEntry, MyConfigEntry, str]] = []
     for device, entry, dev_id in resolved:
         try:
-            map_view_enabled = _opt(
-                entry, OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED
-            )
-            if not map_view_enabled:
+            if not _is_map_view_enabled_for_entry_fn(entry):
                 # Disabled: clear any stale link rather than refresh one that
                 # just refuses every request.
                 dev_reg.async_update_device(device_id=device.id, configuration_url=None)

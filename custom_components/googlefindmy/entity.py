@@ -62,11 +62,9 @@ else:  # pragma: no cover - fallback for environments with stubbed helpers
 
 from .const import (
     CONF_GOOGLE_EMAIL,
-    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     INTEGRATION_VERSION,
-    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     SERVICE_DEVICE_MANUFACTURER,
     SERVICE_DEVICE_MODEL,
@@ -78,6 +76,7 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator
 from .ha_typing import CoordinatorEntity, callback
+from .map_view import _is_map_view_enabled_for_entry
 from .shared_helpers import (  # noqa: F401 - re-exported for platform modules
     known_ids_for_subentry_type as known_ids_for_subentry_type,
 )
@@ -636,9 +635,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         """
 
         config_entry = getattr(self.coordinator, "config_entry", None)
-        if not bool(
-            _entry_option(config_entry, OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED)
-        ):
+        if not _is_map_view_enabled_for_entry(config_entry):
             return None
 
         token = self._get_map_token()
