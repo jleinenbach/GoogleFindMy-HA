@@ -94,6 +94,12 @@ async def test_map_view_refuses_a_disabled_token_like_an_invalid_one() -> None:
 
     assert disabled.status == 401
     assert _comparable(disabled) == _comparable(invalid)
+    # Control: the refused token is genuine for the entry, so the identical
+    # 401 comes from the toggle, not from a token the view could not resolve.
+    resolved, _accepted = map_view._resolve_entry_by_token(
+        hass, _share_token(hass, entry)
+    )
+    assert resolved is entry
 
 
 @pytest.mark.asyncio

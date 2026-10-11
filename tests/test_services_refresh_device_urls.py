@@ -178,7 +178,8 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(
     assert "ha-service" not in device_registry.updated
 
 
-def test_refresh_device_urls_clears_url_for_a_disabled_entry(
+@pytest.mark.asyncio
+async def test_refresh_device_urls_clears_url_for_a_disabled_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A device owned by a ``map_view_enabled=False`` entry gets no configuration_url.
@@ -237,7 +238,7 @@ def test_refresh_device_urls_clears_url_for_a_disabled_entry(
         ]
         await handler(ServiceCall({}))
 
-    asyncio.run(_run_refresh())
+    await _run_refresh()
 
     assert device_registry.updated == {"ha-dev-1": None}
 
@@ -576,7 +577,7 @@ async def test_refresh_device_urls_visits_a_shared_device_once(
     }
 
 
-def _run_disabled_entry_refresh(
+async def _run_disabled_entry_refresh(
     monkeypatch: pytest.MonkeyPatch,
     *,
     configuration_url: str | None,
@@ -628,12 +629,14 @@ def _run_disabled_entry_refresh(
         ]
         await handler(ServiceCall({}))
 
-    asyncio.run(_run_refresh())
+    await _run_refresh()
     return device_registry
 
 
-def test_refresh_device_urls_clears_a_disabled_entry_without_a_base_url(
+@pytest.mark.asyncio
+async def test_refresh_device_urls_clears_a_disabled_entry_without_a_base_url(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Clearing a disabled entry's link needs no reachable HA URL.
 
@@ -644,23 +647,30 @@ def test_refresh_device_urls_clears_a_disabled_entry_without_a_base_url(
     def _raise_url_error(*_: Any, **__: Any) -> str:
         raise NoURLAvailableError()
 
-    device_registry = _run_disabled_entry_refresh(
+    caplog.set_level(logging.WARNING, logger=services.__name__)
+    device_registry = await _run_disabled_entry_refresh(
         monkeypatch,
         configuration_url="https://example.test/api/googlefindmy/map/a?token=stale",
         get_url_impl=_raise_url_error,
     )
 
     assert device_registry.updated == {"ha-dev-1": None}
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "reachable URL" in record.getMessage()
+    ]
 
 
-def test_refresh_device_urls_leaves_an_already_empty_link_alone(
+@pytest.mark.asyncio
+async def test_refresh_device_urls_leaves_an_already_empty_link_alone(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An already-empty link on a disabled entry is neither written nor counted."""
 
     caplog.set_level(logging.INFO, logger=services.__name__)
-    device_registry = _run_disabled_entry_refresh(
+    device_registry = await _run_disabled_entry_refresh(
         monkeypatch,
         configuration_url=None,
         get_url_impl=lambda hass, **kwargs: "https://example.test",
