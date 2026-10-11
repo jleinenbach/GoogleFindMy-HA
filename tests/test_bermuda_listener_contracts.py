@@ -513,7 +513,9 @@ async def test_upload_trigger_info_keeps_area_at_debug(
         ),
     )
     monkeypatch.setattr(
-        bl, "_async_get_device_eid", AsyncMock(return_value=b"\xab" * 20)
+        bl,
+        "_async_get_device_eid",
+        AsyncMock(return_value=bl._UploadEid(eid=b"\xab" * 20, observed_at=1)),
     )
     upload = AsyncMock()
     monkeypatch.setattr(bl, "_async_upload_semantic_location", upload)
@@ -531,3 +533,62 @@ async def test_upload_trigger_info_keeps_area_at_debug(
         for r in caplog.records
     )
     upload.assert_awaited_once()
+
+
+def _patch_area_change_to_upload(
+    monkeypatch: pytest.MonkeyPatch, upload_eid: object
+) -> AsyncMock:
+    """Drive the area-change handler up to the upload with a given EID result."""
+    entity_entry = SimpleNamespace(device_id="ha-dev-1")
+    registry = SimpleNamespace(async_get=Mock(return_value=entity_entry))
+    monkeypatch.setattr(bl.er, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        "homeassistant.helpers.device_registry.async_get",
+        lambda hass: SimpleNamespace(async_get=Mock(return_value=None)),
+    )
+    monkeypatch.setattr(
+        bl,
+        "_async_find_googlefindmy_device",
+        AsyncMock(
+            return_value={
+                "device_id": "google-dev-1",
+                "config_entry_id": "entry_1",
+                "coordinator": Mock(),
+            }
+        ),
+    )
+    monkeypatch.setattr(bl, "_async_get_device_eid", AsyncMock(return_value=upload_eid))
+    upload = AsyncMock()
+    monkeypatch.setattr(bl, "_async_upload_semantic_location", upload)
+    return upload
+
+
+@pytest.mark.asyncio
+async def test_upload_carries_the_sighting_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The report time handed to the uploader is the time the EID was seen."""
+    upload = _patch_area_change_to_upload(
+        monkeypatch, bl._UploadEid(eid=b"\xab" * 20, observed_at=1_699_999_000)
+    )
+
+    await bl._async_handle_area_change(_hass(), _ENTITY, "Kitchen", {})
+
+    upload.assert_awaited_once()
+    assert upload.call_args.kwargs["eid"] == b"\xab" * 20
+    assert upload.call_args.kwargs["report_time"] == 1_699_999_000
+
+
+@pytest.mark.asyncio
+async def test_no_reportable_eid_skips_the_upload_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without a recent sighting nothing is uploaded; a regular state, no WARNING."""
+    caplog.set_level(logging.DEBUG, logger=bl.__name__)
+    upload = _patch_area_change_to_upload(monkeypatch, None)
+
+    await bl._async_handle_area_change(_hass(), _ENTITY, "Kitchen", {})
+
+    upload.assert_not_awaited()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("No reportable EID" in r.getMessage() for r in caplog.records)

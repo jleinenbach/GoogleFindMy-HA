@@ -115,6 +115,7 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
     entity_id: str,
     google_device_id: str | None = None,
     coordinator: Any | None = None,
+    report_time: int | None = None,
 ) -> bool:
     """Process FMDN beacon detection and upload location report.
 
@@ -133,6 +134,8 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         entity_id: Bermuda entity ID for logging
         google_device_id: Google device ID for semantic_name update
         coordinator: GoogleFindMy coordinator for semantic_name update
+        report_time: Wall-clock second the EID was seen, sent as the report's
+            time; None means now
 
     Returns:
         True if upload succeeded, False otherwise
@@ -204,7 +207,9 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
 
     # 4. Encrypt and upload
     try:
-        success = await _encrypt_and_upload_location(hass, eid, location, area)
+        success = await _encrypt_and_upload_location(
+            hass, eid, location, area, report_time=report_time
+        )
 
         if success:
             # Update cache on successful upload (including semantic area for throttling)
@@ -538,6 +543,8 @@ async def _encrypt_and_upload_location(
     eid: bytes,
     location: LocationData,
     semantic_area: str | None = None,
+    *,
+    report_time: int | None = None,
 ) -> bool:
     """Encrypt location and upload to Google FMDN backend.
 
@@ -557,6 +564,8 @@ async def _encrypt_and_upload_location(
         eid: Ephemeral Identity Key (20 or 32 bytes)
         location: Location to upload
         semantic_area: Optional semantic location name (e.g., "Büro", "Wohnzimmer")
+        report_time: Wall-clock second the EID was seen, sent as the report's
+            time; None means now
 
     Returns:
         True if upload succeeded, False otherwise
@@ -650,7 +659,7 @@ async def _encrypt_and_upload_location(
     report = upload.reports.add()
     report.advertisement.identifier.truncatedEid = eid[:10]
     report.advertisement.unwantedTrackingModeEnabled = 0
-    report.time.seconds = int(time.time())
+    report.time.seconds = report_time if report_time is not None else int(time.time())
     report.location.CopyFrom(location_report)
 
     upload_bytes = upload.SerializeToString()
