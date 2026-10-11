@@ -107,7 +107,8 @@ two documents, not a measurement of the service.
   `subsys/bluetooth/fast_pair/fhn/state.c`) and Atmosic (`Atmosic/openair`,
   `subsys/bluetooth/services/gfp/fmdn/`), where frame type and bit derive from
   the same state; not on a recording.
-* Only six trackers of one account (several vendors) and the two tags of the
+* Only six trackers of one account (five Motorola trackers and one
+  card-format tracker of another vendor) and the two tags of the
   public report are covered. Accessory firmware of most vendors is not public.
 * The criteria by which Google's service turns the mode on are not published.
   Nothing here says why or when the service switches a tracker into the mode.
