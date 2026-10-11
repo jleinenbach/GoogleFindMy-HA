@@ -1224,6 +1224,7 @@ class GoogleFindMyEIDResolver:
     )
     _heuristic_miss_log_at: dict[str, float] = field(init=False, default_factory=dict)
     _flags_logged_devices: set[str] = field(init=False, default_factory=set)
+    _decode_failure_types_logged: set[str] = field(init=False, default_factory=set)
     _frame_conflict_logged_devices: set[str] = field(init=False, default_factory=set)
     _frame_conflict_log_at: dict[tuple[str, int], float] = field(
         init=False, default_factory=dict
@@ -1310,6 +1311,8 @@ class GoogleFindMyEIDResolver:
             self._heuristic_miss_log_at = {}
         if not hasattr(self, "_flags_logged_devices"):
             self._flags_logged_devices = set()
+        if not hasattr(self, "_decode_failure_types_logged"):
+            self._decode_failure_types_logged = set()
         if not hasattr(self, "_ble_battery_state"):
             self._ble_battery_state = {}
         if not hasattr(self, "_ble_scan_info"):
@@ -3457,8 +3460,12 @@ class GoogleFindMyEIDResolver:
         carry that distinction.
 
         The match path must never fail on the decoder: the caller updates the
-        lock after this call, so an exception is caught and logged at DEBUG,
-        and the mode falls back to what the frame type shows.
+        lock after this call, so an exception is caught and the mode falls
+        back to what the frame type shows. The first failure of each exception
+        type is logged at WARNING, later ones at DEBUG: before the decoder was
+        guarded, a failure surfaced as an ERROR from the Bluetooth callback,
+        and it must not become invisible now. Only the type name is logged,
+        never the exception text, which could carry payload bytes.
         """
         try:
             reading = self._update_ble_battery(
@@ -3470,7 +3477,17 @@ class GoogleFindMyEIDResolver:
                 clock=clock,
             )
         except Exception as err:  # noqa: BLE001 - see docstring
-            _LOGGER.debug("ble_battery_decode_failed error_type=%s", type(err).__name__)
+            error_type = type(err).__name__
+            if error_type in self._decode_failure_types_logged:
+                _LOGGER.debug("ble_battery_decode_failed error_type=%s", error_type)
+            else:
+                self._decode_failure_types_logged.add(error_type)
+                _LOGGER.warning(
+                    "ble_battery_decode_failed error_type=%s (battery and "
+                    "protection-mode sensors keep their last value; further "
+                    "failures of this type are logged at DEBUG)",
+                    error_type,
+                )
             reading = _FlagsReading(None, "absent")
         return _effective_uwt_mode(
             reading.uwt_bit, reading.origin, candidate.frame_type

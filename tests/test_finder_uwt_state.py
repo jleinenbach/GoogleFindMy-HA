@@ -16,6 +16,7 @@ import pytest
 from custom_components.googlefindmy.eid_resolver import (
     FMDN_FRAME_TYPE,
     MODERN_FRAME_TYPE,
+    ConfirmedSighting,
     EidVariant,
     FlagsOrigin,
     GoogleFindMyEIDResolver,
@@ -95,6 +96,14 @@ def _mode(resolver: GoogleFindMyEIDResolver) -> tuple[bool | None, UwtSource]:
     return sighting.uwt_mode, sighting.uwt_source
 
 
+def test_confirmed_sighting_defaults_to_an_unknown_mode() -> None:
+    """A sighting built without a mode is unknown, never "off": unknown uploads nothing."""
+    sighting = ConfirmedSighting(
+        variant=EidVariant.LEGACY_SECP160R1_X20_BE, window_counter=0, observed_at=0
+    )
+    assert (sighting.uwt_mode, sighting.uwt_source) == (None, UwtSource.UNKNOWN)
+
+
 def test_framed_flags_bit_is_the_source() -> None:
     """A framed advertisement with a decodable flags byte: the bit decides."""
     resolver = _resolver((0x71, 7))
@@ -133,6 +142,16 @@ def test_bare_sighting_in_a_later_window_is_unknown() -> None:
     assert _mode(resolver) == (None, UwtSource.UNKNOWN)
 
 
+def test_restarted_counter_does_not_inherit_the_mode() -> None:
+    """K4: after a counter restart (smaller window, wall gap over one period)
+    an unknown mode stays unknown; only the same window inherits."""
+    resolver = _resolver((0x71, 9), (0x72, 2))
+    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, bytes([0x72]) * 20, _T + 2 * _PERIOD)
+    assert resolver.last_confirmed_sighting("dev-u").window_counter == 2 * _PERIOD  # type: ignore[union-attr]
+    assert _mode(resolver) == (None, UwtSource.UNKNOWN)
+
+
 def test_known_mode_in_the_same_window_replaces() -> None:
     """K4: a known new mode always replaces, also within the window."""
     resolver = _resolver((0x71, 7))
@@ -154,8 +173,15 @@ def test_throwing_decoder_still_records_the_sighting(
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_update_ble_battery", _boom)
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
         _feed(resolver, _framed(0x71, 0x01), _T)
+        _feed(resolver, _framed(0x71, 0x01), _T + 1)
     assert _mode(resolver) == (False, UwtSource.FRAME_TYPE)
-    assert "ble_battery_decode_failed error_type=RuntimeError" in caplog.text
+    failures = [
+        r for r in caplog.records if "ble_battery_decode_failed" in r.getMessage()
+    ]
+    # The first failure of a type stays visible (it used to surface as an
+    # ERROR from the Bluetooth callback); repeats of the same type drop to DEBUG.
+    assert [r.levelno for r in failures] == [logging.WARNING, logging.DEBUG]
+    assert all("error_type=RuntimeError" in r.getMessage() for r in failures)
     assert "decoder broke" not in caplog.text
 
 
