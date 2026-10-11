@@ -266,6 +266,7 @@ def _make_tracker(hass: HomeAssistant, row: dict[str, Any] | None) -> Any:
     )
     entity.hass = hass
     entity.entity_id = "device_tracker.googlefindmy_pixel"
+
     # async_write_ha_state() is a no-op on the CoordinatorEntity test fake;
     # replace it with a real "now"-timestamped write so the plain-write path
     # is observable against the real state machine.
@@ -680,9 +681,7 @@ async def test_customize_override_survives_second_restamp_write(
     entity = _make_tracker(hass, _row(fix_time))
 
     # Mirror core's configuration.yaml customize block: entity_id -> overrides.
-    hass.data[DATA_CUSTOMIZE] = {
-        entity.entity_id: {"icon": "mdi:customize-override"}
-    }
+    hass.data[DATA_CUSTOMIZE] = {entity.entity_id: {"icon": "mdi:customize-override"}}
 
     # Prime the entity (first write is necessarily plain: no previous state).
     _update(entity)
