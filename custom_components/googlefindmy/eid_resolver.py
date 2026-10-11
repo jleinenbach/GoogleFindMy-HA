@@ -3593,27 +3593,29 @@ class GoogleFindMyEIDResolver:
 
             # Observe -- do not arbitrate -- the two redundant channels.
             #
-            # SPEC (Find Hub Network Accessory Specification, retrieved
-            # 2026-08-05): the frame type is set to 0x41 while unwanted
-            # tracking protection mode is active and back to 0x40 when it is
-            # deactivated; hashed-flags spec bit 7 carries the same state. The
-            # two should therefore always agree.
+            # SPEC (Find Hub Network Accessory Specification,
+            # retrieved 2026-10-11), on entering unwanted tracking protection
+            # mode: "The frame type should be set to 0x41. The state is also
+            # reflected in the hashed flags section." On leaving it: "The
+            # frame type should be set back to 0x40." The changelog entry for
+            # the frame type reads "Added a cleartext indication of unwanted
+            # tracking protection mode." Frame type and hashed-flags spec
+            # bit 7 should therefore always agree.
             #
-            # This repository's own documentation has long described 0x41 as
-            # "typically" the modern 32-byte-EID frame, i.e. as a property of
-            # the accessory generation rather than of the tracking state
-            # (docs/BLE_BATTERY_SENSOR.md). That reading and the specification
-            # cannot both be complete, but no primary observation is on record
-            # here either way -- which is the whole reason for this channel.
-            # Until it produces data, the question is open, so this code
-            # does NOT resolve it: the decoded bit is passed through unchanged
-            # in both directions. Forcing the bit to False on a 0x40/bit-1
-            # disagreement would suppress precisely the signal the sensor
-            # exists for; deriving True from a 0x41 frame would mark every
-            # modern tracker as permanently "unwanted tracking".
+            # An older reading in this repository tied 0x41 to the accessory
+            # generation (32-byte P-256 EIDs) instead of the mode. It entered
+            # with ed340df5 (2026-03-06) without a recorded observation behind
+            # it. Field data now exist in docs/UWT_FIELD_DATA.md: frame and bit
+            # agreed on every logged probe line (0x40 with bit 0, 0x41 with
+            # bit 1), and no conflict line was logged. They cover 20-byte EIDs
+            # only; for 32-byte EIDs the equivalence rests on the specification.
             #
-            # This log is the measurement channel that will decide the
-            # question. Revisit once field data exists.
+            # This code still passes the decoded bit through unchanged and
+            # only logs a disagreement: a conflict points at a decoding or
+            # firmware fault and should stay visible, not be smoothed over.
+            # The finder's upload takes the mode from _effective_uwt_mode(),
+            # which prefers the bit read at a known position and falls back
+            # to the frame type.
             if observed_frame is not None:
                 self._log_frame_conflict(
                     matches=matches,
