@@ -21,8 +21,8 @@ on a recorded observation.
 ## How the data were collected
 
 * Source A: the maintainer's own Home Assistant instance running this
-  integration. `FMDN_FLAGS_PROBE` lines (logged once per device on the first
-  decode after start) from the current and the previous
+  integration. `FMDN_FLAGS_PROBE` lines (logged once per device per resolver
+  instance, on the first decode attempt) from the current and the previous
   `home-assistant.log`, and the state history of the per-device
   "Unwanted Tracking Mode" binary sensors from the recorder
   (`/api/history/period`, 2026-09-30 to 2026-10-11, the full retention depth).
@@ -100,7 +100,13 @@ two documents, not a measurement of the service.
 
 ## What this measurement does not establish
 
-* The data cover only 20-byte EIDs (`payload_len=22`): only 20-byte EIDs have been observed so far; no 32-byte EID observed. For trackers with 32-byte EIDs the frame/bit equivalence rests on the specification and on public accessory firmware, not on a recording.
+* Coverage: only 20-byte EIDs have been observed so far; no 32-byte EID
+  observed (`payload_len=22` on every line). For trackers with 32-byte EIDs
+  the frame/bit equivalence rests on the specification and on the public
+  accessory firmware of Nordic (`nrfconnect/sdk-nrf`,
+  `subsys/bluetooth/fast_pair/fhn/state.c`) and Atmosic (`Atmosic/openair`,
+  `subsys/bluetooth/services/gfp/fmdn/`), where frame type and bit derive from
+  the same state; not on a recording.
 * Only six trackers of one account (several vendors) and the two tags of the
   public report are covered. Accessory firmware of most vendors is not public.
 * The criteria by which Google's service turns the mode on are not published.

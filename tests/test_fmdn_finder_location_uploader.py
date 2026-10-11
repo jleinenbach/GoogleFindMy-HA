@@ -855,7 +855,7 @@ async def test_report_carries_the_observed_protection_mode(
 async def test_unknown_protection_mode_is_not_uploaded(
     hass_mock: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """K5: an unknown mode uploads nothing; a ``0`` would claim "off"."""
+    """An unknown mode uploads nothing; a ``0`` would claim "off"."""
     caplog.set_level(
         logging.DEBUG,
         logger="custom_components.googlefindmy.fmdn_finder.location_uploader",

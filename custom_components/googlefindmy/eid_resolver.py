@@ -3620,9 +3620,11 @@ class GoogleFindMyEIDResolver:
             # bit 7 should therefore always agree.
             #
             # An older reading in this repository tied 0x41 to the accessory
-            # generation (32-byte P-256 EIDs) instead of the mode. It entered
-            # with ed340df5 (2026-03-06) without a recorded observation behind
-            # it. Field data now exist in docs/UWT_FIELD_DATA.md: frame and bit
+            # generation (32-byte P-256 EIDs) instead of the mode. It goes back
+            # at least to 588b0e02 (2025-12-15, resolver API doc: "0x41: Modern
+            # / 256-bit frame."); ed340df5 (2026-03-06) carried it into the
+            # battery decoder docs. Neither commit records an observation.
+            # Field data now exist in docs/UWT_FIELD_DATA.md: frame and bit
             # agreed on every logged probe line (0x40 with bit 0, 0x41 with
             # bit 1), and no conflict line was logged. They cover 20-byte EIDs
             # only; for 32-byte EIDs the equivalence rests on the specification.

@@ -642,8 +642,10 @@ async def _async_get_device_eid(  # noqa: PLR0911
         device_id: Google device UUID (e.g., "68419b51-0000-2131-873b-fc411691d329")
 
     Returns:
-        The EID to encrypt to (20 or 32 bytes, see ``_encryptable_eid``) and
-        the time of the sighting, or None if there is no reportable sighting
+        The EID to encrypt to (20 or 32 bytes, see ``_encryptable_eid``), the
+        time of the sighting and the protection mode it showed (``None`` when
+        unknown, see ``eid_resolver._effective_uwt_mode``), or None if there
+        is no reportable sighting
     """
     # Get device identities from coordinator
     get_identities = getattr(coordinator, "get_active_device_identities", None)

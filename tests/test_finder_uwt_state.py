@@ -126,7 +126,7 @@ def test_bare_eid_alone_is_unknown() -> None:
 
 
 def test_bare_copy_in_the_same_window_keeps_the_known_mode() -> None:
-    """K4: the bare copy of a framed advertisement does not erase its mode."""
+    """The bare copy of a framed advertisement does not erase its mode."""
     resolver = _resolver((0x71, 7))
     _feed(resolver, _framed(0x71, 0x01), _T)
     _feed(resolver, bytes([0x71]) * 20, _T + 1)
@@ -134,7 +134,7 @@ def test_bare_copy_in_the_same_window_keeps_the_known_mode() -> None:
 
 
 def test_bare_sighting_in_a_later_window_is_unknown() -> None:
-    """K4: an unknown mode in the next window stays unknown."""
+    """An unknown mode in the next window stays unknown."""
     resolver = _resolver((0x71, 7), (0x72, 8))
     _feed(resolver, _framed(0x71, 0x01), _T)
     _feed(resolver, bytes([0x72]) * 20, _T + _PERIOD)
@@ -143,7 +143,7 @@ def test_bare_sighting_in_a_later_window_is_unknown() -> None:
 
 
 def test_restarted_counter_does_not_inherit_the_mode() -> None:
-    """K4: after a counter restart (smaller window, wall gap over one period)
+    """After a counter restart (smaller window, wall gap over one period)
     an unknown mode stays unknown; only the same window inherits."""
     resolver = _resolver((0x71, 9), (0x72, 2))
     _feed(resolver, _framed(0x71, 0x01), _T)
@@ -153,7 +153,7 @@ def test_restarted_counter_does_not_inherit_the_mode() -> None:
 
 
 def test_known_mode_in_the_same_window_replaces() -> None:
-    """K4: a known new mode always replaces, also within the window."""
+    """A known new mode always replaces, also within the window."""
     resolver = _resolver((0x71, 7))
     _feed(resolver, _framed(0x71, 0x01), _T)
     _feed(resolver, _framed(0x71, 0x00), _T + 1)
@@ -164,7 +164,7 @@ def test_throwing_decoder_still_records_the_sighting(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AE-2: the match path never fails on the flags decoder."""
+    """The match path never fails on the flags decoder."""
     resolver = _resolver((0x71, 7))
 
     def _boom(*_args: Any, **_kwargs: Any) -> Any:
