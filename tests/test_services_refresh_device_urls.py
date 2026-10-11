@@ -632,6 +632,27 @@ def _run_disabled_entry_refresh(
     return device_registry
 
 
+def test_refresh_device_urls_clears_a_disabled_entry_without_a_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing a disabled entry's link needs no reachable HA URL.
+
+    Every resolved device sits on a disabled entry, so the service clears the
+    stale link and returns before the base-URL lookup that would fail here.
+    """
+
+    def _raise_url_error(*_: Any, **__: Any) -> str:
+        raise NoURLAvailableError()
+
+    device_registry = _run_disabled_entry_refresh(
+        monkeypatch,
+        configuration_url="https://example.test/api/googlefindmy/map/a?token=stale",
+        get_url_impl=_raise_url_error,
+    )
+
+    assert device_registry.updated == {"ha-dev-1": None}
+
+
 def test_refresh_device_urls_leaves_an_already_empty_link_alone(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

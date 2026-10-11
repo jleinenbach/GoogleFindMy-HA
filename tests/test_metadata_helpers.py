@@ -186,6 +186,50 @@ async def test_async_refresh_device_urls_skips_an_already_empty_disabled_link(
 
 
 @pytest.mark.asyncio
+async def test_async_refresh_device_urls_restores_the_link_after_re_enabling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turning Map View back on brings the device link back on the next refresh.
+
+    The disabled entry leaves the device without a link; once the option is
+    on again (as after the options-flow reload), the refresh writes a fresh
+    tokenized URL instead of keeping the device link-less.
+    """
+
+    base_url = "https://example.test"
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={OPT_MAP_VIEW_ENABLED: False},
+    )
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+    monkeypatch.setattr(integration, "get_url", lambda _hass, **kwargs: base_url)
+
+    registry = dr.async_get(hass)
+    device = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:device-alpha")},
+        manufacturer="Google",
+        model="Nest",
+        name="Alpha",
+    )
+
+    await integration._async_refresh_device_urls(hass)
+    assert device.configuration_url is None
+
+    entry.options[OPT_MAP_VIEW_ENABLED] = True
+    await integration._async_refresh_device_urls(hass)
+
+    expected_token = map_token_hex_digest(
+        map_token_secret_seed("ha-uuid", entry.entry_id, False)
+    )
+    assert device.configuration_url == (
+        f"{base_url}/api/googlefindmy/map/device-alpha?token={expected_token}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_async_refresh_device_urls_clears_disabled_url_without_a_base_url(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
