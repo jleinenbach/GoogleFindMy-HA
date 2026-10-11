@@ -14,6 +14,7 @@ from custom_components.googlefindmy.eid_resolver import (
     EIDGenerationLock,
     EidVariant,
     GoogleFindMyEIDResolver,
+    UwtSource,
 )
 
 
@@ -418,7 +419,11 @@ def test_sighting_records_variant_window_and_time() -> None:
     _see(resolver, 0x71, _T + 5)
 
     assert resolver.last_confirmed_sighting("dev-m") == ConfirmedSighting(
-        variant=_LEGACY, window_counter=7 * _PERIOD, observed_at=_T + 5
+        variant=_LEGACY,
+        window_counter=7 * _PERIOD,
+        observed_at=_T + 5,
+        uwt_mode=False,
+        uwt_source=UwtSource.FRAME_TYPE,
     )
 
 
@@ -505,7 +510,11 @@ def test_older_window_delivered_late_keeps_the_newer_one() -> None:
     _see(resolver, 0x71, _T + 50)
 
     assert resolver.last_confirmed_sighting("dev-m") == ConfirmedSighting(
-        variant=_LEGACY, window_counter=9 * _PERIOD, observed_at=_T
+        variant=_LEGACY,
+        window_counter=9 * _PERIOD,
+        observed_at=_T,
+        uwt_mode=False,
+        uwt_source=UwtSource.FRAME_TYPE,
     )
 
 
@@ -599,7 +608,11 @@ def test_replayed_older_sighting_is_ignored(
     _see(resolver, 0x71, replay_wall, monotonic=replay_monotonic)
 
     assert resolver.last_confirmed_sighting("dev-m") == ConfirmedSighting(
-        variant=_LEGACY, window_counter=9 * _PERIOD, observed_at=_T + 100
+        variant=_LEGACY,
+        window_counter=9 * _PERIOD,
+        observed_at=_T + 100,
+        uwt_mode=False,
+        uwt_source=UwtSource.FRAME_TYPE,
     )
 
 

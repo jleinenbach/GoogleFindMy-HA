@@ -107,10 +107,16 @@ FINDER_SIGHTING_MAX_AGE_SECONDS = 1024
 
 
 class _UploadEid(NamedTuple):
-    """EID to encrypt a report to, with the wall-clock second it was seen."""
+    """EID to encrypt a report to, with the wall-clock second it was seen.
+
+    ``uwt_mode`` is the unwanted-tracking protection mode the sighting showed,
+    ``None`` when it showed none that can be trusted (see
+    ``eid_resolver._effective_uwt_mode``).
+    """
 
     eid: bytes
     observed_at: int
+    uwt_mode: bool | None
 
 
 # Log formatting
@@ -422,6 +428,16 @@ async def _async_handle_area_change(
             google_device_id,
         )
         return
+    if upload.uwt_mode is None:
+        # The sighting showed no protection mode that can be trusted. The
+        # report field cannot say "unknown" and a 0 would claim "off", so
+        # nothing is uploaded; decided here so no INFO line announces an
+        # upload that does not happen.
+        _LOGGER.debug(
+            "Unknown protection mode for GoogleFindMy device %s, skipping upload",
+            google_device_id,
+        )
+        return
     eid = upload.eid
 
     # The area name is an operator label and stays at DEBUG (AGENTS.md
@@ -449,6 +465,7 @@ async def _async_handle_area_change(
         google_device_id=google_device_id,
         coordinator=coordinator,
         report_time=upload.observed_at,
+        unwanted_tracking_mode=upload.uwt_mode,
     )
 
 
@@ -625,8 +642,10 @@ async def _async_get_device_eid(  # noqa: PLR0911
         device_id: Google device UUID (e.g., "68419b51-0000-2131-873b-fc411691d329")
 
     Returns:
-        The EID to encrypt to (20 or 32 bytes, see ``_encryptable_eid``) and
-        the time of the sighting, or None if there is no reportable sighting
+        The EID to encrypt to (20 or 32 bytes, see ``_encryptable_eid``), the
+        time of the sighting and the protection mode it showed (``None`` when
+        unknown, see ``eid_resolver._effective_uwt_mode``), or None if there
+        is no reportable sighting
     """
     # Get device identities from coordinator
     get_identities = getattr(coordinator, "get_active_device_identities", None)
@@ -727,7 +746,9 @@ async def _async_get_device_eid(  # noqa: PLR0911
             else eid.hex(),
         )
 
-        return _UploadEid(eid=eid, observed_at=sighting.observed_at)
+        return _UploadEid(
+            eid=eid, observed_at=sighting.observed_at, uwt_mode=sighting.uwt_mode
+        )
 
     except Exception as err:
         _LOGGER.warning("Failed to generate EID for device %s: %s", device_id, err)
@@ -782,6 +803,7 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
     coordinator: Any | None = None,
     *,
     report_time: int | None = None,
+    unwanted_tracking_mode: bool | None,
 ) -> None:
     """Upload semantic location to Google FMDN backend.
 
@@ -794,6 +816,9 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
         google_device_id: Google device ID for semantic_name update
         coordinator: GoogleFindMy coordinator for semantic_name update
         report_time: Wall-clock second the EID was seen; the report's time
+        unwanted_tracking_mode: Protection mode the sighting showed, ``None``
+            when unknown; an unknown mode is not uploaded (see
+            ``eid_resolver._effective_uwt_mode``)
     """
     from .location_uploader import (  # noqa: PLC0415
         _mask_address_for_logs,
@@ -822,6 +847,7 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
         google_device_id=google_device_id,
         coordinator=coordinator,
         report_time=report_time,
+        unwanted_tracking_mode=unwanted_tracking_mode,
     )
 
 
