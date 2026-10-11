@@ -25,7 +25,8 @@ from custom_components.googlefindmy.const import (
 )
 from tests.helpers.config_entries_stub import make_config_entry
 
-_FORGED = "device123\n2026-10-11 ERROR forged line"
+_LINE_BREAKS = ("\n", "\r", "\u2028", "\x85")
+_FORGED = "device123{}2026-10-11 ERROR forged line"
 
 
 class _StubConfigEntries:
@@ -73,13 +74,13 @@ def _assert_single_line(messages: list[str], marker: str) -> None:
     hits = [message for message in messages if marker in message]
     assert hits, f"no log line containing {marker!r}: {messages!r}"
     for message in hits:
-        assert "\n" not in message
-        assert "\\n" in message
+        assert len(message.splitlines()) == 1, message
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("line_break", _LINE_BREAKS)
 async def test_token_mismatch_logs_device_id_on_one_line(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, line_break: str
 ) -> None:
     """The pre-auth mismatch branch keeps a forged line break escaped."""
 
@@ -87,7 +88,7 @@ async def test_token_mismatch_logs_device_id_on_one_line(
     view = map_view.GoogleFindMyMapView(_StubHass([]))
 
     response = await view.get(
-        SimpleNamespace(query={"token": "0" * 64}), device_id=_FORGED
+        SimpleNamespace(query={"token": "0" * 64}), device_id=_FORGED.format(line_break)
     )
 
     assert response.status == 401
@@ -95,8 +96,9 @@ async def test_token_mismatch_logs_device_id_on_one_line(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("line_break", _LINE_BREAKS)
 async def test_disabled_entry_logs_device_id_on_one_line(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, line_break: str
 ) -> None:
     """The disabled-entry refusal keeps a forged line break escaped."""
 
@@ -106,7 +108,7 @@ async def test_disabled_entry_logs_device_id_on_one_line(
     view = map_view.GoogleFindMyMapView(_StubHass(entries))
 
     response = await view.get(
-        SimpleNamespace(query={"token": token}), device_id=_FORGED
+        SimpleNamespace(query={"token": token}), device_id=_FORGED.format(line_break)
     )
 
     assert response.status == 401
@@ -114,8 +116,9 @@ async def test_disabled_entry_logs_device_id_on_one_line(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("line_break", _LINE_BREAKS)
 async def test_redirect_logs_device_id_on_one_line(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, line_break: str
 ) -> None:
     """The redirect view keeps a forged line break escaped."""
 
@@ -123,6 +126,9 @@ async def test_redirect_logs_device_id_on_one_line(
     view = map_view.GoogleFindMyMapRedirectView(_StubHass([]))
 
     with pytest.raises(map_view.web.HTTPFound):
-        await view.get(SimpleNamespace(query={"token": "0" * 64}), device_id=_FORGED)
+        await view.get(
+            SimpleNamespace(query={"token": "0" * 64}),
+            device_id=_FORGED.format(line_break),
+        )
 
     _assert_single_line(_view_messages(caplog), "Relative redirect prepared")
