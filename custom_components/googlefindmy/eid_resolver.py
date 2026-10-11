@@ -19,6 +19,7 @@ from collections import OrderedDict
 from collections.abc import Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -991,6 +992,41 @@ def _normalize_encrypted_blob(value: object) -> bytes | None:
         except ValueError:
             return None
     return None
+
+
+class UwtSource(StrEnum):
+    """Where the unwanted-tracking protection mode of a sighting came from."""
+
+    FLAGS_BIT = "flags_bit"
+    FRAME_TYPE = "frame_type"
+    UNKNOWN = "unknown"
+
+
+FlagsOrigin = Literal["framed", "guessed", "absent"]
+
+
+def _effective_uwt_mode(
+    flags_bit: bool | None,
+    flags_origin: FlagsOrigin,
+    frame_type: int | None,
+) -> tuple[bool | None, UwtSource]:
+    """Return the protection mode a sighting shows, and where it came from.
+
+    The Find Hub Network Accessory Specification carries the mode twice: in
+    the frame type (``0x41`` while unwanted tracking protection mode is
+    active, ``0x40`` otherwise) and in spec bit 7 of the hashed flags. The
+    decoded bit wins when it was read at a known position (``"framed"``); a
+    byte found by ``_guess_flags_byte`` may be EID material and counts like no
+    byte at all. Without a usable bit the frame type decides. Without either
+    the mode is unknown, and callers must not report it as "off".
+    """
+    if flags_origin == "framed" and flags_bit is not None:
+        return flags_bit, UwtSource.FLAGS_BIT
+    if frame_type == MODERN_FRAME_TYPE:
+        return True, UwtSource.FRAME_TYPE
+    if frame_type == FMDN_FRAME_TYPE:
+        return False, UwtSource.FRAME_TYPE
+    return None, UwtSource.UNKNOWN
 
 
 @dataclass(slots=True, frozen=True)
