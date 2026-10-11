@@ -116,7 +116,7 @@ class _UploadEid(NamedTuple):
 
     eid: bytes
     observed_at: int
-    uwt_mode: bool | None = None
+    uwt_mode: bool | None
 
 
 # Log formatting
@@ -425,6 +425,16 @@ async def _async_handle_area_change(
     if upload is None:
         _LOGGER.debug(
             "No reportable EID for GoogleFindMy device %s, skipping upload",
+            google_device_id,
+        )
+        return
+    if upload.uwt_mode is None:
+        # The sighting showed no protection mode that can be trusted. The
+        # report field cannot say "unknown" and a 0 would claim "off", so
+        # nothing is uploaded; decided here so no INFO line announces an
+        # upload that does not happen.
+        _LOGGER.debug(
+            "Unknown protection mode for GoogleFindMy device %s, skipping upload",
             google_device_id,
         )
         return
