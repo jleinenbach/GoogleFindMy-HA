@@ -699,7 +699,7 @@ class GoogleFindMyMapView(HomeAssistantView):
 
         entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
         if not entry:
-            _LOGGER.debug("Map token mismatch for device_id=%s", device_id)
+            _LOGGER.debug("Map token mismatch for device_id=%r", device_id)
             return _html_response(
                 "Unauthorized", "Invalid authentication token.", status=401
             )
@@ -709,7 +709,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         # confirmed valid by a different refusal.
         if not _is_map_view_enabled_for_entry(entry):
             _LOGGER.debug(
-                "Map view disabled for entry=%s; refusing device_id=%s",
+                "Map view disabled for entry=%s; refusing device_id=%r",
                 entry.entry_id,
                 device_id,
             )
@@ -1399,7 +1399,7 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         redirect_url = (
             _MAP_PATH_PREFIX + quote(device_id, safe="") + "?" + urlencode(query_dict)
         )
-        _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
+        _LOGGER.debug("Relative redirect prepared for device_id=%r", device_id)
 
         raise web.HTTPFound(location=redirect_url, headers=NO_STORE_HEADERS)
 
