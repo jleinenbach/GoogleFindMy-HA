@@ -134,10 +134,23 @@ def test_bare_sighting_in_the_same_window_is_unknown() -> None:
     """
     resolver = _resolver((0x71, 7))
     _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
+    assert _mode(resolver) == (True, UwtSource.FLAGS_BIT)
     _feed(resolver, bytes([0x71]) * 20, _T + 900)
     sighting = resolver.last_confirmed_sighting("dev-u")
     assert sighting is not None
     assert sighting.observed_at == _T + 900
+    assert (sighting.uwt_mode, sighting.uwt_source) == (None, UwtSource.UNKNOWN)
+
+
+def test_late_older_window_does_not_replace_the_newer_sighting() -> None:
+    """A late advertisement of an older window, even with a known mode, leaves
+    the newer sighting with its own (unknown) mode and its own time."""
+    resolver = _resolver((0x71, 7), (0x72, 8))
+    _feed(resolver, bytes([0x72]) * 20, _T)
+    _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T + 10)
+    sighting = resolver.last_confirmed_sighting("dev-u")
+    assert sighting is not None
+    assert (sighting.window_counter, sighting.observed_at) == (8 * _PERIOD, _T)
     assert (sighting.uwt_mode, sighting.uwt_source) == (None, UwtSource.UNKNOWN)
 
 
