@@ -126,12 +126,19 @@ def test_bare_eid_alone_is_unknown() -> None:
     assert _mode(resolver) == (None, UwtSource.UNKNOWN)
 
 
-def test_bare_copy_in_the_same_window_keeps_the_known_mode() -> None:
-    """The bare copy of a framed advertisement does not erase its mode."""
+def test_bare_sighting_in_the_same_window_is_unknown() -> None:
+    """A later bare EID in the same window does not take over the earlier mode.
+
+    The mode can change within the window; taking it over would report it
+    with the later sighting's time, here 900 s after it was seen.
+    """
     resolver = _resolver((0x71, 7))
     _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
-    _feed(resolver, bytes([0x71]) * 20, _T + 1)
-    assert _mode(resolver) == (True, UwtSource.FLAGS_BIT)
+    _feed(resolver, bytes([0x71]) * 20, _T + 900)
+    sighting = resolver.last_confirmed_sighting("dev-u")
+    assert sighting is not None
+    assert sighting.observed_at == _T + 900
+    assert (sighting.uwt_mode, sighting.uwt_source) == (None, UwtSource.UNKNOWN)
 
 
 def test_bare_sighting_in_a_later_window_is_unknown() -> None:
@@ -145,7 +152,7 @@ def test_bare_sighting_in_a_later_window_is_unknown() -> None:
 
 def test_restarted_counter_does_not_inherit_the_mode() -> None:
     """After a counter restart (smaller window, wall gap over one period)
-    an unknown mode stays unknown; only the same window inherits."""
+    an unknown mode stays unknown."""
     resolver = _resolver((0x71, 9), (0x72, 2))
     _feed(resolver, _framed(0x71, 0x01, MODERN_FRAME_TYPE), _T)
     _feed(resolver, bytes([0x72]) * 20, _T + 2 * _PERIOD)
@@ -220,29 +227,29 @@ def test_frame_and_bit_disagreeing_is_a_conflict() -> None:
 
 
 def test_conflict_does_not_inherit_the_known_mode() -> None:
-    """A contradicting advertisement replaces a known mode in the same window;
-    only an UNKNOWN sighting inherits, a CONFLICT is evidence of its own."""
+    """A contradicting advertisement replaces a known mode in the same window:
+    a CONFLICT is evidence of its own."""
     resolver = _resolver((0x71, 7))
     _feed(resolver, _framed(0x71, 0x00), _T)
     _feed(resolver, _framed(0x71, 0x00, MODERN_FRAME_TYPE), _T + 1)
     assert _mode(resolver) == (None, UwtSource.CONFLICT)
 
 
-def test_bare_copy_after_a_conflict_stays_without_a_mode() -> None:
-    """The bare copy of a contradicting advertisement inherits no value."""
+def test_bare_sighting_after_a_conflict_is_unknown() -> None:
+    """A later bare EID after a conflict shows no mode of its own: unknown."""
     resolver = _resolver((0x71, 7))
     _feed(resolver, _framed(0x71, 0x01), _T)
     _feed(resolver, bytes([0x71]) * 20, _T + 1)
-    assert _mode(resolver) == (None, UwtSource.CONFLICT)
+    assert _mode(resolver) == (None, UwtSource.UNKNOWN)
 
 
-def test_frame_only_copy_does_not_settle_a_conflict() -> None:
-    """Within the window a frame-type-only copy keeps the conflict: it shows no
-    bit, so it cannot tell which of the two contradicting signals was right."""
+def test_later_frame_only_reading_decides_for_itself() -> None:
+    """A later frame-type-only reading in the same window is a sighting of its
+    own: it replaces an earlier conflict with the mode its frame type shows."""
     resolver = _resolver((0x71, 7))
     _feed(resolver, _framed(0x71, 0x01), _T)
     _feed(resolver, _framed(0x71, None), _T + 1)
-    assert _mode(resolver) == (None, UwtSource.CONFLICT)
+    assert _mode(resolver) == (False, UwtSource.FRAME_TYPE)
 
 
 def test_consistent_bit_reading_replaces_a_conflict() -> None:
@@ -254,7 +261,7 @@ def test_consistent_bit_reading_replaces_a_conflict() -> None:
 
 
 def test_conflict_does_not_carry_into_a_later_window() -> None:
-    """The conflict guard holds only within the window that showed it."""
+    """A conflict is not carried into the next window either."""
     resolver = _resolver((0x71, 7), (0x72, 8))
     _feed(resolver, _framed(0x71, 0x01), _T)
     _feed(resolver, _framed(0x72, None), _T + _PERIOD)
