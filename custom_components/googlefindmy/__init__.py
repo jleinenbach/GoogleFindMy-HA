@@ -195,6 +195,7 @@ from .const import (
     OPT_OPTIONS_SCHEMA_VERSION,
     OPTION_KEYS,
     OPTIONAL_CREDENTIAL_KEYS,
+    SECRETS_EXTRA_WATCH_PATHS,
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -630,6 +631,12 @@ CONFIG_SCHEMA: vol.Schema = getattr(
 )(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Options the legacy migration in ``async_setup_entry`` carries over: the
+# user's settings and the schema version, nothing else.
+_LEGACY_MIGRATION_KEPT_OPTIONS: Final[frozenset[str]] = frozenset(
+    (*OPTION_KEYS, SECRETS_EXTRA_WATCH_PATHS, OPT_OPTIONS_SCHEMA_VERSION)
+)
 
 # Bundle field names that may appear in a log line. Any other field name is logged
 # as "other field": per-account fields embed the account e-mail
@@ -8186,23 +8193,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         updated_data[CONF_GOOGLE_EMAIL] = normalized_email
         updated_data[DATA_AUTH_METHOD] = auth_method_value
 
-        # Keep every known option and the schema version. A fresh entry runs
-        # this path too (the config flow stores ``CONF_OAUTH_TOKEN`` while the
-        # new cache is still empty); replacing the options with ``{}`` would
-        # discard the choices made during setup, e.g. a declined Map View.
-        # Only keys the integration no longer knows are dropped.
+        # Keep the user's settings: every key from OPTION_KEYS, the extra
+        # watch paths and the schema version. A fresh entry runs this path too
+        # (the config flow stores ``CONF_OAUTH_TOKEN`` while the new cache is
+        # still empty); replacing the options with ``{}`` would discard the
+        # choices made during setup, e.g. a declined Map View. Dropped are
+        # removed keys such as ``tracked_devices`` and the bookkeeping markers
+        # of the unique-ID migrations, which then run again on the new data.
         kept_options = {
-            key: value
-            for key, value in entry.options.items()
-            if key in OPTION_KEYS or key == OPT_OPTIONS_SCHEMA_VERSION
+            option_name: value
+            for option_name, value in entry.options.items()
+            if option_name in _LEGACY_MIGRATION_KEPT_OPTIONS
         }
         hass.config_entries.async_update_entry(
             entry, data=MappingProxyType(updated_data), options=kept_options
         )
         _LOGGER.info(
-            "[%s] Migrated legacy configuration; kept %d known option(s)",
+            "[%s] Migrated legacy configuration and kept the user's options",
             entry.entry_id,
-            len(kept_options),
         )
 
     elif legacy_cache_primed:

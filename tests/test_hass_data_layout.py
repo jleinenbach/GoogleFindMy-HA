@@ -47,6 +47,7 @@ from custom_components.googlefindmy.const import (
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_ENABLED,
     OPT_OPTIONS_SCHEMA_VERSION,
+    SECRETS_EXTRA_WATCH_PATHS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_LOCATE_DEVICE,
     SERVICE_REBUILD_REGISTRY,
@@ -598,8 +599,8 @@ async def test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry(
     The config flow stores ``CONF_OAUTH_TOKEN`` in ``entry.data`` while the
     entry's token cache is still empty, so the first setup runs the legacy
     migration. That migration used to replace the options with ``{}`` and
-    turned a declined Map View back on. Known option keys and the schema
-    version survive; unknown keys are still dropped.
+    turned a declined Map View back on. The user's settings and the schema
+    version survive; removed keys and migration markers are still dropped.
     """
 
     loop = asyncio.get_running_loop()
@@ -619,8 +620,13 @@ async def test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry(
         OPT_MAP_VIEW_ENABLED: False,
         OPT_LOCATION_POLL_INTERVAL: 600,
         OPT_OPTIONS_SCHEMA_VERSION: 2,
+        SECRETS_EXTRA_WATCH_PATHS: "/config/extra-secrets.json",
     }
-    entry.options = {**initial_options, "tracked_devices": ["stale-device"]}
+    entry.options = {
+        **initial_options,
+        "tracked_devices": ["stale-device"],
+        "unique_id_migrated": True,
+    }
 
     assert await integration.async_setup(hass, {}) is True
     assert await integration.async_setup_entry(hass, entry) is True
