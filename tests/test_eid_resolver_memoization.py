@@ -1011,3 +1011,35 @@ def test_resize_evicts_least_recently_used_entries() -> None:
     assert cache.get("a") == "A"
     assert cache.get("d") == "D"
     assert cache.get("b") is None
+
+
+def test_first_pass_skips_the_mask_key_of_a_variant_without_a_curve_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A variant without a curve row builds its EIDs without a flags mask.
+
+    The ``curve_params is not None`` guard in the first pass only matters when
+    ``_VARIANT_CURVE_PARAMS`` lacks a row for a variant. It mirrors pass two,
+    which then registers that variant without a mask instead of failing the
+    whole build.
+    """
+    monkeypatch.delitem(
+        resolver_mod._VARIANT_CURVE_PARAMS, EidVariant.MODERN_P256_X20_TRUNC_BE
+    )
+
+    _, metadata, _ = _build(_fleet_resolver(), _aged_fleet(1), _FLEET_NOW)
+
+    without_row = [
+        row
+        for row in metadata.values()
+        if row["variant"] == EidVariant.MODERN_P256_X20_TRUNC_BE.value
+    ]
+    others = [
+        row
+        for row in metadata.values()
+        if row["variant"] != EidVariant.MODERN_P256_X20_TRUNC_BE.value
+    ]
+    assert without_row
+    assert all("flags_xor_mask" not in row for row in without_row)
+    assert others
+    assert all("flags_xor_mask" in row for row in others)

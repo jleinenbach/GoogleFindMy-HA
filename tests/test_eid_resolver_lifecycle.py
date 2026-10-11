@@ -535,14 +535,29 @@ def test_same_window_takes_the_newer_sighting_time() -> None:
 
 @pytest.mark.parametrize(
     ("step_back", "kept"),
-    [(_PERIOD, True), (_PERIOD + 1, False), (5_000, False)],
-    ids=["step_of_one_period", "step_beyond_one_period", "step_of_5000_s"],
+    [
+        (0, True),
+        (1, False),
+        (500, False),
+        (_PERIOD, False),
+        (_PERIOD + 1, False),
+        (5_000, False),
+    ],
+    ids=[
+        "no_step",
+        "step_of_1_s",
+        "step_of_500_s",
+        "step_of_one_period",
+        "step_beyond_one_period",
+        "step_of_5000_s",
+    ],
 )
 def test_smaller_window_after_a_backward_wall_step(step_back: int, kept: bool) -> None:
     """Late older window or restarted device: undecidable, so nothing is kept.
 
-    Beyond one period back on the wall clock the entry is dropped; the next
-    sighting records the window the device shows, whichever case it was.
+    Any step back on the wall clock drops the entry; the same wall second is a
+    late delivery and keeps it. The next sighting records the window the
+    device shows, whichever case it was.
     """
     resolver = _matched_resolver()
     _see(resolver, 0x72, _T, monotonic=50_000.0)
