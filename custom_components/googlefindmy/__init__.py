@@ -9328,21 +9328,23 @@ async def _async_refresh_device_urls(
             ):
                 continue
 
-            # Picking the first match, and ``device_owning_entry_ids`` asks its
-            # callers to say why that is allowed.  Here it is: from Core 2026.8
-            # the tuple holds exactly one id.  Below that core it can hold
-            # several, and a device shared between two GoogleFindMy entries then
-            # gets whichever the set iteration yields first -- unchanged from
-            # before this migration, and a pre-existing wart rather than a new
-            # one.  It decides only which entry seeds the map token, and both
-            # entries can serve the device.
+            # ``device_owning_entry_ids`` asks its callers to say why picking
+            # one owner is allowed. From Core 2026.8 the tuple holds exactly one
+            # id. Below that core a device shared between two GoogleFindMy
+            # entries can list both; an owner with Map View enabled wins, so a
+            # disabled owner listed first cannot clear the link of an owner
+            # that still serves the map. Among equals the first owner in set
+            # iteration order wins, as before; it only seeds the map token.
+            owner_ids = [
+                cid for cid in device_owning_entry_ids(device) if cid in domain_entries
+            ]
             entry_id = next(
                 (
                     cid
-                    for cid in device_owning_entry_ids(device)
-                    if cid in domain_entries
+                    for cid in owner_ids
+                    if _is_map_view_enabled_for_entry_fn(domain_entries[cid])
                 ),
-                None,
+                owner_ids[0] if owner_ids else None,
             )
             if not entry_id:
                 continue

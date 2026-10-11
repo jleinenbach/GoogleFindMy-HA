@@ -1259,7 +1259,6 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
         dev_reg = dr.async_get(hass)
         updated_count = 0
-        seen_device_ids: set[str] = set()
         resolved_count = 0
         # (device, owner_entry_id, canonical_id) for every resolved device whose
         # entry has Map View enabled. Populated by the first pass below and
@@ -1281,44 +1280,50 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         # base-URL lookup (mirrors ``_async_refresh_device_urls``); enabled
         # entries' devices are only collected here, their URL built below
         # once ``base_url`` is known.
+        # Below 2026.8 a device can hang on two of our entries at once. The
+        # owners are collected per device first, in the order the entries are
+        # asked; an owner with Map View enabled wins, so a disabled owner asked
+        # first cannot clear the link of an owner that still serves the map.
+        # Among equals the first entry asked wins, and its prefix is the one
+        # ``_canonical_identifier`` strips (set iteration order decided this
+        # before as well, so only determinism changes).
+        owners_by_device: dict[str, tuple[Any, list[str]]] = {}
         for owner_entry_id in entries_by_id:
             for device in dr.async_entries_for_config_entry(dev_reg, owner_entry_id):
-                # Below 2026.8 a device can hang on two of our entries at once.
-                # The first entry asked wins, and its prefix is the one
-                # ``_canonical_identifier`` strips. The choice was arbitrary
-                # before as well (set iteration order), so this is not a change
-                # in outcome, only in determinism.
-                if device.id in seen_device_ids:
-                    continue
-                seen_device_ids.add(device.id)
+                slot = owners_by_device.setdefault(device.id, (device, []))
+                slot[1].append(owner_entry_id)
 
-                identifiers: set[tuple[str, str]] = (
-                    getattr(device, "identifiers", set()) or set()
-                )
-                if not any(domain == DOMAIN for domain, _ in identifiers):
-                    continue
+        for device, owner_ids in owners_by_device.values():
+            identifiers: set[tuple[str, str]] = (
+                getattr(device, "identifiers", set()) or set()
+            )
+            if not any(domain == DOMAIN for domain, _ in identifiers):
+                continue
 
-                if _device_is_service(device):
-                    continue
+            if _device_is_service(device):
+                continue
 
-                canonical_id = _canonical_identifier(device, owner_entry_id)
-                if not canonical_id:
-                    continue
+            owner_entry_id = next(
+                (oid for oid in owner_ids if _map_view_enabled(oid)), owner_ids[0]
+            )
+            canonical_id = _canonical_identifier(device, owner_entry_id)
+            if not canonical_id:
+                continue
 
-                resolved_count += 1
+            resolved_count += 1
 
-                if not _map_view_enabled(owner_entry_id):
-                    # Disabled: clear any stale link rather than refresh one
-                    # that just refuses every request. Count only a real
-                    # change; an already-empty link is not written.
-                    if device.configuration_url is not None:
-                        dev_reg.async_update_device(
-                            device_id=device.id, configuration_url=None
-                        )
-                        updated_count += 1
-                    continue
+            if not _map_view_enabled(owner_entry_id):
+                # Disabled: clear any stale link rather than refresh one that
+                # just refuses every request. Count only a real change; an
+                # already-empty link is not written.
+                if device.configuration_url is not None:
+                    dev_reg.async_update_device(
+                        device_id=device.id, configuration_url=None
+                    )
+                    updated_count += 1
+                continue
 
-                enabled_items.append((device, owner_entry_id, canonical_id))
+            enabled_items.append((device, owner_entry_id, canonical_id))
 
         if resolved_count and not enabled_items:
             # Every resolved device is on a disabled entry, so skip the

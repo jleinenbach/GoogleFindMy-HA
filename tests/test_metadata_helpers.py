@@ -230,6 +230,53 @@ async def test_async_refresh_device_urls_restores_the_link_after_re_enabling(
 
 
 @pytest.mark.asyncio
+async def test_async_refresh_device_urls_prefers_an_enabled_owner_of_a_shared_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Below Core 2026.8 a disabled first owner does not clear a shared link.
+
+    The device lists two owning entries (legacy ``config_entries``); the first
+    has Map View off, the second on. The refresh signs the link for the enabled
+    entry instead of clearing it.
+    """
+
+    base_url = "https://example.test"
+    disabled = make_config_entry(
+        entry_id="entry-1", options={OPT_MAP_VIEW_ENABLED: False}
+    )
+    enabled = make_config_entry(entry_id="entry-2")
+    entries = {disabled.entry_id: disabled, enabled.entry_id: enabled}
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(
+        async_entries=lambda domain: list(entries.values())
+    )
+    monkeypatch.setattr(integration, "get_url", lambda _hass, **kwargs: base_url)
+
+    registry = dr.async_get(hass)
+    device = registry.async_get_or_create(
+        config_entry_id=disabled.entry_id,
+        identifiers={(DOMAIN, f"{enabled.entry_id}:device-alpha")},
+        manufacturer="Google",
+        model="Nest",
+        name="Alpha",
+    )
+    # Pre-2026.8 shape: no single owner, a list of owners with the disabled
+    # entry first.
+    device.config_entry_id = None
+    device.config_entries = [disabled.entry_id, enabled.entry_id]
+
+    await integration._async_refresh_device_urls(hass)
+
+    expected_token = map_token_hex_digest(
+        map_token_secret_seed("ha-uuid", enabled.entry_id, False)
+    )
+    assert device.configuration_url == (
+        f"{base_url}/api/googlefindmy/map/device-alpha?token={expected_token}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_async_refresh_device_urls_clears_disabled_url_without_a_base_url(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
