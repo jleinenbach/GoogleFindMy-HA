@@ -36,6 +36,7 @@ from custom_components.googlefindmy.coordinator.helpers.registry import (
 )
 from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
 from tests.conftest import import_coordinator_consumers
+from tests.helpers.config_entries_stub import make_config_entry
 
 pytest_plugins = ("pytest_homeassistant_custom_component",)
 
@@ -248,13 +249,13 @@ def test_device_info_omits_configuration_url_for_a_disabled_entry(
     monkeypatch.setattr(
         entity, "_resolve_absolute_base_url", lambda: "https://external.domain"
     )
-    entity.coordinator.config_entry = SimpleNamespace(
-        options={OPT_MAP_VIEW_ENABLED: False}, data={}
+    entity.coordinator.config_entry = make_config_entry(
+        entry_id="device-entry", options={OPT_MAP_VIEW_ENABLED: False}
     )
     assert "configuration_url" not in vars(entity.device_info)
 
-    entity.coordinator.config_entry = SimpleNamespace(
-        options={OPT_MAP_VIEW_ENABLED: True}, data={}
+    entity.coordinator.config_entry = make_config_entry(
+        entry_id="device-entry", options={OPT_MAP_VIEW_ENABLED: True}
     )
     assert vars(entity.device_info)["configuration_url"] == (
         "https://external.domain/api/googlefindmy/map/device-1?token=secure-token"
@@ -279,8 +280,8 @@ def test_disabled_owner_registration_keeps_the_enabled_owners_link(
     disabled.add_to_hass(hass)
 
     entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
-    entity.coordinator.config_entry = SimpleNamespace(
-        options={OPT_MAP_VIEW_ENABLED: False}, data={}
+    entity.coordinator.config_entry = make_config_entry(
+        entry_id="device-entry", options={OPT_MAP_VIEW_ENABLED: False}
     )
     info = vars(entity.device_info)
     link = "https://external.domain/api/googlefindmy/map/device-1?token=enabled"
