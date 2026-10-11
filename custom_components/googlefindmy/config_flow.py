@@ -9120,9 +9120,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             OPT_MAP_VIEW_TOKEN_EXPIRATION: _get(
                 OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             ),
-            OPT_MAP_VIEW_ENABLED: _get(
-                OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED
-            ),
+            OPT_MAP_VIEW_ENABLED: _get(OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED),
             OPT_DELETE_CACHES_ON_REMOVE: _get(
                 OPT_DELETE_CACHES_ON_REMOVE, DEFAULT_DELETE_CACHES_ON_REMOVE
             ),

@@ -1142,9 +1142,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         default_map_view_enabled = bool(
             ctx.get("default_map_view_enabled", DEFAULT_MAP_VIEW_ENABLED)
         )
-        map_view_enabled_key = ctx.get(
-            "opt_map_view_enabled_key", OPT_MAP_VIEW_ENABLED
-        )
+        map_view_enabled_key = ctx.get("opt_map_view_enabled_key", OPT_MAP_VIEW_ENABLED)
 
         expiration_cache: dict[str, bool] = {}
         map_view_enabled_cache: dict[str, bool] = {}
@@ -1176,7 +1174,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     try:
                         enabled = bool(opt_reader(entry, key, default))
                     except Exception:
-                        enabled = bool(entry.options.get(key, entry.data.get(key, default)))
+                        enabled = bool(
+                            entry.options.get(key, entry.data.get(key, default))
+                        )
                 else:
                     enabled = bool(entry.options.get(key, entry.data.get(key, default)))
 

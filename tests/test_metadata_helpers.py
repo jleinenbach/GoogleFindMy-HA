@@ -200,8 +200,7 @@ async def test_async_refresh_device_urls_clears_disabled_url_without_a_base_url(
     warnings = [
         record
         for record in caplog.records
-        if record.levelno >= logging.WARNING
-        and "reachable URL" in record.getMessage()
+        if record.levelno >= logging.WARNING and "reachable URL" in record.getMessage()
     ]
     assert warnings == [], (
         "no enabled entry needs a base URL here, so no warning should fire"

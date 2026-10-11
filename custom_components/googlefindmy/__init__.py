@@ -8957,7 +8957,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # the feature registers it regardless of order. Once up, views stay up for
     # the process lifetime (no unregister_view API); map_view.py's own
     # OPT_MAP_VIEW_ENABLED check turns away a since-disabled entry per-request.
-    map_view_enabled_for_entry = _opt(entry, OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED)
+    map_view_enabled_for_entry = _opt(
+        entry, OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED
+    )
     if map_view_enabled_for_entry:
         _async_ensure_map_views_registered(hass, bucket)
 
@@ -9369,9 +9371,7 @@ async def _async_refresh_device_urls(
             if not map_view_enabled:
                 # Disabled: clear any stale link rather than refresh one that
                 # just refuses every request.
-                dev_reg.async_update_device(
-                    device_id=device.id, configuration_url=None
-                )
+                dev_reg.async_update_device(device_id=device.id, configuration_url=None)
                 updated_count += 1
                 continue
 
