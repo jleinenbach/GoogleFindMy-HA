@@ -188,12 +188,12 @@ def test_refresh_device_urls_clears_url_for_a_disabled_entry(
 
     base_url = "https://example.test"
 
-    entry = SimpleNamespace(
+    entry = make_config_entry(
         entry_id="entry-1",
         options={const.OPT_MAP_VIEW_ENABLED: False},
         data={},
+        runtime_data=SimpleNamespace(coordinator=SimpleNamespace()),
     )
-    entry.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
     config_entries = _StubConfigEntries([entry])
 
     hass = SimpleNamespace()
