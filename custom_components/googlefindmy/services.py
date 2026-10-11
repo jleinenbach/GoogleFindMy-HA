@@ -1221,7 +1221,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     return True
             return False
 
-        def _canonical_identifier(device: Any, entry_id: str | None) -> str | None:
+        def _canonical_identifier(device: Any) -> str | None:
             serial = getattr(device, "serial_number", None)
             if isinstance(serial, str) and serial:
                 return serial
@@ -1239,19 +1239,14 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 ):
                     continue
 
-                if entry_id:
-                    prefix = f"{entry_id}:"
-                    if ident_str.startswith(prefix):
-                        ident_str = ident_str[len(prefix) :]
-                elif ":" in ident_str:  # pragma: no cover - no caller reaches it
-                    # Unreachable since the scan asks per config entry: the only
-                    # caller always passes a key of ``entries_by_id``, which is
-                    # never empty. Kept for a caller that does not know the
-                    # owner, of which there is none today; measured, not assumed
-                    # (``grep -n _canonical_identifier`` finds one call site).
-                    candidate, remainder = ident_str.split(":", 1)
-                    if candidate in entries_by_id:
-                        ident_str = remainder
+                # Strip the namespace of whichever of our entries the
+                # identifier carries, not only the chosen token owner's: below
+                # Core 2026.8 a shared device can keep the identifier of a
+                # disabled owner while the link is signed for an enabled one,
+                # and the map view looks the bare device id up.
+                candidate, sep, remainder = ident_str.partition(":")
+                if sep and candidate in entries_by_id:
+                    ident_str = remainder
 
                 return ident_str
 
@@ -1284,9 +1279,10 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         # owners are collected per device first, in the order the entries are
         # asked; an owner with Map View enabled wins, so a disabled owner asked
         # first cannot clear the link of an owner that still serves the map.
-        # Among equals the first entry asked wins, and its prefix is the one
-        # ``_canonical_identifier`` strips (set iteration order decided this
-        # before as well, so only determinism changes).
+        # Among equals the first entry asked wins (set iteration order decided
+        # this before as well, so only determinism changes); it seeds the map
+        # token, while ``_canonical_identifier`` strips any of our entries'
+        # namespaces from the device id.
         owners_by_device: dict[str, tuple[Any, list[str]]] = {}
         for owner_entry_id in entries_by_id:
             for device in dr.async_entries_for_config_entry(dev_reg, owner_entry_id):
@@ -1306,7 +1302,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             owner_entry_id = next(
                 (oid for oid in owner_ids if _map_view_enabled(oid)), owner_ids[0]
             )
-            canonical_id = _canonical_identifier(device, owner_entry_id)
+            canonical_id = _canonical_identifier(device)
             if not canonical_id:
                 continue
 

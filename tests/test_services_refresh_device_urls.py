@@ -585,7 +585,9 @@ async def test_refresh_device_urls_prefers_an_enabled_owner_of_a_shared_device(
 
     Below Core 2026.8 a device can hang on two of our entries. When the first
     entry asked has Map View off and the second has it on, the device keeps a
-    link signed for the enabled entry instead of being cleared.
+    link signed for the enabled entry instead of being cleared. The device
+    still carries the disabled entry's namespaced identifier; the link path
+    must use the bare device id the map view looks up.
     """
     base_url = "https://example.test"
 
@@ -612,7 +614,7 @@ async def test_refresh_device_urls_prefers_an_enabled_owner_of_a_shared_device(
     devices = {
         "ha-shared": SimpleNamespace(
             id="ha-shared",
-            identifiers={(const.DOMAIN, "entry-2:device-alpha")},
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
             config_entries=["entry-1", "entry-2"],
             serial_number=None,
             name="Alpha",
