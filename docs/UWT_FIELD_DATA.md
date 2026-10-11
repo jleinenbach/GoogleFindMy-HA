@@ -36,8 +36,13 @@ on a recorded observation.
 ## Probe lines (source A)
 
 18 lines: three probe passes over the same six trackers. Two passes ran on
-2026-10-09 at 16:22 UTC (140 ms apart, after a start of the integration), one
-on 2026-10-11 at 08:12 UTC (after a restart).
+2026-10-09 at 16:22 UTC, 140 ms apart, during a start of Home Assistant; one ran
+on 2026-10-11 at 08:12 UTC after a restart. The instance has two accounts
+loaded, and each of the two 2026-10-09 passes comes right after its own
+`FMDN BLE scanner registered` line. The probe line is logged once per device
+per resolver instance, so two passes mean the line was emitted by two
+resolver instances or after a reset of that state; which of the two happened
+was not established.
 
 | Pass | Trackers | `observed_frame` | `uwt_mode` | `decoded` | `payload_len` |
 |---|---|---|---|---|---|
@@ -85,11 +90,13 @@ same coordinator write (2026-10-04 and 2026-10-09) or 1.2 s apart
 event.
 
 Many episodes last one to three minutes. This fits the model in the
-specification, where the Find Hub service turns the mode on and the owner's
-phone turns it off again when it next sees the tracker; it does not fit a
-tracker that enters the mode on its own after 30 minutes of separation. This
-is a reading of the data against the specification, not a measurement of the
-service.
+specification, where the Find Hub service turns the mode on and only a holder
+of the tracker's identity key can turn it off again; that this is the owner's
+phone once it sees the tracker is an inference, not something the
+specification states. It does not fit a tracker that enters the mode on its
+own after 30 minutes of separation, the criterion of the IETF DULT draft that
+the specification maps the mode to. This is a reading of the data against the
+two documents, not a measurement of the service.
 
 ## What this measurement does not establish
 
@@ -98,6 +105,6 @@ service.
   public report are covered. Accessory firmware of most vendors is not public.
 * The criteria by which Google's service turns the mode on are not published.
   Nothing here says why or when the service switches a tracker into the mode.
-* The probe line fires once per device per start, so it shows the state at a
+* The probe line fires once per device per resolver instance, so it shows the state at a
   few instants, not every change. Continuous change records need the
   transition log that is planned separately.
