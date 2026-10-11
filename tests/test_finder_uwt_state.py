@@ -234,3 +234,28 @@ def test_bare_copy_after_a_conflict_stays_without_a_mode() -> None:
     _feed(resolver, _framed(0x71, 0x01), _T)
     _feed(resolver, bytes([0x71]) * 20, _T + 1)
     assert _mode(resolver) == (None, UwtSource.CONFLICT)
+
+
+def test_frame_only_copy_does_not_settle_a_conflict() -> None:
+    """Within the window a frame-type-only copy keeps the conflict: it shows no
+    bit, so it cannot tell which of the two contradicting signals was right."""
+    resolver = _resolver((0x71, 7))
+    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, _framed(0x71, None), _T + 1)
+    assert _mode(resolver) == (None, UwtSource.CONFLICT)
+
+
+def test_consistent_bit_reading_replaces_a_conflict() -> None:
+    """A framed reading whose bit agrees with its frame type replaces a conflict."""
+    resolver = _resolver((0x71, 7))
+    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, _framed(0x71, 0x00), _T + 1)
+    assert _mode(resolver) == (False, UwtSource.FLAGS_BIT)
+
+
+def test_conflict_does_not_carry_into_a_later_window() -> None:
+    """The conflict guard holds only within the window that showed it."""
+    resolver = _resolver((0x71, 7), (0x72, 8))
+    _feed(resolver, _framed(0x71, 0x01), _T)
+    _feed(resolver, _framed(0x72, None), _T + _PERIOD)
+    assert _mode(resolver) == (False, UwtSource.FRAME_TYPE)

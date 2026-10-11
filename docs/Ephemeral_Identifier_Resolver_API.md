@@ -297,7 +297,8 @@ otherwise the frame type (`0x41` on, `0x40` off), otherwise unknown; a flags
 byte found only by guessing its position never counts. When that bit and a
 `0x40`/`0x41` frame type disagree, the mode is `None` with source `conflict`.
 A sighting with source `unknown` keeps the known mode of the previous sighting
-in the same window; a `conflict` keeps nothing. The finder
+in the same window; a `conflict` keeps nothing, and within the same window
+only a `flags_bit` reading replaces it. The finder
 sends that mode, and sends nothing without a recent sighting
 or while that mode is unknown, because the upload field cannot express
 "unknown". Field data behind the frame/bit reading:

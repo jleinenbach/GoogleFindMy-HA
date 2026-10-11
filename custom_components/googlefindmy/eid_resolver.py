@@ -3102,12 +3102,15 @@ class GoogleFindMyEIDResolver:
         The same counter replaces: the sighting is newer on the monotonic
         clock, also after such a step.
 
-        A sighting whose protection mode is unknown keeps the mode of the
-        sighting it replaces, but only within the same window: the same
-        advertisement may arrive once with its frame and once as a bare EID,
-        and the bare copy must not erase what the framed one showed. A known
-        mode always replaces, and an unknown one in a later window stays
-        unknown.
+        Within the same window, a sighting with source ``UNKNOWN`` keeps the
+        mode of the sighting it replaces: the same advertisement may arrive
+        once with its frame and once as a bare EID, and the bare copy must not
+        erase what the framed one showed. A ``CONFLICT`` (frame type and bit
+        disagreed) replaces like a known mode and inherits nothing, and within
+        the same window only a ``FLAGS_BIT`` reading replaces it: a copy that
+        shows the frame type alone cannot settle the contradiction, so the
+        mode stays ``None``. Otherwise a known mode always replaces, and an
+        unknown one in a later window stays unknown.
 
         Never raises: a variant this version does not know, or a window
         timestamp that is not an int in ``[0, FHNA_COUNTER_MASK]``, records
@@ -3136,12 +3139,12 @@ class GoogleFindMyEIDResolver:
                 return
             if wall_gap <= ROTATION_PERIOD:
                 return
-        if (
-            uwt_source is UwtSource.UNKNOWN
-            and previous is not None
-            and previous.window_counter == window_counter
-        ):
-            uwt_mode, uwt_source = previous.uwt_mode, previous.uwt_source
+        if previous is not None and previous.window_counter == window_counter:
+            if uwt_source is UwtSource.UNKNOWN or (
+                previous.uwt_source is UwtSource.CONFLICT
+                and uwt_source is not UwtSource.FLAGS_BIT
+            ):
+                uwt_mode, uwt_source = previous.uwt_mode, previous.uwt_source
         self._confirmed_sightings[device_id] = ConfirmedSighting(
             variant=variant,
             window_counter=window_counter,

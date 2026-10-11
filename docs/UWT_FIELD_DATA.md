@@ -6,8 +6,9 @@ The finder reports the protection mode it observed (`unwantedTrackingModeEnabled
 in the upload) and derives it with `_effective_uwt_mode()` in
 `custom_components/googlefindmy/eid_resolver.py`: the hashed-flags bit when the
 flags byte was read at a known position, otherwise the frame type (`0x41` on,
-`0x40` off), otherwise unknown. The comment next to the frame/bit logging in the
-same file cites this file.
+`0x40` off), otherwise unknown. When that bit and a `0x40`/`0x41` frame type
+disagree, the mode is unknown (source `conflict`) and nothing is uploaded. The
+comment next to the frame/bit logging in the same file cites this file.
 
 That rule rests on the Find Hub Network accessory specification (retrieved
 2026-10-11), which says for the mode: "The frame type should be set to 0x41.
