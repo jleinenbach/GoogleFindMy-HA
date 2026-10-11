@@ -9373,9 +9373,13 @@ async def _async_refresh_device_urls(
         try:
             if not _is_map_view_enabled_for_entry_fn(entry):
                 # Disabled: clear any stale link rather than refresh one that
-                # just refuses every request.
-                dev_reg.async_update_device(device_id=device.id, configuration_url=None)
-                updated_count += 1
+                # just refuses every request. Count only a real change; an
+                # already-empty link is not written by the registry.
+                if device.configuration_url is not None:
+                    dev_reg.async_update_device(
+                        device_id=device.id, configuration_url=None
+                    )
+                    updated_count += 1
                 continue
 
             enabled_items.append((device, entry, dev_id))

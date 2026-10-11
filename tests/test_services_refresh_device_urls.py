@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -573,3 +574,76 @@ async def test_refresh_device_urls_visits_a_shared_device_once(
     assert device_registry.updated == {
         "ha-shared": f"{base_url}/api/googlefindmy/map/device-alpha?token={expected}"
     }
+
+
+def _run_disabled_entry_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    configuration_url: str | None,
+    get_url_impl: Any,
+) -> _StubDeviceRegistry:
+    """Run the refresh service once for a single ``map_view_enabled=False`` entry."""
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={const.OPT_MAP_VIEW_ENABLED: False},
+        data={},
+        runtime_data=SimpleNamespace(coordinator=SimpleNamespace()),
+    )
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = _StubConfigEntries([entry])
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+    devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            config_entries={"entry-1"},
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+            configuration_url=configuration_url,
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", get_url_impl)
+
+    async def _run_refresh() -> None:
+        await services.async_register_services(hass, ctx)
+        handler = hass.services.registered[
+            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+        ]
+        await handler(ServiceCall({}))
+
+    asyncio.run(_run_refresh())
+    return device_registry
+
+
+def test_refresh_device_urls_leaves_an_already_empty_link_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An already-empty link on a disabled entry is neither written nor counted."""
+
+    caplog.set_level(logging.INFO, logger=services.__name__)
+    device_registry = _run_disabled_entry_refresh(
+        monkeypatch,
+        configuration_url=None,
+        get_url_impl=lambda hass, **kwargs: "https://example.test",
+    )
+
+    assert device_registry.updated == {}
+    assert "Refreshed URLs for 0 Google Find My devices" in caplog.text

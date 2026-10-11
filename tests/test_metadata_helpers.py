@@ -151,6 +151,41 @@ async def test_async_refresh_device_urls_clears_url_when_map_view_disabled(
 
 
 @pytest.mark.asyncio
+async def test_async_refresh_device_urls_skips_an_already_empty_disabled_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled entry's device without a link is neither written nor counted."""
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={OPT_MAP_VIEW_ENABLED: False},
+    )
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+    monkeypatch.setattr(
+        integration, "get_url", lambda _hass, **kwargs: "https://example.test"
+    )
+
+    registry = dr.async_get(hass)
+    device = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:device-alpha")},
+        manufacturer="Google",
+        model="Nest",
+        name="Alpha",
+    )
+    assert device.configuration_url is None
+    writes_before = len(registry.updated)
+
+    await integration._async_refresh_device_urls(hass)
+
+    assert [
+        u for u in registry.updated[writes_before:] if u["device_id"] == device.id
+    ] == []
+
+
+@pytest.mark.asyncio
 async def test_async_refresh_device_urls_clears_disabled_url_without_a_base_url(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

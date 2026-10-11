@@ -1309,11 +1309,13 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
                 if not _map_view_enabled(owner_entry_id):
                     # Disabled: clear any stale link rather than refresh one
-                    # that just refuses every request.
-                    dev_reg.async_update_device(
-                        device_id=device.id, configuration_url=None
-                    )
-                    updated_count += 1
+                    # that just refuses every request. Count only a real
+                    # change; an already-empty link is not written.
+                    if device.configuration_url is not None:
+                        dev_reg.async_update_device(
+                            device_id=device.id, configuration_url=None
+                        )
+                        updated_count += 1
                     continue
 
                 enabled_items.append((device, owner_entry_id, canonical_id))
