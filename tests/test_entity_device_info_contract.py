@@ -233,6 +233,73 @@ def test_device_info_configuration_url_absent_without_base_url(
     assert entity.device_info.configuration_url is None
 
 
+def test_device_info_omits_configuration_url_for_a_disabled_entry(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled entry leaves the key out; it never passes ``None``.
+
+    ``device_info`` reaches ``DeviceRegistry.async_get_or_create`` as keyword
+    arguments, where ``None`` clears the link and a missing key keeps it.
+    """
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+    monkeypatch.setattr(
+        entity, "_resolve_absolute_base_url", lambda: "https://external.domain"
+    )
+    entity.coordinator.config_entry = SimpleNamespace(
+        options={OPT_MAP_VIEW_ENABLED: False}, data={}
+    )
+    assert "configuration_url" not in vars(entity.device_info)
+
+    entity.coordinator.config_entry = SimpleNamespace(
+        options={OPT_MAP_VIEW_ENABLED: True}, data={}
+    )
+    assert vars(entity.device_info)["configuration_url"] == (
+        "https://external.domain/api/googlefindmy/map/device-1?token=secure-token"
+    )
+
+
+def test_disabled_owner_registration_keeps_the_enabled_owners_link(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The enabled owner's link survives the disabled owner's registration.
+
+    The enabled owner's refresh set the link; registering the disabled owner's
+    entities afterwards must not clear it.
+    """
+
+    enabled = MockConfigEntry(domain=DOMAIN, entry_id="enabled-owner")
+    disabled = MockConfigEntry(domain=DOMAIN, entry_id="disabled-owner")
+    enabled.add_to_hass(hass)
+    disabled.add_to_hass(hass)
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+    entity.coordinator.config_entry = SimpleNamespace(
+        options={OPT_MAP_VIEW_ENABLED: False}, data={}
+    )
+    info = vars(entity.device_info)
+    link = "https://external.domain/api/googlefindmy/map/device-1?token=enabled"
+    enabled_device = device_registry.async_get_or_create(
+        config_entry_id=enabled.entry_id,
+        identifiers=info["identifiers"],
+        configuration_url=link,
+    )
+
+    device_registry.async_get_or_create(config_entry_id=disabled.entry_id, **info)
+
+    # Before 2026.8 both calls resolve to the same registry device; from 2026.8
+    # the second entry gets a device of its own. Either way the enabled owner's
+    # device must still carry its link.
+    kept = device_registry.async_get(enabled_device.id)
+    assert kept is not None
+    assert kept.configuration_url == link
+
+
 @pytest.mark.asyncio
 async def test_integration_device_info_uses_service_device(
     hass: HomeAssistant,

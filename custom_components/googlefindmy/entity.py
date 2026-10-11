@@ -675,18 +675,27 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
 
         label = self.device_label()
         name = label if label and label != self._DEFAULT_DEVICE_LABEL else None
-        configuration_url = self.device_configuration_url(absolute=True)
         # Tracker devices intentionally omit ``via_device`` so Home Assistant
         # can attach them to the correct parent device automatically.
-
-        return DeviceInfo(
-            identifiers=self._device_identifiers(),
-            manufacturer="Google",
-            model="Find My Device",
-            serial_number=self.device_id,
-            configuration_url=configuration_url,
-            name=name,
-        )
+        info: dict[str, Any] = {
+            "identifiers": self._device_identifiers(),
+            "manufacturer": "Google",
+            "model": "Find My Device",
+            "serial_number": self.device_id,
+            "name": name,
+        }
+        config_entry = getattr(self.coordinator, "config_entry", None)
+        if _is_map_view_enabled_for_entry(config_entry):
+            info["configuration_url"] = self.device_configuration_url(absolute=True)
+        # A disabled entry leaves ``configuration_url`` out instead of passing
+        # ``None``: Home Assistant forwards ``device_info`` as keyword arguments
+        # to ``DeviceRegistry.async_get_or_create``, where ``None`` clears the
+        # link and a missing key keeps it. On Home Assistant before 2026.8 one
+        # registry device can belong to two entries, and the link an enabled
+        # owner set must survive the disabled owner's entity registration.
+        # Clearing a link no enabled owner backs is the URL refresh's job,
+        # which checks every owner.
+        return DeviceInfo(**info)
 
     def _coordinator_device_label(self, device_id: str) -> str | None:
         """Return the coordinator's label for ``device_id``, or ``None``.
