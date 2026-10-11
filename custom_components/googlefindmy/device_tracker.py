@@ -1631,13 +1631,15 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         return min(fix_epoch, time.time())
 
     def _write_state_if_changed(self) -> None:
-        """Write HA state only when something state-determining actually changed.
+        """Write HA state, restamping to the real fix time when that's safe.
 
-        Suppresses true no-op writes (same signature, same location_age) so a
-        frequently-polled-but-unchanged tracker can't keep bumping its own
+        A true no-op (same signature, same location_age) still takes a
+        normal ``async_write_ha_state()`` write -- not a fix-time restamp --
+        so a frequently-polled-but-unchanged tracker can't bump its own
         ``last_updated`` and outrank a genuinely fresher one in HA's
         ``person`` integration (which picks by newest ``last_updated``, not
-        ``last_seen``).
+        ``last_seen``), while core's own same-state/same-attr fast path still
+        advances ``last_reported`` as a live heartbeat.
 
         When something did change, the write restamps to the real GPS fix
         time (``_fix_time_epoch()``) only if that's strictly newer than the
@@ -1676,7 +1678,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         location_age_changed = location_age_value != self._last_write_location_age
 
         if signature_unchanged and not location_age_changed:
-            return  # true no-op; suppress entirely
+            # True no-op: still write normally (not via _write_at's explicit
+            # fix-time timestamp) so core's own same-state/same-attr fast
+            # path advances last_reported as a live heartbeat, while
+            # last_updated/last_changed stay untouched -- no restamp needed
+            # since nothing actually changed.
+            self.async_write_ha_state()
+            return
 
         self._last_write_sig = signature
         self._last_write_location_age = location_age_value

@@ -92,6 +92,24 @@ class _RestampCoordinatorStub:
         )
 
 
+def _frozen_clock(monkeypatch: pytest.MonkeyPatch, start: float) -> Callable[[float], None]:
+    """Patch ``time.time()`` to a controllable fake clock seeded at ``start``.
+
+    Device_tracker.py and Home Assistant core's own state-writing path (its
+    ``timestamp or time.time()`` fallback) both read the stdlib ``time``
+    module's ``time`` attribute, so patching it here controls "now" for both
+    without a real sleep -- deterministic, and doesn't block the event loop.
+    Returns a setter to advance the fake clock between writes.
+    """
+    clock = {"now": start}
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+
+    def _advance(new_now: float) -> None:
+        clock["now"] = new_now
+
+    return _advance
+
+
 def _row(last_seen: float, *, lat: float = 48.1, lon: float = 11.5) -> dict[str, Any]:
     return {
         "id": "dev-1",
@@ -298,10 +316,15 @@ def test_force_update_is_never_passed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_noop_update_does_not_restamp_or_double_write(
+async def test_noop_update_writes_plainly_without_restamp_or_state_change(
     hass: HomeAssistant,
 ) -> None:
-    """An unchanged fix is a pure no-op: no write at all, real or stubbed."""
+    """An unchanged fix is a true no-op: last_updated/last_changed don't move,
+    no state_changed event fires, but the plain write path still runs so
+    core's own same-state fast path can advance last_reported as a live
+    heartbeat -- consumers that use last_reported to tell a healthy
+    integration from one that stopped reporting must not go blind.
+    """
     fix_time = time.time() - 120
     entity = _make_tracker(hass, _row(fix_time))
 
@@ -309,33 +332,47 @@ async def test_noop_update_does_not_restamp_or_double_write(
     # previous state exists yet for this entity_id).
     _update(entity)
     await hass.async_block_till_done()
+    first_state = hass.states.get(entity.entity_id)
+    assert first_state is not None
     entity.async_write_ha_state.reset_mock()
 
     events: list[Any] = []
     hass.bus.async_listen("state_changed", events.append)
 
-    # Re-run with the identical row (same signature): must be a pure no-op --
-    # no new state_changed event, and the plain write path is not used either.
+    # Re-run with the identical row (same signature): no state_changed event
+    # and last_updated/last_changed stay put, but the plain write path is
+    # still taken (not suppressed) so last_reported can advance.
     _update(entity)
     await hass.async_block_till_done()
+    second_state = hass.states.get(entity.entity_id)
+    assert second_state is not None
     assert len(events) == 0
-    assert entity.async_write_ha_state.call_count == 0
+    assert entity.async_write_ha_state.call_count == 1
+    assert second_state.last_updated == first_state.last_updated
+    assert second_state.last_changed == first_state.last_changed
 
-    # And again, to prove it stays suppressed, not just once.
+    # And again, to prove it's a stable no-op, not a one-time fluke.
     _update(entity)
     await hass.async_block_till_done()
+    third_state = hass.states.get(entity.entity_id)
+    assert third_state is not None
     assert len(events) == 0
-    assert entity.async_write_ha_state.call_count == 0
+    assert entity.async_write_ha_state.call_count == 2
+    assert third_state.last_updated == first_state.last_updated
+    assert third_state.last_changed == first_state.last_changed
 
 
 @pytest.mark.asyncio
-async def test_genuine_new_fix_restamps_to_fix_time(hass: HomeAssistant) -> None:
+async def test_genuine_new_fix_restamps_to_fix_time(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A fix strictly newer than the current last_updated restamps to it.
 
     The state STRING is unchanged ("not_home" both times), only the
     attributes differ, so ``last_changed`` must stay put while
     ``last_updated`` advances to the fix time.
     """
+    advance = _frozen_clock(monkeypatch, time.time())
     older_fix = time.time() - 300
     entity = _make_tracker(hass, _row(older_fix))
     _update(entity)
@@ -351,9 +388,9 @@ async def test_genuine_new_fix_restamps_to_fix_time(hass: HomeAssistant) -> None
 
     # The first write was necessarily a plain, "now"-stamped write (no
     # previous state existed yet), so a genuinely newer fix must itself be
-    # close to "now" -- a brief real sleep guarantees the next fix time is
-    # strictly newer than that first last_updated.
-    time.sleep(0.05)
+    # close to "now" -- advance the controlled clock instead of sleeping to
+    # guarantee strict ordering without depending on real wall-clock time.
+    advance(first_last_updated + 1.0)
     newer_fix = time.time()
     assert newer_fix > first_last_updated
     entity.coordinator.row = _row(newer_fix, lat=48.2, lon=11.6)
@@ -377,7 +414,7 @@ async def test_genuine_new_fix_restamps_to_fix_time(hass: HomeAssistant) -> None
 
 @pytest.mark.asyncio
 async def test_state_string_change_does_move_last_changed(
-    hass: HomeAssistant,
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A genuine state-string change (not_home -> home) still moves last_changed.
 
@@ -386,6 +423,7 @@ async def test_state_string_change_does_move_last_changed(
     whenever the state string itself actually changes, exactly like a normal
     (non-restamped) write would.
     """
+    advance = _frozen_clock(monkeypatch, time.time())
     fix_time = time.time() - 120
     entity = _make_tracker(hass, _row(fix_time))
     _update(entity, state="not_home")
@@ -393,9 +431,10 @@ async def test_state_string_change_does_move_last_changed(
     assert first_state is not None
     first_last_updated = first_state.last_updated.timestamp()
 
-    # The first write was a plain, "now"-stamped write; a brief real sleep
-    # guarantees the next fix time is strictly newer than that.
-    time.sleep(0.05)
+    # The first write was a plain, "now"-stamped write; advance the
+    # controlled clock instead of sleeping to guarantee the next fix time is
+    # strictly newer than that.
+    advance(first_last_updated + 1.0)
     newer_fix = time.time()
     assert newer_fix > first_last_updated
     entity.coordinator.row = _row(newer_fix, lat=48.3, lon=11.7)
@@ -653,7 +692,7 @@ async def test_calculate_state_failure_falls_back_to_plain_write(
 
 @pytest.mark.asyncio
 async def test_customize_override_survives_second_restamp_write(
-    hass: HomeAssistant,
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A customize.yaml-style override must survive every restamp-path write.
 
@@ -663,6 +702,7 @@ async def test_customize_override_survives_second_restamp_write(
     """
     from homeassistant.core_config import DATA_CUSTOMIZE
 
+    advance = _frozen_clock(monkeypatch, time.time())
     fix_time = time.time() - 120
     entity = _make_tracker(hass, _row(fix_time))
 
@@ -677,10 +717,10 @@ async def test_customize_override_survives_second_restamp_write(
     assert first_written is not None
     first_last_updated = first_written.last_updated.timestamp()
 
-    # A brief real sleep guarantees the next fix time is strictly newer than
-    # the first (plain, "now"-stamped) write, so this update takes the
-    # restamp path.
-    time.sleep(0.05)
+    # Advance the controlled clock instead of sleeping to guarantee the next
+    # fix time is strictly newer than the first (plain, "now"-stamped) write,
+    # so this update takes the restamp path.
+    advance(first_last_updated + 1.0)
     newer_fix = time.time()
     assert newer_fix > first_last_updated
     entity.coordinator.row = _row(newer_fix, lat=48.4, lon=11.8)
@@ -692,7 +732,7 @@ async def test_customize_override_survives_second_restamp_write(
     assert abs(second_written.last_updated.timestamp() - newer_fix) < 1.0
 
     # And a SECOND restamp-path write, not just the first.
-    time.sleep(0.05)
+    advance(newer_fix + 1.0)
     newest_fix = time.time()
     entity.coordinator.row = _row(newest_fix, lat=48.5, lon=11.9)
     _update(entity)
