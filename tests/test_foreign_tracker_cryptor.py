@@ -71,20 +71,30 @@ class TestDecryptIdentityKeyLength:
         _require_len("bar", b"\x00" * 10, 10)
 
 
-def _valid_eid() -> bytes:
-    """Build a valid SECP160r1 EID (on-curve x-coordinate) for encrypt() inputs."""
+def _valid_eid(variant: EidVariant = EidVariant.LEGACY_SECP160R1_X20_BE) -> bytes:
+    """Build a valid EID (on-curve x-coordinate) of ``variant`` for encrypt() inputs."""
     identity_key = b"\x01" * EIK_LENGTH
-    return generate_eid_variant(identity_key, 0, EidVariant.LEGACY_SECP160R1_X20_BE)
+    return generate_eid_variant(identity_key, 0, variant)
+
+
+# One full-length EID per curve encrypt() supports (20 bytes SECP160R1, 32 bytes P-256).
+_FRESHNESS_EID_VARIANTS = pytest.mark.parametrize(
+    "variant",
+    [EidVariant.LEGACY_SECP160R1_X20_BE, EidVariant.SPEC_P256_X32_BE],
+    ids=["secp160r1", "secp256r1"],
+)
 
 
 class TestNonceFreshnessContract:
     """H1 (A7-H hardening): AES-EAX nonce uniqueness rests on caller entropy.
 
     ``encrypt(message, random, eid)`` derives the ephemeral scalar ``s`` solely
-    from ``random``; the EAX nonce is ``LRx(8) || LSx(8)`` where ``LSx`` is the
-    low 8 bytes of ``(s*G).x``. The only production caller,
-    ``fmdn_finder/location_uploader.py:551``, passes ``secrets.token_bytes(32)``
-    as ``random``, so a fresh nonce (and HKDF key) is produced per message.
+    from ``random``; the EAX nonce is ``Rx[-h:] || Sx[-h:]`` where ``Sx`` is the
+    x-coordinate of ``s*G`` and ``h`` the half length of the reading (8 by
+    default). The only production caller,
+    ``_encrypt_and_upload_location`` in ``fmdn_finder/location_uploader.py``,
+    passes ``secrets.token_bytes(32)`` as ``random``, so a fresh nonce (and HKDF
+    key) is produced per message. The contract is pinned for both curves.
 
     AP5 flagged this isolated function as a nonce-reuse FAIL (M1); the Tier-4
     code verification (Regel 10) downgraded it to PASS precisely because of that
@@ -94,9 +104,12 @@ class TestNonceFreshnessContract:
     PASS back into a red test instead of a silent regression.
     """
 
-    def test_fresh_random_yields_distinct_nonce_and_ciphertext(self) -> None:
+    @_FRESHNESS_EID_VARIANTS
+    def test_fresh_random_yields_distinct_nonce_and_ciphertext(
+        self, variant: EidVariant
+    ) -> None:
         """Two encryptions of identical plaintext with fresh entropy must differ."""
-        eid = _valid_eid()
+        eid = _valid_eid(variant)
         message = b"identical-plaintext-payload"
         ct1, sx1 = encrypt(message, secrets.token_bytes(32), eid)
         ct2, sx2 = encrypt(message, secrets.token_bytes(32), eid)
@@ -104,7 +117,10 @@ class TestNonceFreshnessContract:
         assert sx1 != sx2
         assert ct1 != ct2
 
-    def test_reused_random_repeats_nonce_mutation_guard(self) -> None:
+    @_FRESHNESS_EID_VARIANTS
+    def test_reused_random_repeats_nonce_mutation_guard(
+        self, variant: EidVariant
+    ) -> None:
         """Mutation guard proving the freshness test is sharp.
 
         If a caller violates the entropy contract and passes constant bytes,
@@ -112,7 +128,7 @@ class TestNonceFreshnessContract:
         of a fixed plaintext is identical. Asserting that equality here proves
         the freshness test above would actually catch nonce reuse.
         """
-        eid = _valid_eid()
+        eid = _valid_eid(variant)
         message = b"identical-plaintext-payload"
         fixed_random = b"\x02" * 32
         ct1, sx1 = encrypt(message, fixed_random, eid)

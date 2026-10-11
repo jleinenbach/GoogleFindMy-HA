@@ -397,3 +397,111 @@ async def test_stale_locks_are_purged(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert "stale" not in resolver._locks
     assert "stale" not in resolver._persisted_locks
+
+
+# --- Specification variants -------------------------------------------------
+
+_SPEC_ORDER: tuple[EidVariant, ...] = (
+    EidVariant.LEGACY_SECP160R1_X20_BE,
+    EidVariant.SPEC_P256_X32_BE,
+    EidVariant.SPEC_P256_X20_TRUNC_BE,
+    EidVariant.MODERN_P256_X32_BE,
+    EidVariant.MODERN_P256_X20_TRUNC_BE,
+    EidVariant.MODERN_P256_X32_LE_SCALAR,
+    EidVariant.MODERN_P256_X20_TRUNC_LE,
+)
+
+
+def test_compute_variants_tries_spec_before_heuristic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unlocked device gets every variant, the specification ones first."""
+
+    resolver = _build_resolver(monkeypatch)
+    work_item = SimpleNamespace(locked_variant=None, key_bytes=b"\x01" * 32)
+    window = SimpleNamespace(windows=(object(),))
+
+    specs = resolver._compute_variants(work_item, window)  # type: ignore[arg-type]
+
+    assert tuple(spec.variant for spec in specs) == _SPEC_ORDER
+    assert set(_SPEC_ORDER) == set(EidVariant)
+
+
+def _independent_p256_mask(eik: bytes, counter: int, variant: EidVariant) -> int:
+    """Flags mask of a P-256 variant from the oracle, not from the SUT."""
+
+    import hashlib
+
+    from custom_components.googlefindmy.FMDNCrypto.curve_profile import ScalarRule
+    from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
+        VARIANT_DERIVATIONS,
+    )
+    from tests.helpers.fmdn_report_oracle import owner_scalar
+
+    _curve, derivation = VARIANT_DERIVATIONS[variant]
+    rule = "mod_n" if derivation.rule is ScalarRule.MOD_N else "plus1"
+    scalar = owner_scalar(eik, counter, rule, r_dash_byteorder=derivation.byteorder)
+    return hashlib.sha256(scalar.to_bytes(MODERN_EID_LENGTH, "big")).digest()[-1]
+
+
+def test_build_flags_mask_follows_each_variant_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every built P-256 EID carries the mask of its own scalar derivation.
+
+    Previously every P-256 variant got the ``r' mod n`` mask; the
+    ``MODERN_P256_*`` EIDs use ``(r' mod (n - 1)) + 1`` and, for the
+    ``*_LE`` variants, ``r'`` read little-endian.
+    """
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
+    )
+    resolver = _build_resolver(monkeypatch)
+    resolver._ensure_cache_defaults()
+    eik = bytes(range(32))
+    identity = DeviceIdentity(
+        registry_id="registry-id",
+        canonical_id="canonical-id",
+        identity_key=eik,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+    )
+    resolver._cached_identities = [identity]
+    work_items = resolver._collect_work_items([identity], now_unix=1024)
+    _lookup, metadata, _ids = resolver._build_lookup_sync(
+        work_items, 1024, resolver._build_rotation_params()
+    )
+
+    seen: set[EidVariant] = set()
+    for meta in metadata.values():
+        variant = EidVariant(meta["variant"])
+        if variant is EidVariant.LEGACY_SECP160R1_X20_BE:
+            continue
+        expected = _independent_p256_mask(eik, meta["rotation_timestamp"], variant)
+        assert meta["flags_xor_mask"] == expected, variant
+        seen.add(variant)
+
+    assert seen == set(EidVariant) - {EidVariant.LEGACY_SECP160R1_X20_BE}
+
+
+@pytest.mark.parametrize("variant", list(EidVariant), ids=lambda v: v.value)
+def test_stored_lock_variant_loads_unchanged(variant: EidVariant) -> None:
+    """A stored lock keeps its variant name, old values and new ones alike."""
+
+    payload = {
+        "device_id": "dev-1",
+        "canonical_id": "abc123",
+        "variant": variant.value,
+        "advertisement_reversed": False,
+        "eid_length": 20 if "x20" in variant.value else 32,
+    }
+
+    restored = EIDGenerationLock.from_dict(payload)
+
+    assert restored.variant == variant.value
+    assert EIDGenerationLock.from_dict(restored.to_dict()).variant == variant.value

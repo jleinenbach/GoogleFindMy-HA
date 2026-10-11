@@ -746,3 +746,51 @@ async def test_debug_log_masks_scanner_name_without_location(hass_mock, caplog):
     assert "scanner=...eeff" in caplog.text
     assert "bermuda_aabbccddeeff" not in caplog.text
     assert "aabbccddeeff" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report_time", [1_699_999_000, None])
+async def test_report_time_is_the_sighting_time(hass_mock, report_time):
+    """The report carries the time the EID was seen, else the upload time.
+
+    The finder reports the EID of a sighting; its time goes with it, so the
+    owner resolves the counter at the time the EID was advertised. The value
+    is read back from the uploaded protobuf.
+    """
+    from custom_components.googlefindmy.ProtoDecoders.LocationReportsUpload_pb2 import (
+        LocationReportsUpload,
+    )
+
+    upload_mock = AsyncMock(return_value=True)
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(5),
+        ),
+        patch(
+            "custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor.encrypt",
+            MagicMock(return_value=(b"\x00" * 32, b"\x01" * 20)),
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.google_uploader.async_upload_to_google_fmdn",
+            upload_mock,
+        ),
+        patch.object(time, "time", return_value=1_700_000_000.0),
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area=None,
+            rssi=None,
+            scanner_address=None,
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+            report_time=report_time,
+        )
+
+    assert result is True
+    sent = LocationReportsUpload()
+    sent.ParseFromString(upload_mock.call_args.args[1])
+    expected = report_time if report_time is not None else 1_700_000_000
+    assert sent.reports[0].time.seconds == expected
