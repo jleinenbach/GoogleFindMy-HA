@@ -665,6 +665,14 @@
           }
         }
       },
+      "location_status": {
+        "name": "מצב המיקום",
+        "state": {
+          "current": "עדכני",
+          "aging": "מתיישן",
+          "stale": "לא עדכני"
+        }
+      },
       "last_seen": {
         "name": "נראה לאחרונה",
         "state_attributes": {

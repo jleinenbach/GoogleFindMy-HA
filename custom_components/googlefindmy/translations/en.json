@@ -665,6 +665,14 @@
           }
         }
       },
+      "location_status": {
+        "name": "Location status",
+        "state": {
+          "current": "Current",
+          "aging": "Aging",
+          "stale": "Stale"
+        }
+      },
       "last_seen": {
         "name": "Last Seen",
         "state_attributes": {

@@ -665,6 +665,14 @@
           }
         }
       },
+      "location_status": {
+        "name": "Estado de la ubicación",
+        "state": {
+          "current": "Actual",
+          "aging": "Envejeciendo",
+          "stale": "Desactualizada"
+        }
+      },
       "last_seen": {
         "name": "Visto por última vez",
         "state_attributes": {

@@ -665,6 +665,14 @@
           }
         }
       },
+      "location_status": {
+        "name": "Locatiestatus",
+        "state": {
+          "current": "Actueel",
+          "aging": "Verouderend",
+          "stale": "Verouderd"
+        }
+      },
       "last_seen": {
         "name": "Laatst gezien",
         "state_attributes": {

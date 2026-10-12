@@ -16,6 +16,7 @@ Best practices:
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -45,11 +46,15 @@ from .const import (
     TRANSLATION_KEY_ENCRYPTION_KEY_STATUS,
 )
 from .coordinator import (
+    LOCATION_STATUS_OPTIONS,
     CryptoStatus,
     GoogleFindMyCoordinator,
     SemanticLabelRecord,
     _as_ha_attributes,
+    classify_location_status,
     encode_plus_code_for_row,
+    location_age_seconds,
+    resolve_stale_threshold,
 )
 from .entity import (
     GoogleFindMyDeviceEntity,
@@ -95,6 +100,14 @@ PLUS_CODE_DESCRIPTION = SensorEntityDescription(
     key="plus_code",
     translation_key="plus_code",
     icon="mdi:map-marker",
+)
+
+# Icons come from icons.json (default plus one per state), not from here.
+LOCATION_STATUS_DESCRIPTION = SensorEntityDescription(
+    key="location_status",
+    translation_key="location_status",
+    device_class=SensorDeviceClass.ENUM,
+    options=list(LOCATION_STATUS_OPTIONS),
 )
 
 SEMANTIC_LABEL_DESCRIPTION = SensorEntityDescription(
@@ -565,6 +578,19 @@ async def async_setup_entry(
                             added_unique_ids.add(pc_uid)
                         entities.append(plus_code_entity)
 
+                    # --- Location status sensor (always, alongside LastSeen) ---
+                    status_entity = GoogleFindMyLocationStatusSensor(
+                        coordinator,
+                        device,
+                        subentry_key=tracker_scope.subentry_key,
+                        subentry_identifier=tracker_identifier,
+                    )
+                    ls_uid = getattr(status_entity, "unique_id", None)
+                    if not isinstance(ls_uid, str) or ls_uid not in added_unique_ids:
+                        if isinstance(ls_uid, str):
+                            added_unique_ids.add(ls_uid)
+                        entities.append(status_entity)
+
                 # --- BLE Battery sensor (when resolver has data) ---
                 if dev_id not in known_battery_ids and resolver is not None:
                     battery_state = None
@@ -817,6 +843,9 @@ async def async_setup_entry(
                     expected.add(
                         f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"
                     )
+                    expected.add(
+                        f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_location_status"
+                    )
             return expected
 
         def _build_entities(missing: set[str]) -> list[SensorEntity]:
@@ -863,6 +892,7 @@ async def async_setup_entry(
                         continue
                     ls_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
                     pc_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"
+                    st_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_location_status"
                     if ls_uid in missing:
                         built.append(
                             GoogleFindMyLastSeenSensor(
@@ -875,6 +905,15 @@ async def async_setup_entry(
                     if pc_uid in missing:
                         built.append(
                             GoogleFindMyPlusCodeSensor(
+                                coordinator,
+                                device,
+                                subentry_key=tracker_scope.subentry_key,
+                                subentry_identifier=tracker_scope.identifier,
+                            )
+                        )
+                    if st_uid in missing:
+                        built.append(
+                            GoogleFindMyLocationStatusSensor(
                                 coordinator,
                                 device,
                                 subentry_key=tracker_scope.subentry_key,
@@ -1536,6 +1575,101 @@ class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
             self.async_write_ha_state()
             return
         self.refresh_device_label_from_coordinator(log_prefix="PlusCode")
+        current_name = self._device.get("name")
+        if isinstance(current_name, str):
+            self.maybe_update_device_registry_name(current_name)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Expose DeviceInfo using the shared entity helper."""
+
+        return super().device_info
+
+
+# ----------------------------- Per-Device Location Status ----------------------
+
+
+class GoogleFindMyLocationStatusSensor(GoogleFindMyDeviceEntity, SensorEntity):
+    """Per-device enum sensor with the live age class of the published fix.
+
+    Takes over the live part of the device_tracker ``location_status``
+    attribute, which holds the value of the last observation so that a tick
+    without a new fix writes nothing new on the tracker. The value is derived
+    live on every coordinator tick from the coordinator display row
+    (``get_display_location_data_for_subentry``, the same row selection as the
+    tracker) and the shared ``classify_location_status``, so sensor and tracker
+    cannot classify differently:
+
+    - ``current``, ``aging`` or ``stale`` against the configured stale threshold;
+    - ``None`` (HA state ``unknown``) when there is no row or no usable age.
+
+    HA writes a state only when the value changes, so an unchanged class across
+    ticks is a report, not a change (``force_update`` stays ``False``).
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    entity_description = LOCATION_STATUS_DESCRIPTION
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            f"{safe_id}_location_status",
+            separator="_",
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return ``current``/``aging``/``stale`` or ``None`` when unknown."""
+        dev_id = self._device_id
+        if not dev_id:
+            return None
+        row = self.coordinator.get_display_location_data_for_subentry(
+            self.subentry_key, dev_id
+        )
+        status = classify_location_status(
+            location_age_seconds(row, time.time()),
+            resolve_stale_threshold(self.coordinator),
+        )
+        return None if status == "unknown" else status
+
+    @property
+    def available(self) -> bool:
+        """Mirror device presence, falling back to coordinator availability."""
+        if not super().available:
+            return False
+        if not self._device_id:
+            return False
+        return self.coordinator_has_device()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Keep the device label in sync and push the recomputed state."""
+        if not self.coordinator_has_device():
+            self.async_write_ha_state()
+            return
+        self.refresh_device_label_from_coordinator(log_prefix="LocationStatus")
         current_name = self._device.get("name")
         if isinstance(current_name, str):
             self.maybe_update_device_registry_name(current_name)

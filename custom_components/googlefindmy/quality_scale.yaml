@@ -223,14 +223,17 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/binary_sensor.py:AUTH_STATUS_DESC.device_class"
+        - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
     - id: entity-disabled-by-default
       status: done
       evidence:
         - "custom_components/googlefindmy/button.py:GoogleFindMyButtonEntity._attr_entity_registry_enabled_default"
+        - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
     - id: entity-translations
       status: done
       evidence:
         - "custom_components/googlefindmy/translations/en.json:entity"
+        - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
     - id: exception-translations
       status: done
       evidence:
@@ -240,6 +243,7 @@ rules:
       evidence:
         - "custom_components/googlefindmy/icons.json"
         - "tests/test_icons_translation_map.py:test_icons_file_covers_entity_translation_keys"
+        - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
     - id: reconfiguration-flow
       status: done
       evidence:

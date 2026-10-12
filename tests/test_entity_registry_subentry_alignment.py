@@ -178,9 +178,9 @@ async def test_entity_registry_subentry_alignment(
     assert entries, "platform setup should register at least one entity"
 
     # Per-device tracker-scope sensors are identified by their unique_id suffix:
-    # last_seen (timestamp) and plus_code (Open Location Code) both belong to the
-    # tracker subentry, not the diagnostic service scope.
-    tracker_sensor_suffixes = ("_last_seen", "_plus_code")
+    # last_seen (timestamp), plus_code (Open Location Code) and location_status
+    # (age class) belong to the tracker subentry, not the diagnostic service scope.
+    tracker_sensor_suffixes = ("_last_seen", "_plus_code", "_location_status")
 
     service_entries = [
         item
