@@ -47,7 +47,8 @@ Attributes: area (semantic location), scanner (BLE scanner name)
 Flow:
 - Bermuda area change detected → find GoogleFindMy entity on SAME HA device
 - Take the EID of the device's last sighting the EID resolver confirmed
-  (last_confirmed_sighting), never one predicted from the clock
+  (last_confirmed_sighting), never one predicted from the clock, computed
+  from the current identity key the sighting was matched under, if any
 - Upload semantic location to Google FMDN backend
 
 References:
@@ -622,7 +623,7 @@ async def _async_find_googlefindmy_device(  # noqa: PLR0911
     }
 
 
-async def _async_get_device_eid(  # noqa: PLR0911
+async def _async_get_device_eid(  # noqa: PLR0911, PLR0912
     hass: HomeAssistant,
     coordinator: Any,
     device_id: str,
@@ -634,7 +635,12 @@ async def _async_get_device_eid(  # noqa: PLR0911
     owner resolves a report against the recent past and near future of its
     counter, and a prediction from ``pair_date`` ignores the time basis,
     offset and units the resolver matched. A sighting older than
-    ``FINDER_SIGHTING_MAX_AGE_SECONDS`` is not reported.
+    ``FINDER_SIGHTING_MAX_AGE_SECONDS`` is not reported, and neither is one
+    matched under a key none of the device's current identity keys equals
+    (compared by ``eid_resolver.identity_key_fingerprint``): its window
+    counter belongs to that key, and an EID computed from another key with
+    it was never advertised. Among several candidate keys of one device the
+    one the sighting was matched under is used.
 
     Args:
         hass: Home Assistant instance
@@ -663,10 +669,13 @@ async def _async_get_device_eid(  # noqa: PLR0911
         _LOGGER.debug("No device identities available from coordinator")
         return None
 
-    # Find identity matching our device_id
+    # Find the identities matching our device_id
     # canonical_id format: "{entry_id}:{device_uuid}" or just "{device_uuid}"
-    # We match if device_id equals canonical_id or is the suffix after ":"
-    identity = None
+    # We match if device_id equals canonical_id or is the suffix after ":".
+    # The coordinator yields one identity per candidate identity key of a
+    # device, all with the same canonical_id, so every match is kept: the
+    # sighting's key fingerprint picks the key further down.
+    candidates = []
     for ident in identities:
         canonical_id = getattr(ident, "canonical_id", None)
         if not canonical_id:
@@ -674,15 +683,17 @@ async def _async_get_device_eid(  # noqa: PLR0911
 
         # Check for exact match or suffix match
         if canonical_id == device_id or canonical_id.endswith(f":{device_id}"):
-            identity = ident
-            _LOGGER.debug(
-                "Found matching identity for device %s (canonical_id: %s)",
-                device_id,
-                canonical_id,
-            )
-            break
+            candidates.append(ident)
 
-    if not identity:
+    identity = candidates[0] if candidates else None
+    if identity is not None:
+        _LOGGER.debug(
+            "Found %d matching identities for device %s (canonical_id: %s)",
+            len(candidates),
+            device_id,
+            getattr(identity, "canonical_id", None),
+        )
+    else:
         _LOGGER.debug(
             "No identity found for device %s in %d identities. Available canonical_ids: %s",
             device_id,
@@ -693,9 +704,11 @@ async def _async_get_device_eid(  # noqa: PLR0911
         )
         return None
 
-    # Get identity key
-    identity_key = getattr(identity, "identity_key", None)
-    if not identity_key:
+    # Get the candidate identity keys
+    identity_keys = [
+        key for ident in candidates if (key := getattr(ident, "identity_key", None))
+    ]
+    if not identity_keys:
         _LOGGER.debug(
             "Identity for device %s has no identity_key (encrypted_identity_key present: %s)",
             device_id,
@@ -728,6 +741,28 @@ async def _async_get_device_eid(  # noqa: PLR0911
                 "Last confirmed sighting of device %s is %s s old, nothing to report",
                 device_id,
                 age,
+            )
+            return None
+
+        from ..eid_resolver import identity_key_fingerprint  # noqa: PLC0415
+
+        identity_key = (
+            None
+            if sighting.key_fingerprint is None
+            else next(
+                (
+                    key
+                    for key in identity_keys
+                    if identity_key_fingerprint(key) == sighting.key_fingerprint
+                ),
+                None,
+            )
+        )
+        if identity_key is None:
+            _LOGGER.debug(
+                "Last confirmed sighting of device %s was not matched under "
+                "any current identity key, nothing to report",
+                device_id,
             )
             return None
 
