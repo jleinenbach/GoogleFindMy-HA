@@ -1159,7 +1159,7 @@ def _make_stale_probe_tracker(coordinator: _ShowAgeCoordinatorStub) -> Any:
 
 def test_home_cadence_report_not_stale_under_default_threshold() -> None:
     """A ~35 min old fix (typical home reporting cadence) must NOT be stale
-    under the retuned default. Under the previous 1800 s default the very same
+    under the re-tuned default. Under the previous 1800 s default the very same
     age would have flipped to "stale" and blanked the coordinates."""
 
     coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=None)
@@ -1168,7 +1168,7 @@ def test_home_cadence_report_not_stale_under_default_threshold() -> None:
     entity._get_location_age = lambda *a, **k: 2100.0  # type: ignore[method-assign]
 
     assert entity._get_stale_threshold() == DEFAULT_STALE_THRESHOLD
-    assert DEFAULT_STALE_THRESHOLD > 1800, "default must be retuned above 1800 s"
+    assert DEFAULT_STALE_THRESHOLD > 1800, "default must be re-tuned above 1800 s"
     assert entity._is_location_stale() is False, (
         "a 35 min old home report must not be treated as stale"
     )

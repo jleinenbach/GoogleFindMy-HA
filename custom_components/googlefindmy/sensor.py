@@ -1633,9 +1633,10 @@ class GoogleFindMyLocationStatusSensor(GoogleFindMyDeviceEntity, SensorEntity):
     (``get_display_location_data_for_subentry``) and the shared
     ``classify_location_status``. The tracker uses the same function and the
     same row selection (``select_display_row`` over the current row and the
-    last reliable fix); the two last-good caches differ only after the device
-    was hidden, because the tracker clears its own then and the coordinator
-    keeps its until the device is purged:
+    last reliable fix). The two last-good caches can still differ: after the
+    device was hidden the tracker clears its own while the coordinator keeps
+    its until the device is purged, and a tracker entity that was disabled
+    starts again without one:
 
     - ``current``, ``aging`` or ``stale`` against the configured stale threshold;
     - ``None`` (HA state ``unknown``) when there is no row or no usable age.

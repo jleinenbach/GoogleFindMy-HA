@@ -408,6 +408,50 @@ async def test_tf06_restore_publishes_the_restored_fix_then_only_reports(
     assert after.last_updated == first_updated, "last_updated moved on a tick"
 
 
+@pytest.mark.asyncio
+async def test_restore_while_hidden_publishes_the_restored_fix_once_visible() -> None:
+    """A restore for a hidden device still shows the restored fix later (R6-7).
+
+    The restore runs before the first publish, and that publish clears the
+    tracker's own last-good cache for a device the coordinator does not show.
+    Measured: the restored fix is not lost, because the same restore primes
+    the coordinator cache, which the tracker reads once the device is visible.
+    """
+
+    entity = _tracker(_row(_now()))
+    stub = entity.coordinator
+    stub.row = None
+    stub.visible = False
+
+    def _gated(key: str | None, device_id: str) -> dict[str, Any] | None:
+        # The real coordinator gates both reads on visibility.
+        return stub.row if stub.visible else None
+
+    stub.get_device_location_data_for_subentry = _gated
+    stub.get_display_location_data_for_subentry = _gated
+    restored = SimpleNamespace(
+        attributes={
+            "latitude": 48.3,
+            "longitude": 11.6,
+            "accuracy_m": 10.0,
+            "last_seen": _now() - 30,
+        }
+    )
+
+    async def _last_state() -> Any:
+        return restored
+
+    entity.async_get_last_state = _last_state
+    entity.async_write_ha_state = lambda: None
+    await entity.async_added_to_hass()
+    assert entity._attr_latitude is None  # hidden: nothing published
+
+    stub.visible = True
+    entity._handle_coordinator_update()
+    assert entity._attr_latitude == 48.3
+    assert entity._attr_longitude == 11.6
+
+
 def test_tf07_show_location_age_off_holds_the_status(
     freezer: FrozenDateTimeFactory,
 ) -> None:
