@@ -263,6 +263,7 @@ rules:
         - "README.md#subentries-and-feature-groups"
         - "tests/test_options_flow_subentries.py::test_repairs_move_assigns_devices_to_selected_subentry"
         - "tests/test_options_flow_subentries.py::test_repairs_delete_moves_devices_and_removes_subentry"
+        - "tests/test_device_tracker_tick_writes.py::test_repair_issue_one_per_entry_removed_with_that_entry"
     - id: stale-devices
       status: done
       evidence:

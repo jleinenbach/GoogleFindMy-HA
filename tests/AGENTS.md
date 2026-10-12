@@ -686,6 +686,12 @@ duplicate-detection utilities:
   creating duplicate repair issues. The `issue_registry_capture` fixture will
   therefore assert that `created` stays empty and that any stale
   `duplicate_account_<entry_id>` entry is removed during the run.
+* `issue_registry_capture` patches the package-level `ir` module, which every
+  platform module imports as the same object, so it also captures issues the
+  platforms create. Each captured payload carries `issue_id`, `domain`,
+  `translation_placeholders` and every other keyword argument as passed (for
+  example `severity`, `breaks_in_ha_version`, `translation_key`, `is_fixable`,
+  `is_persistent`).
 
 ### Duplicate disable fallbacks
 

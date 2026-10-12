@@ -1065,3 +1065,232 @@ async def test_zone_change_without_new_fix_stamps_last_changed_now(
     assert after.last_changed.timestamp() == pytest.approx(_now(), abs=1e-3), (
         "last_changed carries the old fix time instead of the tick time"
     )
+
+
+# ---------------------------------------------------------------------------
+# Repair issue announcing the held attributes (V-C3 b1).
+#
+# ``issue_registry_capture`` records every argument the platform passes to
+# ``async_create_issue`` and every deletion. Home Assistant's own
+# ``async_at_started`` runs unchanged, against a small hass that offers the
+# surface it reads (``state``, ``bus.async_listen_once``,
+# ``async_run_hass_job``) in the helper's own module generation. A real
+# ``hass`` was measured unusable for this: the fixture's ``homeassistant.core``
+# predates the re-imported helpers, so ``hass.state is CoreState.running``
+# fails and the job then runs on a path where the re-imported frame helper is
+# not set up; and the real ``automation`` integration cannot be set up in this
+# harness. Entity registry and the two reference helpers are replaced by
+# doubles of their public functions.
+# ---------------------------------------------------------------------------
+
+
+class _StartingHass:
+    """The hass surface ``async_at_started`` reads, with a firable bus."""
+
+    def __init__(self, *, started: bool) -> None:
+        from custom_components.googlefindmy import device_tracker
+
+        helper_globals = device_tracker.async_at_started.__globals__
+        core_state = helper_globals["CoreState"]
+        self._core_state = core_state
+        self._started_event = helper_globals["EVENT_HOMEASSISTANT_STARTED"]
+        self.state = core_state.running if started else core_state.starting
+        self.listeners: dict[Any, list[Callable[[Any], None]]] = {}
+        self.bus = SimpleNamespace(async_listen_once=self._listen_once)
+
+    def _listen_once(self, event_type: Any, listener: Callable[[Any], None]) -> Any:
+        self.listeners.setdefault(event_type, []).append(listener)
+
+        def _remove() -> None:
+            self.listeners[event_type].remove(listener)
+
+        return _remove
+
+    def async_run_hass_job(self, job: Any, *args: Any) -> None:
+        job.target(*args)
+
+    def fire_started(self) -> None:
+        self.state = self._core_state.running
+        for listener in list(self.listeners.pop(self._started_event, [])):
+            listener(SimpleNamespace(event_type=self._started_event))
+
+
+class _Entry:
+    """A config entry with its unload callbacks."""
+
+    def __init__(self, entry_id: str) -> None:
+        self.entry_id = entry_id
+        self.title = entry_id
+        self.on_unload: list[Callable[[], None]] = []
+
+    def async_on_unload(self, func: Callable[[], None]) -> None:
+        self.on_unload.append(func)
+
+    def unload(self) -> None:
+        for func in self.on_unload:
+            func()
+        self.on_unload.clear()
+
+
+@pytest.fixture
+def repair_platform(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The tracker module with registry and reference helpers as doubles."""
+
+    import sys
+
+    from custom_components.googlefindmy import device_tracker
+
+    trackers = {
+        "entry-a": ["device_tracker.a"],
+        "entry-b": ["device_tracker.b"],
+        "entry-late": ["device_tracker.late"],
+        "entry-gone": ["device_tracker.gone"],
+    }
+    references: dict[str, list[str]] = {}
+    script_references: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        device_tracker,
+        "er",
+        SimpleNamespace(
+            async_get=lambda hass: "registry",
+            async_entries_for_config_entry=lambda registry, entry_id: [
+                SimpleNamespace(entity_id=entity_id, domain=entity_id.split(".")[0])
+                for entity_id in [*trackers.get(entry_id, []), "sensor.other"]
+            ],
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "homeassistant.components.automation",
+        SimpleNamespace(
+            automations_with_entity=lambda hass, entity_id: references.get(
+                entity_id, []
+            )
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "homeassistant.components.script",
+        SimpleNamespace(
+            scripts_with_entity=lambda hass, entity_id: script_references.get(
+                entity_id, []
+            )
+        ),
+    )
+    return SimpleNamespace(
+        module=device_tracker,
+        references=references,
+        script_references=script_references,
+    )
+
+
+def test_repair_issue_one_per_entry_removed_with_that_entry(
+    repair_platform: Any, issue_registry_capture: Any
+) -> None:
+    """One WARNING per entry with the removal version; unload removes only its own."""
+
+    from custom_components.googlefindmy.const import (
+        DOMAIN,
+        TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
+    )
+
+    hass = _StartingHass(started=True)
+    first, second = _Entry("entry-a"), _Entry("entry-b")
+    repair_platform.module._async_track_frozen_attributes_issue(hass, first)
+    repair_platform.module._async_track_frozen_attributes_issue(hass, second)
+
+    issues = issue_registry_capture.registry.issues
+    assert set(issues) == {
+        "tracker_attributes_frozen_entry-a",
+        "tracker_attributes_frozen_entry-b",
+    }
+    issue = issues["tracker_attributes_frozen_entry-a"]
+    assert issue["domain"] == DOMAIN
+    assert issue["breaks_in_ha_version"] == TRACKER_ATTRS_BREAKS_IN_HA_VERSION
+    assert issue["severity"] == repair_platform.module.ir.IssueSeverity.WARNING
+    assert issue["is_fixable"] is False
+    assert issue["is_persistent"] is False
+    assert issue["translation_key"] == "tracker_attributes_frozen_no_automations"
+    assert issue["translation_placeholders"] == {
+        "entry_title": "entry-a",
+        "replacement_sensors": (
+            "sensor.*_location_status, sensor.*_last_seen, sensor.*_coarse_fix"
+        ),
+        "breaks_version": TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
+    }
+
+    first.unload()
+    assert set(issues) == {"tracker_attributes_frozen_entry-b"}
+    assert issue_registry_capture.deleted == [
+        (DOMAIN, "tracker_attributes_frozen_entry-a")
+    ]
+
+    # A reload sets the platform up again: the issue comes back.
+    repair_platform.module._async_track_frozen_attributes_issue(hass, first)
+    assert "tracker_attributes_frozen_entry-a" in issues
+
+
+def test_repair_issue_lists_automations_loaded_after_the_platform(
+    repair_platform: Any, issue_registry_capture: Any
+) -> None:
+    """The list is built once Home Assistant has started.
+
+    ``automation`` may load after this platform; asked during the setup it
+    would report no references. After ``homeassistant_started`` the issue
+    names the automations and scripts that use the entry's trackers (not those
+    of other entries) and uses the key with the list.
+    """
+
+    hass = _StartingHass(started=False)
+    entry = _Entry("entry-late")
+    repair_platform.module._async_track_frozen_attributes_issue(hass, entry)
+    assert issue_registry_capture.created == []
+
+    # ``automation`` finishes loading; only then does Home Assistant start.
+    repair_platform.references["device_tracker.late"] = ["automation.arrives"]
+    repair_platform.references["device_tracker.a"] = ["automation.elsewhere"]
+    repair_platform.script_references["device_tracker.late"] = [
+        "script.notify",
+        "automation.arrives",
+    ]
+    # Another entity of the same entry is not a tracker and is not listed.
+    repair_platform.script_references["sensor.other"] = ["script.unrelated"]
+    hass.fire_started()
+
+    (issue,) = issue_registry_capture.created
+    assert issue["issue_id"] == "tracker_attributes_frozen_entry-late"
+    assert issue["translation_key"] == "tracker_attributes_frozen"
+    assert issue["translation_placeholders"]["automations"] == (
+        "- automation.arrives\n- script.notify"
+    )
+
+
+def test_repair_issue_not_created_when_unloaded_before_start(
+    repair_platform: Any, issue_registry_capture: Any
+) -> None:
+    """Unloading before ``homeassistant_started`` cancels the pending issue."""
+
+    hass = _StartingHass(started=False)
+    entry = _Entry("entry-gone")
+    repair_platform.module._async_track_frozen_attributes_issue(hass, entry)
+    entry.unload()
+    hass.fire_started()
+
+    assert issue_registry_capture.created == []
+    assert issue_registry_capture.registry.issues == {}
+
+
+def test_repair_issue_scheduling_failure_does_not_fail_the_setup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The issue is advisory: a hass without a start state only logs."""
+
+    import logging
+
+    from custom_components.googlefindmy import device_tracker
+
+    entry = _Entry("entry-stub")
+    with caplog.at_level(logging.DEBUG, logger=device_tracker.__name__):
+        device_tracker._async_track_frozen_attributes_issue(SimpleNamespace(), entry)
+    assert entry.on_unload == []
+    assert "Held-attributes repair issue not scheduled" in caplog.text

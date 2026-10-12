@@ -1135,6 +1135,24 @@ TRANSLATION_KEY_DUPLICATE_ACCOUNT: str = "duplicate_account_entries"
 ISSUE_RESTART_REQUIRED_KEY: str = "restart_required"
 TRANSLATION_KEY_RESTART_REQUIRED: str = "restart_required"
 
+# Repairs issue per config entry: the device_tracker attributes location_age,
+# location_status and (main tracker) coarse_* keep the value of the last
+# observation and will be removed. Two translation keys, with and without the
+# list of automations and scripts that reference a tracker of the entry.
+ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY: str = "tracker_attributes_frozen"
+TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN: str = "tracker_attributes_frozen"
+TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS: str = (
+    "tracker_attributes_frozen_no_automations"
+)
+
+# Integration-owned deprecation (AGENTS.md, "Integration-owned deprecations"):
+# the frozen tracker attributes are removed in the first integration release
+# on or after this Home Assistant version. Set as an assumption when the
+# repair issue was introduced (that month plus eight months, a buffer for the
+# upstream release) and checked again before that release. It may be raised
+# with a reason in the PR description, never lowered.
+TRACKER_ATTRS_BREAKS_IN_HA_VERSION: str = "2027.6.0"
+
 
 def issue_id_for(entry_id: str) -> str:
     """Return a stable Repairs issue_id for a given config entry.
@@ -1309,6 +1327,10 @@ __all__ = [
     "TRANSLATION_KEY_UNIQUE_ID_COLLISION",
     "TRANSLATION_KEY_DUPLICATE_ACCOUNT",
     "ISSUE_RESTART_REQUIRED_KEY",
+    "ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY",
+    "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN",
+    "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS",
+    "TRACKER_ATTRS_BREAKS_IN_HA_VERSION",
     "TRANSLATION_KEY_RESTART_REQUIRED",
     "issue_id_for",
     "STORAGE_KEY",

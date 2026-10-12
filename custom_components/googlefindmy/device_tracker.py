@@ -33,10 +33,13 @@ from homeassistant.const import (
     ATTR_LONGITUDE,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.start import async_at_started
 
 from . import (
     EntityRecoveryManager,
@@ -50,8 +53,12 @@ from . import (
 from .const import (
     DEFAULT_SHOW_LOCATION_AGE,
     DOMAIN,
+    ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY,
     OPT_SHOW_LOCATION_AGE,
+    TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
     TRACKER_SUBENTRY_KEY,
+    TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN,
+    TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS,
 )
 from .coordinator import (
     GoogleFindMyCoordinator,
@@ -176,6 +183,93 @@ def _normalize_identifier_set(candidate: Iterable[Any] | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# The entities that carry the live values of the held tracker attributes; kept
+# literal so every locale of the repair issue names the same entity ids.
+_FROZEN_ATTRIBUTES_REPLACEMENTS = (
+    "sensor.*_location_status, sensor.*_last_seen, sensor.*_coarse_fix"
+)
+
+
+def frozen_attributes_issue_id(entry_id: str) -> str:
+    """Return the Repairs issue id announcing the held tracker attributes."""
+    return f"{ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY}_{entry_id}"
+
+
+@callback
+def _async_track_frozen_attributes_issue(
+    hass: HomeAssistant, config_entry: ConfigEntry
+) -> None:
+    """Show the held-attributes issue in Repairs while this entry is loaded.
+
+    The list of automations and scripts is computed once Home Assistant has
+    started: ``automation`` and ``script`` need not be loaded while this
+    platform sets up (they would report no references), and neither is a
+    dependency of the integration. The tracker entity ids come from the
+    entity registry, not from runtime entities. Unloading the entry removes
+    both the pending start callback and the issue.
+    """
+    issue_id = frozen_attributes_issue_id(config_entry.entry_id)
+
+    @callback
+    def _create_issue(_hass: HomeAssistant) -> None:
+        # Imported when needed: neither integration is a dependency of this one,
+        # and both are loaded by the time Home Assistant has started.
+        from homeassistant.components.automation import (  # noqa: PLC0415
+            automations_with_entity,
+        )
+        from homeassistant.components.script import (  # noqa: PLC0415
+            scripts_with_entity,
+        )
+
+        trackers = [
+            entry.entity_id
+            for entry in er.async_entries_for_config_entry(
+                er.async_get(hass), config_entry.entry_id
+            )
+            if entry.domain == "device_tracker"
+        ]
+        users = sorted(
+            {
+                reference
+                for tracker in trackers
+                for reference in (
+                    *automations_with_entity(hass, tracker),
+                    *scripts_with_entity(hass, tracker),
+                )
+            }
+        )
+        placeholders = {
+            "entry_title": config_entry.title or config_entry.entry_id,
+            "replacement_sensors": _FROZEN_ATTRIBUTES_REPLACEMENTS,
+            "breaks_version": TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
+        }
+        translation_key = TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS
+        if users:
+            translation_key = TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN
+            placeholders["automations"] = "\n".join(f"- {ref}" for ref in users)
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            issue_id,
+            breaks_in_ha_version=TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=translation_key,
+            translation_placeholders=placeholders,
+        )
+
+    if not hasattr(hass, "state") or not hasattr(hass, "bus"):
+        # A hass double without the start surface (fast test stubs): the issue
+        # is advisory, so skip it rather than fail the platform setup. No
+        # exception is caught here, so a failure while creating the issue on
+        # a running Home Assistant still surfaces.
+        _LOGGER.debug("Held-attributes repair issue not scheduled: no start state")
+        return
+    config_entry.async_on_unload(async_at_started(hass, _create_issue))
+    config_entry.async_on_unload(lambda: ir.async_delete_issue(hass, DOMAIN, issue_id))
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -198,6 +292,7 @@ async def async_setup_entry(
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = config_entry
+    _async_track_frozen_attributes_issue(hass, config_entry)
 
     def _known_subentry_ids() -> set[str]:
         return known_config_subentry_ids(config_entry)
