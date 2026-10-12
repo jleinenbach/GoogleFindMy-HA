@@ -92,7 +92,9 @@ class _RestampCoordinatorStub:
         )
 
 
-def _frozen_clock(monkeypatch: pytest.MonkeyPatch, start: float) -> Callable[[float], None]:
+def _frozen_clock(
+    monkeypatch: pytest.MonkeyPatch, start: float
+) -> Callable[[float], None]:
     """Patch ``time.time()`` to a controllable fake clock seeded at ``start``.
 
     Device_tracker.py and Home Assistant core's own state-writing path (its
