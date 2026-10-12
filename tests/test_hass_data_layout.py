@@ -44,6 +44,10 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
     DOMAIN,
     MODE_MIGRATE,
+    OPT_LOCATION_POLL_INTERVAL,
+    OPT_MAP_VIEW_ENABLED,
+    OPT_OPTIONS_SCHEMA_VERSION,
+    SECRETS_EXTRA_WATCH_PATHS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_LOCATE_DEVICE,
     SERVICE_REBUILD_REGISTRY,
@@ -586,6 +590,55 @@ async def test_async_setup_entry_hijacks_legacy_credentials_when_cache_empty(
 
 
 @pytest.mark.asyncio
+async def test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A fresh entry keeps the options chosen during the initial setup.
+
+    The config flow stores ``CONF_OAUTH_TOKEN`` in ``entry.data`` while the
+    entry's token cache is still empty, so the first setup runs the legacy
+    migration. That migration used to replace the options with ``{}`` and
+    turned a declined Map View back on. The user's settings and the schema
+    version survive; removed keys and migration markers are still dropped.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data = {
+        DATA_AUTH_METHOD: "oauth",
+        CONF_OAUTH_TOKEN: "fresh-oauth-token",
+        CONF_GOOGLE_EMAIL: "user@example.com",
+    }
+    initial_options = {
+        OPT_MAP_VIEW_ENABLED: False,
+        OPT_LOCATION_POLL_INTERVAL: 600,
+        OPT_OPTIONS_SCHEMA_VERSION: 2,
+        SECRETS_EXTRA_WATCH_PATHS: "/config/extra-secrets.json",
+    }
+    entry.options = {
+        **initial_options,
+        "tracked_devices": ["stale-device"],
+        "unique_id_migrated": True,
+    }
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    _, payload = hass.config_entries.entry_update_calls[0]
+    assert CONF_OAUTH_TOKEN not in payload["data"]
+    assert payload["options"] == initial_options
+    assert entry.options[OPT_MAP_VIEW_ENABLED] is False
+    assert hass.http.registered == []
+
+
+@pytest.mark.asyncio
 async def test_async_setup_entry_leaves_modern_entries_intact(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory: Callable[..., type[Any]],
@@ -644,6 +697,80 @@ async def test_async_setup_entry_registers_the_map_tiles_token_view(
     ]
     assert len(token_views) == 1
     assert type(token_views[0]).__name__ == "GoogleFindMyMapTilesTokenView"
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_skips_view_registration_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A single entry with ``map_view_enabled`` off registers no views at all."""
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    hass = harness.hass
+    # A "modern" shape (cache already primed) skips the legacy migration path;
+    # that path keeps the option (see
+    # ``test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry``),
+    # but this test is about view registration, not about the migration.
+    harness.entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+    harness.entry.options[OPT_MAP_VIEW_ENABLED] = False
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, harness.entry) is True
+
+    assert hass.http.registered == []
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_disabled_entry_does_not_block_another_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """One entry opting out must not stop a second entry from registering the views.
+
+    Registration is gated per-entry but the "already registered" bucket is
+    shared process/domain-wide (HA core has no view-unregister API), so the
+    disabled entry setting up first must leave the door open for an enabled
+    entry to register afterwards.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    hass = harness.hass
+    disabled_entry = harness.entry
+    # A "modern" shape (cache already primed) skips the legacy migration path;
+    # that path keeps the option (see
+    # ``test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry``),
+    # but this test is about view registration, not about the migration.
+    disabled_entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+    disabled_entry.options[OPT_MAP_VIEW_ENABLED] = False
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, disabled_entry) is True
+    assert hass.http.registered == []
+
+    enabled_entry = _StubConfigEntry()
+    enabled_entry.entry_id = "entry-test-2"
+    enabled_entry.unique_id = "user2@example.com"
+    enabled_entry.data = {
+        DATA_SECRET_BUNDLE: {"username": "user2@example.com"},
+        CONF_GOOGLE_EMAIL: "user2@example.com",
+    }
+    enabled_entry._attach_hass(hass)
+    hass.config_entries._entries.append(enabled_entry)
+
+    assert await integration.async_setup_entry(hass, enabled_entry) is True
+
+    assert len(hass.http.registered) == 3
 
 
 @pytest.mark.asyncio
@@ -935,6 +1062,72 @@ async def test_a_core_without_schedule_reload_stays_quiet_about_it(
     await entry._update_listeners[0](hass, entry)
 
     assert hass.config_entries.scheduled_reloads == []
+
+
+@pytest.mark.asyncio
+async def test_options_update_listener_never_touches_map_views_directly(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The per-entry update listener leaves map-view (de)registration alone.
+
+    ``map_view_enabled`` is a setup-time option, exactly like the poll
+    interval or a feature-group toggle: the Settings form's own
+    ``async_step_settings`` already calls ``_schedule_claimed_reload`` for any
+    options change, and that reload re-runs ``async_setup_entry`` end to end,
+    which registers the views and refreshes every device's
+    ``configuration_url`` through the ordinary setup path. The listener
+    installed on the entry (``_async_refresh_watch_paths``) must therefore
+    never call ``_async_ensure_map_views_registered`` or
+    ``_async_refresh_device_urls`` itself -- whether the change flips
+    ``map_view_enabled`` on, off, or touches an unrelated option -- or it
+    would race the reload the settings step already owns.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    # A "modern" shape (cache already primed) skips the legacy migration path;
+    # that path keeps the option (see
+    # ``test_async_setup_entry_keeps_the_initial_options_of_a_fresh_entry``),
+    # but this test is about view registration, not about the migration.
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+    entry.options[OPT_MAP_VIEW_ENABLED] = False
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+    assert hass.http.registered == []
+
+    notify = entry._update_listeners[0]
+
+    ensure_calls: list[tuple[Any, Any]] = []
+    monkeypatch.setattr(
+        integration,
+        "_async_ensure_map_views_registered",
+        lambda hass_arg, bucket: ensure_calls.append((hass_arg, bucket)),
+    )
+    refresh_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(integration, "_async_refresh_device_urls", refresh_mock)
+
+    for new_options in (
+        {**entry.options, OPT_MAP_VIEW_ENABLED: True},
+        {**entry.options, OPT_MAP_VIEW_ENABLED: False},
+        {**entry.options, integration.OPT_LOCATION_POLL_INTERVAL: 999},
+    ):
+        entry.options = new_options
+        await notify(hass, entry)
+
+    assert ensure_calls == [], (
+        "the update listener must never register map views itself; that is "
+        "the reload's job"
+    )
+    refresh_mock.assert_not_awaited()
 
 
 def test_the_reload_latch_is_a_no_op_without_an_entry_id() -> None:

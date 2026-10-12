@@ -531,6 +531,7 @@ async def test_semantic_upload_debug_log_masks_scanner_name(
             eid=b"\xab" * 20,
             area="Kitchen",
             config_entry_id="entry_1",
+            unwanted_tracking_mode=False,
             scanner="AA:BB:CC:DD:EE:FF",
             google_device_id="google_dev_1",
         )
@@ -557,6 +558,7 @@ async def test_semantic_upload_passes_the_report_time_on(
             eid=b"\xab" * 20,
             area="Kitchen",
             config_entry_id="entry_1",
+            unwanted_tracking_mode=False,
             report_time=report_time,
         )
 
@@ -614,6 +616,8 @@ async def test_find_googlefindmy_device_info_keeps_entity_id_at_debug(
 # --- The finder reports the last confirmed sighting -----------------------
 
 _LOCK_EIK = bytes(range(32))
+# The identity key of the same device after it was paired again.
+_OTHER_EIK = bytes(range(32, 64))
 _LOCK_NOW = 1_700_000_000
 # An aligned window counter as the resolver records it for a sighting.
 _SIGHTING_COUNTER = 40 * 1024
@@ -633,14 +637,28 @@ _UPLOAD_VARIANT_FOR_LOCK = {
 }
 
 
-def _sighting(variant: str, *, age: int = 10) -> Any:
-    from custom_components.googlefindmy.eid_resolver import ConfirmedSighting
+def _sighting(
+    variant: str,
+    *,
+    age: int = 10,
+    uwt_mode: bool | None = None,
+    identity_key: bytes | None = _LOCK_EIK,
+) -> Any:
+    """A sighting matched under ``identity_key`` (``None``: no fingerprint)."""
+    from custom_components.googlefindmy.eid_resolver import (
+        ConfirmedSighting,
+        identity_key_fingerprint,
+    )
     from custom_components.googlefindmy.FMDNCrypto.eid_generator import EidVariant
 
     return ConfirmedSighting(
         variant=EidVariant(variant),
         window_counter=_SIGHTING_COUNTER,
         observed_at=_LOCK_NOW - age,
+        uwt_mode=uwt_mode,
+        key_fingerprint=None
+        if identity_key is None
+        else identity_key_fingerprint(identity_key),
     )
 
 
@@ -657,10 +675,12 @@ def _hass_with_sighting(sighting: Any, *, resolver: bool = True) -> MagicMock:
     return hass
 
 
-def _coordinator_with_identity(registry_id: str | None = "reg-1") -> MagicMock:
+def _coordinator_with_identity(
+    registry_id: str | None = "reg-1", *, identity_key: bytes = _LOCK_EIK
+) -> MagicMock:
     identity = MagicMock(
         canonical_id="entry:dev-1",
-        identity_key=_LOCK_EIK,
+        identity_key=identity_key,
         pair_date=0,
         registry_id=registry_id,
     )
@@ -809,14 +829,17 @@ _COUNTER_VARIANTS = ["legacy_secp160r1_x20_be", "spec_p256_x32_be"]
 
 
 def _identity(
-    *, pair_date: int | None = _PAIR_DATE, secrets: int | None = _SECRETS_DATE
+    *,
+    pair_date: int | None = _PAIR_DATE,
+    secrets: int | None = _SECRETS_DATE,
+    identity_key: bytes = _LOCK_EIK,
 ) -> Any:
     from custom_components.googlefindmy.coordinator import DeviceIdentity
 
     return DeviceIdentity(
         registry_id="reg-1",
         canonical_id="dev-1",
-        identity_key=_LOCK_EIK,
+        identity_key=identity_key,
         encrypted_identity_key=None,
         owner_key_version=None,
         device_type=None,
@@ -827,11 +850,15 @@ def _identity(
     )
 
 
-def _built_resolver(now: int, identity: Any = None) -> Any:
-    """Resolver with the lookup built for the device at ``now``."""
+def _built_resolver(now: int, identity: Any = None, resolver: Any = None) -> Any:
+    """Resolver with the lookup built for the device at ``now``.
+
+    Passing ``resolver`` rebuilds the lookup of an existing resolver, as a key
+    change does, and keeps the sightings it already recorded.
+    """
     from tests.test_ble_battery_sensor import _make_resolver
 
-    resolver = _make_resolver()
+    resolver = resolver if resolver is not None else _make_resolver()
     identity = identity if identity is not None else _identity()
     resolver._cached_identities = [identity]
     work_items = resolver._collect_work_items([identity], now_unix=now)
@@ -842,14 +869,14 @@ def _built_resolver(now: int, identity: Any = None) -> Any:
     return resolver
 
 
-def _device_eid(counter: int, variant: str) -> bytes:
+def _device_eid(counter: int, variant: str, identity_key: bytes = _LOCK_EIK) -> bytes:
     """The EID the device advertises at ``counter`` (the device model)."""
     from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
         EidVariant,
         generate_eid_variant,
     )
 
-    return generate_eid_variant(_LOCK_EIK, counter, EidVariant(variant))
+    return generate_eid_variant(identity_key, counter, EidVariant(variant))
 
 
 def _observe(
@@ -869,7 +896,9 @@ def _observe(
         assert resolver.resolve_eid(build(eid, 0)) is not None
 
 
-async def _finder_upload_at(resolver: Any, at: int) -> Any:
+async def _finder_upload_at(
+    resolver: Any, at: int, identity_key: bytes = _LOCK_EIK
+) -> Any:
     from custom_components.googlefindmy.const import DOMAIN
     from custom_components.googlefindmy.fmdn_finder import bermuda_listener
 
@@ -877,7 +906,7 @@ async def _finder_upload_at(resolver: Any, at: int) -> Any:
     hass.data = {DOMAIN: {"eid_resolver": resolver}}
     with patch.object(bermuda_listener.time, "time", return_value=at):
         return await bermuda_listener._async_get_device_eid(
-            hass, _coordinator_with_identity(), "dev-1"
+            hass, _coordinator_with_identity(identity_key=identity_key), "dev-1"
         )
 
 
@@ -1034,3 +1063,266 @@ async def test_finder_reports_the_canonical_eid_of_a_reversed_advertisement() ->
     upload = await _finder_upload_at(resolver, _LOCK_NOW)
     assert upload is not None
     assert upload.eid == advertised
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [True, False, None])
+async def test_device_eid_carries_the_sighting_mode(mode: bool | None) -> None:
+    """The protection mode of the sighting travels with its EID."""
+    upload = await _upload_for(_sighting("legacy_secp160r1_x20_be", uwt_mode=mode))
+
+    assert upload is not None
+    assert upload.uwt_mode is mode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [True, False, None])
+async def test_semantic_upload_passes_the_protection_mode_on(
+    hass_mock: MagicMock, mode: bool | None
+) -> None:
+    """The mode reaches the uploader unchanged (None stays None)."""
+    upload_mock = AsyncMock()
+    with patch(
+        "custom_components.googlefindmy.fmdn_finder.location_uploader.async_process_fmdn_beacon_detection",
+        upload_mock,
+    ):
+        await _async_upload_semantic_location(
+            hass_mock,
+            eid=b"\xab" * 20,
+            area="Kitchen",
+            config_entry_id="entry_1",
+            unwanted_tracking_mode=mode,
+        )
+
+    assert upload_mock.await_args.kwargs["unwanted_tracking_mode"] is mode
+
+
+# --- The sighting belongs to the identity key it was matched under ---------
+
+
+@pytest.mark.asyncio
+async def test_sighting_under_a_replaced_identity_key_reports_nothing() -> None:
+    """A sighting matched under the old key gives no EID under a new key.
+
+    Recomputing the EID from the new key with the old sighting's window would
+    report an EID the device never advertised, with the old sighting's time
+    and mode.
+    """
+    variant = "spec_p256_x32_be"
+    resolver = _built_resolver(_LOCK_NOW)
+    _observe(resolver, _device_eid(_LOCK_NOW - _SECRETS_DATE, variant), _LOCK_NOW)
+
+    upload = await _finder_upload_at(resolver, _LOCK_NOW + 30, _OTHER_EIK)
+
+    assert upload is None
+
+
+@pytest.mark.asyncio
+async def test_sighting_under_the_current_identity_key_reports() -> None:
+    """With the key the sighting was matched under, the seen EID is reported."""
+    from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
+        _encryptable_eid,
+    )
+    from custom_components.googlefindmy.FMDNCrypto.eid_generator import EidVariant
+
+    variant = "spec_p256_x32_be"
+    counter = _LOCK_NOW - _SECRETS_DATE
+    resolver = _built_resolver(_LOCK_NOW)
+    _observe(resolver, _device_eid(counter, variant), _LOCK_NOW)
+
+    upload = await _finder_upload_at(resolver, _LOCK_NOW + 30)
+
+    assert upload is not None
+    sighting = resolver.last_confirmed_sighting("reg-1")
+    assert sighting is not None
+    assert upload.eid == _encryptable_eid(
+        _LOCK_EIK, sighting.window_counter, EidVariant(variant)
+    )
+
+
+@pytest.mark.asyncio
+async def test_sighting_after_the_key_change_reports_again() -> None:
+    """After the lookup is rebuilt for the new key, its sighting is reported."""
+    variant = "spec_p256_x32_be"
+    counter = _LOCK_NOW - _SECRETS_DATE
+    resolver = _built_resolver(_LOCK_NOW)
+    _observe(resolver, _device_eid(counter, variant), _LOCK_NOW)
+
+    _built_resolver(_LOCK_NOW, _identity(identity_key=_OTHER_EIK), resolver)
+    advertised = _device_eid(counter, variant, _OTHER_EIK)
+    _observe(resolver, advertised, _LOCK_NOW + 10, monotonic=50_010.0)
+
+    upload = await _finder_upload_at(resolver, _LOCK_NOW + 30, _OTHER_EIK)
+
+    assert upload is not None
+    assert upload.eid == advertised
+
+
+@pytest.mark.asyncio
+async def test_sighting_without_a_key_fingerprint_reports_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A sighting whose key is unknown cannot be bound, so nothing is sent."""
+    caplog.set_level(logging.DEBUG)
+
+    upload = await _upload_for(_sighting("spec_p256_x32_be", identity_key=None))
+
+    assert upload is None
+    assert any(
+        "not matched under any current identity key" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.DEBUG
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_key_fingerprint_matches_for_hex_and_bytes() -> None:
+    """Both sides normalize the key alike, so its spellings agree."""
+    from custom_components.googlefindmy.eid_resolver import identity_key_fingerprint
+
+    fingerprint = identity_key_fingerprint(_LOCK_EIK)
+
+    assert fingerprint is not None
+    assert len(fingerprint) == 32
+    assert identity_key_fingerprint(_LOCK_EIK.hex()) == fingerprint
+    assert identity_key_fingerprint(bytearray(_LOCK_EIK)) == fingerprint
+    assert identity_key_fingerprint(_OTHER_EIK) != fingerprint
+
+
+@pytest.mark.parametrize(
+    "key", ["not hex", None, 123, object()], ids=["bad_hex", "none", "int", "object"]
+)
+def test_key_fingerprint_rejects_unparseable_keys(key: object) -> None:
+    from custom_components.googlefindmy.eid_resolver import identity_key_fingerprint
+
+    assert identity_key_fingerprint(key) is None
+
+
+def test_key_fingerprint_is_not_the_own_report_key() -> None:
+    """SHA-256 of the key decrypts the device's own reports; never derive it.
+
+    The fingerprint is no SHA-256 of the key, no prefix of one, and differs
+    from a SHA3-256 of the key without the domain prefix.
+    """
+    import hashlib
+
+    from custom_components.googlefindmy.eid_resolver import identity_key_fingerprint
+
+    fingerprint = identity_key_fingerprint(_LOCK_EIK)
+    own_report_key = hashlib.sha256(_LOCK_EIK).digest()
+
+    assert fingerprint is not None
+    assert fingerprint != own_report_key
+    assert not own_report_key.startswith(fingerprint[:16])
+    assert fingerprint != hashlib.sha3_256(_LOCK_EIK).digest()
+
+
+def test_confirmed_sighting_repr_hides_the_key_fingerprint() -> None:
+    sighting = _sighting("spec_p256_x32_be")
+
+    assert sighting.key_fingerprint is not None
+    assert "key_fingerprint" not in repr(sighting)
+    assert sighting.key_fingerprint.hex() not in repr(sighting)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keys",
+    [(_OTHER_EIK, _LOCK_EIK), (_LOCK_EIK, _OTHER_EIK)],
+    ids=["seen_key_second", "seen_key_first"],
+)
+async def test_finder_uses_the_candidate_key_the_sighting_was_matched_under(
+    keys: tuple[bytes, bytes],
+) -> None:
+    """The coordinator yields one identity per candidate key of a device.
+
+    Whatever their order, the EID is computed from the candidate whose
+    fingerprint the sighting carries.
+    """
+    from custom_components.googlefindmy.const import DOMAIN
+    from custom_components.googlefindmy.fmdn_finder import bermuda_listener
+
+    variant = "spec_p256_x32_be"
+    resolver = _built_resolver(_LOCK_NOW)
+    advertised = _device_eid(_LOCK_NOW - _SECRETS_DATE, variant)
+    _observe(resolver, advertised, _LOCK_NOW)
+
+    coordinator = MagicMock()
+    coordinator.get_active_device_identities.return_value = [
+        MagicMock(
+            canonical_id="entry:dev-1",
+            identity_key=key,
+            pair_date=0,
+            registry_id="reg-1",
+        )
+        for key in keys
+    ]
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"eid_resolver": resolver}}
+    with patch.object(bermuda_listener.time, "time", return_value=_LOCK_NOW + 30):
+        upload = await bermuda_listener._async_get_device_eid(
+            hass, coordinator, "dev-1"
+        )
+
+    assert upload is not None
+    assert upload.eid == advertised
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("canonical_ids", "keys", "reported"),
+    [
+        (("entry:dev-2", "entry:dev-1"), (_OTHER_EIK, _LOCK_EIK), True),
+        (("entry:dev-1", "entry:dev-1"), (None, _LOCK_EIK), True),
+        (("entry:dev-2",), (_LOCK_EIK,), False),
+        (("entry:dev-1",), (None,), False),
+    ],
+    ids=[
+        "other_device_first",
+        "candidate_without_key",
+        "no_identity_of_device",
+        "no_candidate_with_key",
+    ],
+)
+async def test_finder_matches_only_identities_of_the_device(
+    canonical_ids: tuple[str, ...],
+    keys: tuple[bytes | None, ...],
+    reported: bool,
+) -> None:
+    """Identities of other devices and candidates without a key are skipped.
+
+    Another device's identity, even under the key the sighting was matched
+    under, is no candidate; without an identity of the device, or without a
+    key among its candidates, nothing is sent.
+    """
+    from custom_components.googlefindmy.const import DOMAIN
+    from custom_components.googlefindmy.fmdn_finder import bermuda_listener
+
+    variant = "spec_p256_x32_be"
+    resolver = _built_resolver(_LOCK_NOW)
+    advertised = _device_eid(_LOCK_NOW - _SECRETS_DATE, variant)
+    _observe(resolver, advertised, _LOCK_NOW)
+
+    coordinator = MagicMock()
+    coordinator.get_active_device_identities.return_value = [
+        MagicMock(
+            canonical_id=canonical_id,
+            identity_key=key,
+            encrypted_identity_key=None,
+            pair_date=0,
+            registry_id="reg-1",
+        )
+        for canonical_id, key in zip(canonical_ids, keys, strict=True)
+    ]
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"eid_resolver": resolver}}
+    with patch.object(bermuda_listener.time, "time", return_value=_LOCK_NOW + 30):
+        upload = await bermuda_listener._async_get_device_eid(
+            hass, coordinator, "dev-1"
+        )
+
+    if reported:
+        assert upload is not None
+        assert upload.eid == advertised
+    else:
+        assert upload is None

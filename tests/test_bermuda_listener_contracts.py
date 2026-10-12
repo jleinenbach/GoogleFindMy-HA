@@ -515,7 +515,9 @@ async def test_upload_trigger_info_keeps_area_at_debug(
     monkeypatch.setattr(
         bl,
         "_async_get_device_eid",
-        AsyncMock(return_value=bl._UploadEid(eid=b"\xab" * 20, observed_at=1)),
+        AsyncMock(
+            return_value=bl._UploadEid(eid=b"\xab" * 20, observed_at=1, uwt_mode=False)
+        ),
     )
     upload = AsyncMock()
     monkeypatch.setattr(bl, "_async_upload_semantic_location", upload)
@@ -569,7 +571,8 @@ async def test_upload_carries_the_sighting_time(
 ) -> None:
     """The report time handed to the uploader is the time the EID was seen."""
     upload = _patch_area_change_to_upload(
-        monkeypatch, bl._UploadEid(eid=b"\xab" * 20, observed_at=1_699_999_000)
+        monkeypatch,
+        bl._UploadEid(eid=b"\xab" * 20, observed_at=1_699_999_000, uwt_mode=False),
     )
 
     await bl._async_handle_area_change(_hass(), _ENTITY, "Kitchen", {})
@@ -577,6 +580,45 @@ async def test_upload_carries_the_sighting_time(
     upload.assert_awaited_once()
     assert upload.call_args.kwargs["eid"] == b"\xab" * 20
     assert upload.call_args.kwargs["report_time"] == 1_699_999_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [True, False])
+async def test_upload_carries_the_sighting_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: bool | None
+) -> None:
+    """The protection mode handed to the uploader is the one the EID showed."""
+    upload = _patch_area_change_to_upload(
+        monkeypatch,
+        bl._UploadEid(eid=b"\xab" * 20, observed_at=1_699_999_000, uwt_mode=mode),
+    )
+
+    await bl._async_handle_area_change(_hass(), _ENTITY, "Kitchen", {})
+
+    upload.assert_awaited_once()
+    assert upload.call_args.kwargs["unwanted_tracking_mode"] is mode
+
+
+@pytest.mark.asyncio
+async def test_unknown_sighting_mode_skips_the_upload_before_info(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unknown protection mode uploads nothing and announces nothing at INFO."""
+    upload = _patch_area_change_to_upload(
+        monkeypatch,
+        bl._UploadEid(eid=b"\xab" * 20, observed_at=1_699_999_000, uwt_mode=None),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=bl.__name__):
+        await bl._async_handle_area_change(_hass(), _ENTITY, "Kitchen", {})
+
+    upload.assert_not_awaited()
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert any(
+        "Unknown protection mode" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.DEBUG
+    )
 
 
 @pytest.mark.asyncio

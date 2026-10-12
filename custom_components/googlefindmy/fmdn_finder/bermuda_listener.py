@@ -47,7 +47,8 @@ Attributes: area (semantic location), scanner (BLE scanner name)
 Flow:
 - Bermuda area change detected → find GoogleFindMy entity on SAME HA device
 - Take the EID of the device's last sighting the EID resolver confirmed
-  (last_confirmed_sighting), never one predicted from the clock
+  (last_confirmed_sighting), never one predicted from the clock, computed
+  from the current identity key the sighting was matched under, if any
 - Upload semantic location to Google FMDN backend
 
 References:
@@ -107,10 +108,16 @@ FINDER_SIGHTING_MAX_AGE_SECONDS = 1024
 
 
 class _UploadEid(NamedTuple):
-    """EID to encrypt a report to, with the wall-clock second it was seen."""
+    """EID to encrypt a report to, with the wall-clock second it was seen.
+
+    ``uwt_mode`` is the unwanted-tracking protection mode the sighting showed,
+    ``None`` when it showed none that can be trusted (see
+    ``eid_resolver._effective_uwt_mode``).
+    """
 
     eid: bytes
     observed_at: int
+    uwt_mode: bool | None
 
 
 # Log formatting
@@ -422,6 +429,16 @@ async def _async_handle_area_change(
             google_device_id,
         )
         return
+    if upload.uwt_mode is None:
+        # The sighting showed no protection mode that can be trusted. The
+        # report field cannot say "unknown" and a 0 would claim "off", so
+        # nothing is uploaded; decided here so no INFO line announces an
+        # upload that does not happen.
+        _LOGGER.debug(
+            "Unknown protection mode for GoogleFindMy device %s, skipping upload",
+            google_device_id,
+        )
+        return
     eid = upload.eid
 
     # The area name is an operator label and stays at DEBUG (AGENTS.md
@@ -449,6 +466,7 @@ async def _async_handle_area_change(
         google_device_id=google_device_id,
         coordinator=coordinator,
         report_time=upload.observed_at,
+        unwanted_tracking_mode=upload.uwt_mode,
     )
 
 
@@ -605,7 +623,7 @@ async def _async_find_googlefindmy_device(  # noqa: PLR0911
     }
 
 
-async def _async_get_device_eid(  # noqa: PLR0911
+async def _async_get_device_eid(  # noqa: PLR0911, PLR0912
     hass: HomeAssistant,
     coordinator: Any,
     device_id: str,
@@ -617,7 +635,12 @@ async def _async_get_device_eid(  # noqa: PLR0911
     owner resolves a report against the recent past and near future of its
     counter, and a prediction from ``pair_date`` ignores the time basis,
     offset and units the resolver matched. A sighting older than
-    ``FINDER_SIGHTING_MAX_AGE_SECONDS`` is not reported.
+    ``FINDER_SIGHTING_MAX_AGE_SECONDS`` is not reported, and neither is one
+    matched under a key none of the device's current identity keys equals
+    (compared by ``eid_resolver.identity_key_fingerprint``): its window
+    counter belongs to that key, and an EID computed from another key with
+    it was never advertised. Among several candidate keys of one device the
+    one the sighting was matched under is used.
 
     Args:
         hass: Home Assistant instance
@@ -625,8 +648,10 @@ async def _async_get_device_eid(  # noqa: PLR0911
         device_id: Google device UUID (e.g., "68419b51-0000-2131-873b-fc411691d329")
 
     Returns:
-        The EID to encrypt to (20 or 32 bytes, see ``_encryptable_eid``) and
-        the time of the sighting, or None if there is no reportable sighting
+        The EID to encrypt to (20 or 32 bytes, see ``_encryptable_eid``), the
+        time of the sighting and the protection mode it showed (``None`` when
+        unknown, see ``eid_resolver._effective_uwt_mode``), or None if there
+        is no reportable sighting
     """
     # Get device identities from coordinator
     get_identities = getattr(coordinator, "get_active_device_identities", None)
@@ -644,10 +669,13 @@ async def _async_get_device_eid(  # noqa: PLR0911
         _LOGGER.debug("No device identities available from coordinator")
         return None
 
-    # Find identity matching our device_id
+    # Find the identities matching our device_id
     # canonical_id format: "{entry_id}:{device_uuid}" or just "{device_uuid}"
-    # We match if device_id equals canonical_id or is the suffix after ":"
-    identity = None
+    # We match if device_id equals canonical_id or is the suffix after ":".
+    # The coordinator yields one identity per candidate identity key of a
+    # device, all with the same canonical_id, so every match is kept: the
+    # sighting's key fingerprint picks the key further down.
+    candidates = []
     for ident in identities:
         canonical_id = getattr(ident, "canonical_id", None)
         if not canonical_id:
@@ -655,15 +683,17 @@ async def _async_get_device_eid(  # noqa: PLR0911
 
         # Check for exact match or suffix match
         if canonical_id == device_id or canonical_id.endswith(f":{device_id}"):
-            identity = ident
-            _LOGGER.debug(
-                "Found matching identity for device %s (canonical_id: %s)",
-                device_id,
-                canonical_id,
-            )
-            break
+            candidates.append(ident)
 
-    if not identity:
+    identity = candidates[0] if candidates else None
+    if identity is not None:
+        _LOGGER.debug(
+            "Found %d matching identities for device %s (canonical_id: %s)",
+            len(candidates),
+            device_id,
+            getattr(identity, "canonical_id", None),
+        )
+    else:
         _LOGGER.debug(
             "No identity found for device %s in %d identities. Available canonical_ids: %s",
             device_id,
@@ -674,9 +704,11 @@ async def _async_get_device_eid(  # noqa: PLR0911
         )
         return None
 
-    # Get identity key
-    identity_key = getattr(identity, "identity_key", None)
-    if not identity_key:
+    # Get the candidate identity keys
+    identity_keys = [
+        key for ident in candidates if (key := getattr(ident, "identity_key", None))
+    ]
+    if not identity_keys:
         _LOGGER.debug(
             "Identity for device %s has no identity_key (encrypted_identity_key present: %s)",
             device_id,
@@ -712,6 +744,28 @@ async def _async_get_device_eid(  # noqa: PLR0911
             )
             return None
 
+        from ..eid_resolver import identity_key_fingerprint  # noqa: PLC0415
+
+        identity_key = (
+            None
+            if sighting.key_fingerprint is None
+            else next(
+                (
+                    key
+                    for key in identity_keys
+                    if identity_key_fingerprint(key) == sighting.key_fingerprint
+                ),
+                None,
+            )
+        )
+        if identity_key is None:
+            _LOGGER.debug(
+                "Last confirmed sighting of device %s was not matched under "
+                "any current identity key, nothing to report",
+                device_id,
+            )
+            return None
+
         # encrypt() picks the curve from the EID's length.
         eid = _encryptable_eid(identity_key, sighting.window_counter, sighting.variant)
 
@@ -727,7 +781,9 @@ async def _async_get_device_eid(  # noqa: PLR0911
             else eid.hex(),
         )
 
-        return _UploadEid(eid=eid, observed_at=sighting.observed_at)
+        return _UploadEid(
+            eid=eid, observed_at=sighting.observed_at, uwt_mode=sighting.uwt_mode
+        )
 
     except Exception as err:
         _LOGGER.warning("Failed to generate EID for device %s: %s", device_id, err)
@@ -782,6 +838,7 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
     coordinator: Any | None = None,
     *,
     report_time: int | None = None,
+    unwanted_tracking_mode: bool | None,
 ) -> None:
     """Upload semantic location to Google FMDN backend.
 
@@ -794,6 +851,9 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
         google_device_id: Google device ID for semantic_name update
         coordinator: GoogleFindMy coordinator for semantic_name update
         report_time: Wall-clock second the EID was seen; the report's time
+        unwanted_tracking_mode: Protection mode the sighting showed, ``None``
+            when unknown; an unknown mode is not uploaded (see
+            ``eid_resolver._effective_uwt_mode``)
     """
     from .location_uploader import (  # noqa: PLC0415
         _mask_address_for_logs,
@@ -822,6 +882,7 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
         google_device_id=google_device_id,
         coordinator=coordinator,
         report_time=report_time,
+        unwanted_tracking_mode=unwanted_tracking_mode,
     )
 
 

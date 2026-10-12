@@ -289,12 +289,37 @@ EID the device advertised (aligned to the 1024 s rotation window) and the
 wall-clock second of the sighting, or `None`. It is an observation, not a
 prediction: the finder encrypts its report to that EID and sends the sighting
 time, and the owner resolves the counter over the recent past and near future.
+The sighting also carries the unwanted tracking protection mode the device
+advertised: `uwt_mode` (`True`, `False` or `None`) and `uwt_source`
+(`flags_bit`, `frame_type`, `conflict` or `unknown`). `_effective_uwt_mode()`
+takes the hashed-flags bit when the flags byte was read at a known position,
+otherwise the frame type (`0x41` on, `0x40` off), otherwise unknown; a flags
+byte found only by guessing its position never counts. When that bit and a
+`0x40`/`0x41` frame type disagree, the mode is `None` with source `conflict`.
+Each sighting carries only the mode it showed itself, also within the same
+rotation window: the mode can change within a window, so nothing is taken over
+from an earlier sighting, and a later frame-type reading decides for itself
+also after a `conflict`. The finder
+sends that mode, and sends nothing without a recent sighting
+or while that mode is unknown, because the upload field cannot express
+"unknown". Field data behind the frame/bit reading:
+`docs/UWT_FIELD_DATA.md`.
 A late advertisement of an older window does not replace a newer window seen
 at most one period earlier. If the older window arrives with a wall time earlier
 than the newer sighting (the wall clock stepped back), the recorded sighting is
 dropped, because such a late window cannot be told apart from a device that
-restarted its counter; nothing is reported until the next match. Matches of
-the heuristic phone path record no sighting. The method is not part of
+restarted its counter; nothing is reported until the next match.
+Each sighting is bound to the identity key it was matched under:
+`key_fingerprint` holds a 32-byte SHA3-256 digest of a domain prefix and the
+normalized key bytes (`identity_key_fingerprint()`; never the key itself and
+never its SHA-256, which is the key of the device's own reports). Of the
+candidate identity keys the coordinator holds for the device, the finder uses
+the one with that fingerprint, and sends nothing when none has it or when the
+sighting has none: the window counter belongs to the key it was matched
+under, and an EID computed from another key with that counter was never
+advertised. A sighting under another key replaces the recorded one whatever
+its counter, because the counter starts anew after the device is paired again.
+Matches of the heuristic phone path record no sighting. The method is not part of
 `GoogleFindMyEIDResolverProtocol`.
 
 The resolver also records both forward and reversed advertisements so scanners do not need to normalize byte order.

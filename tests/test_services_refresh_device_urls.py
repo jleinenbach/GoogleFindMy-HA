@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -175,6 +176,71 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(
         "ha-dev-2": f"{base_url}/api/googlefindmy/map/beta-serial?token={expected_entry_two_token}",
     }
     assert "ha-service" not in device_registry.updated
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_clears_url_for_a_disabled_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device owned by a ``map_view_enabled=False`` entry gets no configuration_url.
+
+    Mirrors ``entity.py``'s ``device_configuration_url``: the service must not
+    hand out a link to an endpoint that refuses every request for this entry.
+    """
+
+    base_url = "https://example.test"
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={const.OPT_MAP_VIEW_ENABLED: False},
+        data={},
+        runtime_data=SimpleNamespace(coordinator=SimpleNamespace()),
+    )
+    config_entries = _StubConfigEntries([entry])
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = config_entries
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+
+    devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            config_entries={"entry-1"},
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+            configuration_url=f"{base_url}/api/googlefindmy/map/device-alpha?token=stale",
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
+
+    async def _run_refresh() -> None:
+        await services.async_register_services(hass, ctx)
+        handler = hass.services.registered[
+            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+        ]
+        await handler(ServiceCall({}))
+
+    await _run_refresh()
+
+    assert device_registry.updated == {"ha-dev-1": None}
 
 
 @pytest.mark.asyncio
@@ -443,7 +509,8 @@ async def test_refresh_device_urls_visits_a_shared_device_once(
 
     Below Core 2026.8 a device can belong to several config entries at the same
     time, so the per-entry query returns it once per entry. The first entry asked
-    wins, which is also the entry whose prefix ``_canonical_identifier`` strips.
+    wins and seeds the map token; ``_canonical_identifier`` strips any of our
+    entries' namespaces from the device id.
     """
     fake_now = 1_209_600
     base_url = "https://example.test"
@@ -509,3 +576,224 @@ async def test_refresh_device_urls_visits_a_shared_device_once(
     assert device_registry.updated == {
         "ha-shared": f"{base_url}/api/googlefindmy/map/device-alpha?token={expected}"
     }
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_prefers_an_enabled_owner_of_a_shared_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled owner asked first does not clear a shared device's link.
+
+    Below Core 2026.8 a device can hang on two of our entries. When the first
+    entry asked has Map View off and the second has it on, the device keeps a
+    link signed for the enabled entry instead of being cleared. The device
+    still carries the disabled entry's namespaced identifier; the link path
+    must use the bare device id the map view looks up.
+    """
+    base_url = "https://example.test"
+
+    entry_one = make_config_entry(
+        entry_id="entry-1", data={}, options={const.OPT_MAP_VIEW_ENABLED: False}
+    )
+    entry_two = make_config_entry(entry_id="entry-2", data={}, options={})
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = _StubConfigEntries([entry_one, entry_two])
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+    devices = {
+        "ha-shared": SimpleNamespace(
+            id="ha-shared",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            config_entries=["entry-1", "entry-2"],
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+            configuration_url=f"{base_url}/api/googlefindmy/map/device-alpha?token=old",
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
+
+    expected = const.map_token_hex_digest(
+        const.map_token_secret_seed("ha-uuid", "entry-2", False)
+    )
+    assert device_registry.updated == {
+        "ha-shared": f"{base_url}/api/googlefindmy/map/device-alpha?token={expected}"
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_keeps_a_prefix_that_is_not_one_of_our_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only our own entries' namespaces are stripped from the device id.
+
+    A colon-separated prefix that names no GoogleFindMy entry is part of the
+    device id itself and stays in the link path.
+    """
+    base_url = "https://example.test"
+    entry = make_config_entry(entry_id="entry-1", data={}, options={})
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = _StubConfigEntries([entry])
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+    devices = {
+        "ha-dev": SimpleNamespace(
+            id="ha-dev",
+            identifiers={(const.DOMAIN, "other:device-alpha")},
+            config_entries=["entry-1"],
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+            configuration_url=None,
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
+
+    expected = const.map_token_hex_digest(
+        const.map_token_secret_seed("ha-uuid", "entry-1", False)
+    )
+    assert device_registry.updated == {
+        "ha-dev": f"{base_url}/api/googlefindmy/map/other:device-alpha?token={expected}"
+    }
+
+
+async def _run_disabled_entry_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    configuration_url: str | None,
+    get_url_impl: Any,
+) -> _StubDeviceRegistry:
+    """Run the refresh service once for a single ``map_view_enabled=False`` entry."""
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={const.OPT_MAP_VIEW_ENABLED: False},
+        data={},
+        runtime_data=SimpleNamespace(coordinator=SimpleNamespace()),
+    )
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = _StubConfigEntries([entry])
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+    devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            config_entries={"entry-1"},
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+            configuration_url=configuration_url,
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", get_url_impl)
+
+    async def _run_refresh() -> None:
+        await services.async_register_services(hass, ctx)
+        handler = hass.services.registered[
+            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+        ]
+        await handler(ServiceCall({}))
+
+    await _run_refresh()
+    return device_registry
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_clears_a_disabled_entry_without_a_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Clearing a disabled entry's link needs no reachable HA URL.
+
+    Every resolved device sits on a disabled entry, so the service clears the
+    stale link and returns before the base-URL lookup that would fail here.
+    """
+
+    def _raise_url_error(*_: Any, **__: Any) -> str:
+        raise NoURLAvailableError()
+
+    caplog.set_level(logging.WARNING, logger=services.__name__)
+    device_registry = await _run_disabled_entry_refresh(
+        monkeypatch,
+        configuration_url="https://example.test/api/googlefindmy/map/a?token=stale",
+        get_url_impl=_raise_url_error,
+    )
+
+    assert device_registry.updated == {"ha-dev-1": None}
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "reachable URL" in record.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_leaves_an_already_empty_link_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An already-empty link on a disabled entry is neither written nor counted."""
+
+    caplog.set_level(logging.INFO, logger=services.__name__)
+    device_registry = await _run_disabled_entry_refresh(
+        monkeypatch,
+        configuration_url=None,
+        get_url_impl=lambda hass, **kwargs: "https://example.test",
+    )
+
+    assert device_registry.updated == {}
+    assert "Refreshed URLs for 0 Google Find My devices" in caplog.text
