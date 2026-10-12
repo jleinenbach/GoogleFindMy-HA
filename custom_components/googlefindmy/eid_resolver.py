@@ -1007,12 +1007,13 @@ _KEY_FINGERPRINT_DOMAIN = b"gfmy-finder-eik\x00"
 
 
 def identity_key_fingerprint(key: object) -> bytes | None:
-    """Return a short one-way fingerprint of an identity key, or ``None``.
+    """Return a one-way fingerprint of an identity key, or ``None``.
 
     The finder may report a sighting only under the identity key the sighting
     was matched under. The resolver records this fingerprint with each
-    sighting and the finder compares it with the fingerprint of the key it
-    holds now, so the sighting never stores a second copy of the key.
+    sighting and the finder compares it with the fingerprints of the
+    candidate keys it holds now, so the sighting never stores a second copy
+    of the key.
 
     The key is normalized as for the lookup (bytes or a hex string), so both
     sides derive the same value from the same key. The hash is SHA3-256 over
