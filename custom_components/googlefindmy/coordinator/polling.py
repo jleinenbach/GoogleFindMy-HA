@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/coordinator/polling.py
 """Polling operations for GoogleFindMyCoordinator.
 
 This module contains polling-related methods extracted from main.py.
@@ -1606,13 +1607,22 @@ class PollingOperations(_MixinBase):
                         len(devices_to_poll),
                         effective_interval,
                     )
-                    # Held so ``_async_cancel_poll_cycle`` can cancel a cycle that
-                    # is still running when the entry unloads or Home Assistant
-                    # stops.
-                    self._poll_cycle_task = self.hass.async_create_task(
-                        self._async_start_poll_cycle(devices_to_poll, force=force_poll),
-                        name=f"{DOMAIN}.poll_cycle",
+                    # Sequential requests and inter-device delays must not hold
+                    # up HA startup. Keep the handle for our teardown cleanup;
+                    # entry-managed background tasks also cancel on unload.
+                    poll_cycle = self._async_start_poll_cycle(
+                        devices_to_poll, force=force_poll
                     )
+                    if self.config_entry is not None:
+                        self._poll_cycle_task = (
+                            self.config_entry.async_create_background_task(
+                                self.hass, poll_cycle, name=f"{DOMAIN}.poll_cycle"
+                            )
+                        )
+                    else:
+                        self._poll_cycle_task = self.hass.async_create_background_task(
+                            poll_cycle, name=f"{DOMAIN}.poll_cycle"
+                        )
             else:
                 _LOGGER.debug(
                     "Poll not due (elapsed=%.1fs/%ss) or already running=%s",
@@ -1686,7 +1696,7 @@ class PollingOperations(_MixinBase):
     def _request_poll_reauth(self, reauth_exc: ConfigEntryAuthFailed) -> None:
         """Start the config-entry reauth flow from the background poll cycle.
 
-        ``_async_start_poll_cycle`` runs via ``hass.async_create_task`` (not
+        ``_async_start_poll_cycle`` runs as a background task (not
         awaited by the refresh; the task is held in ``_poll_cycle_task`` only so
         it can be cancelled on unload and on Home Assistant stop), so a raised
         ``ConfigEntryAuthFailed`` never reaches the awaited

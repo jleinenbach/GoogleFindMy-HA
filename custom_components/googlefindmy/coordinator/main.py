@@ -1,4 +1,4 @@
-# custom_components/googlefindmy/coordinator.py
+# custom_components/googlefindmy/coordinator/main.py
 """Data coordinator for Google Find My Device (async-first, HA-friendly).
 
 Discovery vs. polling semantics:
@@ -1148,9 +1148,11 @@ class GoogleFindMyCoordinator(
         the core runs that only on entry unload (``config_entry.async_on_unload``
         in ``DataUpdateCoordinator.__init__``), and a stopping Home Assistant does
         not unload entries (``ConfigEntries._async_shutdown`` merely cancels retry
-        setups). Without this listener the tracked poll task outlives the stop
-        event and the core logs ``Task ... was still running after final writes
-        shutdown stage`` against this integration before cancelling it itself.
+        setups). Before the poll became a background task, without this listener
+        it outlived the stop event and the core logged ``Task ... was still
+        running after final writes shutdown stage`` before cancelling it itself.
+        Core now also cancels the background task on stop; this listener still
+        settles it and disarms retries and resolver timers created by its cleanup.
 
         The one-time listener has already removed itself from the bus before it
         invokes this handler, so the remover it handed out is spent; drop it
@@ -1162,9 +1164,10 @@ class GoogleFindMyCoordinator(
     async def _async_cancel_poll_cycle(self) -> None:
         """Cancel and settle the in-flight poll cycle, if any.
 
-        The cycle runs as a *tracked* task (``hass.async_create_task`` in
-        ``polling.py``) so ``hass.async_block_till_done`` still waits for it; the
-        price is that nobody but this coordinator cancels it. Shared by the
+        The cycle runs as a background task (entry-managed when available) in
+        ``polling.py``, so startup and ``hass.async_block_till_done`` do not wait
+        for its requests or inter-device delays. Core also cancels background
+        tasks on stop and entry-managed tasks on unload. Shared by the
         unload path (``async_shutdown``) and the stop path (``_async_on_hass_stop``).
         Awaiting the cancelled task lets the cycle's ``finally`` settle first;
         what that ``finally`` arms (a short retry, the EID refresh debounce) is

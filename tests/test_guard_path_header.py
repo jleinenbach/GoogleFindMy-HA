@@ -58,7 +58,6 @@ LEGACY_ALLOWLIST: set[str] = {
     "tests/test_coordinator_identity.py",
     "tests/test_coordinator_key_priority.py",
     "tests/test_coordinator_polling.py",
-    "tests/test_coordinator_predictive_polling.py",
     "tests/test_coordinator_priority.py",
     "tests/test_coordinator_registry.py",
     "tests/test_coordinator_registry_entity.py",
