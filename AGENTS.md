@@ -46,6 +46,7 @@
   - [7) Quality scale (practical, non-blocking)](#7-quality-scale-practical-non-blocking)
   - [8) Deprecation check (concise, per PR)](#8-deprecation-check-concise-per-pr)
     - [Deprecation shim checklist (Home Assistant)](#deprecation-shim-checklist-home-assistant)
+    - [Integration-owned deprecations (register)](#integration-owned-deprecations-register)
   - [9) Docs & i18n (minimal but strict)](#9-docs--i18n-minimal-but-strict)
   - [10) Local commands (VERIFY)](#10-local-commands-verify)
     - [10.1 Type-checking policy — mypy strict on edited Python files](#101-type-checking-policy--mypy-strict-on-edited-python-files)
@@ -70,7 +71,7 @@
     - [6) In-repo Find My Device Network protocol reference](#6-in-repo-find-my-device-network-protocol-reference)
   - [High-confidence & sourcing standard for Codex](#high-confidence--sourcing-standard-for-codex)
     - [0. Scope](#0-scope)
-    - [1. High-confidence mode (≥ 90 %)](#1-high-confidence-mode-%E2%89%A5-90-%25)
+    - [1. High-confidence mode (≥ 90 %)](#1-high-confidence-mode-%E2%89%A5-90-)
     - [2. Mandatory evidence](#2-mandatory-evidence)
     - [3. Workflow for code changes](#3-workflow-for-code-changes)
       - [Home Assistant regression helper](#home-assistant-regression-helper)
@@ -776,6 +777,24 @@ Add to the PR description:
   `async_get_system_health_info()` still supports the pre-2024 signature of
   `ConfigEntries.async_entries()` that omitted the domain filter. Remove this
   guard when compatibility with that Core series is no longer required.
+
+### Integration-owned deprecations (register)
+
+Deprecations this integration announces to its users (attributes, options,
+entities), as opposed to the Core deprecations above. Each row names the
+constant that holds the removal version, the surface, the replacement, the
+repair issue and the guard.
+
+* The removal ships in the first integration release on or after the Home
+  Assistant version in the constant.
+* The constant may be raised (extended) with a reason in the PR description,
+  never lowered.
+* When the guard fails, remove the surface, the repair issue, the constant and
+  the row in one PR, or extend the constant.
+
+| Constant (`const.py`) | Surface | Replacement | Repair issue | Guard |
+| --- | --- | --- | --- | --- |
+| `TRACKER_ATTRS_BREAKS_IN_HA_VERSION = "2027.6.0"` | `device_tracker` attributes `location_age`, `location_status`, `coarse_*` (main tracker) | `sensor.*_location_status`, `sensor.*_last_seen`, `sensor.*_coarse_fix` | `tracker_attributes_frozen_<entry_id>` | `tests/test_guard_integration_deprecations.py` |
 
 ---
 
