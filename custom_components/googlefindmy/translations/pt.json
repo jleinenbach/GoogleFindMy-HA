@@ -53,7 +53,8 @@
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
-          "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa"
+          "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
+          "map_view_enabled": "Ativar a visualização do mapa"
         }
       },
       "select_hub_for_visibility": {
@@ -284,6 +285,7 @@
           "enable_stats_entities": "Criar entidades estatísticas",
           "delete_caches_on_remove": "Exclua caches ao remover entrada",
           "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
+          "map_view_enabled": "Ativar a visualização do mapa",
           "contributor_mode": "Modo de contribuidor de localização",
           "subentry": "Grupo de recursos",
           "secrets_extra_watch_paths": "Caminhos de monitorização adicionais de secrets.json (um por linha)"
@@ -296,6 +298,7 @@
           "accuracy_gate_enabled": "Quando ativado (predefinição), uma posição recebida é descartada se estiver claramente fora do círculo de incerteza da posição em cache, se for pelo menos quatro vezes menos precisa do que ela, tiver pelo menos 200 m de imprecisão e essa posição em cache for simultaneamente fiável e recente. Nada é descartado sem uma alternativa melhor: uma posição imprecisa é sempre aceite num arranque a frio, ou quando a posição em cache não é fiável ou está desatualizada. Isto impede que um relatório amplo da rede desloque o localizador e que, uma vez que o Home Assistant usa o raio de precisão como tolerância de zona, o assinale erradamente como em casa. Desative apenas se suspeitar que é esta verificação que está a causar um problema.",
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
+          "map_view_enabled": "Ativado por predefinição. Quando desativado, os pedidos à vista de mapa são recusados como com um token inválido e as hiperligações dos dispositivos são apagadas. Não renova hiperligações existentes; se uma puder ter sido exposta, use 'Ativar a expiração do token de visualização do mapa' (até duas semanas se já estava ativada).",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (todas as áreas por padrão para relatórios de crowdsourcing ou apenas áreas de alto tráfego).",
           "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos.",
           "secrets_extra_watch_paths": "Opcional. Caminhos absolutos adicionais para ficheiros secrets.json que a integração deve monitorizar para deteção automática, um por linha. Deixe vazio para monitorizar apenas os locais predefinidos."

@@ -58,6 +58,7 @@ from .coordinator.helpers.registry import (
     read_device_ownership,
     resolve_device_by_identifiers,
 )
+from .map_view import _is_map_view_enabled_for_entry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1119,7 +1120,213 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         Security:
             The token is a short-lived (weekly) or static gate derived from the HA UUID.
             All tokens are redacted in logs; the view must validate tokens server-side.
+
+        Clearing a disabled entry's stale ``configuration_url`` needs no base
+        URL, so that pass runs before the base-URL lookup below, mirroring
+        ``_async_refresh_device_urls`` in ``__init__.py``.
         """
+        entries = hass.config_entries.async_entries(DOMAIN)
+        entries_by_id = {entry.entry_id: entry for entry in entries}
+
+        default_expiration = bool(
+            ctx.get(
+                "default_map_view_token_expiration",
+                DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+            )
+        )
+        opt_reader = ctx.get("opt")
+        opt_key = ctx.get(
+            "opt_map_view_token_expiration_key", OPT_MAP_VIEW_TOKEN_EXPIRATION
+        )
+
+        expiration_cache: dict[str, bool] = {}
+        map_view_enabled_cache: dict[str, bool] = {}
+        token_cache: dict[str, str] = {}
+        ha_uuid = str(hass.data.get("core.uuid", "ha"))
+        now = int(time.time())
+
+        def _read_bool_option(
+            entry_id: str | None,
+            key: str,
+            default: bool,
+            cache: dict[str, bool],
+        ) -> bool:
+            """Read one bool option for ``entry_id``, via the shared ``opt`` reader.
+
+            Used for the token-expiration option, cached so an entry's option
+            is read once per refresh regardless of device count. Map View
+            enablement is read through ``map_view._is_map_view_enabled_for_entry``
+            so every call site shares one rule.
+            """
+            cache_key = entry_id or ""
+            if cache_key in cache:
+                return cache[cache_key]
+
+            entry = entries_by_id.get(entry_id) if entry_id else None
+            enabled = default
+
+            if entry:
+                if callable(opt_reader):
+                    try:
+                        enabled = bool(opt_reader(entry, key, default))
+                    except Exception:
+                        enabled = bool(
+                            entry.options.get(key, entry.data.get(key, default))
+                        )
+                else:
+                    enabled = bool(entry.options.get(key, entry.data.get(key, default)))
+
+            cache[cache_key] = bool(enabled)
+            return cache[cache_key]
+
+        def _map_view_enabled(entry_id: str | None) -> bool:
+            cache_key = entry_id or ""
+            if cache_key not in map_view_enabled_cache:
+                entry = entries_by_id.get(entry_id) if entry_id else None
+                map_view_enabled_cache[cache_key] = _is_map_view_enabled_for_entry(
+                    entry
+                )
+            return map_view_enabled_cache[cache_key]
+
+        def _expiration_enabled(entry_id: str | None) -> bool:
+            return _read_bool_option(
+                entry_id, opt_key, default_expiration, expiration_cache
+            )
+
+        def _token_for_entry(entry_id: str | None) -> str:
+            cache_key = entry_id or ""
+            if cache_key in token_cache:
+                return token_cache[cache_key]
+
+            entry_part = entry_id or ""
+            if _expiration_enabled(entry_id):
+                seed = map_token_secret_seed(ha_uuid, entry_part, True, now=now)
+            else:
+                seed = map_token_secret_seed(ha_uuid, entry_part, False)
+
+            token_cache[cache_key] = map_token_hex_digest(seed)
+            return token_cache[cache_key]
+
+        def _device_is_service(device: Any) -> bool:
+            identifiers: set[tuple[str, str]] = (
+                getattr(device, "identifiers", set()) or set()
+            )
+            for domain, ident in identifiers:
+                if domain != DOMAIN:
+                    continue
+                ident_str = str(ident)
+                if ident_str == LEGACY_SERVICE_IDENTIFIER or ident_str.startswith(
+                    SERVICE_DEVICE_IDENTIFIER_PREFIX
+                ):
+                    return True
+            return False
+
+        def _canonical_identifier(device: Any) -> str | None:
+            serial = getattr(device, "serial_number", None)
+            if isinstance(serial, str) and serial:
+                return serial
+
+            identifiers: set[tuple[str, str]] = (
+                getattr(device, "identifiers", set()) or set()
+            )
+            for domain, ident in identifiers:
+                if domain != DOMAIN:
+                    continue
+
+                ident_str = str(ident)
+                if ident_str == LEGACY_SERVICE_IDENTIFIER or ident_str.startswith(
+                    SERVICE_DEVICE_IDENTIFIER_PREFIX
+                ):
+                    continue
+
+                # Strip the namespace of whichever of our entries the
+                # identifier carries, not only the chosen token owner's: below
+                # Core 2026.8 a shared device can keep the identifier of a
+                # disabled owner while the link is signed for an enabled one,
+                # and the map view looks the bare device id up.
+                candidate, sep, remainder = ident_str.partition(":")
+                if sep and candidate in entries_by_id:
+                    ident_str = remainder
+
+                return ident_str
+
+            return None
+
+        dev_reg = dr.async_get(hass)
+        updated_count = 0
+        resolved_count = 0
+        # (device, owner_entry_id, canonical_id) for every resolved device whose
+        # entry has Map View enabled. Populated by the first pass below and
+        # consumed by the second, after the base-URL lookup.
+        enabled_items: list[tuple[Any, str, str]] = []
+        # Ask per entry instead of scanning the whole registry. Two things
+        # change with that, both deliberate. The owning entry is now read from
+        # the query rather than guessed from the device: the previous loop took
+        # the first of ``config_entries`` that was ours and otherwise the first
+        # one at all, so a device owned by a foreign integration could be given
+        # one of our map URLs signed with a token seeded from that foreign entry
+        # id. And a device that carries our identifier while belonging to no
+        # GoogleFindMy entry is no longer touched at all; it is registry
+        # residue, not one of our devices. ``async_entries_for_config_entry``
+        # exists unchanged at tag ``2025.9.1`` and at ``2026.9.0``, so this
+        # needs no capability switch.
+        #
+        # This pass also clears disabled entries' stale links before the
+        # base-URL lookup (mirrors ``_async_refresh_device_urls``); enabled
+        # entries' devices are only collected here, their URL built below
+        # once ``base_url`` is known.
+        # Below 2026.8 a device can hang on two of our entries at once. The
+        # owners are collected per device first, in the order the entries are
+        # asked; an owner with Map View enabled wins, so a disabled owner asked
+        # first cannot clear the link of an owner that still serves the map.
+        # Among equals the first entry asked wins (set iteration order decided
+        # this before as well, so only determinism changes); it seeds the map
+        # token, while ``_canonical_identifier`` strips any of our entries'
+        # namespaces from the device id.
+        owners_by_device: dict[str, tuple[Any, list[str]]] = {}
+        for owner_entry_id in entries_by_id:
+            for device in dr.async_entries_for_config_entry(dev_reg, owner_entry_id):
+                slot = owners_by_device.setdefault(device.id, (device, []))
+                slot[1].append(owner_entry_id)
+
+        for device, owner_ids in owners_by_device.values():
+            identifiers: set[tuple[str, str]] = (
+                getattr(device, "identifiers", set()) or set()
+            )
+            if not any(domain == DOMAIN for domain, _ in identifiers):
+                continue
+
+            if _device_is_service(device):
+                continue
+
+            owner_entry_id = next(
+                (oid for oid in owner_ids if _map_view_enabled(oid)), owner_ids[0]
+            )
+            canonical_id = _canonical_identifier(device)
+            if not canonical_id:
+                continue
+
+            resolved_count += 1
+
+            if not _map_view_enabled(owner_entry_id):
+                # Disabled: clear any stale link rather than refresh one that
+                # just refuses every request. Count only a real change; an
+                # already-empty link is not written.
+                if device.configuration_url is not None:
+                    dev_reg.async_update_device(
+                        device_id=device.id, configuration_url=None
+                    )
+                    updated_count += 1
+                continue
+
+            enabled_items.append((device, owner_entry_id, canonical_id))
+
+        if resolved_count and not enabled_items:
+            # Every resolved device is on a disabled entry, so skip the
+            # base-URL lookup entirely.
+            _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
+            return
+
         try:
             base_url = get_url(
                 hass,
@@ -1155,172 +1362,22 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "set an external URL in Home Assistant settings for remote access",
             )
 
-        entries = hass.config_entries.async_entries(DOMAIN)
-        entries_by_id = {entry.entry_id: entry for entry in entries}
-
-        default_expiration = bool(
-            ctx.get(
-                "default_map_view_token_expiration",
-                DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        for device, owner_entry_id, canonical_id in enabled_items:
+            auth_token = _token_for_entry(owner_entry_id)
+            new_config_url = (
+                f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
             )
-        )
-        opt_reader = ctx.get("opt")
-        opt_key = ctx.get(
-            "opt_map_view_token_expiration_key", OPT_MAP_VIEW_TOKEN_EXPIRATION
-        )
-
-        expiration_cache: dict[str, bool] = {}
-        token_cache: dict[str, str] = {}
-        ha_uuid = str(hass.data.get("core.uuid", "ha"))
-        now = int(time.time())
-
-        def _expiration_enabled(entry_id: str | None) -> bool:
-            cache_key = entry_id or ""
-            if cache_key in expiration_cache:
-                return expiration_cache[cache_key]
-
-            entry = entries_by_id.get(entry_id) if entry_id else None
-            enabled = default_expiration
-
-            if entry:
-                if callable(opt_reader):
-                    try:
-                        enabled = bool(opt_reader(entry, opt_key, default_expiration))
-                    except Exception:
-                        enabled = bool(
-                            entry.options.get(
-                                opt_key,
-                                entry.data.get(opt_key, default_expiration),
-                            )
-                        )
-                else:
-                    enabled = bool(
-                        entry.options.get(
-                            opt_key,
-                            entry.data.get(opt_key, default_expiration),
-                        )
-                    )
-
-            expiration_cache[cache_key] = bool(enabled)
-            return expiration_cache[cache_key]
-
-        def _token_for_entry(entry_id: str | None) -> str:
-            cache_key = entry_id or ""
-            if cache_key in token_cache:
-                return token_cache[cache_key]
-
-            entry_part = entry_id or ""
-            if _expiration_enabled(entry_id):
-                seed = map_token_secret_seed(ha_uuid, entry_part, True, now=now)
-            else:
-                seed = map_token_secret_seed(ha_uuid, entry_part, False)
-
-            token_cache[cache_key] = map_token_hex_digest(seed)
-            return token_cache[cache_key]
-
-        def _device_is_service(device: Any) -> bool:
-            identifiers: set[tuple[str, str]] = (
-                getattr(device, "identifiers", set()) or set()
+            dev_reg.async_update_device(
+                device_id=device.id,
+                configuration_url=new_config_url,
             )
-            for domain, ident in identifiers:
-                if domain != DOMAIN:
-                    continue
-                ident_str = str(ident)
-                if ident_str == LEGACY_SERVICE_IDENTIFIER or ident_str.startswith(
-                    SERVICE_DEVICE_IDENTIFIER_PREFIX
-                ):
-                    return True
-            return False
-
-        def _canonical_identifier(device: Any, entry_id: str | None) -> str | None:
-            serial = getattr(device, "serial_number", None)
-            if isinstance(serial, str) and serial:
-                return serial
-
-            identifiers: set[tuple[str, str]] = (
-                getattr(device, "identifiers", set()) or set()
-            )
-            for domain, ident in identifiers:
-                if domain != DOMAIN:
-                    continue
-
-                ident_str = str(ident)
-                if ident_str == LEGACY_SERVICE_IDENTIFIER or ident_str.startswith(
-                    SERVICE_DEVICE_IDENTIFIER_PREFIX
-                ):
-                    continue
-
-                if entry_id:
-                    prefix = f"{entry_id}:"
-                    if ident_str.startswith(prefix):
-                        ident_str = ident_str[len(prefix) :]
-                elif ":" in ident_str:  # pragma: no cover - no caller reaches it
-                    # Unreachable since the scan asks per config entry: the only
-                    # caller always passes a key of ``entries_by_id``, which is
-                    # never empty. Kept for a caller that does not know the
-                    # owner, of which there is none today; measured, not assumed
-                    # (``grep -n _canonical_identifier`` finds one call site).
-                    candidate, remainder = ident_str.split(":", 1)
-                    if candidate in entries_by_id:
-                        ident_str = remainder
-
-                return ident_str
-
-            return None
-
-        dev_reg = dr.async_get(hass)
-        updated_count = 0
-        seen_device_ids: set[str] = set()
-        # Ask per entry instead of scanning the whole registry. Two things
-        # change with that, both deliberate. The owning entry is now read from
-        # the query rather than guessed from the device: the previous loop took
-        # the first of ``config_entries`` that was ours and otherwise the first
-        # one at all, so a device owned by a foreign integration could be given
-        # one of our map URLs signed with a token seeded from that foreign entry
-        # id. And a device that carries our identifier while belonging to no
-        # GoogleFindMy entry is no longer touched at all; it is registry
-        # residue, not one of our devices. ``async_entries_for_config_entry``
-        # exists unchanged at tag ``2025.9.1`` and at ``2026.9.0``, so this
-        # needs no capability switch.
-        for owner_entry_id in entries_by_id:
-            for device in dr.async_entries_for_config_entry(dev_reg, owner_entry_id):
-                # Below 2026.8 a device can hang on two of our entries at once.
-                # The first entry asked wins, and its prefix is the one
-                # ``_canonical_identifier`` strips. The choice was arbitrary
-                # before as well (set iteration order), so this is not a change
-                # in outcome, only in determinism.
-                if device.id in seen_device_ids:
-                    continue
-                seen_device_ids.add(device.id)
-
-                identifiers: set[tuple[str, str]] = (
-                    getattr(device, "identifiers", set()) or set()
+            updated_count += 1
+            if ctx.get("redact_url_token"):
+                _LOGGER.debug(
+                    "Updated URL for device %s: %s",
+                    device.name_by_user or device.name,
+                    ctx["redact_url_token"](new_config_url),
                 )
-                if not any(domain == DOMAIN for domain, _ in identifiers):
-                    continue
-
-                if _device_is_service(device):
-                    continue
-
-                canonical_id = _canonical_identifier(device, owner_entry_id)
-                if not canonical_id:
-                    continue
-
-                auth_token = _token_for_entry(owner_entry_id)
-                new_config_url = (
-                    f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
-                )
-                dev_reg.async_update_device(
-                    device_id=device.id,
-                    configuration_url=new_config_url,
-                )
-                updated_count += 1
-                if ctx.get("redact_url_token"):
-                    _LOGGER.debug(
-                        "Updated URL for device %s: %s",
-                        device.name_by_user or device.name,
-                        ctx["redact_url_token"](new_config_url),
-                    )
 
         _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 

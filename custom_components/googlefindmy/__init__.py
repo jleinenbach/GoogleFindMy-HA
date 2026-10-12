@@ -195,6 +195,7 @@ from .const import (
     OPT_OPTIONS_SCHEMA_VERSION,
     OPTION_KEYS,
     OPTIONAL_CREDENTIAL_KEYS,
+    SECRETS_EXTRA_WATCH_PATHS,
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -567,6 +568,19 @@ def _ensure_runtime_imports() -> None:
     _RUNTIME_IMPORTS_LOADED = True
 
 
+def _is_map_view_enabled_for_entry_fn(entry: ConfigEntry) -> bool:
+    """Return whether Map View is enabled for ``entry`` (one shared rule).
+
+    Delegates to ``map_view._is_map_view_enabled_for_entry`` so registration,
+    the device-URL refresh, the refresh service and the views all read the
+    option the same way. Imported lazily like the other ``map_view`` names.
+    """
+
+    from .map_view import _is_map_view_enabled_for_entry
+
+    return _is_map_view_enabled_for_entry(entry)
+
+
 def _cloud_discovery_runtime(
     hass: HomeAssistant, entry: ConfigEntry | None = None
 ) -> CloudDiscoveryRuntime:
@@ -617,6 +631,12 @@ CONFIG_SCHEMA: vol.Schema = getattr(
 )(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Options the legacy migration in ``async_setup_entry`` carries over: the
+# user's settings and the schema version, nothing else.
+_LEGACY_MIGRATION_KEPT_OPTIONS: Final[frozenset[str]] = frozenset(
+    (*OPTION_KEYS, SECRETS_EXTRA_WATCH_PATHS, OPT_OPTIONS_SCHEMA_VERSION)
+)
 
 # Bundle field names that may appear in a log line. Any other field name is logged
 # as "other field": per-account fields embed the account e-mail
@@ -5629,6 +5649,33 @@ def _effective_config(entry: ConfigEntry) -> dict[str, Any]:
     return {k: _opt(entry, k, None) for k in OPTION_KEYS}
 
 
+def _async_ensure_map_views_registered(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Register the map HTTP views once, if not already done.
+
+    Registration is domain-wide (``bucket`` is the shared domain data): HA core
+    has no ``unregister_view`` API, so per-entry access is gated at request
+    time instead (see ``map_view.py``'s ``OPT_MAP_VIEW_ENABLED`` check).
+    """
+    views_registered = bucket.get("views_registered")
+    if not isinstance(views_registered, bool):
+        views_registered = False
+    if views_registered:
+        return
+
+    map_view_instance = GoogleFindMyMapView(hass)
+    hass.http.register_view(map_view_instance)
+
+    map_redirect_view_instance = GoogleFindMyMapRedirectView(hass)
+    hass.http.register_view(map_redirect_view_instance)
+
+    map_tiles_token_view_instance = GoogleFindMyMapTilesTokenView(hass)
+    hass.http.register_view(map_tiles_token_view_instance)
+    bucket["views_registered"] = True
+    _LOGGER.debug("Registered map views")
+
+
 def _normalize_contributor_mode(value: Any) -> str:
     """Return a sanitized contributor mode string."""
 
@@ -8146,11 +8193,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         updated_data[CONF_GOOGLE_EMAIL] = normalized_email
         updated_data[DATA_AUTH_METHOD] = auth_method_value
 
+        # Keep the user's settings: every key from OPTION_KEYS, the extra
+        # watch paths and the schema version. A fresh entry runs this path too
+        # (the config flow stores ``CONF_OAUTH_TOKEN`` while the new cache is
+        # still empty); replacing the options with ``{}`` would discard the
+        # choices made during setup, e.g. a declined Map View. Dropped are
+        # removed keys such as ``tracked_devices`` and the bookkeeping markers
+        # of the unique-ID migrations, which then run again on the new data.
+        kept_options = {
+            option_name: value
+            for option_name, value in entry.options.items()
+            if option_name in _LEGACY_MIGRATION_KEPT_OPTIONS
+        }
         hass.config_entries.async_update_entry(
-            entry, data=MappingProxyType(updated_data), options={}
+            entry, data=MappingProxyType(updated_data), options=kept_options
         )
         _LOGGER.info(
-            "[%s] Migrated legacy configuration and reset entry for subentry setup",
+            "[%s] Migrated legacy configuration and kept the user's options",
             entry.entry_id,
         )
 
@@ -8288,6 +8347,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         listeners = getattr(updated_entry, "update_listeners", None)
         if isinstance(listeners, list) and _async_refresh_watch_paths not in listeners:
             return
+
+        # The map-view toggle is not handled here, like every other setup-time
+        # option: ``OptionsFlowHandler.async_step_settings`` already schedules a
+        # reload on change, which re-runs ``async_setup_entry`` end to end.
 
         updated_fingerprint = _credential_fingerprint(updated_entry.data)
         if updated_fingerprint == credential_fingerprint:
@@ -8917,21 +8980,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "Coordinator setup failed early; will recover on next refresh: %s", err
         )
 
-    # Register map views (idempotent across multi-entry)
-    views_registered = bucket.get("views_registered")
-    if not isinstance(views_registered, bool):
-        views_registered = False
-    if not views_registered:
-        map_view_instance = GoogleFindMyMapView(hass)
-        hass.http.register_view(map_view_instance)
-
-        map_redirect_view_instance = GoogleFindMyMapRedirectView(hass)
-        hass.http.register_view(map_redirect_view_instance)
-
-        map_tiles_token_view_instance = GoogleFindMyMapTilesTokenView(hass)
-        hass.http.register_view(map_tiles_token_view_instance)
-        bucket["views_registered"] = True
-        _LOGGER.debug("Registered map views")
+    # Register map views (idempotent across multi-entry), gated per-entry: an
+    # entry that opts out skips registration, but another entry still wanting
+    # the feature registers it regardless of order. Once up, views stay up for
+    # the process lifetime (no unregister_view API); map_view.py's own
+    # OPT_MAP_VIEW_ENABLED check turns away a since-disabled entry per-request.
+    if _is_map_view_enabled_for_entry_fn(entry):
+        _async_ensure_map_views_registered(hass, bucket)
 
     # Run duplicate self-healing asynchronously so it also executes on reloads.
     hass.async_create_task(
@@ -9256,6 +9311,112 @@ async def _async_refresh_device_urls(
         changed = _url_state_changed(hass, state)
         return not periodic or changed
 
+    domain_entries = {
+        entry.entry_id: entry for entry in hass.config_entries.async_entries(DOMAIN)
+    }
+
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import (
+        device_owning_entry_ids,
+        iter_all_devices,
+    )
+
+    dev_reg = dr.async_get(hass)
+    updated_count = 0
+
+    # Resolved once so both passes below (clear disabled, then build enabled)
+    # share the same device -> owning-entry lookup.
+    resolved: list[tuple[dr.DeviceEntry, MyConfigEntry, str]] = []
+    # Whole registry on purpose: this pass covers the map URL of every
+    # GoogleFindMy device across all entries of the domain, and picks the owning
+    # entry per device below.
+    for device in iter_all_devices(dev_reg):
+        try:
+            if getattr(device, "entry_type", None) == dr.DeviceEntryType.SERVICE:
+                continue
+
+            if (
+                getattr(device, "translation_key", None)
+                == SERVICE_DEVICE_TRANSLATION_KEY
+            ):
+                continue
+
+            if not any(
+                len(identifier) >= 1 and identifier[0] == DOMAIN
+                for identifier in device.identifiers
+            ):
+                continue
+
+            # ``device_owning_entry_ids`` asks its callers to say why picking
+            # one owner is allowed. From Core 2026.8 the tuple holds exactly one
+            # id. Below that core a device shared between two GoogleFindMy
+            # entries can list both; an owner with Map View enabled wins, so a
+            # disabled owner listed first cannot clear the link of an owner
+            # that still serves the map. Among equals the first owner in set
+            # iteration order wins, as before; it only seeds the map token.
+            owner_ids = [
+                cid for cid in device_owning_entry_ids(device) if cid in domain_entries
+            ]
+            entry_id = next(
+                (
+                    cid
+                    for cid in owner_ids
+                    if _is_map_view_enabled_for_entry_fn(domain_entries[cid])
+                ),
+                owner_ids[0] if owner_ids else None,
+            )
+            if not entry_id:
+                continue
+
+            dev_id = next(
+                (
+                    ident[1]
+                    for ident in device.identifiers
+                    if len(ident) == 2 and ident[0] == DOMAIN
+                ),
+                None,
+            )
+            if not dev_id:
+                continue
+
+            if ":" in dev_id:
+                dev_id = dev_id.split(":", 1)[1]
+
+            resolved.append((device, domain_entries[entry_id], dev_id))
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    # Clearing a disabled entry's stale configuration_url needs no base URL,
+    # so it runs before that lookup -- otherwise an install with no reachable
+    # HA URL would never get the link cleared.
+    enabled_items: list[tuple[dr.DeviceEntry, MyConfigEntry, str]] = []
+    for device, entry, dev_id in resolved:
+        try:
+            if not _is_map_view_enabled_for_entry_fn(entry):
+                # Disabled: clear any stale link rather than refresh one that
+                # just refuses every request. Count only a real change; an
+                # already-empty link is not written by the registry.
+                if device.configuration_url is not None:
+                    dev_reg.async_update_device(
+                        device_id=device.id, configuration_url=None
+                    )
+                    updated_count += 1
+                continue
+
+            enabled_items.append((device, entry, dev_id))
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if resolved and not enabled_items:
+        # Every resolved device is on a disabled entry, so skip the base-URL
+        # lookup entirely. With no devices at all, fall through so "no
+        # reachable URL" is still reported as before.
+        if updated_count:
+            _LOGGER.debug(
+                "Refreshed URLs for %d Google Find My device(s)", updated_count
+            )
+        return
+
     try:
         base_url = cast(
             str,
@@ -9302,76 +9463,13 @@ async def _async_refresh_device_urls(
     base_url = base_url.rstrip("/")
 
     ha_uuid = str(hass.data.get("core.uuid", "ha"))
-    domain_entries = {
-        entry.entry_id: entry for entry in hass.config_entries.async_entries(DOMAIN)
-    }
 
-    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
-    from .coordinator.helpers.registry import (
-        device_owning_entry_ids,
-        iter_all_devices,
-    )
-
-    dev_reg = dr.async_get(hass)
-    updated_count = 0
-    # Whole registry on purpose: this pass refreshes the map URL of every
-    # GoogleFindMy device across all entries of the domain, and picks the owning
-    # entry per device below.
-    for device in iter_all_devices(dev_reg):
+    for device, entry, dev_id in enabled_items:
         try:
-            if getattr(device, "entry_type", None) == dr.DeviceEntryType.SERVICE:
-                continue
-
-            if (
-                getattr(device, "translation_key", None)
-                == SERVICE_DEVICE_TRANSLATION_KEY
-            ):
-                continue
-
-            if not any(
-                len(identifier) >= 1 and identifier[0] == DOMAIN
-                for identifier in device.identifiers
-            ):
-                continue
-
-            # Picking the first match, and ``device_owning_entry_ids`` asks its
-            # callers to say why that is allowed.  Here it is: from Core 2026.8
-            # the tuple holds exactly one id.  Below that core it can hold
-            # several, and a device shared between two GoogleFindMy entries then
-            # gets whichever the set iteration yields first -- unchanged from
-            # before this migration, and a pre-existing wart rather than a new
-            # one.  It decides only which entry seeds the map token, and both
-            # entries can serve the device.
-            entry_id = next(
-                (
-                    cid
-                    for cid in device_owning_entry_ids(device)
-                    if cid in domain_entries
-                ),
-                None,
-            )
-            if not entry_id:
-                continue
-
-            dev_id = next(
-                (
-                    ident[1]
-                    for ident in device.identifiers
-                    if len(ident) == 2 and ident[0] == DOMAIN
-                ),
-                None,
-            )
-            if not dev_id:
-                continue
-
-            if ":" in dev_id:
-                dev_id = dev_id.split(":", 1)[1]
-
-            entry = domain_entries[entry_id]
             token_exp = _opt(
                 entry, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             )
-            secret = map_token_secret_seed(ha_uuid, entry_id, bool(token_exp))
+            secret = map_token_secret_seed(ha_uuid, entry.entry_id, bool(token_exp))
             auth_token = map_token_hex_digest(secret)
 
             map_path = f"/api/googlefindmy/map/{dev_id}?token={auth_token}"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import math
@@ -23,8 +24,10 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
+    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     WEEK_SECONDS,
     map_token_hex_digest,
@@ -618,9 +621,44 @@ def _resolve_entry_by_token(
             ),
         )
         accepted = _entry_accept_tokens(hass, entry.entry_id, bool(token_exp))
-        if auth_token in accepted:
+        if _token_matches(auth_token, accepted):
             return entry, accepted
     return None, None
+
+
+def _token_matches(auth_token: str, accepted: set[str]) -> bool:
+    """Return whether ``auth_token`` is one of ``accepted``, in constant time.
+
+    The token comes from the query string, so it is attacker-controlled. Each
+    accepted token is compared with ``hmac.compare_digest`` and every one is
+    compared, so the time spent does not depend on how much of a token matched.
+    The comparison runs on UTF-8 bytes: ``compare_digest`` raises ``TypeError``
+    for a ``str`` with non-ASCII characters, which would turn ``?token=%C3%A4`` into
+    a server error instead of a refusal. Unencodable code points (lone
+    surrogates) become ``?``, which never occurs in a hex token.
+    """
+    provided = auth_token.encode("utf-8", "replace")
+    matched = False
+    for candidate in accepted:
+        matched |= hmac.compare_digest(provided, candidate.encode("utf-8"))
+    return matched
+
+
+def _is_map_view_enabled_for_entry(entry: ConfigEntry) -> bool:
+    """Return whether Map View is enabled for the resolved config entry.
+
+    Shared by every view that resolves an entry from a share token, since
+    views stay registered process-wide (no unregister_view API) even after
+    an entry turns the feature off.
+    """
+    entry_options = getattr(entry, "options", {}) or {}
+    entry_data = getattr(entry, "data", {}) or {}
+    return bool(
+        entry_options.get(
+            OPT_MAP_VIEW_ENABLED,
+            entry_data.get(OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED),
+        )
+    )
 
 
 def _map_tiles_access_token(hass: Any) -> str | None:
@@ -680,7 +718,20 @@ class GoogleFindMyMapView(HomeAssistantView):
 
         entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
         if not entry:
-            _LOGGER.debug("Map token mismatch for device_id=%s", device_id)
+            _LOGGER.debug("Map token mismatch for device_id=%r", device_id)
+            return _html_response(
+                "Unauthorized", "Invalid authentication token.", status=401
+            )
+
+        # Defense in depth (see _is_map_view_enabled_for_entry). Reuse the exact
+        # invalid-token response so a disabled-but-valid token can't be
+        # confirmed valid by a different refusal.
+        if not _is_map_view_enabled_for_entry(entry):
+            _LOGGER.debug(
+                "Map view disabled for entry=%s; refusing device_id=%r",
+                entry.entry_id,
+                device_id,
+            )
             return _html_response(
                 "Unauthorized", "Invalid authentication token.", status=401
             )
@@ -1367,7 +1418,7 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         redirect_url = (
             _MAP_PATH_PREFIX + quote(device_id, safe="") + "?" + urlencode(query_dict)
         )
-        _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
+        _LOGGER.debug("Relative redirect prepared for device_id=%r", device_id)
 
         raise web.HTTPFound(location=redirect_url, headers=NO_STORE_HEADERS)
 
@@ -1411,6 +1462,9 @@ class GoogleFindMyMapTilesTokenView(HomeAssistantView):
             return web.Response(status=401, headers=NO_STORE_HEADERS)
         entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
         if entry is None:
+            return web.Response(status=401, headers=NO_STORE_HEADERS)
+        if not _is_map_view_enabled_for_entry(entry):
+            # Same rule as the main map view: 401, not a distinguishable 404.
             return web.Response(status=401, headers=NO_STORE_HEADERS)
         token = _map_tiles_access_token(self.hass)
         if token is None:

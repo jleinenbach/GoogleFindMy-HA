@@ -53,7 +53,8 @@
           "google_home_filter_enabled": "Google Home-apparaten filteren",
           "google_home_filter_keywords": "Filtertrefwoorden (kommagescheiden)",
           "enable_stats_entities": "Statistiekentiteiten aanmaken",
-          "map_view_token_expiration": "Kaartweergave-tokenverloopdatum inschakelen"
+          "map_view_token_expiration": "Kaartweergave-tokenverloopdatum inschakelen",
+          "map_view_enabled": "Kaartweergave inschakelen"
         }
       },
       "select_hub_for_visibility": {
@@ -284,6 +285,7 @@
           "enable_stats_entities": "Statistiekentiteiten aanmaken",
           "delete_caches_on_remove": "Caches verwijderen bij verwijderen item",
           "map_view_token_expiration": "Kaartweergave-tokenverloopdatum inschakelen",
+          "map_view_enabled": "Kaartweergave inschakelen",
           "contributor_mode": "Locatiebijdragermodus",
           "subentry": "Functiegroep",
           "secrets_extra_watch_paths": "Extra secrets.json-controlepaden (één per regel)"
@@ -296,6 +298,7 @@
           "accuracy_gate_enabled": "Wanneer dit is ingeschakeld (standaard), wordt een binnenkomende locatie genegeerd als die duidelijk buiten de onzekerheidscirkel van de opgeslagen positie valt, minstens vier keer onnauwkeuriger is dan die, minstens 200 m onnauwkeurig is en die opgeslagen positie zowel betrouwbaar als recent is. Er wordt nooit iets genegeerd zonder een beter alternatief: een onnauwkeurige locatie wordt altijd geaccepteerd bij een koude start, of wanneer de opgeslagen positie onbetrouwbaar of verouderd is. Zo verplaatst een ruime melding uit het netwerk de tracker niet en meldt Home Assistant hem niet ten onrechte als thuis, doordat het de nauwkeurigheidsstraal als zonetolerantie gebruikt. Schakel dit alleen uit als je vermoedt dat deze controle zelf een probleem veroorzaakt.",
           "delete_caches_on_remove": "Verwijder gecachete tokens en apparaatmetadata wanneer dit item wordt verwijderd.",
           "map_view_token_expiration": "Indien ingeschakeld, verlopen kaartweergavetokens na 1 week. Indien uitgeschakeld (standaard), verlopen tokens niet.",
+          "map_view_enabled": "Standaard ingeschakeld. Indien uitgeschakeld worden kaartweergave-verzoeken geweigerd als bij een ongeldig token en worden apparaatlinks gewist. Vernieuwt bestaande links niet; als een link mogelijk is gelekt, gebruik 'Kaartweergave-tokenverloopdatum inschakelen' (tot twee weken indien al ingeschakeld).",
           "contributor_mode": "Kies hoe je apparaat bijdraagt aan het Google-netwerk (standaard Alle gebieden voor crowdsourced rapportage, of alleen drukbezochte gebieden).",
           "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen]({subentries_docs_url}) voor voorbeelden.",
           "secrets_extra_watch_paths": "Optioneel. Extra absolute paden naar secrets.json-bestanden die de integratie moet bewaken voor automatische overname, één per regel. Laat leeg om alleen de standaardlocaties te bewaken."

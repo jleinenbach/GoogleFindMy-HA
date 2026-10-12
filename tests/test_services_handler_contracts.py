@@ -71,7 +71,11 @@ def full_ctx() -> dict[str, Any]:
         "resolve_canonical": mock.Mock(return_value=("CANON", "Friendly Name")),
         "is_active_entry": mock.Mock(return_value=True),
         "primary_active_entry": mock.Mock(return_value=None),
-        "opt": mock.Mock(return_value=False),
+        # Mirrors the real _opt(entry, key, default): with no matching option
+        # set on the (empty options/data) test entries, it always falls
+        # through to the caller's own default -- a flat return_value=False
+        # would silently satisfy every bool-typed option read the same way.
+        "opt": mock.Mock(side_effect=lambda entry, key, default: default),
         "default_map_view_token_expiration": False,
         "opt_map_view_token_expiration_key": "map_view_token_expiration",
         "redact_url_token": mock.Mock(return_value="<redacted-url>"),
