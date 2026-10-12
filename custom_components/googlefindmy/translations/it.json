@@ -673,6 +673,9 @@
           "stale": "Obsoleta"
         }
       },
+      "coarse_fix": {
+        "name": "Posizione approssimativa"
+      },
       "last_seen": {
         "name": "Ultima volta visto",
         "state_attributes": {

@@ -673,6 +673,9 @@
           "stale": "Verouderd"
         }
       },
+      "coarse_fix": {
+        "name": "Grove locatie"
+      },
       "last_seen": {
         "name": "Laatst gezien",
         "state_attributes": {

@@ -68,6 +68,9 @@
           "stale": "mdi:map-marker-off"
         }
       },
+      "coarse_fix": {
+        "default": "mdi:map-marker-radius"
+      },
       "semantic_labels": {
         "default": "mdi:format-list-text"
       },

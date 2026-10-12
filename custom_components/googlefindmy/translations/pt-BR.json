@@ -673,6 +673,9 @@
           "stale": "Desatualizada"
         }
       },
+      "coarse_fix": {
+        "name": "Localização aproximada"
+      },
       "last_seen": {
         "name": "Visto pela última vez",
         "state_attributes": {

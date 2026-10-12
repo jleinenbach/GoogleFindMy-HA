@@ -673,6 +673,9 @@
           "stale": "Stale"
         }
       },
+      "coarse_fix": {
+        "name": "Coarse fix"
+      },
       "last_seen": {
         "name": "Last Seen",
         "state_attributes": {

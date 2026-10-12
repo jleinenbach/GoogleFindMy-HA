@@ -224,6 +224,7 @@ rules:
       evidence:
         - "custom_components/googlefindmy/binary_sensor.py:AUTH_STATUS_DESC.device_class"
         - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
+        - "tests/test_sensor_coarse_fix.py:test_entity_contract"
     - id: entity-disabled-by-default
       status: done
       evidence:
@@ -232,11 +233,15 @@ rules:
         # because it replaces a visible attribute and changes at most three
         # times per fix cycle (not noisy).
         - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
+        # Same exception for coarse_fix: the only live carrier of a discarded
+        # coarse fix, about two state changes per coarse fix.
+        - "tests/test_sensor_coarse_fix.py:test_entity_contract"
     - id: entity-translations
       status: done
       evidence:
         - "custom_components/googlefindmy/translations/en.json:entity"
         - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
+        - "tests/test_sensor_coarse_fix.py:test_entity_contract"
     - id: exception-translations
       status: done
       evidence:

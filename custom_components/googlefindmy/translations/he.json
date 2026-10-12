@@ -673,6 +673,9 @@
           "stale": "לא עדכני"
         }
       },
+      "coarse_fix": {
+        "name": "מיקום משוער"
+      },
       "last_seen": {
         "name": "נראה לאחרונה",
         "state_attributes": {

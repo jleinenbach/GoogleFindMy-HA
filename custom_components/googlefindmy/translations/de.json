@@ -673,6 +673,9 @@
           "stale": "Veraltet"
         }
       },
+      "coarse_fix": {
+        "name": "Grobortung"
+      },
       "last_seen": {
         "name": "Zuletzt gesehen",
         "state_attributes": {

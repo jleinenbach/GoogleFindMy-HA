@@ -462,6 +462,7 @@ async def test_tick_without_a_device_name_still_writes(
     [
         ("location_status", ["GoogleFindMyLocationStatusSensor"]),
         ("last_seen", ["GoogleFindMyLastSeenSensor"]),
+        ("coarse_fix", ["GoogleFindMyCoarseFixSensor"]),
     ],
 )
 async def test_recovery_rebuilds_exactly_the_lost_sensor(
