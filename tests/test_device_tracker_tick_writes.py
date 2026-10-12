@@ -341,8 +341,15 @@ def test_show_location_age_switched_on_is_held_from_then_on(
 # ---------------------------------------------------------------------------
 
 
-def _core_state(entity: Any, hass: HomeAssistant) -> tuple[str, list[str]]:
-    """State string and ``in_zones`` as ``TrackerEntity`` derives them."""
+def _core_state(entity: Any, hass: HomeAssistant) -> tuple[str, list[str] | None]:
+    """State string and ``in_zones`` as ``TrackerEntity`` derives them.
+
+    ``zone.async_in_zones`` and the ``in_zones`` attribute are newer than the
+    declared Home Assistant floor; 2025.9.1 and 2026.1.3 derive the state from
+    ``zone.async_active_zone`` and publish no ``in_zones``. Follow whichever
+    API the installed core provides and return ``None`` for ``in_zones`` on
+    the older line.
+    """
 
     from homeassistant.components import zone
     from homeassistant.const import STATE_HOME, STATE_NOT_HOME
@@ -350,9 +357,14 @@ def _core_state(entity: Any, hass: HomeAssistant) -> tuple[str, list[str]]:
     lat, lon = entity._attr_latitude, entity._attr_longitude
     if lat is None or lon is None:
         return "unknown", []
-    active, in_zones = zone.async_in_zones(
-        hass, lat, lon, entity._attr_location_accuracy or 0
-    )
+    radius = entity._attr_location_accuracy or 0
+    in_zones_fn = getattr(zone, "async_in_zones", None)
+    in_zones: list[str] | None
+    if in_zones_fn is None:
+        active = zone.async_active_zone(hass, lat, lon, radius)
+        in_zones = None
+    else:
+        active, in_zones = in_zones_fn(hass, lat, lon, radius)
     if active is None:
         return STATE_NOT_HOME, in_zones
     if active.entity_id == zone.ENTITY_ID_HOME:
@@ -370,7 +382,8 @@ def _wire_entity_write_path(entity: Any, hass: HomeAssistant) -> None:
     def _calculate() -> SimpleNamespace:
         state, in_zones = _core_state(entity, hass)
         attributes = dict(entity._attr_extra_state_attributes)
-        attributes["in_zones"] = in_zones
+        if in_zones is not None:
+            attributes["in_zones"] = in_zones
         return SimpleNamespace(state=state, attributes=attributes)
 
     def _write() -> None:
