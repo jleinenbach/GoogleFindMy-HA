@@ -507,6 +507,35 @@ def resolve_stale_threshold(coordinator: Any) -> int:
         return DEFAULT_STALE_THRESHOLD
 
 
+# Entity-facing location status values in age order. ``unknown`` (no age) is
+# not an option: the sensor publishes it as ``None`` (HA state ``unknown``).
+LOCATION_STATUS_OPTIONS: tuple[str, ...] = ("current", "aging", "stale")
+
+
+def classify_location_status(age: float | None, stale_threshold: float) -> str:
+    """Classify the age of the published fix against the stale threshold.
+
+    Single source of truth for the entity-facing location status: the
+    device_tracker ``location_status`` attribute, the Last Location tracker
+    (which renders ``stale`` as ``last_known``) and the ``location_status``
+    sensor all call this, so they cannot drift apart. Returns ``unknown`` when
+    the age is unknown, ``stale`` past ``stale_threshold``, ``aging`` past half
+    of it and ``current`` otherwise; both bounds are exclusive.
+
+    Not the same notion as ``determine_location_status`` in ``helpers/cache.py``:
+    that one labels the coordinator snapshot row against the poll interval
+    (inclusive bounds, free-text values next to snapshot states such as
+    ``Fused (Weighted)``) and is never shown as an entity status.
+    """
+    if age is None:
+        return "unknown"
+    if age > stale_threshold:
+        return "stale"
+    if age > stale_threshold / 2:
+        return "aging"
+    return "current"
+
+
 def resolve_seeded_accuracy(raw: Any, flag: bool | None) -> tuple[float, bool | None]:
     """Couple accuracy sanitization with its ``estimated`` provenance.
 

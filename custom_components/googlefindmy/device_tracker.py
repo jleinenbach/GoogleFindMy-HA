@@ -56,6 +56,7 @@ from .const import (
 from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
+    classify_location_status,
     encode_plus_code_for_row,
     is_reliable_fix,
     location_age_seconds,
@@ -1345,16 +1346,9 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         Accepts an explicit ``row`` so the published status describes the age of
         the same row that produced the coordinates (Codex #202).
         """
-        age = self._get_location_age(row)
-        if age is None:
-            return "unknown"
-        threshold = self._get_stale_threshold()
-        if age > threshold:
-            return "stale"
-        elif age > threshold / 2:
-            return "aging"
-        else:
-            return "current"
+        return classify_location_status(
+            self._get_location_age(row), self._get_stale_threshold()
+        )
 
     # ------------------------------------------------------------------
     # Location attribute synchronisation (HA CachedProperties pattern)
@@ -1729,13 +1723,5 @@ class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
         Mirrors the parent's ``row`` parameter so the published status describes
         the same row that produced the coordinates (Codex #202).
         """
-        age = self._get_location_age(row)
-        if age is None:
-            return "unknown"
-        threshold = self._get_stale_threshold()
-        if age > threshold:
-            return "last_known"
-        elif age > threshold / 2:
-            return "aging"
-        else:
-            return "current"
+        status = super()._get_location_status(row)
+        return "last_known" if status == "stale" else status
