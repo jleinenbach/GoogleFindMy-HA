@@ -42,12 +42,13 @@ class _CoordinatorStub:
             entry_id="entry-ticks", options={}, runtime_data=None
         )
         self.row = row
+        self.visible = True
 
     def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         return lambda: None
 
     def is_device_visible_in_subentry(self, key: str, device_id: str) -> bool:
-        return True
+        return self.visible
 
     def is_device_present(self, device_id: str) -> bool:
         return True
@@ -314,3 +315,243 @@ def test_show_location_age_switched_on_is_held_from_then_on(
 
     freezer.tick(120)
     assert _published(entity) == switched_on
+
+
+# ---------------------------------------------------------------------------
+# Codex review of #1321 at ``ceb5e70`` (three threads on the restamp path).
+#
+# The findings concern writes that bypass the entity's own write path:
+# ``hass.states.async_set(..., timestamp=<old fix time>)``. The tests below
+# therefore drive ticks through ``_handle_coordinator_update()`` against the
+# real state machine. The conftest stubs give the tracker a no-op
+# ``async_write_ha_state`` and none of Entity's private surface, so
+# ``_wire_entity_write_path`` supplies both: a write that does what Core's
+# ``Entity._async_write_ha_state`` does with the timestamp (none, so Core
+# stamps "now") and with ``force_update``, plus the TrackerEntity zone logic
+# for the state string. Code that writes through ``async_write_ha_state`` is
+# measured by the assertions; code that writes around it is measured too,
+# because the assertions read the state machine, not the double.
+#
+# ``freezer`` comes first among the fixtures: ``use_real_homeassistant_modules``
+# re-imports Home Assistant, and a ``dt_util`` imported after the freeze
+# started keeps reading the real clock while ``time.time()`` and the state
+# machine follow the frozen one (measured). Timestamps are compared with an
+# absolute tolerance; ``pytest.approx``'s relative default is about half an
+# hour at today's epoch values and would hide a restamp to the old fix.
+# ---------------------------------------------------------------------------
+
+
+def _core_state(entity: Any, hass: HomeAssistant) -> tuple[str, list[str]]:
+    """State string and ``in_zones`` as ``TrackerEntity`` derives them."""
+
+    from homeassistant.components import zone
+    from homeassistant.const import STATE_HOME, STATE_NOT_HOME
+
+    lat, lon = entity._attr_latitude, entity._attr_longitude
+    if lat is None or lon is None:
+        return "unknown", []
+    active, in_zones = zone.async_in_zones(
+        hass, lat, lon, entity._attr_location_accuracy or 0
+    )
+    if active is None:
+        return STATE_NOT_HOME, in_zones
+    if active.entity_id == zone.ENTITY_ID_HOME:
+        return STATE_HOME, in_zones
+    return active.name, in_zones
+
+
+def _wire_entity_write_path(entity: Any, hass: HomeAssistant) -> None:
+    """Give a stub-bound tracker Core's write path on a real state machine."""
+
+    entity.hass = hass
+    entity._context = None
+    entity._state_info = None
+
+    def _calculate() -> SimpleNamespace:
+        state, in_zones = _core_state(entity, hass)
+        attributes = dict(entity._attr_extra_state_attributes)
+        attributes["in_zones"] = in_zones
+        return SimpleNamespace(state=state, attributes=attributes)
+
+    def _write() -> None:
+        calculated = _calculate()
+        hass.states.async_set(
+            entity.entity_id,
+            calculated.state,
+            calculated.attributes,
+            # Core's TrackerEntity default for a push entity is ``True``
+            # (``not should_poll``); the stub base defines no value.
+            force_update=getattr(entity, "force_update", True),
+            context=entity._context,
+            state_info=entity._state_info,
+        )
+
+    entity._async_calculate_state = _calculate
+    entity.async_write_ha_state = _write
+
+
+def _now() -> float:
+    from homeassistant.util import dt as dt_util
+
+    return dt_util.utcnow().timestamp()
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "device_not_visible",
+        "no_row",
+        "reliable_fix",
+        "first_unreliable_fix",
+        "unreliable_fix_after_reliable",
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_coordinator_update_branch_ends_in_one_plain_write(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+    branch: str,
+) -> None:
+    """Contract of ``custom_components/googlefindmy/AGENTS.md`` (Codex P1, #1321).
+
+    Every branch of ``_handle_coordinator_update`` ends in exactly one
+    ``async_write_ha_state`` and never writes ``hass.states`` around it. A
+    state of the entity is already in the state machine, so a write path that
+    restamps an existing state is reached in every branch.
+    """
+
+    entity = _tracker(_row(_now() - 30))
+    _wire_entity_write_path(entity, hass)
+    hass.states.async_set(entity.entity_id, "not_home", {})
+    await hass.async_block_till_done()
+
+    estimated = {**_row(_now() - 30), "accuracy_estimated": True}
+    if branch == "device_not_visible":
+        entity.coordinator.visible = False
+    elif branch == "no_row":
+        entity.coordinator.row = None
+    elif branch == "first_unreliable_fix":
+        entity.coordinator.row = estimated
+    elif branch == "unreliable_fix_after_reliable":
+        entity._last_good_accuracy_data = _row(_now() - 60)
+        entity.coordinator.row = estimated
+
+    writes: list[None] = []
+    direct: list[tuple[Any, ...]] = []
+    # A pure counter: passing the call on would itself write hass.states and
+    # hide a direct write behind it.
+    entity.async_write_ha_state = lambda: writes.append(None)
+
+    class _RecordingStates:
+        """``hass.states`` as the entity sees it; counts writes around it."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(hass.states, name)
+
+        def async_set(self, *args: Any, **kwargs: Any) -> None:
+            direct.append(args)
+            hass.states.async_set(*args, **kwargs)
+
+    class _HassView:
+        """The real ``hass`` with the recording ``states`` in its place."""
+
+        states = _RecordingStates()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(hass, name)
+
+    entity.hass = _HassView()
+    freezer.tick(120)
+    entity._handle_coordinator_update()
+
+    assert len(writes) == 1, f"{branch}: {len(writes)} writes"
+    assert direct == [], f"{branch}: wrote hass.states directly"
+
+
+@pytest.mark.asyncio
+async def test_last_reported_never_moves_backward(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """``last_reported`` is a heartbeat and never jumps back (Codex P2, #1321).
+
+    Ticks go through the entity: an identical tick, a tick in which the age
+    of the unchanged fix enters a new minute, and a new fix. After each one
+    ``last_reported`` is the time of that tick.
+    """
+
+    entity = _tracker(_row(_now() - 30))
+    entity.coordinator.config_entry.options["show_location_age"] = True
+    _wire_entity_write_path(entity, hass)
+
+    seen: list[float] = []
+
+    async def _tick(seconds: float) -> None:
+        freezer.tick(seconds)
+        entity._handle_coordinator_update()
+        await hass.async_block_till_done()
+        state = hass.states.get(entity.entity_id)
+        assert state is not None
+        now = _now()
+        assert state.last_reported.timestamp() == pytest.approx(now, abs=1e-3), (
+            "last_reported is not the time of the tick"
+        )
+        assert state.last_updated <= state.last_reported
+        seen.append(state.last_reported.timestamp())
+
+    await _tick(0)
+    await _tick(5)  # identical observation
+    await _tick(120)  # age of the same fix enters a new minute
+    entity.coordinator.row = _row(_now() + 10, lat=48.2)
+    await _tick(10)  # new fix
+
+    assert seen == sorted(seen)
+
+
+@pytest.mark.asyncio
+async def test_zone_change_without_new_fix_stamps_last_changed_now(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """A new zone of an unchanged fix is a change at tick time (Codex P2, #1321).
+
+    The zone moves away from the unchanged position; the next tick carries
+    the same observation and a new age minute. The derived state changes, so
+    ``last_changed`` must be the time of that tick, not of the old fix.
+    """
+
+    from homeassistant.components import zone
+
+    zone.async_setup_track_zone_entity_ids(hass)
+    zone_attrs = {"latitude": 48.1, "longitude": 11.5, "radius": 200.0}
+    hass.states.async_set("zone.office", "0", {**zone_attrs, "friendly_name": "Office"})
+    await hass.async_block_till_done()
+
+    entity = _tracker(_row(_now() - 30))
+    entity.coordinator.config_entry.options["show_location_age"] = True
+    _wire_entity_write_path(entity, hass)
+
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    before = hass.states.get(entity.entity_id)
+    assert before is not None
+    assert before.state == "Office"
+
+    hass.states.async_set(
+        "zone.office",
+        "0",
+        {**zone_attrs, "latitude": 48.3, "friendly_name": "Office"},
+    )
+    freezer.tick(120)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+
+    after = hass.states.get(entity.entity_id)
+    assert after is not None
+    assert after.state == "not_home"
+    assert after.last_changed.timestamp() == pytest.approx(_now(), abs=1e-3), (
+        "last_changed carries the old fix time instead of the tick time"
+    )
