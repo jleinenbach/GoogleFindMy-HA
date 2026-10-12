@@ -15,6 +15,7 @@ from custom_components.googlefindmy.eid_resolver import (
     EidVariant,
     GoogleFindMyEIDResolver,
     UwtSource,
+    identity_key_fingerprint,
 )
 
 
@@ -613,6 +614,75 @@ def test_replayed_older_sighting_is_ignored(
         observed_at=_T + 100,
         uwt_mode=False,
         uwt_source=UwtSource.FRAME_TYPE,
+    )
+
+
+_KEY_1 = bytes(range(32))
+_KEY_2 = bytes(range(32, 64))
+
+
+def _keyed(window: int, key: bytes | None) -> dict[str, object]:
+    """Lookup metadata of a legacy EID in ``window`` matched under ``key``."""
+    meta: dict[str, object] = {
+        "variant": _LEGACY.value,
+        "rotation_timestamp": window * _PERIOD,
+    }
+    if key is not None:
+        meta["key_fingerprint"] = identity_key_fingerprint(key)
+    return meta
+
+
+def test_sighting_carries_the_key_fingerprint_of_its_metadata() -> None:
+    resolver = _build_resolver()
+    resolver._note_confirmed_sighting("device-1", _keyed(7, _KEY_1), observed_at=_T)
+
+    sighting = resolver.last_confirmed_sighting("device-1")
+    assert sighting is not None
+    assert sighting.key_fingerprint == identity_key_fingerprint(_KEY_1)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["00" * 16, b"\x00" * 15, b"\x00" * 17, bytearray(16), 7, None],
+    ids=["hex_str", "short", "long", "bytearray", "int", "none"],
+)
+def test_malformed_key_fingerprint_is_not_recorded(value: object) -> None:
+    """The sighting is kept, its binding is not: the finder then sends nothing."""
+    resolver = _build_resolver()
+    meta = _keyed(7, None)
+    meta["key_fingerprint"] = value
+    resolver._note_confirmed_sighting("device-1", meta, observed_at=_T)
+
+    sighting = resolver.last_confirmed_sighting("device-1")
+    assert sighting is not None
+    assert sighting.key_fingerprint is None
+
+
+@pytest.mark.parametrize(
+    ("new_key", "delay", "window"),
+    [(_KEY_2, 50, 7), (_KEY_2, -50, 7), (_KEY_1, 50, 9)],
+    ids=["new_key", "new_key_wall_stepped_back", "same_key_keeps_newer"],
+)
+def test_a_sighting_under_a_new_key_replaces_one_with_a_higher_counter(
+    new_key: bytes, delay: int, window: int
+) -> None:
+    """After re-pairing the counter starts anew and is not comparable.
+
+    Under the same key a smaller counter within one period is a late
+    advertisement and is dropped; under another key it replaces, whatever
+    the counters and the wall clock say.
+    """
+    resolver = _build_resolver()
+    resolver._note_confirmed_sighting("device-1", _keyed(9, _KEY_1), observed_at=_T)
+    resolver._note_confirmed_sighting(
+        "device-1", _keyed(7, new_key), observed_at=_T + delay
+    )
+
+    sighting = resolver.last_confirmed_sighting("device-1")
+    assert sighting is not None
+    assert sighting.window_counter == window * _PERIOD
+    assert sighting.key_fingerprint == identity_key_fingerprint(
+        _KEY_2 if window == 7 else _KEY_1
     )
 
 

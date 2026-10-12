@@ -637,8 +637,18 @@ _UPLOAD_VARIANT_FOR_LOCK = {
 }
 
 
-def _sighting(variant: str, *, age: int = 10, uwt_mode: bool | None = None) -> Any:
-    from custom_components.googlefindmy.eid_resolver import ConfirmedSighting
+def _sighting(
+    variant: str,
+    *,
+    age: int = 10,
+    uwt_mode: bool | None = None,
+    identity_key: bytes | None = _LOCK_EIK,
+) -> Any:
+    """A sighting matched under ``identity_key`` (``None``: no fingerprint)."""
+    from custom_components.googlefindmy.eid_resolver import (
+        ConfirmedSighting,
+        identity_key_fingerprint,
+    )
     from custom_components.googlefindmy.FMDNCrypto.eid_generator import EidVariant
 
     return ConfirmedSighting(
@@ -646,6 +656,9 @@ def _sighting(variant: str, *, age: int = 10, uwt_mode: bool | None = None) -> A
         window_counter=_SIGHTING_COUNTER,
         observed_at=_LOCK_NOW - age,
         uwt_mode=uwt_mode,
+        key_fingerprint=None
+        if identity_key is None
+        else identity_key_fingerprint(identity_key),
     )
 
 
@@ -1143,3 +1156,69 @@ async def test_sighting_after_the_key_change_reports_again() -> None:
 
     assert upload is not None
     assert upload.eid == advertised
+
+
+@pytest.mark.asyncio
+async def test_sighting_without_a_key_fingerprint_reports_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A sighting whose key is unknown cannot be bound, so nothing is sent."""
+    caplog.set_level(logging.DEBUG)
+
+    upload = await _upload_for(_sighting("spec_p256_x32_be", identity_key=None))
+
+    assert upload is None
+    assert any(
+        "not matched under the current identity key" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.DEBUG
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_key_fingerprint_matches_for_hex_and_bytes() -> None:
+    """Both sides normalize the key alike, so its spellings agree."""
+    from custom_components.googlefindmy.eid_resolver import identity_key_fingerprint
+
+    fingerprint = identity_key_fingerprint(_LOCK_EIK)
+
+    assert fingerprint is not None
+    assert len(fingerprint) == 16
+    assert identity_key_fingerprint(_LOCK_EIK.hex()) == fingerprint
+    assert identity_key_fingerprint(bytearray(_LOCK_EIK)) == fingerprint
+    assert identity_key_fingerprint(_OTHER_EIK) != fingerprint
+
+
+@pytest.mark.parametrize(
+    "key", ["not hex", None, 123, object()], ids=["bad_hex", "none", "int", "object"]
+)
+def test_key_fingerprint_rejects_unparseable_keys(key: object) -> None:
+    from custom_components.googlefindmy.eid_resolver import identity_key_fingerprint
+
+    assert identity_key_fingerprint(key) is None
+
+
+def test_key_fingerprint_is_not_the_own_report_key() -> None:
+    """SHA-256 of the key decrypts the device's own reports; never derive it.
+
+    The fingerprint is no SHA-256 of the key, no prefix of one, and differs
+    from an unpersonalized BLAKE2b of the key.
+    """
+    import hashlib
+
+    from custom_components.googlefindmy.eid_resolver import identity_key_fingerprint
+
+    fingerprint = identity_key_fingerprint(_LOCK_EIK)
+    own_report_key = hashlib.sha256(_LOCK_EIK).digest()
+
+    assert fingerprint is not None
+    assert not own_report_key.startswith(fingerprint)
+    assert fingerprint != hashlib.blake2b(_LOCK_EIK, digest_size=16).digest()
+
+
+def test_confirmed_sighting_repr_hides_the_key_fingerprint() -> None:
+    sighting = _sighting("spec_p256_x32_be")
+
+    assert sighting.key_fingerprint is not None
+    assert "key_fingerprint" not in repr(sighting)
+    assert sighting.key_fingerprint.hex() not in repr(sighting)
