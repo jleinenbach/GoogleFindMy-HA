@@ -904,6 +904,11 @@ class CacheBuilder:
             }
             if flags_xor_mask is not None:
                 meta["flags_xor_mask"] = flags_xor_mask
+            # Shared devices: the metadata of an EID comes from its best match
+            # only, so it carries that device's fingerprint. Equal EIDs come
+            # from equal identity keys (the EID is derived from the key), so
+            # the fingerprint holds for every device sharing it; were that
+            # wrong, the finder would report nothing rather than a wrong EID.
             if key_fingerprint is not None:
                 meta["key_fingerprint"] = key_fingerprint
             self.metadata[eid_bytes] = meta
