@@ -308,8 +308,17 @@ A late advertisement of an older window does not replace a newer window seen
 at most one period earlier. If the older window arrives with a wall time earlier
 than the newer sighting (the wall clock stepped back), the recorded sighting is
 dropped, because such a late window cannot be told apart from a device that
-restarted its counter; nothing is reported until the next match. Matches of
-the heuristic phone path record no sighting. The method is not part of
+restarted its counter; nothing is reported until the next match.
+Each sighting is bound to the identity key it was matched under:
+`key_fingerprint` holds a 16-byte BLAKE2b digest of the normalized key bytes
+(`identity_key_fingerprint()`, personalized; never the key itself and never its
+SHA-256, which is the key of the device's own reports). The finder sends
+nothing when the identity key it holds now has another fingerprint, or when
+the sighting has none: the window counter belongs to the key it was matched
+under, and an EID computed from another key with that counter was never
+advertised. A sighting under another key replaces the recorded one whatever
+its counter, because the counter starts anew after the device is paired again.
+Matches of the heuristic phone path record no sighting. The method is not part of
 `GoogleFindMyEIDResolverProtocol`.
 
 The resolver also records both forward and reversed advertisements so scanners do not need to normalize byte order.
