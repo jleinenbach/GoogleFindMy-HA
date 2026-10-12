@@ -833,7 +833,7 @@ class CacheBuilder:
     lookup: dict[bytes, list[EIDMatch]] = field(default_factory=dict)
     metadata: dict[bytes, dict[str, Any]] = field(default_factory=dict)
 
-    def register_eid(  # noqa: PLR0913
+    def register_eid(  # noqa: PLR0912, PLR0913
         self,
         eid_bytes: bytes,
         *,
@@ -842,6 +842,7 @@ class CacheBuilder:
         window: WindowCandidate,
         advertisement_reversed: bool,
         flags_xor_mask: int | None = None,
+        key_fingerprint: bytes | None = None,
     ) -> None:
         """Register an EID and metadata, supporting multiple matches per EID.
 
@@ -903,6 +904,8 @@ class CacheBuilder:
             }
             if flags_xor_mask is not None:
                 meta["flags_xor_mask"] = flags_xor_mask
+            if key_fingerprint is not None:
+                meta["key_fingerprint"] = key_fingerprint
             self.metadata[eid_bytes] = meta
         elif existing_metadata is not None and existing_bases is not None:
             existing_metadata["timestamp_bases"] = existing_bases
@@ -994,6 +997,33 @@ def _normalize_encrypted_blob(value: object) -> bytes | None:
     return None
 
 
+_KEY_FINGERPRINT_SIZE = 16
+_KEY_FINGERPRINT_PERSON = b"gfmy-finder-eik"
+
+
+def identity_key_fingerprint(key: object) -> bytes | None:
+    """Return a short one-way fingerprint of an identity key, or ``None``.
+
+    The finder may report a sighting only under the identity key the sighting
+    was matched under. The resolver records this fingerprint with each
+    sighting and the finder compares it with the fingerprint of the key it
+    holds now, so the sighting never stores a second copy of the key.
+
+    The key is normalized as for the lookup (bytes or a hex string), so both
+    sides derive the same value from the same key. BLAKE2b with a
+    personalization string is used rather than SHA-256: SHA-256 of the
+    identity key is the AES key of the device's own location reports, so it
+    must not be kept anywhere else. The personalization separates this use
+    from any other hash of the key.
+    """
+    key_bytes = _normalize_encrypted_blob(key)
+    if key_bytes is None:
+        return None
+    return hashlib.blake2b(
+        key_bytes, digest_size=_KEY_FINGERPRINT_SIZE, person=_KEY_FINGERPRINT_PERSON
+    ).digest()
+
+
 class UwtSource(StrEnum):
     """Where the unwanted-tracking protection mode of a sighting came from."""
 
@@ -1063,6 +1093,12 @@ class ConfirmedSighting:
     ``uwt_mode`` is the unwanted-tracking protection mode the advertisement
     showed, ``None`` when it showed none that can be trusted; ``uwt_source``
     says where it came from (see ``_effective_uwt_mode``).
+
+    ``key_fingerprint`` binds the sighting to the identity key it was matched
+    under (``identity_key_fingerprint``). The window counter belongs to that
+    key: an EID computed from another key with this counter was never
+    advertised. ``None`` means the binding is unknown, and the finder then
+    reports nothing.
     """
 
     variant: EidVariant
@@ -1070,6 +1106,7 @@ class ConfirmedSighting:
     observed_at: int
     uwt_mode: bool | None = None
     uwt_source: UwtSource = UwtSource.UNKNOWN
+    key_fingerprint: bytes | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -2319,6 +2356,7 @@ class GoogleFindMyEIDResolver:
         try:
             # Pass two: generate and register.
             for work_item, specs in planned:
+                fingerprint = identity_key_fingerprint(work_item.key_bytes)
                 for variant_spec in specs:
                     xor_mask: int | None = None
                     try:
@@ -2349,6 +2387,7 @@ class GoogleFindMyEIDResolver:
                             window=generated.window,
                             advertisement_reversed=generated.is_reversed,
                             flags_xor_mask=xor_mask,
+                            key_fingerprint=fingerprint,
                         )
         finally:
             # Shrink even when pass two raised, so a failed build does not
@@ -3100,7 +3139,10 @@ class GoogleFindMyEIDResolver:
         records the window the device shows. A step back smaller than the time
         since the previous sighting leaves a positive gap and is not detected.
         The same counter replaces: the sighting is newer on the monotonic
-        clock, also after such a step.
+        clock, also after such a step. A sighting matched under another
+        identity key (by ``key_fingerprint``) always replaces, before any of
+        these comparisons: its counter is not comparable with the previous
+        one, and after the device is paired again it starts anew.
 
         Every sighting carries only the protection mode it showed itself,
         also within the same window: nothing is carried over from the
@@ -3129,8 +3171,19 @@ class GoogleFindMyEIDResolver:
         except ValueError:
             return
         window_counter = window_ts - window_ts % ROTATION_PERIOD
+        raw_fingerprint = metadata.get("key_fingerprint")
+        key_fingerprint = (
+            raw_fingerprint
+            if isinstance(raw_fingerprint, bytes)
+            and len(raw_fingerprint) == _KEY_FINGERPRINT_SIZE
+            else None
+        )
         previous = self._confirmed_sightings.get(device_id)
-        if previous is not None and window_counter < previous.window_counter:
+        if (
+            previous is not None
+            and previous.key_fingerprint == key_fingerprint
+            and window_counter < previous.window_counter
+        ):
             wall_gap = observed_at - previous.observed_at
             if wall_gap < 0:
                 del self._confirmed_sightings[device_id]
@@ -3143,6 +3196,7 @@ class GoogleFindMyEIDResolver:
             observed_at=observed_at,
             uwt_mode=uwt_mode,
             uwt_source=uwt_source,
+            key_fingerprint=key_fingerprint,
         )
 
     def _sighting_is_older_than_the_lock(
