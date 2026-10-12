@@ -376,6 +376,10 @@ class TestUWTModeSensorDocumentationMatchesSpec:
     the specifications in their own words: the Find Hub Network Accessory
     Specification maps its unwanted tracking protection mode onto the DULT
     separated state, and ``T_(SEPARATED_UT_TIMEOUT)`` is a normative DULT value.
+    A third revision (2026-10-11) replaced the autonomous transition with what
+    the Find Hub specification says about the mode itself: the service relays
+    the activation (Data ID ``0x07``) through the network, and only a holder of
+    the identity key can deactivate it (``0x08``).
 
     A figure guard alone pinned the second error in place: it forbade the number
     as such, and the number is correct. So the guard moved from the *number* to
@@ -422,12 +426,18 @@ class TestUWTModeSensorDocumentationMatchesSpec:
     #: Per property 2 the guarded docstrings do not restate either withdrawn
     #: claim, which is what lets these patterns stay broad without an exception
     #: for the paragraph that mentions the history.
+    #:
+    #: Two patterns were retired on 2026-10-11, ``command[-\s]driven`` and
+    #: ``is entered and left by command``: they now describe the specified
+    #: model, in which the service activates the mode with Data ID ``0x07`` and a
+    #: key holder deactivates it with ``0x08``. Exclusivity stays forbidden
+    #: (``only by command``), because other vendors' firmware is not public, and
+    #: so does ``not by elapsed time``, because Google's server criteria are not
+    #: published and may well include time.
     WITHDRAWN_CLAIM_PATTERNS = tuple(
         pattern
         for claim in (
             r"not by elapsed time",
-            r"command[-\s]driven",
-            r"is\s+entered\s+and\s+left\s+by\s+command",
             r"only\s+(?:entered|set|activated)\s+by\s+command",
             r"only\s+by\s+command",
             r"no\s+such\s+window\s+exists",
@@ -447,18 +457,24 @@ class TestUWTModeSensorDocumentationMatchesSpec:
         """Return *doc* lowercased with all whitespace runs collapsed."""
         return " ".join(doc.split()).lower()
 
-    def test_docstring_does_not_reassert_the_withdrawn_command_only_claim(
+    def test_docstring_does_not_reassert_a_withdrawn_mode_claim(
         self,
     ) -> None:
-        """The mode is not command-only, and the docstrings must not say it is.
+        """The docstrings must not reassert a withdrawn claim about the mode.
 
-        Case (a) in ``tests/AGENTS.md``, corrective: the withdrawn claim shipped
+        Withdrawn are: that the mode is entered only by command (exclusivity is
+        not specified, and other vendors' firmware is not public), that it is
+        not entered by elapsed time (Google's server criteria are not
+        published), that the bit turns on after a separation window, and that
+        the mode is not the DULT separated state.
+
+        Case (a) in ``tests/AGENTS.md``, corrective: the withdrawn claims shipped
         and produced misdirected automations (BSkando#210).
 
         Retirement condition: the DULT mapping has survived a release cycle
         unchanged, or BSkando#210 has closed. Either makes this a historical
-        note rather than a live correction, and the positive guard below is
-        then the only one still earning its place.
+        note rather than a live correction, and the positive guards below are
+        then the only ones still earning their place.
         """
         docs = {
             "class": inspect.getdoc(GoogleFindMyUWTModeSensor) or "",
@@ -473,9 +489,10 @@ class TestUWTModeSensorDocumentationMatchesSpec:
                 assert match is None, (
                     f"{name} docstring reasserts a withdrawn claim "
                     f"({pattern!r} matched {match.group(0)!r}). The FMDN mode "
-                    "maps onto the DULT separated state, which a device enters "
-                    "autonomously after 30 minutes of separation, and the 8-24 "
-                    "hour figure gates the motion detector rather than this bit."
+                    "maps onto the DULT separated state; the service turns it "
+                    "on (0x07, relayed through the network), a key holder "
+                    "turns it off (0x08), and the 8-24 hour figure gates the "
+                    "motion detector rather than this bit."
                 )
 
     def test_docstring_names_the_dult_mapping_and_its_timer(self) -> None:
@@ -503,6 +520,52 @@ class TestUWTModeSensorDocumentationMatchesSpec:
                 f"class docstring no longer names {token!r}; the DULT mapping "
                 "that replaced the command-only claim is not discoverable."
             )
+
+    def test_docstring_names_service_activation_and_key_holder_deactivation(
+        self,
+    ) -> None:
+        """Who turns the mode on and off must stay stated in the class docstring.
+
+        The Find Hub specification says the service "can relay an unwanted
+        tracking protection mode activation request through the Find Hub
+        network", and deactivation is authenticated with a key derived from the
+        identity key. A docstring that only says "separated state" lets the
+        reader assume a timer inside the tracker, which is the error behind
+        BSkando#210. Required are both Data IDs, the relay, and the statement
+        that Google's server criteria are not published.
+
+        Retirement condition: the service-activation model has survived a
+        release cycle unchanged, or BSkando#210 has closed.
+        """
+        # Normalised like the negative guard, so that rewrapping the paragraph
+        # cannot split "not published" across a line and fail a correct text.
+        class_doc = self._normalise(inspect.getdoc(GoogleFindMyUWTModeSensor) or "")
+
+        for token in ("0x07", "0x08", "relay", "not published"):
+            assert token in class_doc, (
+                f"class docstring no longer names {token!r}; who switches the "
+                "mode on (the service, 0x07, relayed) and off (a key holder, "
+                "0x08) is not discoverable."
+            )
+
+    def test_withdrawn_patterns_still_catch_exclusive_and_timer_wording(
+        self,
+    ) -> None:
+        """Retiring two patterns must not open the exclusive or timer claims.
+
+        A control for the negative guard, not a docstring guard of its own: it
+        lives and retires with that guard. The two sentences are the variants
+        the plan review used as a counter-check on 2026-10-11.
+        """
+        for sentence in (
+            "The mode is only set by command.",
+            "The mode turns on when the tag has been separated for a while.",
+        ):
+            normalised = self._normalise(sentence)
+            assert any(
+                re.search(pattern, normalised)
+                for pattern in self.WITHDRAWN_CLAIM_PATTERNS
+            ), f"no withdrawn-claim pattern catches {sentence!r}"
 
     def test_separation_figure_is_attributed_to_the_motion_detector(self) -> None:
         """If the 8-24 hour figure appears, it must gate the chime, not the bit.

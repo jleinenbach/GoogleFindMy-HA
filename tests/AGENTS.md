@@ -1162,6 +1162,20 @@ corrected attribution in the same paragraph as the figure. Read that as the rule
 for new members: name what must not be said and what must be said instead, and
 never make a guard out of a term that a correct sentence would also need.
 
+**Service-activation model (correction of 2026-10-11).** The 2026-09-03 text
+described the mode as entered autonomously after 30 minutes of separation, with
+Data ID `0x07` / `0x08` as an additional path. The Find Hub specification says
+more about the mode itself: "The Find Hub service can relay an unwanted tracking
+protection mode activation request through the Find Hub network", and leaving
+the mode is authenticated with a key derived from the identity key, so in
+practice the owner's phone turns it off (an inference, not a specification
+statement). DULT's 30 minutes bound the separation criterion; Google's server
+criteria are not published. Two patterns of the negative guard described this
+model as an error and were retired (`command[-\s]driven`, `is entered and left
+by command`); exclusivity (`only by command`) and `not by elapsed time` stay
+forbidden. A new positive guard requires `0x07`, `0x08`, `relay` and `not
+published` in the class docstring. Nothing above this paragraph was deleted.
+
 Use this pattern in one of exactly two situations, and keep four properties:
 
 - **(a) Corrective.** A wrong docstring has already caused a real defect. This is

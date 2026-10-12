@@ -528,7 +528,7 @@ use case where the caller does NOT own the tracker.
 | CCCD Descriptor | `00002902-0000-1000-8000-00805F9B34FB` |
 | Byte Order | **Little endian** (opposite of FMDN Beacon Actions!) |
 | Authentication | **None** |
-| Availability | **Separated state only**; the accessory enters that state after roughly 30 minutes without an owner device and enables the unauthenticated motion-gated sound a further 8-24 hours later (DULT `T_(SEPARATED_UT_TIMEOUT)`, a randomised value from a uniform distribution: `draft-detecting-unwanted-location-trackers-01` sections 3.4.4 and 3.12.2.1, table 16; see `docs/TRIGGER_MECHANISMS.md` sections 4.1 and 8) |
+| Availability | **Separated state only**; with Find Hub the service turns the mode on (Data ID `0x07`, relayed through a phone in the network) and only a holder of the identity key turns it off (`0x08`); DULT's 30 minutes bound the separation criterion, and Google's server criteria are not published. The accessory enables the unauthenticated motion-gated sound 8-24 hours after the state begins (DULT `T_(SEPARATED_UT_TIMEOUT)`, a randomised value from a uniform distribution: `draft-detecting-unwanted-location-trackers-01` sections 3.4.4 and 3.12.2.1, table 16; see `docs/TRIGGER_MECHANISMS.md` sections 4.1 and 8) |
 
 ### DULT Opcodes (Little-Endian Wire Format)
 
@@ -596,9 +596,11 @@ Source: `seemoo-lab/AirGuard` — `GoogleFindMyNetwork.kt`
 account). In near-owner state, the tracker responds to DULT Sound_Start with
 `Invalid_command (0xFFFF)`.
 
-DULT only works when the tracker is in "separated state". It enters that state after
-roughly 30 minutes away from any device logged into the owner's Google account, and the
-unauthenticated motion-gated sound becomes available only a further 8-24 hours later.
+DULT only works when the tracker is in "separated state". With Find Hub the service puts
+the tracker into that state (Data ID `0x07`, relayed through a phone in the network), and
+only a holder of the identity key takes it out (`0x08`). DULT's 30 minutes bound the
+separation criterion; Google's server criteria are not published. The unauthenticated
+motion-gated sound becomes available only 8-24 hours after the state begins.
 This is the opposite of our use case.
 
 > **Provenance of both figures, corrected 2026-09-03:** they are normative DULT, not
@@ -621,6 +623,19 @@ This is the opposite of our use case.
 > What survives unchanged is the operational point: the 8-24 hours gate the autonomous
 > chime, not the flag bit, so the `uwt_mode` binary sensor must not be used as a
 > separation timer ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)).
+>
+> **Third revision, 2026-10-11: who switches the mode.** The text above calls `0x07` /
+> `0x08` an additional path next to an autonomous transition. The Find Hub specification
+> says more about the mode itself: "The Find Hub service can relay an unwanted tracking
+> protection mode activation request through the Find Hub network" (section "Unwanted
+> tracking prevention", retrieved 2026-10-11). Activation is authenticated with the
+> unwanted tracking protection key; deactivation additionally requires that "The hashed
+> ephemeral identity key matches the current ephemeral identity key". With Find Hub the
+> service therefore turns the mode on (`0x07`, relayed through a phone in the network),
+> and only a holder of the identity key can turn it off (`0x08`); in practice this is the
+> owner's phone (an inference, not specified). DULT's 30 minutes bound the separation
+> criterion; Google's server criteria are not published, and other vendors' firmware is
+> not public. Field data: `docs/UWT_FIELD_DATA.md`.
 
 **We must use FMDN Beacon Actions (authenticated ring)** because:
 1. We have the EIK → can derive the ring key
@@ -818,7 +833,7 @@ The ring key is currently only used during device registration
 | **Beacon Actions** | FMDN GATT characteristic (`FE2C1238`) for owner-authenticated commands (ring, UTP); ring authentication can be waived for the duration of UTP mode by control flag `0x01` at activation |
 | **DULT** | Detecting Unwanted Location Trackers — IETF specification for anti-stalking |
 | **ANOS** | Accessory Non-Owner Service — DULT GATT service (`15190001-12F4`) for unauthenticated commands |
-| **Separated State** | DULT accessory state, entered after roughly 30 minutes without an owner device and left on reunion (DULT sections 3.4.4 / 3.4.5); the unauthenticated DULT sound is enabled only after a further 8-24 hours (`T_(SEPARATED_UT_TIMEOUT)`, section 3.12.2.1 and table 16). Both figures are normative DULT. The Find Hub specification **maps** its unwanted tracking protection mode onto this state, so the `uwt_mode` binary sensor reports it; Data ID `0x07` / `0x08` are an additional GATT path in and out, not the only one. The 8-24 hours gate the motion-triggered chime, not the flag bit |
+| **Separated State** | DULT accessory state; DULT bounds the separation criterion at 30 minutes and ends the state on reunion (DULT sections 3.4.4 / 3.4.5). With Find Hub the service turns the mode on (`0x07`, relayed through a phone in the network) and only a holder of the identity key turns it off (`0x08`); Google's server criteria are not published; the unauthenticated DULT sound is enabled only after a further 8-24 hours (`T_(SEPARATED_UT_TIMEOUT)`, section 3.12.2.1 and table 16). Both figures are normative DULT. The Find Hub specification **maps** its unwanted tracking protection mode onto this state, so the `uwt_mode` binary sensor reports it. The 8-24 hours gate the motion-triggered chime, not the flag bit |
 | **GATT** | Generic Attribute Profile — BLE protocol for read/write operations |
 | **CCCD** | Client Characteristic Configuration Descriptor — enables BLE notifications/indications |
 | **ADM** | Android Device Management — Google auth token type |
