@@ -579,17 +579,18 @@ async def async_setup_entry(
                         entities.append(plus_code_entity)
 
                     # --- Location status sensor (always, alongside LastSeen) ---
-                    status_entity = GoogleFindMyLocationStatusSensor(
-                        coordinator,
-                        device,
-                        subentry_key=tracker_scope.subentry_key,
-                        subentry_identifier=tracker_identifier,
+                    # Built only here, right after LastSeen was added for this
+                    # device for the first time, and its unique_id is derived
+                    # from the same device id: a duplicate cannot reach this
+                    # point, so no unique-id check of its own.
+                    entities.append(
+                        GoogleFindMyLocationStatusSensor(
+                            coordinator,
+                            device,
+                            subentry_key=tracker_scope.subentry_key,
+                            subentry_identifier=tracker_identifier,
+                        )
                     )
-                    ls_uid = getattr(status_entity, "unique_id", None)
-                    if not isinstance(ls_uid, str) or ls_uid not in added_unique_ids:
-                        if isinstance(ls_uid, str):
-                            added_unique_ids.add(ls_uid)
-                        entities.append(status_entity)
 
                 # --- BLE Battery sensor (when resolver has data) ---
                 if dev_id not in known_battery_ids and resolver is not None:
@@ -1597,15 +1598,19 @@ class GoogleFindMyLocationStatusSensor(GoogleFindMyDeviceEntity, SensorEntity):
     attribute, which holds the value of the last observation so that a tick
     without a new fix writes nothing new on the tracker. The value is derived
     live on every coordinator tick from the coordinator display row
-    (``get_display_location_data_for_subentry``, the same row selection as the
-    tracker) and the shared ``classify_location_status``, so sensor and tracker
-    cannot classify differently:
+    (``get_display_location_data_for_subentry``) and the shared
+    ``classify_location_status``. The tracker uses the same function and the
+    same row selection (``select_display_row`` over the current row and the
+    last reliable fix); the two last-good caches differ only after the device
+    was hidden, because the tracker clears its own then and the coordinator
+    keeps its until the device is purged:
 
     - ``current``, ``aging`` or ``stale`` against the configured stale threshold;
     - ``None`` (HA state ``unknown``) when there is no row or no usable age.
 
-    HA writes a state only when the value changes, so an unchanged class across
-    ticks is a report, not a change (``force_update`` stays ``False``).
+    Every tick writes; HA records a change only when the value changes, so an
+    unchanged class across ticks is a report, not a change (``force_update``
+    stays ``False``).
     """
 
     _attr_has_entity_name = True

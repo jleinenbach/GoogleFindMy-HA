@@ -91,8 +91,8 @@ PARALLEL_UPDATES = 0
 
 # Attributes that age with the clock rather than with a new fix. The tracker
 # publishes them as of the last observation (see
-# GoogleFindMyDeviceTracker._hold_observation_attributes); the live values
-# are on sensor.*_last_seen.
+# GoogleFindMyDeviceTracker._hold_observation_attributes); the live age is
+# on sensor.*_last_seen, the live status on sensor.*_location_status.
 _HELD_ATTRIBUTES: tuple[str, ...] = ("location_age", "location_status")
 
 # Wall-clock grace before a fresh entity addition is judged against the entity
@@ -1600,8 +1600,9 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         a coordinator tick writes identical attributes and Core only reports it
         (see ``force_update``). A new fix, a stale transition (it withholds the
         coordinates) or a change of availability changes the signature and
-        publishes fresh values. The live age and status belong to
-        ``sensor.*_last_seen``; ``attributes`` is updated in place.
+        publishes fresh values. The live age belongs to ``sensor.*_last_seen``,
+        the live status to ``sensor.*_location_status``; ``attributes`` is
+        updated in place.
         """
         signature = self._state_signature()
         if signature != self._observation_sig:

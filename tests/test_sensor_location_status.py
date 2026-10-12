@@ -132,16 +132,14 @@ def _coordinator_class() -> type[Any]:
     return _Coordinator
 
 
-class _Entry:
-    def __init__(self, coordinator: Any) -> None:
-        self.runtime_data = coordinator
-        self.entry_id = "entry-status"
-        self.data: dict[str, Any] = {}
-        self.options: dict[str, Any] = {}
-        self._unsub: list[Callable[[], None]] = []
+def _entry(runtime_data: Any, *, entry_id: str = "entry-status") -> Any:
+    """Platform config entry; the setup registers unload callbacks on it."""
 
-    def async_on_unload(self, callback: Callable[[], None]) -> None:
-        self._unsub.append(callback)
+    return make_config_entry(
+        entry_id=entry_id,
+        runtime_data=runtime_data,
+        async_on_unload=lambda _callback: None,
+    )
 
 
 async def _setup_sensors(
@@ -159,7 +157,7 @@ async def _setup_sensors(
             entity.entity_id = f"sensor.{entity.unique_id}"
             added.append(entity)
 
-    await sensor.async_setup_entry(SimpleNamespace(), _Entry(coordinator), _capture)
+    await sensor.async_setup_entry(SimpleNamespace(), _entry(coordinator), _capture)
     return coordinator, added
 
 
@@ -407,16 +405,78 @@ async def test_device_info_comes_from_the_shared_helper(
     assert vars(status.device_info) == vars(plus_code.device_info)
 
 
+@pytest.mark.asyncio
+async def test_sensor_unavailable_while_the_coordinator_is(
+    freezer: FrozenDateTimeFactory,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A failed coordinator update makes the sensor unavailable first."""
+
+    del deterministic_config_subentry_id
+    coordinator, entities = await _setup_sensors([{"id": "dev-1", "name": "Pixel"}])
+    coordinator.ingest("dev-1", _row(time.time()))
+    (entity,) = _status_sensors(entities)
+    coordinator.last_update_success = True
+    assert entity.available is True
+
+    coordinator.last_update_success = False
+    assert entity.available is False
+
+
+@pytest.mark.asyncio
+async def test_tick_without_a_device_name_still_writes(
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """No label to forward: no registry sync, but the state is still written."""
+
+    sensor = importlib.import_module("custom_components.googlefindmy.sensor")
+    coordinator = _coordinator_class()([{"id": "dev-1"}], _T)
+    coordinator.ingest("dev-1", _row(time.time()))
+    entity = sensor.GoogleFindMyLocationStatusSensor(
+        coordinator,
+        {"id": "dev-1"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=f"{TRACKER_SUBENTRY_KEY}-identifier",
+    )
+    entity.entity_id = f"sensor.{entity.unique_id}"
+    writes: list[None] = []
+    renames: list[str] = []
+    entity.async_write_ha_state = lambda: writes.append(None)
+    entity.maybe_update_device_registry_name = renames.append
+
+    entity._handle_coordinator_update()
+
+    assert writes == [None]
+    assert renames == []
+    assert entity.native_value == "current"
+
+
 # ---------------------------------------------------------------------------
 # Recovery
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_recovery_rebuilds_the_status_sensor(
+@pytest.mark.parametrize(
+    ("lost", "expected_types"),
+    [
+        ("location_status", ["GoogleFindMyLocationStatusSensor"]),
+        ("last_seen", ["GoogleFindMyLastSeenSensor"]),
+    ],
+)
+async def test_recovery_rebuilds_exactly_the_lost_sensor(
+    monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory: Any,
+    lost: str,
+    expected_types: list[str],
 ) -> None:
-    """A lost registry entry is expected again and rebuilt by the factory."""
+    """Remove one registry entry, run the recovery, find exactly that entity.
+
+    The registry holds every expected tracker sensor except ``lost``; the
+    recovery manager compares it with the expected unique IDs and adds what is
+    missing through the sensor platform's factory. Losing the status sensor
+    rebuilds it; losing LastSeen rebuilds LastSeen and not the status sensor.
+    """
 
     import asyncio
 
@@ -424,6 +484,7 @@ async def test_recovery_rebuilds_the_status_sensor(
     from homeassistant.const import Platform
     from homeassistant.core import HomeAssistant
 
+    import custom_components.googlefindmy as integration
     from custom_components.googlefindmy import EntityRecoveryManager, sensor
 
     loop = asyncio.get_running_loop()
@@ -442,8 +503,7 @@ async def test_recovery_rebuilds_the_status_sensor(
     )(*args)
     hass.verify_event_loop_thread = lambda *_args, **_kwargs: None
 
-    entry = _Entry(None)
-    entry.entry_id = "entry-recovery"
+    entry = _entry(None, entry_id="entry-recovery")
     tracker_subentry = ConfigSubentry(
         data={"group_key": "tracker", "features": ("sensor",)},
         subentry_type="tracker",
@@ -460,12 +520,14 @@ async def test_recovery_rebuilds_the_status_sensor(
         coordinator=coordinator, entity_recovery_manager=manager
     )
 
+    added: list[Any] = []
     pending: list[asyncio.Task[Any]] = []
 
     def _add(entities: Iterable[Any], **_kwargs: Any) -> None:
         for entity in entities:
             entity.hass = hass
             entity.entity_id = f"sensor.{entity.unique_id}"
+            added.append(entity)
             pending.append(loop.create_task(entity.async_added_to_hass()))
 
     await sensor.async_setup_entry(hass, entry, _add)
@@ -473,14 +535,34 @@ async def test_recovery_rebuilds_the_status_sensor(
 
     registration = manager._platforms.get(str(Platform.SENSOR))
     assert registration is not None
-    status_uid = f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_dev-1_location_status"
-    assert status_uid in registration.expected_unique_ids()
+    prefix = f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_dev-1_"
+    expected = registration.expected_unique_ids()
+    assert f"{prefix}location_status" in expected
 
-    rebuilt = registration.entity_factory({status_uid})
-    assert [type(e) for e in rebuilt] == [sensor.GoogleFindMyLocationStatusSensor]
-    assert rebuilt[0].unique_id == status_uid
-    # Asking for nothing that is missing builds nothing.
-    assert registration.entity_factory(set()) == []
+    registry_entries = [
+        SimpleNamespace(domain="sensor", platform=DOMAIN, unique_id=uid)
+        for uid in sorted(expected)
+        if uid != f"{prefix}{lost}"
+    ]
+    monkeypatch.setattr(
+        integration,
+        "_iter_config_entry_entities",
+        lambda _registry, _entry_id: registry_entries,
+    )
+    added.clear()
+    pending.clear()
+
+    await manager.async_recover_missing_entities()
+    await asyncio.gather(*pending)
+
+    assert [type(e).__name__ for e in added] == expected_types
+    assert [e.unique_id for e in added] == [f"{prefix}{lost}"]
+    # The manager drops anything that is not missing; the factory itself must
+    # not build more either.
+    assert [
+        type(e).__name__ for e in registration.entity_factory({f"{prefix}{lost}"})
+    ] == expected_types
+    assert all(isinstance(e, sensor.SensorEntity) for e in added)
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +604,7 @@ async def test_sensor_same_status_as_tracker(
 
     coordinator = _coordinator_class()([{"id": "dev-1", "name": "Pixel"}], _T)
     coordinator.last_update_success = True
-    entry = _Entry(coordinator)
+    entry = _entry(coordinator)
 
     sensors: list[Any] = []
     trackers: list[Any] = []

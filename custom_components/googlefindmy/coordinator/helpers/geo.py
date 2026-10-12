@@ -518,7 +518,7 @@ def classify_location_status(age: float | None, stale_threshold: float) -> str:
     Single source of truth for the entity-facing location status: the
     device_tracker ``location_status`` attribute, the Last Location tracker
     (which renders ``stale`` as ``last_known``) and the ``location_status``
-    sensor all call this, so they cannot drift apart. Returns ``unknown`` when
+    sensor all call this, so the classification itself cannot drift. Returns ``unknown`` when
     the age is unknown, ``stale`` past ``stale_threshold``, ``aging`` past half
     of it and ``current`` otherwise; both bounds are exclusive.
 

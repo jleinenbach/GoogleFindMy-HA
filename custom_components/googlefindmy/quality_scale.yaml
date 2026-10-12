@@ -228,6 +228,9 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/button.py:GoogleFindMyButtonEntity._attr_entity_registry_enabled_default"
+        # Pins a deliberate exception: location_status is enabled by default
+        # because it replaces a visible attribute and changes at most three
+        # times per fix cycle (not noisy).
         - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
     - id: entity-translations
       status: done
