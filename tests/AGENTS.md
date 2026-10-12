@@ -1166,15 +1166,26 @@ never make a guard out of a term that a correct sentence would also need.
 described the mode as entered autonomously after 30 minutes of separation, with
 Data ID `0x07` / `0x08` as an additional path. The Find Hub specification says
 more about the mode itself: "The Find Hub service can relay an unwanted tracking
-protection mode activation request through the Find Hub network", and leaving
-the mode is authenticated with a key derived from the identity key, so in
-practice the owner's phone turns it off (an inference, not a specification
+protection mode activation request through the Find Hub network". Turning the
+mode on and off both use the unwanted tracking protection key; only turning it
+off additionally requires that the hashed ephemeral identity key matches the
+current one, so in practice the owner's phone turns it off (an inference, not a specification
 statement). DULT's 30 minutes bound the separation criterion; Google's server
 criteria are not published. Two patterns of the negative guard described this
 model as an error and were retired (`command[-\s]driven`, `is entered and left
 by command`); exclusivity (`only by command`) and `not by elapsed time` stay
 forbidden. A new positive guard requires `0x07`, `0x08`, `relay` and `not
-published` in the class docstring. Nothing above this paragraph was deleted.
+published` in the class docstring. The retirement left the withdrawn
+autonomous transition without a pattern, so on 2026-10-12 the negative guard
+gained five patterns, each scoped to a UWT subject whose list gained `that
+state`, `this state`, `0x07` and `0x08`: `autonomously, not by
+command`; `autonomously`, `on its own` or `by itself` next to a
+separation time; `entered after 30 minutes`; `additional ... path`; and `no
+command sent by anyone`. The words alone are not forbidden, because correct
+sentences need them (the specification has the Seeker write `0x07`). The
+control test gained one sentence per new pattern, each caught by that pattern
+alone, and a second control lists correct sentences that must stay unmatched. Nothing above this
+paragraph was deleted.
 
 Use this pattern in one of exactly two situations, and keep four properties:
 

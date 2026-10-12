@@ -659,9 +659,13 @@ class TestUpdateBLEBattery:
     # ---- Lenient 0x41 + legacy-length variants (Codex review on PR #169) ----
     # The Find Hub specification ties 0x41 to the unwanted tracking protection
     # mode and 0x40 to normal operation, not to the EID length (see
-    # docs/FMDN.md and docs/UWT_FIELD_DATA.md), so a 0x41 frame with a 20-byte
-    # legacy EID is expected. _extract_candidates already tolerates 0x41 with a
-    # 20-byte legacy EID in the raw-header path (Z. 2678-2688). The lenient
+    # docs/FMDN.md and docs/UWT_FIELD_DATA.md), so a 20-byte EID in a 0x41 frame
+    # is a valid length. Two fixtures below decode the mode bit as clear in a
+    # 0x41 frame: that is the conflict between frame type and bit, kept here
+    # because these tests cover the battery decode only (the upload decision
+    # for the conflict is tested in tests/test_finder_uwt_state.py).
+    # _extract_candidates already tolerates 0x41 with a 20-byte legacy EID in
+    # both framed geometries (via _framed_eid_lengths). The lenient
     # branches in _update_ble_battery mirror that tolerance for the flags-byte
     # lookup. Range is intentionally narrow (legacy_min..legacy_min+1) to
     # match the existing tolerance and limit false-positive decodes.

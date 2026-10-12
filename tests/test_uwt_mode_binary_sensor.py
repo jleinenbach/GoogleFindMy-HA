@@ -343,9 +343,17 @@ class TestUWTModeSensorCoordinatorUpdate:
 #: when one of these stands in the same clause, so that a true sentence about a
 #: different mechanism -- the "Skip ringing authentication" control flag, say --
 #: does not trip a guard written for the mode semantics.
+#:
+#: ``that state``/``this state`` and the two Data IDs were added on
+#: 2026-10-12: the withdrawn autonomous transition was written as "DULT
+#: defines that state autonomously" and "Data ID 0x07 ... and 0x08 ... are an
+#: additional, seeker-driven path", and neither sentence names any of the
+#: older subjects. A bare ``state`` is deliberately not a subject: "the entity
+#: state" is a Home Assistant term with nothing to do with the mode.
 _UWT_SUBJECT = (
     r"(?:uwt|unwanted tracking protection mode|\bmode\b|this bit|the bit"
-    r"|this sensor|the sensor|separated state|separation window)"
+    r"|this sensor|the sensor|separated state|separation window"
+    r"|(?:that|this)\s+state|0x07|0x08)"
 )
 
 #: Gap between subject and claim. Bounded, and it may not cross a sentence or
@@ -448,6 +456,19 @@ class TestUWTModeSensorDocumentationMatchesSpec:
             r"(?:set|reported)\s+after\s+(?:a|the)?\s*separation",
             r"chime\s+is\s+a\s+dult\s+platform\s+behaviour",
             r"is\s+not\s+the\s+(?:dult\s+)?separated\s+state",
+            # Added 2026-10-12: the autonomous transition withdrawn on
+            # 2026-10-11 had no pattern of its own after the retirement. Each
+            # is bound to the claim, not to a word: "on its own", "entered
+            # after" and "seeker-driven" also occur in correct sentences (the
+            # specification itself has the Seeker write 0x07), so they only
+            # fire next to "not by command" or a separation time.
+            r"autonomously,?\s+(?:and\s+)?not\s+by\s+command",
+            r"(?:autonomously|on\s+its\s+own|by\s+itself)\s+(?:\S+\s+){0,2}"
+            r"(?:after|once|when)\b[^.;:]{0,40}(?:minutes|separ(?:ated|ation))",
+            r"(?:enter(?:s|ed)?|turns\s+on|switch(?:es)?\s+on)\s+(?:\S+\s+){0,3}"
+            r"after\s+(?:30|thirty)\s+minutes",
+            r"additional[,\s]+(?:\S+\s+){0,2}path",
+            r"no\s+command\s+sent\s+by\s+anyone",
         )
         for pattern in _scoped_to_uwt_subject(claim)
     )
@@ -489,7 +510,7 @@ class TestUWTModeSensorDocumentationMatchesSpec:
                 assert match is None, (
                     f"{name} docstring reasserts a withdrawn claim "
                     f"({pattern!r} matched {match.group(0)!r}). The FMDN mode "
-                    "maps onto the DULT separated state; the service turns it "
+                    "maps onto the DULT separated state; the service can turn it "
                     "on (0x07, relayed through the network), a key holder "
                     "turns it off (0x08), and the 8-24 hour figure gates the "
                     "motion detector rather than this bit."
@@ -528,8 +549,9 @@ class TestUWTModeSensorDocumentationMatchesSpec:
 
         The Find Hub specification says the service "can relay an unwanted
         tracking protection mode activation request through the Find Hub
-        network", and deactivation is authenticated with a key derived from the
-        identity key. A docstring that only says "separated state" lets the
+        network". Both directions are authenticated with the unwanted tracking
+        protection key; only deactivation additionally requires that the hashed
+        ephemeral identity key matches the current one. A docstring that only says "separated state" lets the
         reader assume a timer inside the tracker, which is the error behind
         BSkando#210. Required are both Data IDs, the relay, and the statement
         that Google's server criteria are not published.
@@ -554,18 +576,57 @@ class TestUWTModeSensorDocumentationMatchesSpec:
         """Retiring two patterns must not open the exclusive or timer claims.
 
         A control for the negative guard, not a docstring guard of its own: it
-        lives and retires with that guard. The two sentences are the variants
-        the plan review used as a counter-check on 2026-10-11.
+        lives and retires with that guard. The first two sentences are the
+        variants the plan review used as a counter-check on 2026-10-11. The
+        other five, added on 2026-10-12, are the withdrawn autonomous transition
+        and the "additional path" reading of 0x07/0x08, one sentence per
+        pattern added that day and each caught by that pattern alone, so that
+        deleting any one of them turns this test red.
         """
         for sentence in (
             "The mode is only set by command.",
             "The mode turns on when the tag has been separated for a while.",
+            "DULT defines that state autonomously, not by command.",
+            "The tracker goes into the mode on its own once it has been "
+            "separated for a while.",
+            "The mode is entered after 30 minutes of separation.",
+            "Data IDs 0x07 and 0x08 are an additional path into the mode.",
+            "The mode can appear and disappear with no command sent by anyone.",
         ):
             normalised = self._normalise(sentence)
             assert any(
                 re.search(pattern, normalised)
                 for pattern in self.WITHDRAWN_CLAIM_PATTERNS
             ), f"no withdrawn-claim pattern catches {sentence!r}"
+
+    def test_withdrawn_patterns_leave_correct_sentences_alone(self) -> None:
+        """The 2026-10-12 patterns must not fire on a correct sentence.
+
+        The other half of the control above, and bound to it: ``tests/AGENTS.md``
+        forbids a guard made of a term that a correct sentence also needs. Each
+        sentence here is true under the specification and reuses a word of a
+        withdrawn claim ("entered after", "on its own", "by itself",
+        "seeker-driven", "state").
+        """
+        for sentence in (
+            "The mode is entered after the Find Hub service relays a 0x07 "
+            "activation request.",
+            "The tracker enters the mode after it receives Data ID 0x07.",
+            "The bit on its own cannot tell how long a tag has been away from "
+            "its owner.",
+            "The bit by itself carries no duration.",
+            "This sensor by itself does not ring the tag.",
+            "Home Assistant restores the entity state by itself after a restart.",
+            "The Seeker writes Data ID 0x07, a seeker-driven request through the "
+            "Find Hub network.",
+        ):
+            normalised = self._normalise(sentence)
+            hits = [
+                match.group(0)
+                for pattern in self.WITHDRAWN_CLAIM_PATTERNS
+                if (match := re.search(pattern, normalised))
+            ]
+            assert not hits, f"{sentence!r} is correct but matched {hits!r}"
 
     def test_separation_figure_is_attributed_to_the_motion_detector(self) -> None:
         """If the 8-24 hour figure appears, it must gate the chime, not the bit.
@@ -616,9 +677,10 @@ class TestUWTModeSensorDocumentationMatchesSpec:
             in class_doc
         )
         assert "unwanted tracking protection mode" in is_on_doc
-        # Both Data IDs must stay named: they are the additional, seeker-driven
-        # GATT path into and out of the mode, and the "Skip ringing
-        # authentication" caveat below hangs off 0x07.
+        # Both Data IDs must stay named: 0x07 is how the Find Hub service can
+        # turn the mode on (relayed through the network), 0x08 how a holder of
+        # the identity key turns it off, and the "Skip ringing authentication"
+        # caveat below hangs off 0x07.
         assert "0x07" in class_doc
         assert "0x08" in class_doc
 

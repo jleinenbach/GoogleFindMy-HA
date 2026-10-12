@@ -941,14 +941,14 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
     devices "must also meet the requirements in the implementation version of
     the cross-platform specification for Detecting Unwanted Location Trackers
     (DULT)". Who switches the mode is stated in the Find Hub specification
-    itself (section "Unwanted tracking prevention", retrieved 2026-10-11): "The
+    itself (section "Unwanted tracking protection mode", retrieved 2026-10-11): "The
     Find Hub service can relay an unwanted tracking protection mode activation
     request through the Find Hub network". Activation (Data ID 0x07 on the
     Beacon Actions characteristic) is authenticated with the unwanted tracking
     protection key; deactivation (0x08) additionally requires that "The hashed
     ephemeral identity key matches the current ephemeral identity key". With
-    Find Hub the service therefore turns the mode on (0x07, relayed through a
-    phone in the network), and only a holder of the identity key can turn it
+    Find Hub the service can therefore turn the mode on (0x07, relayed through
+    the Find Hub network), and only a holder of the identity key can turn it
     off (0x08). In practice that holder is the owner's phone; that is an
     INFERENCE, not a specification statement. DULT's 30 minutes bound the
     separation criterion: the accessory "SHALL transition from near-owner mode
@@ -958,8 +958,9 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
     3.4.5). Google's server criteria for sending the activation are not
     published, and other vendors' firmware is not public. Two consequences for
     automations. The mode can appear with no command sent from this
-    installation, because the service decides. And the bit is no timer inside
-    the tracker: it cannot tell how long a tag has been away from its owner.
+    installation, because the Find Hub service can request it. And the bit
+    carries no duration: it cannot tell how long a tag has been away from its
+    owner.
     Field data from real installations: ``docs/UWT_FIELD_DATA.md``.
 
     Two 24-hour figures exist and they are not the same figure:
