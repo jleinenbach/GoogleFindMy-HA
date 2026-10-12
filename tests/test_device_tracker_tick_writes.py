@@ -43,6 +43,9 @@ class _CoordinatorStub:
         )
         self.row = row
         self.visible = True
+        # The coarse fix the accuracy gate discarded, as the coordinator's
+        # freshness accessor would return it; ``None`` = none or expired.
+        self.coarse: dict[str, Any] | None = None
 
     def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         return lambda: None
@@ -67,6 +70,12 @@ class _CoordinatorStub:
         self, key: str | None = None, feature: str | None = None
     ) -> list[dict[str, Any]]:
         return [self.row] if self.row else []
+
+    def get_fresh_coarse_fix(self, device_id: str) -> dict[str, Any] | None:
+        return dict(self.coarse) if self.coarse else None
+
+    def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
+        self.row = {"id": device_id, "device_id": device_id, "name": "Pixel", **data}
 
     def stable_subentry_identifier(
         self, *, key: str | None = None, feature: str | None = None
@@ -119,6 +128,30 @@ def _published(entity: Any) -> dict[str, Any]:
     return dict(entity._attr_extra_state_attributes)
 
 
+def _coarse(last_seen: float) -> dict[str, Any]:
+    """A coarse fix far from the published position, as the gate keeps it."""
+
+    return {
+        "latitude": 49.9,
+        "longitude": 10.9,
+        "accuracy": 1600.0,
+        "last_seen": last_seen,
+    }
+
+
+def _status_sensor(entity: Any) -> Any:
+    """The ``location_status`` sensor over the tracker's coordinator."""
+
+    from custom_components.googlefindmy import sensor
+
+    return sensor.GoogleFindMyLocationStatusSensor(
+        entity.coordinator,
+        {"id": "dev-1", "name": "Pixel"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=TRACKER_SUBENTRY_KEY,
+    )
+
+
 @pytest.mark.parametrize("last_location", [False, True])
 def test_force_update_is_false(last_location: bool) -> None:
     """Both tracker classes report identical writes instead of changing state."""
@@ -127,6 +160,42 @@ def test_force_update_is_false(last_location: bool) -> None:
 
     entity = _tracker(_row(dt_util.utcnow().timestamp()), last_location=last_location)
     assert entity.force_update is False
+
+
+def test_tf01_observation_signature_ignores_clock_driven_values() -> None:
+    """Only a new published observation changes the signature.
+
+    Taken over from #1321 (``test_location_age_stays_excluded_from_signature``)
+    and extended: ``location_age``, ``location_status`` and the ``coarse_*``
+    side information change with the clock or the coarse-fix window, so none
+    of them may make a tick look like a new observation. The coarse case
+    inverts #1321's ``test_coarse_fix_change_is_not_swallowed_by_signature``
+    (V-C11 c and V-C15 b: the coarse fix is held, not a new observation).
+    """
+
+    from homeassistant.util import dt as dt_util
+
+    entity = _tracker(_row(dt_util.utcnow().timestamp() - 3600))
+    _published(entity)
+    baseline = entity._state_signature()
+
+    clocked = dict(entity._attr_extra_state_attributes)
+    clocked["location_age"] = clocked["location_age"] + 60
+    clocked["location_status"] = "aging"
+    clocked.update(
+        coarse_latitude=49.9,
+        coarse_longitude=10.9,
+        coarse_accuracy=1600.0,
+        coarse_last_seen=1.0,
+    )
+    entity._attr_extra_state_attributes = clocked
+    assert entity._state_signature() == baseline
+
+    entity._attr_extra_state_attributes = {**clocked, "battery_level": 5}
+    assert entity._state_signature() != baseline
+    entity._attr_extra_state_attributes = clocked
+    entity._attr_latitude = 48.2
+    assert entity._state_signature() != baseline
 
 
 def test_tf02_main_tracker_aging_without_fix_publishes_identical_attributes(
@@ -140,10 +209,15 @@ def test_tf02_main_tracker_aging_without_fix_publishes_identical_attributes(
     first = _published(entity)
     assert first["location_status"] == "current"
 
+    status_sensor = _status_sensor(entity)
+    assert status_sensor.native_value == "current"
+
     freezer.tick(entity._get_stale_threshold() * 0.75)
     # Control: without holding, the status would now read "aging".
     assert entity._get_location_status() == "aging"
     assert _published(entity) == first, "last_updated would move: attributes changed"
+    # The live class moved to the sensor.
+    assert status_sensor.native_value == "aging"
 
 
 def test_tf03_last_location_tracker_aging_without_fix_publishes_identical_attributes(
@@ -196,21 +270,164 @@ def test_new_fix_publishes_fresh_age_and_status(freezer: FrozenDateTimeFactory) 
     assert fresh != aged
 
 
-def test_stale_transition_publishes_stale(freezer: FrozenDateTimeFactory) -> None:
-    """Going stale withholds the coordinates, so it is a new observation."""
+@pytest.mark.asyncio
+async def test_tf04_stale_transition_is_a_change_at_tick_time(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """Going stale withholds the coordinates: a change, stamped at the tick.
+
+    Rebuilt from #1321's ``test_stale_transition_is_plain_now_write`` on the
+    public surface: no new fix arrives, the clock passes the stale threshold,
+    the state becomes ``unknown`` with ``location_status`` ``stale``, and
+    ``last_updated``/``last_changed`` are the time of that tick, not of the
+    old fix.
+    """
+
+    entity = _tracker(_row(_now() - 30))
+    _wire_entity_write_path(entity, hass)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    fresh = hass.states.get(entity.entity_id)
+    assert fresh is not None
+    assert fresh.attributes["location_status"] == "current"
+    assert fresh.attributes.get("latitude") is not None
+
+    freezer.tick(entity._get_stale_threshold() + 60)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    stale = hass.states.get(entity.entity_id)
+    assert stale is not None
+    assert stale.state == "unknown"
+    assert stale.attributes["location_status"] == "stale"
+    assert stale.attributes.get("latitude") is None
+    assert stale.attributes.get("last_latitude") == 48.1
+    assert stale.last_updated.timestamp() == pytest.approx(_now(), abs=1e-3)
+    assert stale.last_changed.timestamp() == pytest.approx(_now(), abs=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_tf05_recovery_from_unavailable_is_a_change_at_tick_time(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """Coming back with the same old fix is written now, after the gap.
+
+    Rebuilt from #1321's
+    ``test_recovery_from_unavailable_with_old_fix_is_plain_write_and_orders_after``:
+    the history stays in order, nothing is backdated to the old fix.
+    """
+
+    entity = _tracker(_row(_now() - 30))
+    _wire_entity_write_path(entity, hass)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+
+    freezer.tick(60)
+    entity.coordinator.visible = False
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    gap = hass.states.get(entity.entity_id)
+    assert gap is not None
+    assert gap.state == "unavailable"
+
+    freezer.tick(60)
+    entity.coordinator.visible = True
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    back = hass.states.get(entity.entity_id)
+    assert back is not None
+    assert back.state == "not_home"
+    assert back.last_updated > gap.last_updated
+    assert back.last_updated.timestamp() == pytest.approx(_now(), abs=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_tf06_restore_publishes_the_restored_fix_then_only_reports(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """After a restart: one change with the restored fix, then reports only.
+
+    Rebuilt from #1321's ``test_first_write_after_restart_is_plain``. The
+    held values are in place before the first write, so the ticks after it
+    publish identical attributes (Gegenprüfung D-7).
+    """
+
+    from homeassistant.const import EVENT_STATE_CHANGED, EVENT_STATE_REPORTED
+    from homeassistant.core import State, callback
+
+    entity = _tracker(_row(_now()))
+    entity.coordinator.row = None  # cold boot: the coordinator has not polled
+    _wire_entity_write_path(entity, hass)
+    restored = State(
+        entity.entity_id,
+        "not_home",
+        {
+            "latitude": 48.1,
+            "longitude": 11.5,
+            "accuracy_m": 10.0,
+            "last_seen": _now() - 30,
+        },
+    )
+
+    async def _last_state() -> State:
+        return restored
+
+    entity.async_get_last_state = _last_state
+    events: list[str] = []
+
+    @callback
+    def _record(event: Event) -> None:
+        if event.data.get("entity_id") == entity.entity_id:
+            events.append(event.event_type)
+
+    hass.bus.async_listen(EVENT_STATE_CHANGED, _record)
+    hass.bus.async_listen(
+        EVENT_STATE_REPORTED, _record, event_filter=callback(lambda _data: True)
+    )
+
+    await entity.async_added_to_hass()
+    await hass.async_block_till_done()
+    first = hass.states.get(entity.entity_id)
+    assert first is not None
+    assert first.attributes["latitude"] == 48.1
+    assert events == [EVENT_STATE_CHANGED]
+    first_updated = first.last_updated
+
+    for _ in range(2):
+        freezer.tick(60)
+        entity._handle_coordinator_update()
+        await hass.async_block_till_done()
+    assert events == [EVENT_STATE_CHANGED, EVENT_STATE_REPORTED, EVENT_STATE_REPORTED]
+    after = hass.states.get(entity.entity_id)
+    assert after is not None
+    assert after.last_updated == first_updated, "last_updated moved on a tick"
+
+
+def test_tf07_show_location_age_off_holds_the_status(
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Without ``location_age`` the held status alone keeps the tick identical."""
 
     from homeassistant.util import dt as dt_util
 
     entity = _tracker(_row(dt_util.utcnow().timestamp()))
-    _published(entity)
-    freezer.tick(entity._get_stale_threshold() + 60)
-    stale = _published(entity)
-    assert stale["location_status"] == "stale"
-    assert entity._attr_latitude is None
+    entity.coordinator.config_entry.options["show_location_age"] = False
+    first = _published(entity)
+    assert "location_age" not in first
+    assert first["location_status"] == "current"
+
+    freezer.tick(entity._get_stale_threshold() * 0.75)
+    assert entity._get_location_status() == "aging"
+    assert _published(entity) == first, "last_updated would move: attributes changed"
 
 
 @pytest.mark.parametrize("last_location", [False, True])
-def test_tf08_tf11_every_coordinator_tick_writes(
+def test_every_coordinator_tick_writes(
     freezer: FrozenDateTimeFactory, last_location: bool
 ) -> None:
     """No tick is suppressed: Core must re-evaluate zones and ``last_reported``.
@@ -317,6 +534,259 @@ def test_show_location_age_switched_on_is_held_from_then_on(
     assert _published(entity) == switched_on
 
 
+def _record_events(hass: HomeAssistant, entity_id: str) -> list[str]:
+    """Collect ``state_changed``/``state_reported`` for one entity, in order."""
+
+    from homeassistant.const import EVENT_STATE_CHANGED, EVENT_STATE_REPORTED
+    from homeassistant.core import callback
+
+    events: list[str] = []
+
+    @callback
+    def _record(event: Event) -> None:
+        if event.data.get("entity_id") == entity_id:
+            events.append(event.event_type)
+
+    hass.bus.async_listen(EVENT_STATE_CHANGED, _record)
+    hass.bus.async_listen(
+        EVENT_STATE_REPORTED, _record, event_filter=callback(lambda _data: True)
+    )
+    return events
+
+
+@pytest.mark.asyncio
+async def test_tf08_tick_without_new_observation_is_one_report(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """Through the entity: a tick writes, Core only reports it (EE-44).
+
+    Replaces #1321's ``test_noop_update_writes_plainly_without_restamp_or_state_change``:
+    the write is no longer suppressed, so ``last_reported`` keeps moving
+    while ``last_updated`` stays.
+    """
+
+    from homeassistant.const import EVENT_STATE_REPORTED
+
+    entity = _tracker(_row(_now() - 30))
+    _wire_entity_write_path(entity, hass)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    first = hass.states.get(entity.entity_id)
+    assert first is not None
+    # A report updates the same State object in place: keep the values.
+    first_updated, first_reported = first.last_updated, first.last_reported
+    events = _record_events(hass, entity.entity_id)
+
+    freezer.tick(entity._get_stale_threshold() * 0.75)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    ticked = hass.states.get(entity.entity_id)
+    assert ticked is not None
+    assert events == [EVENT_STATE_REPORTED]
+    assert ticked.last_updated == first_updated, "last_updated moved on a tick"
+    assert ticked.last_reported > first_reported
+
+
+@pytest.mark.asyncio
+async def test_tf09_coarse_fix_expiry_moves_nothing_on_the_main_tracker(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """V-C15 (b): an expiring coarse fix waits for the next observation.
+
+    Codex thread ``4247583316`` on #1353: expiry alone used to drop
+    ``coarse_*``, which Core wrote as a change, and ``person`` could then rank
+    the old coordinates as the freshest. The held keys stay until a new
+    observation; the live value is on the coarse-fix sensor.
+    """
+
+    from homeassistant.const import EVENT_STATE_CHANGED, EVENT_STATE_REPORTED
+
+    entity = _tracker(_row(_now() - 30))
+    entity.coordinator.coarse = _coarse(_now() - 10)
+    _wire_entity_write_path(entity, hass)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    first = hass.states.get(entity.entity_id)
+    assert first is not None
+    assert first.attributes["coarse_latitude"] == 49.9
+    first_updated = first.last_updated
+    first_coarse_seen = first.attributes["coarse_last_seen"]
+    events = _record_events(hass, entity.entity_id)
+
+    freezer.tick(60)
+    entity.coordinator.coarse = None  # expired in the coordinator
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    held = hass.states.get(entity.entity_id)
+    assert held is not None
+    assert events == [EVENT_STATE_REPORTED], "last_updated moved: coarse_* changed"
+    assert held.last_updated == first_updated
+    assert held.attributes["coarse_latitude"] == 49.9
+    assert held.attributes["coarse_last_seen"] == first_coarse_seen
+
+    events.clear()
+    entity.coordinator.row = _row(_now(), lat=48.2)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    moved = hass.states.get(entity.entity_id)
+    assert moved is not None
+    assert events == [EVENT_STATE_CHANGED]
+    assert not [key for key in moved.attributes if key.startswith("coarse_")]
+
+
+def test_tf10_coarse_fix_appearing_moves_nothing_on_the_main_tracker(
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """V-C11 (c): the gate rejects a fix, the published position stays.
+
+    The coarse fix is held back until the next observation, so the tick
+    publishes identical attributes and ``last_updated`` stays (Audit F-3).
+    A later observation carries it if it is still fresh then.
+    """
+
+    from homeassistant.util import dt as dt_util
+
+    entity = _tracker(_row(dt_util.utcnow().timestamp() - 30))
+    first = _published(entity)
+    assert not [key for key in first if key.startswith("coarse_")]
+
+    freezer.tick(60)
+    entity.coordinator.coarse = _coarse(dt_util.utcnow().timestamp() - 5)
+    assert _published(entity) == first, "last_updated would move: coarse_* appeared"
+
+    entity.coordinator.row = _row(dt_util.utcnow().timestamp() - 20, lat=48.2)
+    assert _published(entity)["coarse_latitude"] == 49.9
+
+
+@pytest.mark.asyncio
+async def test_tf11_zone_created_around_the_unchanged_position_changes_state(
+    freezer: FrozenDateTimeFactory,
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """Every tick writes, so Core re-evaluates zones (Prüfer CA-1, EE-44).
+
+    A zone added around the unchanged position changes the state on the next
+    tick without a new fix; a suppressed write would have kept ``not_home``.
+    """
+
+    from homeassistant.components import zone
+
+    zone.async_setup_track_zone_entity_ids(hass)
+    entity = _tracker(_row(_now() - 30))
+    _wire_entity_write_path(entity, hass)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    before = hass.states.get(entity.entity_id)
+    assert before is not None
+    assert before.state == "not_home"
+
+    hass.states.async_set(
+        "zone.office",
+        "0",
+        {
+            "latitude": 48.1,
+            "longitude": 11.5,
+            "radius": 200.0,
+            "friendly_name": "Office",
+        },
+    )
+    await hass.async_block_till_done()
+    freezer.tick(60)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+    after = hass.states.get(entity.entity_id)
+    assert after is not None
+    assert after.state == "Office"
+
+
+def test_tf13_last_location_tracker_carries_no_coarse_fix(
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """V-C11 (c): the never-stale tracker has no ``coarse_*`` at all.
+
+    Neither appearing nor expiring changes its attributes (Gegenprüfung D-5),
+    so it never moves ``last_updated`` for a coarse fix.
+    """
+
+    from homeassistant.util import dt as dt_util
+
+    entity = _tracker(_row(dt_util.utcnow().timestamp() - 30), last_location=True)
+    entity.coordinator.coarse = _coarse(dt_util.utcnow().timestamp() - 5)
+    first = _published(entity)
+    assert not [key for key in first if key.startswith("coarse_")]
+
+    freezer.tick(60)
+    entity.coordinator.coarse = None
+    assert _published(entity) == first, "last_updated would move: coarse_* changed"
+    entity.coordinator.row = _row(dt_util.utcnow().timestamp(), lat=48.2)
+    entity.coordinator.coarse = _coarse(dt_util.utcnow().timestamp())
+    assert not [key for key in _published(entity) if key.startswith("coarse_")]
+
+
+@pytest.mark.asyncio
+async def test_registry_override_is_left_to_the_core_write_path(
+    hass: HomeAssistant,
+    use_real_homeassistant_modules: None,
+) -> None:
+    """Registry name and icon overrides reach the state through Core.
+
+    Rebuilt from #1321's ``test_registry_override_reaches_the_written_state``
+    without a double. Core applies the overrides in
+    its entity state calculation (part 1, a real Entity). The tracker
+    keeps them because it writes only through Core's write path: none of its
+    own classes overrides the write or the state calculation (part 2), and
+    ``test_every_coordinator_update_branch_ends_in_one_plain_write`` pins
+    that it never writes ``hass.states`` around it.
+    """
+
+    from homeassistant.helpers import entity_registry as er
+    from homeassistant.helpers.entity import Entity
+
+    from custom_components.googlefindmy import device_tracker
+
+    class _ProbeEntity(Entity):
+        """Minimal real Entity whose own name/icon differ from the override."""
+
+        _attr_name = "Entity Default Name"
+        _attr_icon = "mdi:entity-default"
+
+    registry = er.async_get(hass)
+    entry = registry.async_get_or_create("device_tracker", "googlefindmy", "probe-1")
+    entry = registry.async_update_entity(
+        entry.entity_id, name="User Renamed Tracker", icon="mdi:user-custom-icon"
+    )
+    probe = _ProbeEntity()
+    probe.hass = hass
+    probe.entity_id = entry.entity_id
+    probe.registry_entry = entry
+    probe.async_write_ha_state()
+    written = hass.states.get(entry.entity_id)
+    assert written is not None
+    assert written.attributes["friendly_name"] == "User Renamed Tracker"
+    assert written.attributes["icon"] == "mdi:user-custom-icon"
+
+    # Every variant of Core's write and state calculation carries one of these
+    # parts in its name (public, private, thread-safe).
+    write_path_parts = ("write_ha_state", "calculate_state")
+    for cls in (
+        device_tracker.GoogleFindMyDeviceTracker,
+        device_tracker.GoogleFindMyLastLocationTracker,
+    ):
+        own = [
+            (klass.__name__, name)
+            for klass in cls.__mro__
+            if klass.__module__.startswith("custom_components.")
+            for name in vars(klass)
+            if any(part in name for part in write_path_parts)
+        ]
+        assert own == [], f"{cls.__name__} overrides Core's write path: {own}"
+
+
 # ---------------------------------------------------------------------------
 # Codex review of #1321 at ``ceb5e70`` (three threads on the restamp path).
 #
@@ -341,24 +811,29 @@ def test_show_location_age_switched_on_is_held_from_then_on(
 # ---------------------------------------------------------------------------
 
 
-def _core_state(entity: Any, hass: HomeAssistant) -> tuple[str, list[str] | None]:
+def _core_state(
+    entity: Any, hass: HomeAssistant, *, legacy_zone_api: bool = False
+) -> tuple[str, list[str] | None]:
     """State string and ``in_zones`` as ``TrackerEntity`` derives them.
 
     ``zone.async_in_zones`` and the ``in_zones`` attribute are newer than the
     declared Home Assistant floor; 2025.9.1 and 2026.1.3 derive the state from
     ``zone.async_active_zone`` and publish no ``in_zones``. Follow whichever
     API the installed core provides and return ``None`` for ``in_zones`` on
-    the older line.
+    the older line, in every branch. ``legacy_zone_api`` forces the older
+    path on a newer core; deleting ``async_in_zones`` cannot simulate it,
+    because there ``async_active_zone`` itself calls ``async_in_zones``
+    (measured on 2026.9.3: ``NameError``).
     """
 
     from homeassistant.components import zone
     from homeassistant.const import STATE_HOME, STATE_NOT_HOME
 
+    in_zones_fn = None if legacy_zone_api else getattr(zone, "async_in_zones", None)
     lat, lon = entity._attr_latitude, entity._attr_longitude
     if lat is None or lon is None:
-        return "unknown", []
+        return "unknown", ([] if in_zones_fn is not None else None)
     radius = entity._attr_location_accuracy or 0
-    in_zones_fn = getattr(zone, "async_in_zones", None)
     in_zones: list[str] | None
     if in_zones_fn is None:
         active = zone.async_active_zone(hass, lat, lon, radius)
@@ -372,34 +847,43 @@ def _core_state(entity: Any, hass: HomeAssistant) -> tuple[str, list[str] | None
     return active.name, in_zones
 
 
-def _wire_entity_write_path(entity: Any, hass: HomeAssistant) -> None:
-    """Give a stub-bound tracker Core's write path on a real state machine."""
+def _wire_entity_write_path(
+    entity: Any, hass: HomeAssistant, *, legacy_zone_api: bool = False
+) -> None:
+    """Give a stub-bound tracker Core's write path on a real state machine.
+
+    The write does what Core's ``Entity._async_write_ha_state`` does with the
+    parts these tests measure: no timestamp (Core stamps "now"), the entity's
+    ``force_update``, ``unavailable`` without attributes when the entity is not
+    available, otherwise the TrackerEntity zone state and the extra
+    attributes. It does not reproduce ``TrackerEntity.state_attributes``
+    (``latitude``, ``longitude``, ``gps_accuracy`` from the ``_attr_*``
+    values) nor the friendly name or other registry-derived keys; that is
+    enough for timestamps and the zone state, and the plain ``latitude`` the
+    tests read comes from the tracker's own extra attributes.
+    """
+
+    from homeassistant.const import STATE_UNAVAILABLE
 
     entity.hass = hass
-    entity._context = None
-    entity._state_info = None
-
-    def _calculate() -> SimpleNamespace:
-        state, in_zones = _core_state(entity, hass)
-        attributes = dict(entity._attr_extra_state_attributes)
-        if in_zones is not None:
-            attributes["in_zones"] = in_zones
-        return SimpleNamespace(state=state, attributes=attributes)
 
     def _write() -> None:
-        calculated = _calculate()
+        if not entity.available:
+            state, attributes = STATE_UNAVAILABLE, {}
+        else:
+            state, in_zones = _core_state(entity, hass, legacy_zone_api=legacy_zone_api)
+            attributes = dict(entity._attr_extra_state_attributes)
+            if in_zones is not None:
+                attributes["in_zones"] = in_zones
         hass.states.async_set(
             entity.entity_id,
-            calculated.state,
-            calculated.attributes,
+            state,
+            attributes,
             # Core's TrackerEntity default for a push entity is ``True``
             # (``not should_poll``); the stub base defines no value.
             force_update=getattr(entity, "force_update", True),
-            context=entity._context,
-            state_info=entity._state_info,
         )
 
-    entity._async_calculate_state = _calculate
     entity.async_write_ha_state = _write
 
 
@@ -457,7 +941,14 @@ async def test_every_coordinator_update_branch_ends_in_one_plain_write(
     entity.async_write_ha_state = lambda: writes.append(None)
 
     class _RecordingStates:
-        """``hass.states`` as the entity sees it; counts writes around it."""
+        """``hass.states`` as the entity sees it; counts writes around it.
+
+        Both public write entry points of the state machine are counted:
+        ``async_set`` and ``async_set_internal`` (the one Core's own entity
+        write uses). A write through another object than ``self.hass`` is out
+        of reach of this view; the timestamp tests below read the state
+        machine itself and would see its effect.
+        """
 
         def __getattr__(self, name: str) -> Any:
             return getattr(hass.states, name)
@@ -465,6 +956,10 @@ async def test_every_coordinator_update_branch_ends_in_one_plain_write(
         def async_set(self, *args: Any, **kwargs: Any) -> None:
             direct.append(args)
             hass.states.async_set(*args, **kwargs)
+
+        def async_set_internal(self, *args: Any, **kwargs: Any) -> None:
+            direct.append(args)
+            hass.states.async_set_internal(*args, **kwargs)
 
     class _HassView:
         """The real ``hass`` with the recording ``states`` in its place."""
@@ -523,11 +1018,13 @@ async def test_last_reported_never_moves_backward(
     assert seen == sorted(seen)
 
 
+@pytest.mark.parametrize("legacy_zone_api", [False, True])
 @pytest.mark.asyncio
 async def test_zone_change_without_new_fix_stamps_last_changed_now(
     freezer: FrozenDateTimeFactory,
     hass: HomeAssistant,
     use_real_homeassistant_modules: None,
+    legacy_zone_api: bool,
 ) -> None:
     """A new zone of an unchanged fix is a change at tick time (Codex P2, #1321).
 
@@ -545,7 +1042,7 @@ async def test_zone_change_without_new_fix_stamps_last_changed_now(
 
     entity = _tracker(_row(_now() - 30))
     entity.coordinator.config_entry.options["show_location_age"] = True
-    _wire_entity_write_path(entity, hass)
+    _wire_entity_write_path(entity, hass, legacy_zone_api=legacy_zone_api)
 
     entity._handle_coordinator_update()
     await hass.async_block_till_done()

@@ -95,6 +95,20 @@ PARALLEL_UPDATES = 0
 # on sensor.*_last_seen, the live status on sensor.*_location_status.
 _HELD_ATTRIBUTES: tuple[str, ...] = ("location_age", "location_status")
 
+# Side information about a coarse fix the accuracy gate discarded (#216). It can
+# appear (the gate rejects a fix, the published position stays) and expire (the
+# clock passes the stale threshold) without a new published observation, so the
+# main tracker holds it with the observation too: it changes only together with
+# a new observation. The live value is on the coarse-fix sensor. Unlike
+# _HELD_ATTRIBUTES, an absent key does not drop the held value, because absence
+# here means "expired", not "switched off by an option".
+_COARSE_ATTRIBUTES: tuple[str, ...] = (
+    "coarse_latitude",
+    "coarse_longitude",
+    "coarse_accuracy",
+    "coarse_last_seen",
+)
+
 # Wall-clock grace before a fresh entity addition is judged against the entity
 # registry.
 #
@@ -1044,11 +1058,16 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     _attr_entity_registry_enabled_default = True
     _attr_translation_key = "device"
     _attr_attribution: str | None = None  # Set in __init__ with account email
-    # location_age changes on every fix; keep it out of recorder history
-    # (HA developer guidance, 2023-09 / Entity docs). Stationary devices still
-    # benefit from the show_location_age toggle and 60s rounding, but even
-    # mobile devices should not bloat the state_attributes table here.
+    # location_age is held between observations (see
+    # _hold_observation_attributes) but still takes a new value with every
+    # observation; keep it out of recorder history (HA developer guidance,
+    # 2023-09 / Entity docs). The show_location_age toggle and the 60 s rounding
+    # stay, but even mobile devices should not bloat the state_attributes table
+    # here.
     _unrecorded_attributes = frozenset({"location_age"})
+    # The main tracker carries the held coarse-fix side information; the
+    # _last_location tracker never goes stale and carries none (V-C11 c).
+    _publishes_coarse_fix = True
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod
@@ -1367,7 +1386,10 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """Recompute and publish every TrackerEntity attribute via _attr_*.
 
         Must be called before *every* ``async_write_ha_state()`` so that
-        HA's ``CachedProperties`` mechanism picks up fresh values.
+        HA's ``CachedProperties`` mechanism picks up fresh values. The values
+        that change with the clock rather than with a new fix
+        (``_HELD_ATTRIBUTES`` and ``_COARSE_ATTRIBUTES``) are published as of
+        the last observation; see ``_hold_observation_attributes``.
         """
         stale = self._is_location_stale()
 
@@ -1512,7 +1534,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # entity a second owner of that policy, and two owners of one rule drift.
         coarse = None
         get_coarse = getattr(self.coordinator, "get_fresh_coarse_fix", None)
-        if callable(get_coarse):
+        if self._publishes_coarse_fix and callable(get_coarse):
             coarse = get_coarse(self.device_id)
         if coarse:
             # The SECOND LINE, not the rule. The accessor above already applies the
@@ -1568,8 +1590,10 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         ``_sync_location_attrs()`` publishes) rather than a hand-maintained
         attribute list, so a future attribute is automatically covered.
 
-        ``_HELD_ATTRIBUTES`` are excluded: they age with the clock, not with a
-        new fix, so they must not make a tick look like a new observation.
+        ``_HELD_ATTRIBUTES`` and ``_COARSE_ATTRIBUTES`` are excluded: they
+        change with the clock or the coarse-fix window, not with a new
+        published fix, so they must not make a tick look like a new
+        observation.
         """
         # No class-level default for this attr in HA core, so a bare read can
         # raise AttributeError before the first _sync_location_attrs() write;
@@ -1579,7 +1603,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             sorted(
                 (key, value)
                 for key, value in attrs.items()
-                if key not in _HELD_ATTRIBUTES
+                if key not in _HELD_ATTRIBUTES and key not in _COARSE_ATTRIBUTES
             )
         )
         return (
@@ -1593,24 +1617,33 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         )
 
     def _hold_observation_attributes(self, attributes: dict[str, Any]) -> None:
-        """Publish the age and status of the last observation until a new one.
+        """Publish the clock-driven values of the last observation until a new one.
 
-        While the observation signature is unchanged, ``location_age`` and
-        ``location_status`` keep the values published with that observation, so
-        a coordinator tick writes identical attributes and Core only reports it
-        (see ``force_update``). A new fix, a stale transition (it withholds the
-        coordinates) or a change of availability changes the signature and
-        publishes fresh values. The live age belongs to ``sensor.*_last_seen``,
-        the live status to ``sensor.*_location_status``; ``attributes`` is
-        updated in place.
+        While the observation signature is unchanged, ``location_age``,
+        ``location_status`` and the ``coarse_*`` side information keep the
+        values published with that observation, so a coordinator tick writes
+        identical attributes and Core only reports it (see ``force_update``). A
+        new fix, a stale transition (it withholds the coordinates) or a change
+        of availability changes the signature and publishes fresh values. The
+        live age belongs to ``sensor.*_last_seen``, the live status to
+        ``sensor.*_location_status``, the live coarse fix to the coarse-fix
+        sensor; ``attributes`` is updated in place.
         """
         signature = self._state_signature()
         if signature != self._observation_sig:
             self._observation_sig = signature
             self._held_attributes = {
-                key: attributes[key] for key in _HELD_ATTRIBUTES if key in attributes
+                key: attributes[key]
+                for key in (*_HELD_ATTRIBUTES, *_COARSE_ATTRIBUTES)
+                if key in attributes
             }
             return
+        # A coarse fix that appeared or expired since the observation waits for
+        # the next one: drop the live keys and republish the held ones.
+        for key in _COARSE_ATTRIBUTES:
+            attributes.pop(key, None)
+            if key in self._held_attributes:
+                attributes[key] = self._held_attributes[key]
         for key in _HELD_ATTRIBUTES:
             if key not in attributes:
                 # Omitted on purpose (``show_location_age`` switched off): never
@@ -1680,6 +1713,9 @@ class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
 
     _attr_translation_key = "last_location"
     _attr_entity_registry_enabled_default = True
+    # Never stale, so an expiring coarse fix would be a timestamp move on a
+    # tracker that otherwise holds still; the coarse-fix sensor carries it.
+    _publishes_coarse_fix = False
 
     def __init__(
         self,
