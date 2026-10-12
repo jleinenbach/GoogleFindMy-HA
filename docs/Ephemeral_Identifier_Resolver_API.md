@@ -211,8 +211,10 @@ The resolver supports the **Find Hub Network Accessory (FHNA)** specification an
 
 The Frame Type (Packet Prefix) is located at **Octet 7** of the Service Data.
 
-* **0x40**: Legacy / 160-bit frame.
-* **0x41**: Modern / 256-bit frame.
+* **0x40**: normal operation (unwanted tracking protection mode off).
+* **0x41**: unwanted tracking protection mode active; hashed-flags bit 7 carries the same state.
+
+The frame type is not a curve or length selector. The [Find Hub Network Accessory Specification](https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn) (retrieved 2026-10-11) ties it to the mode: "The frame type should be set to 0x41. The state is also reflected in the hashed flags section." and, on leaving the mode, "The frame type should be set back to 0x40." The EID length is derived from the payload length (`_framed_eid_lengths` in `eid_resolver.py`); the constant names `FMDN_FRAME_TYPE` (`0x40`) and `MODERN_FRAME_TYPE` (`0x41`) are historical. Field data: [`docs/UWT_FIELD_DATA.md`](UWT_FIELD_DATA.md); only 20-byte EIDs have been observed so far; no 32-byte EID observed.
 
 #### 2. EID Lengths & Structure
 
