@@ -617,6 +617,18 @@ def test_replayed_older_sighting_is_ignored(
     )
 
 
+class _HostileBytes(bytes):
+    """A bytes subclass whose length and comparison raise."""
+
+    def __len__(self) -> int:
+        raise RuntimeError("len")
+
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError("eq")
+
+    __hash__ = bytes.__hash__
+
+
 _KEY_1 = bytes(range(32))
 _KEY_2 = bytes(range(32, 64))
 
@@ -643,7 +655,7 @@ def test_sighting_carries_the_key_fingerprint_of_its_metadata() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["00" * 16, b"\x00" * 15, b"\x00" * 17, bytearray(16), 7, None],
+    ["00" * 32, b"\x00" * 31, b"\x00" * 33, bytearray(32), 7, None],
     ids=["hex_str", "short", "long", "bytearray", "int", "none"],
 )
 def test_malformed_key_fingerprint_is_not_recorded(value: object) -> None:
@@ -663,7 +675,7 @@ def test_malformed_key_fingerprint_is_not_recorded(value: object) -> None:
     [(_KEY_2, 50, 7), (_KEY_2, -50, 7), (_KEY_1, 50, 9)],
     ids=["new_key", "new_key_wall_stepped_back", "same_key_keeps_newer"],
 )
-def test_a_sighting_under_a_new_key_replaces_one_with_a_higher_counter(
+def test_another_key_decides_replacement_regardless_of_the_counter(
     new_key: bytes, delay: int, window: int
 ) -> None:
     """After re-pairing the counter starts anew and is not comparable.
@@ -684,6 +696,18 @@ def test_a_sighting_under_a_new_key_replaces_one_with_a_higher_counter(
     assert sighting.key_fingerprint == identity_key_fingerprint(
         _KEY_2 if window == 7 else _KEY_1
     )
+
+
+def test_hostile_key_fingerprint_does_not_raise() -> None:
+    """Never raises: a bytes subclass is not taken as a fingerprint."""
+    resolver = _build_resolver()
+    meta = _keyed(7, None)
+    meta["key_fingerprint"] = _HostileBytes(b"\x00" * 32)
+    resolver._note_confirmed_sighting("device-1", meta, observed_at=_T)
+
+    sighting = resolver.last_confirmed_sighting("device-1")
+    assert sighting is not None
+    assert sighting.key_fingerprint is None
 
 
 def test_shared_tracker_records_a_sighting_per_device() -> None:

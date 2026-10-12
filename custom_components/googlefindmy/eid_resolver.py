@@ -1002,8 +1002,8 @@ def _normalize_encrypted_blob(value: object) -> bytes | None:
     return None
 
 
-_KEY_FINGERPRINT_SIZE = 16
-_KEY_FINGERPRINT_PERSON = b"gfmy-finder-eik"
+_KEY_FINGERPRINT_SIZE = 32
+_KEY_FINGERPRINT_DOMAIN = b"gfmy-finder-eik\x00"
 
 
 def identity_key_fingerprint(key: object) -> bytes | None:
@@ -1015,18 +1015,16 @@ def identity_key_fingerprint(key: object) -> bytes | None:
     holds now, so the sighting never stores a second copy of the key.
 
     The key is normalized as for the lookup (bytes or a hex string), so both
-    sides derive the same value from the same key. BLAKE2b with a
-    personalization string is used rather than SHA-256: SHA-256 of the
-    identity key is the AES key of the device's own location reports, so it
-    must not be kept anywhere else. The personalization separates this use
-    from any other hash of the key.
+    sides derive the same value from the same key. The hash is SHA3-256 over
+    a domain prefix and the key (BSI TR-02102-1, table 4.1), not SHA-256 of
+    the key: SHA-256 of the identity key is the AES key of the device's own
+    location reports, so it must not be kept anywhere else. The prefix
+    separates this use from any other hash of the key.
     """
     key_bytes = _normalize_encrypted_blob(key)
     if key_bytes is None:
         return None
-    return hashlib.blake2b(
-        key_bytes, digest_size=_KEY_FINGERPRINT_SIZE, person=_KEY_FINGERPRINT_PERSON
-    ).digest()
+    return hashlib.sha3_256(_KEY_FINGERPRINT_DOMAIN + key_bytes).digest()
 
 
 class UwtSource(StrEnum):
@@ -3159,7 +3157,8 @@ class GoogleFindMyEIDResolver:
 
         Never raises: a variant this version does not know, or a window
         timestamp that is not an int in ``[0, FHNA_COUNTER_MASK]``, records
-        nothing.
+        nothing; a key fingerprint that is not exactly ``bytes`` of the
+        fingerprint length is recorded as ``None``.
         """
         window_ts = metadata.get("rotation_timestamp")
         if (
@@ -3177,9 +3176,11 @@ class GoogleFindMyEIDResolver:
             return
         window_counter = window_ts - window_ts % ROTATION_PERIOD
         raw_fingerprint = metadata.get("key_fingerprint")
+        # The exact type, not isinstance: a bytes subclass could raise from
+        # len() or ==, and this method never raises.
         key_fingerprint = (
             raw_fingerprint
-            if isinstance(raw_fingerprint, bytes)
+            if type(raw_fingerprint) is bytes
             and len(raw_fingerprint) == _KEY_FINGERPRINT_SIZE
             else None
         )

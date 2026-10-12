@@ -1169,7 +1169,7 @@ async def test_sighting_without_a_key_fingerprint_reports_nothing(
 
     assert upload is None
     assert any(
-        "not matched under the current identity key" in r.getMessage()
+        "not matched under any current identity key" in r.getMessage()
         for r in caplog.records
         if r.levelno == logging.DEBUG
     )
@@ -1183,7 +1183,7 @@ def test_key_fingerprint_matches_for_hex_and_bytes() -> None:
     fingerprint = identity_key_fingerprint(_LOCK_EIK)
 
     assert fingerprint is not None
-    assert len(fingerprint) == 16
+    assert len(fingerprint) == 32
     assert identity_key_fingerprint(_LOCK_EIK.hex()) == fingerprint
     assert identity_key_fingerprint(bytearray(_LOCK_EIK)) == fingerprint
     assert identity_key_fingerprint(_OTHER_EIK) != fingerprint
@@ -1202,7 +1202,7 @@ def test_key_fingerprint_is_not_the_own_report_key() -> None:
     """SHA-256 of the key decrypts the device's own reports; never derive it.
 
     The fingerprint is no SHA-256 of the key, no prefix of one, and differs
-    from an unpersonalized BLAKE2b of the key.
+    from a SHA3-256 of the key without the domain prefix.
     """
     import hashlib
 
@@ -1212,8 +1212,9 @@ def test_key_fingerprint_is_not_the_own_report_key() -> None:
     own_report_key = hashlib.sha256(_LOCK_EIK).digest()
 
     assert fingerprint is not None
-    assert not own_report_key.startswith(fingerprint)
-    assert fingerprint != hashlib.blake2b(_LOCK_EIK, digest_size=16).digest()
+    assert fingerprint != own_report_key
+    assert not own_report_key.startswith(fingerprint[:16])
+    assert fingerprint != hashlib.sha3_256(_LOCK_EIK).digest()
 
 
 def test_confirmed_sighting_repr_hides_the_key_fingerprint() -> None:
@@ -1222,3 +1223,46 @@ def test_confirmed_sighting_repr_hides_the_key_fingerprint() -> None:
     assert sighting.key_fingerprint is not None
     assert "key_fingerprint" not in repr(sighting)
     assert sighting.key_fingerprint.hex() not in repr(sighting)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keys",
+    [(_OTHER_EIK, _LOCK_EIK), (_LOCK_EIK, _OTHER_EIK)],
+    ids=["seen_key_second", "seen_key_first"],
+)
+async def test_finder_uses_the_candidate_key_the_sighting_was_matched_under(
+    keys: tuple[bytes, bytes],
+) -> None:
+    """The coordinator yields one identity per candidate key of a device.
+
+    Whatever their order, the EID is computed from the candidate whose
+    fingerprint the sighting carries.
+    """
+    from custom_components.googlefindmy.const import DOMAIN
+    from custom_components.googlefindmy.fmdn_finder import bermuda_listener
+
+    variant = "spec_p256_x32_be"
+    resolver = _built_resolver(_LOCK_NOW)
+    advertised = _device_eid(_LOCK_NOW - _SECRETS_DATE, variant)
+    _observe(resolver, advertised, _LOCK_NOW)
+
+    coordinator = MagicMock()
+    coordinator.get_active_device_identities.return_value = [
+        MagicMock(
+            canonical_id="entry:dev-1",
+            identity_key=key,
+            pair_date=0,
+            registry_id="reg-1",
+        )
+        for key in keys
+    ]
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"eid_resolver": resolver}}
+    with patch.object(bermuda_listener.time, "time", return_value=_LOCK_NOW + 30):
+        upload = await bermuda_listener._async_get_device_eid(
+            hass, coordinator, "dev-1"
+        )
+
+    assert upload is not None
+    assert upload.eid == advertised
