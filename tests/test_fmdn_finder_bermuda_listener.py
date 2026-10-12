@@ -1266,3 +1266,63 @@ async def test_finder_uses_the_candidate_key_the_sighting_was_matched_under(
 
     assert upload is not None
     assert upload.eid == advertised
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("canonical_ids", "keys", "reported"),
+    [
+        (("entry:dev-2", "entry:dev-1"), (_OTHER_EIK, _LOCK_EIK), True),
+        (("entry:dev-1", "entry:dev-1"), (None, _LOCK_EIK), True),
+        (("entry:dev-2",), (_LOCK_EIK,), False),
+        (("entry:dev-1",), (None,), False),
+    ],
+    ids=[
+        "other_device_first",
+        "candidate_without_key",
+        "no_identity_of_device",
+        "no_candidate_with_key",
+    ],
+)
+async def test_finder_matches_only_identities_of_the_device(
+    canonical_ids: tuple[str, ...],
+    keys: tuple[bytes | None, ...],
+    reported: bool,
+) -> None:
+    """Identities of other devices and candidates without a key are skipped.
+
+    Another device's identity, even under the key the sighting was matched
+    under, is no candidate; without an identity of the device, or without a
+    key among its candidates, nothing is sent.
+    """
+    from custom_components.googlefindmy.const import DOMAIN
+    from custom_components.googlefindmy.fmdn_finder import bermuda_listener
+
+    variant = "spec_p256_x32_be"
+    resolver = _built_resolver(_LOCK_NOW)
+    advertised = _device_eid(_LOCK_NOW - _SECRETS_DATE, variant)
+    _observe(resolver, advertised, _LOCK_NOW)
+
+    coordinator = MagicMock()
+    coordinator.get_active_device_identities.return_value = [
+        MagicMock(
+            canonical_id=canonical_id,
+            identity_key=key,
+            encrypted_identity_key=None,
+            pair_date=0,
+            registry_id="reg-1",
+        )
+        for canonical_id, key in zip(canonical_ids, keys, strict=True)
+    ]
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"eid_resolver": resolver}}
+    with patch.object(bermuda_listener.time, "time", return_value=_LOCK_NOW + 30):
+        upload = await bermuda_listener._async_get_device_eid(
+            hass, coordinator, "dev-1"
+        )
+
+    if reported:
+        assert upload is not None
+        assert upload.eid == advertised
+    else:
+        assert upload is None
