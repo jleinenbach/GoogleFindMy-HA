@@ -596,3 +596,34 @@ def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
     assert len(calls) == 1
     for arg in calls[0].args:
         assert _ALLOWED_ARGS.match(ast.unparse(arg)), ast.unparse(arg)
+
+
+def test_readme_quotes_the_line_the_code_writes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The README example starts like the line the code really writes.
+
+    The line is rendered through the real code path, and its prefix up to the
+    first variable field is looked up in a code block of the README section
+    (AGENTS.md: quoted program output is covered by a test).
+
+    Retirement condition: the README section is removed.
+    """
+    resolver = _resolver()
+    with caplog.at_level(logging.INFO, logger=_RESOLVER_LOGGER):
+        _observe(resolver, True, 10.0)
+    ((_, line),) = _lines(caplog)
+    prefix = line.split(" device=")[0].rsplit("=", 1)[0] + "="
+    assert prefix == "FMDN_UWT_TRANSITION kind="
+
+    readme = (_RESOLVER_SOURCE.parents[2] / "README.md").read_text()
+    section = readme.split(
+        "### Reporting unwanted tracking protection mode changes", 1
+    )[1].split("\n## ", 1)[0]
+    code_blocks = re.findall(r"```[a-z]*\n(.*?)```", section, flags=re.DOTALL)
+    assert any(
+        block_line.strip().startswith(prefix)
+        for block in code_blocks
+        for block_line in block.splitlines()
+    )
+    assert "custom_components.googlefindmy.eid_resolver: info" in section
