@@ -15,7 +15,7 @@ import logging
 import math
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -612,6 +612,13 @@ class _IdentityProvider(Protocol):
 
 
 @runtime_checkable
+class _LocateRequestClock(Protocol):
+    """Protocol implemented by coordinators that stamp sent location requests."""
+
+    def locate_requested_mono(self, device_id: str) -> float | None: ...
+
+
+@runtime_checkable
 class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
     """Protocol defining the public interface for EID resolution.
 
@@ -1046,11 +1053,14 @@ class _FlagsReading(NamedTuple):
     ``uwt_bit`` is the decoded spec bit 7, or ``None`` when nothing was
     decoded. ``origin`` says how the byte was located: ``"framed"`` at the
     position the matched geometry defines, ``"guessed"`` by
-    ``_guess_flags_byte``, ``"absent"`` when no byte was found.
+    ``_guess_flags_byte``, ``"absent"`` when no byte was found. ``decoded``
+    is the whole XOR-decoded flags byte, ``None`` when nothing was decoded;
+    the measurement channel logs it next to the mode.
     """
 
     uwt_bit: bool | None
     origin: FlagsOrigin
+    decoded: int | None = None
 
 
 def _effective_uwt_mode(
@@ -1083,6 +1093,108 @@ def _effective_uwt_mode(
     if frame_mode is not None:
         return frame_mode, UwtSource.FRAME_TYPE
     return None, UwtSource.UNKNOWN
+
+
+# Measurement channel for protection-mode changes (FMDN_UWT_TRANSITION and the
+# ``uwt_transitions`` diagnostics block). Both sizes are derived from the
+# field data in docs/UWT_FIELD_DATA.md and the public report BSkando#210:
+#
+# - 12 INFO lines per device and rolling hour. The highest rate measured for
+#   one device is 24 changes in 11 days (about 2.2 a day); 12 an hour are 288
+#   a day, more than a hundred times that. Normal operation is never
+#   throttled, only a tracker that flaps continuously; the shortest reported
+#   episode is 38 s, so changes a minute apart do occur.
+# - 200 events per config entry. At the #210 rate (32 changes in 11 days,
+#   about 2.9 a day) that is about 69 days of history, at the rate seen on the
+#   maintainer's instance (about 2.6 a day) about 77 days. Memory stays fixed
+#   per entry instead of growing with the number of devices.
+_UWT_TRANSITION_INFO_PER_HOUR = 12
+_UWT_TRANSITION_RING_SIZE = 200
+_UWT_TRANSITION_WINDOW_SECONDS = 3600.0
+
+
+class UwtTransitionEvent(NamedTuple):
+    """One recorded change of a device's unwanted-tracking protection mode.
+
+    ``canonical_id`` stays inside the integration: the diagnostics export
+    replaces it by the device's position in the entry (``device_index``).
+    ``old`` is ``"unknown"`` for the first known mode of a device in this
+    process. ``poll_age_s`` is the age, at the observation, of the last
+    location request the integration sent for the device; ``prev_seen_age_s``
+    the age of the last observation of the old mode. Both are ``None`` when
+    there is nothing to measure them against.
+    """
+
+    canonical_id: str
+    kind: Literal["change", "resync"]
+    old: Literal["on", "off", "unknown"]
+    new: Literal["on", "off"]
+    source: str
+    flags: FlagsOrigin
+    frame: str
+    payload_len: int
+    poll_age_s: int | None
+    prev_seen_age_s: int | None
+    observed: str
+    seq: int
+
+
+class UwtTransitionSnapshot(NamedTuple):
+    """Recorded protection-mode changes of one config entry, oldest first."""
+
+    capacity: int
+    dropped: int
+    info_lines_per_device_hour: int
+    events: tuple[UwtTransitionEvent, ...]
+
+
+@dataclass(slots=True)
+class _UwtTrack:
+    """Protection-mode state of one device in one config entry.
+
+    ``state`` is the last known mode (``None`` before the first one);
+    ``last_mono`` the newest observation on the monotonic clock, known or
+    not, which orders later observations; ``last_seen_mono_by_state`` the
+    newest observation of each mode. ``seq`` numbers the recorded events.
+    ``info_times`` and ``suppressed`` belong to the INFO budget of the log
+    line; ``skipped_source`` remembers why the last observation carried no
+    mode, so the DEBUG line for it is written once per reason, not once per
+    advertisement.
+    """
+
+    state: bool | None = None
+    last_mono: float | None = None
+    last_seen_mono_by_state: dict[bool, float] = field(default_factory=dict)
+    seq: int = 0
+    info_times: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_UWT_TRANSITION_INFO_PER_HOUR)
+    )
+    suppressed: int = 0
+    skipped_source: UwtSource | None = None
+
+
+@dataclass(slots=True)
+class _UwtEventRing:
+    """Fixed-size event history of one config entry."""
+
+    events: deque[UwtTransitionEvent] = field(
+        default_factory=lambda: deque(maxlen=_UWT_TRANSITION_RING_SIZE)
+    )
+    dropped: int = 0
+
+
+def _uwt_label(mode: bool | None) -> Literal["on", "off", "unknown"]:
+    """Return the log label of a protection mode."""
+    if mode is None:
+        return "unknown"
+    return "on" if mode else "off"
+
+
+def _uwt_frame_label(frame_type: int | None) -> str:
+    """Return ``0x40``/``0x41`` for an FMDN frame type, else ``none``."""
+    if frame_type in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE):
+        return f"0x{frame_type:02x}"
+    return "none"
 
 
 @dataclass(slots=True, frozen=True)
@@ -1248,6 +1360,15 @@ class GoogleFindMyEIDResolver:
     _confirmed_sightings: dict[str, ConfirmedSighting] = field(
         init=False, default_factory=dict
     )
+    # Protection-mode measurement channel, in memory only: the state per
+    # (config entry, device) and the event history per config entry behind
+    # FMDN_UWT_TRANSITION and the ``uwt_transitions`` diagnostics block. Keyed
+    # by entry as well as device so that a tracker shared between two
+    # accounts keeps one history per account, and no entry sees another's.
+    _uwt_track: dict[tuple[str, str], _UwtTrack] = field(
+        init=False, default_factory=dict
+    )
+    _uwt_events: dict[str, _UwtEventRing] = field(init=False, default_factory=dict)
     _known_advertisement_reversed: dict[str, bool] = field(
         init=False, default_factory=dict
     )
@@ -1325,7 +1446,7 @@ class GoogleFindMyEIDResolver:
             self._load_task = None
         self._start_alignment_timer()
 
-    def _ensure_cache_defaults(self) -> None:  # noqa: PLR0912
+    def _ensure_cache_defaults(self) -> None:  # noqa: PLR0912, PLR0915
         """Initialize optional caches when stubs bypass __init__."""
 
         if not hasattr(self, "_known_offsets"):
@@ -1344,6 +1465,10 @@ class GoogleFindMyEIDResolver:
             self._lock_last_seen_monotonic = {}
         if not hasattr(self, "_confirmed_sightings"):
             self._confirmed_sightings = {}
+        if not hasattr(self, "_uwt_track"):
+            self._uwt_track = {}
+        if not hasattr(self, "_uwt_events"):
+            self._uwt_events = {}
         if not hasattr(self, "_provisioning_warn_at"):
             self._provisioning_warn_at = {}
         if not hasattr(self, "_locks"):
@@ -1583,6 +1708,34 @@ class GoogleFindMyEIDResolver:
             while self._pending_refresh:
                 self._pending_refresh = False
                 await self._refresh_cache()
+            # Unloading an entry also runs a refresh (or stop() for the last
+            # one), so this drops the history of unloaded entries as well.
+            self._purge_uwt_state()
+
+    def _purge_uwt_state(self) -> None:
+        """Drop measurement-channel state of devices and entries now gone.
+
+        A device keeps its track only while an identity of its entry still
+        names it, by canonical id (as ``EIDMatch.canonical_id`` carries it,
+        without an entry prefix) or by registry id; an entry keeps its event
+        history only while it still provides an identity.
+        """
+        self._ensure_cache_defaults()
+        known_pairs: set[tuple[str, str]] = set()
+        known_entries: set[str] = set()
+        for identity in self._cached_identities:
+            entry_id = identity.config_entry_id
+            if not entry_id:
+                continue
+            known_entries.add(entry_id)
+            if identity.canonical_id:
+                known_pairs.add((entry_id, identity.canonical_id.split(":")[-1]))
+            if identity.registry_id:
+                known_pairs.add((entry_id, identity.registry_id))
+        for key in [key for key in self._uwt_track if key not in known_pairs]:
+            del self._uwt_track[key]
+        for entry_id in [e for e in self._uwt_events if e not in known_entries]:
+            del self._uwt_events[entry_id]
 
     def reset_device_offset(self, registry_id: str) -> None:
         """Forget cached offsets/locks for a given device registry ID."""
@@ -3554,8 +3707,178 @@ class GoogleFindMyEIDResolver:
                     error_type,
                 )
             reading = _FlagsReading(None, "absent")
-        return _effective_uwt_mode(
+        mode, source = _effective_uwt_mode(
             reading.uwt_bit, reading.origin, candidate.frame_type
+        )
+        try:
+            self._note_uwt_observation(
+                matches,
+                mode=mode,
+                source=source,
+                reading=reading,
+                frame_type=candidate.frame_type,
+                payload_len=len(raw),
+                clock=clock,
+            )
+        except Exception as err:  # noqa: BLE001 - the match path must not fail
+            _LOGGER.debug("uwt_transition_failed error_type=%s", type(err).__name__)
+        return mode, source
+
+    def _note_uwt_observation(  # noqa: PLR0913
+        self,
+        matches: list[EIDMatch],
+        *,
+        mode: bool | None,
+        source: UwtSource,
+        reading: _FlagsReading,
+        frame_type: int | None,
+        payload_len: int,
+        clock: ObservationClock,
+    ) -> None:
+        """Record a protection-mode change per (config entry, device).
+
+        A change is recorded when a device shows a mode other than its last
+        known one, including its first known mode in this process (``old`` is
+        then ``unknown``). An observation older than the newest one of the
+        track changes nothing: history replay may deliver sightings out of
+        order. An observation without a trustworthy mode (unknown, or frame
+        type and flags bit in conflict) is no change either; why it carried
+        none is logged at DEBUG once per reason.
+        """
+        self._ensure_cache_defaults()
+        for match in matches:
+            device_key = match.canonical_id or match.device_id
+            key = (match.config_entry_id, device_key)
+            track = self._uwt_track.get(key)
+            if track is None:
+                track = _UwtTrack()
+                self._uwt_track[key] = track
+            if track.last_mono is not None and track.last_mono > clock.monotonic:
+                continue
+            track.last_mono = clock.monotonic
+            if mode is None:
+                if track.skipped_source is not source:
+                    track.skipped_source = source
+                    _LOGGER.debug(
+                        "uwt_observation_skipped device=%s canonical=%s source=%s",
+                        match.device_id,
+                        match.canonical_id,
+                        source.value,
+                    )
+                continue
+            track.skipped_source = None
+            old = track.state
+            old_seen = (
+                track.last_seen_mono_by_state.get(old) if old is not None else None
+            )
+            track.last_seen_mono_by_state[mode] = clock.monotonic
+            if old == mode:
+                continue
+            track.state = mode
+            self._record_uwt_event(
+                match,
+                track,
+                kind="change",
+                old=old,
+                new=mode,
+                source=source,
+                reading=reading,
+                frame_type=frame_type,
+                payload_len=payload_len,
+                clock=clock,
+                old_seen_mono=old_seen,
+            )
+
+    def _record_uwt_event(  # noqa: PLR0913
+        self,
+        match: EIDMatch,
+        track: _UwtTrack,
+        *,
+        kind: Literal["change", "resync"],
+        old: bool | None,
+        new: bool,
+        source: UwtSource,
+        reading: _FlagsReading,
+        frame_type: int | None,
+        payload_len: int,
+        clock: ObservationClock,
+        old_seen_mono: float | None,
+    ) -> UwtTransitionEvent:
+        """Append one event to the history of the match's config entry."""
+        track.seq += 1
+        prev_seen_age_s: int | None = None
+        if old_seen_mono is not None:
+            prev_seen_age_s = int(max(0.0, clock.monotonic - old_seen_mono))
+        event = UwtTransitionEvent(
+            canonical_id=match.canonical_id or match.device_id,
+            kind=kind,
+            old=_uwt_label(old),
+            new="on" if new else "off",
+            source=source.value,
+            flags=reading.origin,
+            frame=_uwt_frame_label(frame_type),
+            payload_len=payload_len,
+            poll_age_s=self._uwt_poll_age_s(match, clock.monotonic),
+            prev_seen_age_s=prev_seen_age_s,
+            observed=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock.wall)),
+            seq=track.seq,
+        )
+        ring = self._uwt_events.get(match.config_entry_id)
+        if ring is None:
+            ring = _UwtEventRing()
+            self._uwt_events[match.config_entry_id] = ring
+        if len(ring.events) == ring.events.maxlen:
+            ring.dropped += 1
+        ring.events.append(event)
+        return event
+
+    def _uwt_poll_age_s(self, match: EIDMatch, observed_mono: float) -> int | None:
+        """Return seconds from the last sent location request to the sighting.
+
+        Only the coordinator of the match's own config entry is asked, by the
+        match's canonical id (the coordinator's ``device["id"]``); there is no
+        fallback to another entry. ``None`` when that coordinator has sent no
+        request for the device, or when the request was sent after the
+        observation (the advertisement clock may lag ``time.monotonic``).
+        """
+        bucket = self.hass.data.get(DOMAIN)
+        entries = bucket.get("entries") if isinstance(bucket, dict) else None
+        if not isinstance(entries, dict):
+            return None
+        runtime = entries.get(match.config_entry_id)
+        provider: _LocateRequestClock | None = None
+        candidate = getattr(runtime, "coordinator", None)
+        if isinstance(candidate, _LocateRequestClock):
+            provider = candidate
+        elif isinstance(runtime, _LocateRequestClock):
+            provider = runtime
+        if provider is None:
+            return None
+        stamp = provider.locate_requested_mono(match.canonical_id)
+        if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+            return None
+        age = observed_mono - stamp
+        if age < 0:
+            _LOGGER.debug(
+                "uwt_poll_age_unavailable device=%s reason=poll_after_observation",
+                match.device_id,
+            )
+            return None
+        return int(age)
+
+    def uwt_transition_snapshot(self, entry_id: str) -> UwtTransitionSnapshot:
+        """Return the recorded protection-mode changes of one config entry.
+
+        Only events of ``entry_id`` are returned; an entry without history
+        yields an empty snapshot.
+        """
+        rings: dict[str, _UwtEventRing] = getattr(self, "_uwt_events", {})
+        ring = rings.get(entry_id)
+        return UwtTransitionSnapshot(
+            capacity=_UWT_TRANSITION_RING_SIZE,
+            dropped=ring.dropped if ring is not None else 0,
+            info_lines_per_device_hour=_UWT_TRANSITION_INFO_PER_HOUR,
+            events=tuple(ring.events) if ring is not None else (),
         )
 
     def _update_ble_battery(  # noqa: PLR0912, PLR0913
@@ -3630,6 +3953,7 @@ class GoogleFindMyEIDResolver:
             flags_byte = _guess_flags_byte(raw)
             flags_origin = "guessed" if flags_byte is not None else "absent"
         uwt_bit: bool | None = None
+        decoded_flags: int | None = None
 
         # ---- Decode and store ----
         # CANONICAL SPEC ANCHOR for FMDN hashed_flags decoding.
@@ -3660,6 +3984,7 @@ class GoogleFindMyEIDResolver:
         # See also docs/BLE_BATTERY_SENSOR.md L45.
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
+            decoded_flags = decoded
             # Mask/shift centralized in FMDN_HASHED_FLAGS_* constants
             # (top of module, FMDN frame-type cluster).
             battery_raw = (
@@ -3805,7 +4130,7 @@ class GoogleFindMyEIDResolver:
                         raw_hex,
                     )
                     self._flags_logged_devices.add(storage_key)
-        return _FlagsReading(uwt_bit, flags_origin)
+        return _FlagsReading(uwt_bit, flags_origin, decoded_flags)
 
     # ------------------------------------------------------------------
     # Public BLE battery API
@@ -4275,3 +4600,7 @@ class GoogleFindMyEIDResolver:
         confirmed_sightings = getattr(self, "_confirmed_sightings", None)
         if isinstance(confirmed_sightings, dict):
             confirmed_sightings.clear()
+        for attr in ("_uwt_track", "_uwt_events"):
+            mapping = getattr(self, attr, None)
+            if isinstance(mapping, dict):
+                mapping.clear()
