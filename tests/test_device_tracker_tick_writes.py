@@ -170,7 +170,7 @@ def test_tf01_observation_signature_ignores_clock_driven_values() -> None:
     side information change with the clock or the coarse-fix window, so none
     of them may make a tick look like a new observation. The coarse case
     inverts #1321's ``test_coarse_fix_change_is_not_swallowed_by_signature``
-    (V-C11 c and V-C15 b: the coarse fix is held, not a new observation).
+    (the coarse fix is held with the observation and is no new observation).
     """
 
     from homeassistant.util import dt as dt_util
@@ -354,7 +354,7 @@ async def test_tf06_restore_publishes_the_restored_fix_then_only_reports(
 
     Rebuilt from #1321's ``test_first_write_after_restart_is_plain``. The
     held values are in place before the first write, so the ticks after it
-    publish identical attributes (Gegenprüfung D-7).
+    publish identical attributes.
     """
 
     from homeassistant.const import EVENT_STATE_CHANGED, EVENT_STATE_REPORTED
@@ -410,7 +410,7 @@ async def test_tf06_restore_publishes_the_restored_fix_then_only_reports(
 
 @pytest.mark.asyncio
 async def test_restore_while_hidden_publishes_the_restored_fix_once_visible() -> None:
-    """A restore for a hidden device still shows the restored fix later (R6-7).
+    """A restore for a hidden device still shows the restored fix later.
 
     The restore runs before the first publish, and that publish clears the
     tracker's own last-good cache for a device the coordinator does not show.
@@ -604,7 +604,7 @@ async def test_tf08_tick_without_new_observation_is_one_report(
     hass: HomeAssistant,
     use_real_homeassistant_modules: None,
 ) -> None:
-    """Through the entity: a tick writes, Core only reports it (EE-44).
+    """Through the entity: a tick writes, Core only reports it.
 
     Replaces #1321's ``test_noop_update_writes_plainly_without_restamp_or_state_change``:
     the write is no longer suppressed, so ``last_reported`` keeps moving
@@ -639,7 +639,7 @@ async def test_tf09_coarse_fix_expiry_moves_nothing_on_the_main_tracker(
     hass: HomeAssistant,
     use_real_homeassistant_modules: None,
 ) -> None:
-    """V-C15 (b): an expiring coarse fix waits for the next observation.
+    """An expiring coarse fix waits for the next observation.
 
     Codex thread ``4247583316`` on #1353: expiry alone used to drop
     ``coarse_*``, which Core wrote as a change, and ``person`` could then rank
@@ -685,7 +685,7 @@ async def test_tf09_coarse_fix_expiry_moves_nothing_on_the_main_tracker(
 def test_tf10_coarse_fix_appearing_moves_nothing_on_the_main_tracker(
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """V-C11 (c): the gate rejects a fix, the published position stays.
+    """The gate rejects a fix, the published position stays.
 
     The coarse fix is held back until the next observation, so the tick
     publishes identical attributes and ``last_updated`` stays (Audit F-3).
@@ -712,7 +712,7 @@ async def test_tf11_zone_created_around_the_unchanged_position_changes_state(
     hass: HomeAssistant,
     use_real_homeassistant_modules: None,
 ) -> None:
-    """Every tick writes, so Core re-evaluates zones (Prüfer CA-1, EE-44).
+    """Every tick writes, so Core re-evaluates zones.
 
     A zone added around the unchanged position changes the state on the next
     tick without a new fix; a suppressed write would have kept ``not_home``.
@@ -751,9 +751,9 @@ async def test_tf11_zone_created_around_the_unchanged_position_changes_state(
 def test_tf13_last_location_tracker_carries_no_coarse_fix(
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """V-C11 (c): the never-stale tracker has no ``coarse_*`` at all.
+    """The never-stale tracker has no ``coarse_*`` at all.
 
-    Neither appearing nor expiring changes its attributes (Gegenprüfung D-5),
+    Neither appearing nor expiring changes its attributes,
     so it never moves ``last_updated`` for a coarse fix.
     """
 
@@ -1112,7 +1112,7 @@ async def test_zone_change_without_new_fix_stamps_last_changed_now(
 
 
 # ---------------------------------------------------------------------------
-# Repair issue announcing the held attributes (V-C3 b1).
+# Repair issue announcing the held attributes.
 #
 # ``issue_registry_capture`` records every argument the platform passes to
 # ``async_create_issue`` and every deletion. Home Assistant's own
@@ -1180,8 +1180,6 @@ class _Entry:
 def repair_platform(monkeypatch: pytest.MonkeyPatch) -> Any:
     """The tracker module with registry and reference helpers as doubles."""
 
-    import sys
-
     from custom_components.googlefindmy import device_tracker
 
     trackers = {
@@ -1203,23 +1201,15 @@ def repair_platform(monkeypatch: pytest.MonkeyPatch) -> Any:
             ],
         ),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "homeassistant.components.automation",
-        SimpleNamespace(
-            automations_with_entity=lambda hass, entity_id: references.get(
-                entity_id, []
-            )
-        ),
+    monkeypatch.setattr(
+        device_tracker,
+        "automations_with_entity",
+        lambda hass, entity_id: references.get(entity_id, []),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "homeassistant.components.script",
-        SimpleNamespace(
-            scripts_with_entity=lambda hass, entity_id: script_references.get(
-                entity_id, []
-            )
-        ),
+    monkeypatch.setattr(
+        device_tracker,
+        "scripts_with_entity",
+        lambda hass, entity_id: script_references.get(entity_id, []),
     )
     return SimpleNamespace(
         module=device_tracker,

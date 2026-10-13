@@ -27,6 +27,12 @@ from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+# ``automation`` and ``script`` are no dependencies (hassfest allows these two
+# imports, ALLOWED_USED_COMPONENTS). Imported at module level because Home
+# Assistant imports this platform in the executor; a lazy import inside the
+# start callback would load the modules on the event loop.
+from homeassistant.components.automation import automations_with_entity
+from homeassistant.components.script import scripts_with_entity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_LATITUDE,
@@ -212,15 +218,6 @@ def _async_track_frozen_attributes_issue(
 
     @callback
     def _create_issue(_hass: HomeAssistant) -> None:
-        # Imported when needed: neither integration is a dependency of this one,
-        # and both are loaded by the time Home Assistant has started.
-        from homeassistant.components.automation import (  # noqa: PLC0415
-            automations_with_entity,
-        )
-        from homeassistant.components.script import (  # noqa: PLC0415
-            scripts_with_entity,
-        )
-
         trackers = [
             entry.entity_id
             for entry in er.async_entries_for_config_entry(
@@ -1161,7 +1158,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     # here.
     _unrecorded_attributes = frozenset({"location_age"})
     # The main tracker carries the held coarse-fix side information; the
-    # _last_location tracker never goes stale and carries none (V-C11 c).
+    # _last_location tracker never goes stale and carries none.
     _publishes_coarse_fix = True
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----

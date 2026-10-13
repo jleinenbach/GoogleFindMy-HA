@@ -1,18 +1,18 @@
 # tests/test_sensor_coarse_fix.py
-"""Behavior tests for ``GoogleFindMyCoarseFixSensor`` (#216, V-C11 c).
+"""Behavior tests for ``GoogleFindMyCoarseFixSensor`` (#216).
 
 The main device_tracker holds its ``coarse_*`` attributes with the observation
 and the ``_last_location`` tracker carries none, so this sensor is the live
 carrier of a coarse fix the accuracy gate discarded. The tests pin the
-decision rules G-1 to G-3 of the plan:
+three rules of the sensor:
 
-- G-1: the state is the time of the fresh coarse fix and ``None`` (HA state
+- (1) the state is the time of the fresh coarse fix and ``None`` (HA state
   ``unknown``) without one or after it expired; a coarse fix exists only while
   it is newer than the adopted fix, so the state is then later than
   ``sensor.*_last_seen``;
-- G-2: ``coarse_accuracy`` and the coordinates only under the ``coarse_*``
+- (2) ``coarse_accuracy`` and the coordinates only under the ``coarse_*``
   names, never ``latitude``/``longitude`` (no map marker, no zone logic);
-- G-3: enabled by default, a TIMESTAMP without ``state_class``.
+- (3) enabled by default, a TIMESTAMP without ``state_class``.
 
 The coarse fix enters through the coordinator's own producer
 (``_record_coarse_fix``) and leaves through its freshness accessor
@@ -153,7 +153,7 @@ def _now() -> float:
 
 @pytest.mark.asyncio
 async def test_no_coarse_fix_is_unknown(freezer: FrozenDateTimeFactory) -> None:
-    """G-1: without a discarded fix the state is ``None``, no attributes."""
+    """Rule (1): without a discarded fix the state is ``None``, no attributes."""
 
     coordinator, entity, _last_seen = await _setup()
     coordinator._device_location_data["dev-1"] = _row(_now() - 60)
@@ -166,7 +166,7 @@ async def test_no_coarse_fix_is_unknown(freezer: FrozenDateTimeFactory) -> None:
 async def test_coarse_fix_newer_than_the_adopted_fix_is_the_state(
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """G-1 and G-2: the coarse fix time is the state, later than LastSeen."""
+    """Rules (1) and (2): the coarse fix time is the state, later than LastSeen."""
 
     from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
 
@@ -193,7 +193,7 @@ async def test_coarse_fix_newer_than_the_adopted_fix_is_the_state(
 
 @pytest.mark.asyncio
 async def test_expired_coarse_fix_is_unknown(freezer: FrozenDateTimeFactory) -> None:
-    """G-1: past the stale threshold the accessor drops it, the state is ``None``."""
+    """Rule (1): past the stale threshold the accessor drops it, state ``None``."""
 
     coordinator, entity, _last_seen = await _setup()
     coordinator._device_location_data["dev-1"] = _row(_now() - 120)
@@ -247,7 +247,7 @@ async def test_unusable_coarse_stamp_or_missing_accessor_is_unknown(
 
 @pytest.mark.asyncio
 async def test_entity_contract(freezer: FrozenDateTimeFactory) -> None:
-    """G-3: TIMESTAMP without state class, enabled, tracker scope, own key."""
+    """Rule (3): TIMESTAMP without state class, enabled, tracker scope, own key."""
 
     from homeassistant.components.sensor import SensorDeviceClass
 
