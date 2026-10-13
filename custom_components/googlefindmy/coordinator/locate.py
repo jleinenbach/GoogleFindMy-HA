@@ -371,6 +371,12 @@ class LocateOperations(_MixinBase):
             google_home_filter = self._get_google_home_filter()
 
             try:
+                # Stamped before the await, not after it: a request that
+                # times out or raises was still sent. Created lazily for
+                # coordinators built without __init__.
+                if not hasattr(self, "_locate_requested_mono"):
+                    self._locate_requested_mono = {}
+                self._locate_requested_mono[device_id] = time.monotonic()
                 location_data = await self.api.async_get_device_location(
                     device_id, name
                 )

@@ -1969,6 +1969,12 @@ class PollingOperations(_MixinBase):
                         # make this outer guard win the race and raise a spurious
                         # TimeoutError before the inner request can return its
                         # clean empty result (Nygard: stagger nested timeouts).
+                        # Stamped before the await, not after it: a request
+                        # that times out or raises was still sent. Created
+                        # lazily for coordinators built without __init__.
+                        if not hasattr(self, "_locate_requested_mono"):
+                            self._locate_requested_mono = {}
+                        self._locate_requested_mono[dev_id] = time.monotonic()
                         location = await asyncio.wait_for(
                             self.api.async_get_device_location(dev_id, dev_name),
                             timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
