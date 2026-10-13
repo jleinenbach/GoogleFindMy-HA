@@ -1,7 +1,7 @@
 # tests/test_uwt_transition_channel.py
 """Measurement channel for unwanted-tracking protection mode changes.
 
-The resolver records every change of a device's protection mode per
+The resolver records each change of a device's protection mode it sees per
 (config entry, device) and keeps a fixed-size history per config entry. The
 history feeds the ``uwt_transitions`` diagnostics block; the
 ``FMDN_UWT_TRANSITION`` log line is pinned further down. ``poll_age_s`` is
@@ -498,7 +498,8 @@ def test_the_thirteenth_change_of_an_hour_goes_to_debug(
 def test_after_the_hour_a_resync_line_closes_the_throttled_stretch(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """LC-5: a throttled stretch never ends in the log without its end state."""
+    """LC-5: once the budget is free, the next sighting closes the throttled
+    stretch with the end state."""
     resolver = _resolver()
     _flap(resolver, 13)
     caplog.clear()

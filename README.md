@@ -658,8 +658,8 @@ Trackers in the Find Hub network can enter *unwanted tracking protection
 mode*. The integration reads the mode from each advertisement of your own
 trackers (frame type and hashed-flags bit) and shows it as the protection mode
 binary sensor. What makes Google's service turn the mode on for a tracker is
-not published. To narrow it down, the integration records every change of the
-mode per device, together with how long before the change it last requested
+not published. To narrow it down, the integration records each change of the
+mode it sees in an advertisement, per device, together with how long before the change it last requested
 the device's location from Google.
 
 1. **Search the log for `FMDN_UWT_TRANSITION`.** One line is written per
@@ -676,8 +676,8 @@ the device's location from Google.
      if it sent none since the start).
    - `prev_seen_age_s`: seconds since the old mode was last seen.
    - At most 12 lines per device and hour are written at INFO, further ones at
-     DEBUG. When the limit frees up again, a line with `kind=resync` repeats
-     the current mode, and `suppressed=<n>` says how many lines went to DEBUG.
+     DEBUG. Once the limit has freed up, the next advertisement of the device
+     writes a line with `kind=resync` that repeats the current mode, and `suppressed=<n>` says how many lines went to DEBUG.
 2. **Make INFO visible.** The line is logged at INFO and is hidden at the
    default level. Call the `logger.set_level` action (no restart needed; it
    lasts until the next restart):

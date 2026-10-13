@@ -1,8 +1,8 @@
 # tests/test_diagnostics_uwt_transitions.py
 """Diagnostics ``uwt_transitions`` block (protection-mode changes).
 
-The EID resolver records every change of a device's unwanted-tracking
-protection mode per config entry. The config-entry diagnostics carry that
+The EID resolver records each change of a device's unwanted-tracking
+protection mode it sees, per config entry. The config-entry diagnostics carry that
 history so a user can attach it to an issue without configuring logging.
 Users post this block publicly, so the tests drive the real
 ``async_get_config_entry_diagnostics`` and pin, by a difference test, that

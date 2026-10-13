@@ -1101,8 +1101,9 @@ def _effective_uwt_mode(
 #
 # - 12 INFO lines per device and rolling hour. The highest rate measured for
 #   one device is 24 changes in 11 days (about 2.2 a day); 12 an hour are 288
-#   a day, more than a hundred times that. Normal operation is never
-#   throttled, only a tracker that flaps continuously; the shortest reported
+#   a day, more than a hundred times that, so the rates measured so far stay
+#   far below the limit and only a tracker that flaps continuously reaches
+#   it; the shortest reported
 #   episode is 38 s, so changes a minute apart do occur.
 # - 200 events per config entry. At the #210 rate (32 changes in 11 days,
 #   about 2.9 a day) that is about 69 days of history, at the rate seen on the
@@ -3784,8 +3785,8 @@ class GoogleFindMyEIDResolver:
             if old == mode:
                 # No change. If lines were held back at DEBUG and the budget
                 # is free again, write the current mode at INFO, so that a
-                # throttled stretch never ends in the log without its end
-                # state.
+                # throttled stretch ends in the log with its end state as soon
+                # as the device is seen again.
                 if track.suppressed and self._uwt_budget_free(track, clock.monotonic):
                     event = self._record_uwt_event(
                         match,
