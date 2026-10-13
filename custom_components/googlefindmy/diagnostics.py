@@ -37,6 +37,7 @@ from .const import (
     CONF_GOOGLE_EMAIL,
     # secrets in entry.data (must never be exposed)
     CONF_OAUTH_TOKEN,
+    DATA_EID_RESOLVER,
     DATA_SECRET_BUNDLE,
     # defaults for options (used to avoid hard-coded literals)
     DEFAULT_DEVICE_POLL_DELAY,
@@ -531,6 +532,65 @@ def _recent_errors_block(coordinator: Any) -> list[dict[str, Any]] | None:
 # ---------------------------------------------------------------------------
 
 
+_UWT_EVENT_FIELDS = (
+    "kind",
+    "old",
+    "new",
+    "source",
+    "flags",
+    "frame",
+    "payload_len",
+    "poll_age_s",
+    "prev_seen_age_s",
+    "observed",
+    "seq",
+)
+
+
+def _uwt_transitions_block(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
+    """Return the protection-mode changes the EID resolver recorded for an entry.
+
+    Each event names its device by ``device_index``, the position of the
+    device's canonical id in the sorted set of devices in this entry's
+    events; the canonical id itself is left out. Only events of ``entry_id``
+    are included. Without a resolver, or if reading it fails, the block is
+    empty.
+    """
+    empty: dict[str, Any] = {
+        "capacity": None,
+        "dropped": 0,
+        "info_lines_per_device_hour": None,
+        "events": [],
+    }
+    try:
+        bucket = hass.data.get(DOMAIN) or {}
+        resolver = bucket.get(DATA_EID_RESOLVER) if isinstance(bucket, dict) else None
+        reader = getattr(resolver, "uwt_transition_snapshot", None)
+        if not callable(reader):
+            return empty
+        snapshot = reader(entry_id)
+        order = {
+            canonical_id: index
+            for index, canonical_id in enumerate(
+                sorted({event.canonical_id for event in snapshot.events})
+            )
+        }
+        return {
+            "capacity": snapshot.capacity,
+            "dropped": snapshot.dropped,
+            "info_lines_per_device_hour": snapshot.info_lines_per_device_hour,
+            "events": [
+                {
+                    "device_index": order[event.canonical_id],
+                    **{name: getattr(event, name) for name in _UWT_EVENT_FIELDS},
+                }
+                for event in snapshot.events
+            ],
+        }
+    except Exception:  # noqa: BLE001 - diagnostics must not fail on this block
+        return empty
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, Any]:
@@ -828,6 +888,11 @@ async def async_get_config_entry_diagnostics(
 
     foreign_report_readings = get_foreign_reading_diagnostics(entry.entry_id)
 
+    # Recorded protection-mode changes of this entry (FMDN_UWT_TRANSITION).
+    # Like the block above it carries no ID value, only a positional index,
+    # and it can be posted to an issue on its own.
+    uwt_transitions = _uwt_transitions_block(hass, entry.entry_id)
+
     # --- Assemble payload (without secrets) ---
     payload: dict[str, Any] = {
         "integration": integration_meta,
@@ -846,6 +911,7 @@ async def async_get_config_entry_diagnostics(
         "concurrency": concurrency,
         "eik_cache": eik_cache_stats,
         "foreign_report_readings": foreign_report_readings,
+        "uwt_transitions": uwt_transitions,
     }
     if crypto_info:
         payload["crypto"] = _crypto_block(crypto_info)
