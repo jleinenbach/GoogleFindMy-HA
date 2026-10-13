@@ -120,7 +120,7 @@ def _ids_in(text: str) -> set[str]:
 async def test_block_adds_no_id_value_to_the_dump(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Difference test (K12): the block carries positions, never ids."""
+    """Difference test: the block carries positions, never ids."""
     payload = await _dump(monkeypatch, _ENTRY_A, _resolver_with_history())
 
     block = payload["uwt_transitions"]

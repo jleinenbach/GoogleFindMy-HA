@@ -149,7 +149,7 @@ def test_a_change_is_recorded_with_its_previous_mode() -> None:
 def test_an_observation_without_mode_records_nothing(
     source: UwtSource, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """No change, and the reason is named once per reason (R5c-F6).
+    """No change, and the reason is named once per reason.
 
     A conflict between frame type and flags bit is its own source, not
     "unknown"; the DEBUG line is written when the reason changes, not once
@@ -189,7 +189,7 @@ def test_a_known_mode_after_a_skip_resets_the_skip_reason(
 
 
 def test_an_older_observation_records_nothing_a_newer_one_does() -> None:
-    """History replay may deliver sightings out of order (AE-12)."""
+    """History replay may deliver sightings out of order."""
     resolver = _resolver()
     _observe(resolver, False, 100.0)
     _observe(resolver, True, 50.0)
@@ -276,7 +276,7 @@ def test_poll_age_reads_a_bare_coordinator_as_well() -> None:
 def test_a_request_after_the_observation_gives_no_poll_age(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The advertisement clock may lag ``time.monotonic`` (MC10)."""
+    """The advertisement clock may lag ``time.monotonic``."""
     resolver = _resolver({"entry-a": _Coordinator({"dev-1": 12.0})})
     with caplog.at_level(logging.DEBUG, logger=_RESOLVER_LOGGER):
         _observe(resolver, True, 10.0)
@@ -498,7 +498,7 @@ def test_the_thirteenth_change_of_an_hour_goes_to_debug(
 def test_after_the_hour_a_resync_line_closes_the_throttled_stretch(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """LC-5: once the budget is free, the next sighting closes the throttled
+    """Once the budget is free, the next sighting closes the throttled
     stretch with the end state."""
     resolver = _resolver()
     _flap(resolver, 13)
@@ -564,8 +564,7 @@ def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
     event (fixed labels, numbers, the UTC time), the decoded flags byte and
     the suppressed count: no name, entity id, address or coordinate.
 
-    Retirement condition: the transition line is lowered to DEBUG or removed
-    (see CA-GFMY-UWT-HA-KORRELATION-001).
+    Retirement condition: the transition line is lowered to DEBUG or removed.
     """
     source = _RESOLVER_SOURCE.read_text()
     tree = ast.parse(source)

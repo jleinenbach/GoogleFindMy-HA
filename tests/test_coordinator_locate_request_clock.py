@@ -114,7 +114,7 @@ def test_no_stamp_before_the_first_request(monkeypatch: pytest.MonkeyPatch) -> N
 def test_poll_cycle_stamps_before_the_await_even_when_it_raises(
     monkeypatch: pytest.MonkeyPatch, built_by_init: bool
 ) -> None:
-    """LC-13: the stamp is set before the request, not in a ``finally``.
+    """The stamp is set before the request, not in a ``finally``.
 
     The API reads the stamp while the request is in flight and then raises;
     the stamp must already be there inside the call and must still be there
@@ -167,7 +167,7 @@ async def test_manual_locate_stamps_before_the_await_even_when_it_raises(
 
 
 def test_purge_device_drops_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
-    """LC-15: a deleted device re-added under the same id starts without a stamp."""
+    """A deleted device re-added under the same id starts without a stamp."""
     loop = asyncio.new_event_loop()
     try:
         coordinator = _make_coordinator(monkeypatch, loop, _RaisingAPI(), [])
@@ -192,7 +192,7 @@ def test_reader_answers_none_on_a_coordinator_built_without_init() -> None:
     ids=["entry_scoped", "legacy"],
 )
 def test_canonical_id_joins_the_snapshot_device_id(registry_identifier: str) -> None:
-    """Ü2: ``EIDMatch.canonical_id`` equals the id the coordinator stamps by.
+    """``EIDMatch.canonical_id`` equals the id the coordinator stamps by.
 
     The resolver derives ``canonical_id`` with ``_extract_our_identifier`` from
     the device-registry identifier (``coordinator/identity.py``), the poll and

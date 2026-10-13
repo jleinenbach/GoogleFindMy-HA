@@ -1270,7 +1270,7 @@ async def test_finder_uses_the_candidate_key_the_sighting_was_matched_under(
     assert upload.eid == advertised
 
     # The source of the mode travels with it, so that the skip line can tell
-    # an unknown mode from a conflict (R5c-F6).
+    # an unknown mode from a conflict.
     sighting = resolver.last_confirmed_sighting("reg-1")
     assert sighting is not None
     resolver._confirmed_sightings["reg-1"] = replace(
