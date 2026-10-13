@@ -1154,6 +1154,14 @@ TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS: str = (
 TRACKER_ATTRS_BREAKS_IN_HA_VERSION: str = "2027.6.0"
 
 
+def frozen_attributes_issue_id(entry_id: str) -> str:
+    """Return the Repairs issue id announcing the held tracker attributes.
+
+    Pattern: 'tracker_attributes_frozen_<entry_id>'
+    """
+    return f"{ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY}_{entry_id}"
+
+
 def issue_id_for(entry_id: str) -> str:
     """Return a stable Repairs issue_id for a given config entry.
 
@@ -1328,6 +1336,7 @@ __all__ = [
     "TRANSLATION_KEY_DUPLICATE_ACCOUNT",
     "ISSUE_RESTART_REQUIRED_KEY",
     "ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY",
+    "frozen_attributes_issue_id",
     "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN",
     "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS",
     "TRACKER_ATTRS_BREAKS_IN_HA_VERSION",

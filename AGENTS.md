@@ -794,7 +794,7 @@ repair issue and the guard.
 
 | Constant (`const.py`) | Surface | Replacement | Repair issue | Guard |
 | --- | --- | --- | --- | --- |
-| `TRACKER_ATTRS_BREAKS_IN_HA_VERSION = "2027.6.0"` | `device_tracker` attributes `location_age`, `location_status`, `coarse_*` (main tracker) | `sensor.*_location_status`, `sensor.*_last_seen`, `sensor.*_coarse_fix` | `tracker_attributes_frozen_<entry_id>` | `tests/test_guard_integration_deprecations.py` |
+| `TRACKER_ATTRS_BREAKS_IN_HA_VERSION = "2027.6.0"` | `device_tracker` attributes `location_age`, `location_status`, `coarse_*` (main tracker) | per-device sensors with the unique_id suffixes `_location_status`, `_last_seen`, `_coarse_fix` | `tracker_attributes_frozen_<entry_id>` | `tests/test_guard_integration_deprecations.py` |
 
 ---
 

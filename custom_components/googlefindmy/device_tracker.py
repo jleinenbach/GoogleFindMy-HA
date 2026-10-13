@@ -59,12 +59,12 @@ from . import (
 from .const import (
     DEFAULT_SHOW_LOCATION_AGE,
     DOMAIN,
-    ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY,
     OPT_SHOW_LOCATION_AGE,
     TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
     TRACKER_SUBENTRY_KEY,
     TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN,
     TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS,
+    frozen_attributes_issue_id,
 )
 from .coordinator import (
     GoogleFindMyCoordinator,
@@ -189,16 +189,15 @@ def _normalize_identifier_set(candidate: Iterable[Any] | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-# The entities that carry the live values of the held tracker attributes; kept
-# literal so every locale of the repair issue names the same entity ids.
-_FROZEN_ATTRIBUTES_REPLACEMENTS = (
-    "sensor.*_location_status, sensor.*_last_seen, sensor.*_coarse_fix"
+# Unique-id suffixes of the per-device sensors that carry the live values of the
+# held tracker attributes. The issue lists their registered entity ids: Home
+# Assistant derives the object id from the translated entity name for most
+# languages, so a literal such as ``sensor.*_coarse_fix`` would not exist there.
+_FROZEN_ATTRIBUTES_REPLACEMENT_SUFFIXES = (
+    "_location_status",
+    "_last_seen",
+    "_coarse_fix",
 )
-
-
-def frozen_attributes_issue_id(entry_id: str) -> str:
-    """Return the Repairs issue id announcing the held tracker attributes."""
-    return f"{ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY}_{entry_id}"
 
 
 @callback
@@ -210,21 +209,29 @@ def _async_track_frozen_attributes_issue(
     The list of automations and scripts is computed once Home Assistant has
     started: ``automation`` and ``script`` need not be loaded while this
     platform sets up (they would report no references), and neither is a
-    dependency of the integration. The tracker entity ids come from the
-    entity registry, not from runtime entities. Unloading the entry removes
-    both the pending start callback and the issue.
+    dependency of the integration. The tracker and replacement sensor entity
+    ids come from the entity registry, not from runtime entities. Unloading
+    the entry cancels a pending start callback but keeps the issue, so a
+    reload does not undo the user's "ignore"; ``async_remove_entry`` deletes
+    it, and a non-persistent issue of an entry that is no longer set up turns
+    inactive with the next start.
     """
     issue_id = frozen_attributes_issue_id(config_entry.entry_id)
 
     @callback
     def _create_issue(_hass: HomeAssistant) -> None:
+        registered = er.async_entries_for_config_entry(
+            er.async_get(hass), config_entry.entry_id
+        )
         trackers = [
-            entry.entity_id
-            for entry in er.async_entries_for_config_entry(
-                er.async_get(hass), config_entry.entry_id
-            )
-            if entry.domain == "device_tracker"
+            entry.entity_id for entry in registered if entry.domain == "device_tracker"
         ]
+        replacements = sorted(
+            entry.entity_id
+            for entry in registered
+            if entry.domain == "sensor"
+            and entry.unique_id.endswith(_FROZEN_ATTRIBUTES_REPLACEMENT_SUFFIXES)
+        )
         users = sorted(
             {
                 reference
@@ -237,7 +244,7 @@ def _async_track_frozen_attributes_issue(
         )
         placeholders = {
             "entry_title": config_entry.title or config_entry.entry_id,
-            "replacement_sensors": _FROZEN_ATTRIBUTES_REPLACEMENTS,
+            "replacement_sensors": "\n".join(f"- {ref}" for ref in replacements) or "-",
             "breaks_version": TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
         }
         translation_key = TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS
@@ -264,7 +271,6 @@ def _async_track_frozen_attributes_issue(
         _LOGGER.debug("Held-attributes repair issue not scheduled: no start state")
         return
     config_entry.async_on_unload(async_at_started(hass, _create_issue))
-    config_entry.async_on_unload(lambda: ir.async_delete_issue(hass, DOMAIN, issue_id))
 
 
 async def async_setup_entry(

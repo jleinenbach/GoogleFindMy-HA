@@ -1188,17 +1188,47 @@ def repair_platform(monkeypatch: pytest.MonkeyPatch) -> Any:
         "entry-late": ["device_tracker.late"],
         "entry-gone": ["device_tracker.gone"],
     }
+    # Replacement sensors as a German installation names them: the entity id
+    # follows the translated name, the unique_id keeps the English suffix.
+    sensors = {
+        "entry-a": [
+            (
+                "sensor.a_standortstatus",
+                "googlefindmy_entry-a_tracker_a_location_status",
+            ),
+            ("sensor.a_zuletzt_gesehen", "googlefindmy_entry-a_tracker_a_last_seen"),
+            ("sensor.a_grobortung", "googlefindmy_entry-a_tracker_a_coarse_fix"),
+        ],
+        "entry-b": [
+            ("sensor.b_coarse_fix", "googlefindmy_entry-b_tracker_b_coarse_fix"),
+        ],
+    }
     references: dict[str, list[str]] = {}
     script_references: dict[str, list[str]] = {}
+
+    def _entries(registry: Any, entry_id: str) -> list[SimpleNamespace]:
+        registered = [
+            (entity_id, f"googlefindmy_{entry_id}_{entity_id}")
+            for entity_id in trackers.get(entry_id, [])
+        ]
+        registered += sensors.get(entry_id, [])
+        # Another sensor of the entry that carries no held attribute.
+        registered.append(("sensor.other", f"googlefindmy_{entry_id}_x_plus_code"))
+        return [
+            SimpleNamespace(
+                entity_id=entity_id,
+                domain=entity_id.split(".")[0],
+                unique_id=unique_id,
+            )
+            for entity_id, unique_id in registered
+        ]
+
     monkeypatch.setattr(
         device_tracker,
         "er",
         SimpleNamespace(
             async_get=lambda hass: "registry",
-            async_entries_for_config_entry=lambda registry, entry_id: [
-                SimpleNamespace(entity_id=entity_id, domain=entity_id.split(".")[0])
-                for entity_id in [*trackers.get(entry_id, []), "sensor.other"]
-            ],
+            async_entries_for_config_entry=_entries,
         ),
     )
     monkeypatch.setattr(
@@ -1218,10 +1248,14 @@ def repair_platform(monkeypatch: pytest.MonkeyPatch) -> Any:
     )
 
 
-def test_repair_issue_one_per_entry_removed_with_that_entry(
+def test_repair_issue_one_per_entry_kept_over_an_unload(
     repair_platform: Any, issue_registry_capture: Any
 ) -> None:
-    """One WARNING per entry with the removal version; unload removes only its own."""
+    """One WARNING per entry with the removal version, kept over an unload.
+
+    Deleting it on unload would drop the user's "ignore" with every reload;
+    ``async_remove_entry`` deletes it instead.
+    """
 
     from custom_components.googlefindmy.const import (
         DOMAIN,
@@ -1248,20 +1282,30 @@ def test_repair_issue_one_per_entry_removed_with_that_entry(
     assert issue["translation_placeholders"] == {
         "entry_title": "entry-a",
         "replacement_sensors": (
-            "sensor.*_location_status, sensor.*_last_seen, sensor.*_coarse_fix"
+            "- sensor.a_grobortung\n- sensor.a_standortstatus\n- sensor.a_zuletzt_gesehen"
         ),
         "breaks_version": TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
     }
 
-    first.unload()
-    assert set(issues) == {"tracker_attributes_frozen_entry-b"}
-    assert issue_registry_capture.deleted == [
-        (DOMAIN, "tracker_attributes_frozen_entry-a")
-    ]
+    assert (
+        issues["tracker_attributes_frozen_entry-b"]["translation_placeholders"][
+            "replacement_sensors"
+        ]
+        == "- sensor.b_coarse_fix"
+    )
 
-    # A reload sets the platform up again: the issue comes back.
+    first.unload()
+    assert set(issues) == {
+        "tracker_attributes_frozen_entry-a",
+        "tracker_attributes_frozen_entry-b",
+    }
+    assert issue_registry_capture.deleted == []
+
+    # A reload sets the platform up again and refreshes the same issue.
     repair_platform.module._async_track_frozen_attributes_issue(hass, first)
-    assert "tracker_attributes_frozen_entry-a" in issues
+    assert [item["issue_id"] for item in issue_registry_capture.created].count(
+        "tracker_attributes_frozen_entry-a"
+    ) == 2
 
 
 def test_repair_issue_lists_automations_loaded_after_the_platform(
@@ -1297,6 +1341,8 @@ def test_repair_issue_lists_automations_loaded_after_the_platform(
     assert issue["translation_placeholders"]["automations"] == (
         "- automation.arrives\n- script.notify"
     )
+    # No replacement sensor registered for this entry: a placeholder, not "".
+    assert issue["translation_placeholders"]["replacement_sensors"] == "-"
 
 
 def test_repair_issue_not_created_when_unloaded_before_start(
@@ -1314,10 +1360,14 @@ def test_repair_issue_not_created_when_unloaded_before_start(
     assert issue_registry_capture.registry.issues == {}
 
 
-def test_repair_issue_scheduling_failure_does_not_fail_the_setup(
+def test_repair_issue_skipped_for_a_hass_without_start_state(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The issue is advisory: a hass without a start state only logs."""
+    """A hass double without ``state``/``bus`` skips the issue and only logs.
+
+    Production always has both; the branch keeps the platform setup of fast
+    test doubles working, and it catches no exception.
+    """
 
     import logging
 

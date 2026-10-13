@@ -16,7 +16,11 @@ Four arms for the entry ``TRACKER_ATTRS_BREAKS_IN_HA_VERSION``:
     the source: a dead exclusion elsewhere could keep a text probe green);
 (b) the register row names exactly the value of the constant;
 (c) the repair issue takes ``breaks_in_ha_version`` from the constant, so
-    issue, register and guard share one source;
+    issue, register and guard share one source: every call in the
+    integration that passes the keyword is found on the syntax tree, in any
+    module, so a literal or an alias elsewhere fails too (quotes of Core
+    deprecations in docstrings are no calls; a ``**kwargs`` mapping is not
+    seen);
 (d) cleanup: once the tracker no longer publishes any of the keys, the
     constant and its row must go too.
 
@@ -27,6 +31,7 @@ decision rule itself is the pure ``_removal_due``.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -132,8 +137,13 @@ def test_register_row_names_the_constant_value() -> None:
 def test_repair_issue_takes_the_version_from_the_constant() -> None:
     """Arm (c): one source for issue, register and guard."""
 
-    source = (
-        _REPO_ROOT / "custom_components/googlefindmy/device_tracker.py"
-    ).read_text(encoding="utf-8")
-    passed: list[Any] = re.findall(r"breaks_in_ha_version\s*=\s*([^,\n)]+)", source)
-    assert passed == ["TRACKER_ATTRS_BREAKS_IN_HA_VERSION"]
+    package = _REPO_ROOT / "custom_components/googlefindmy"
+    passed: list[Any] = [
+        (path.relative_to(package).as_posix(), ast.unparse(keyword.value))
+        for path in sorted(package.rglob("*.py"))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "breaks_in_ha_version"
+    ]
+    assert passed == [("device_tracker.py", "TRACKER_ATTRS_BREAKS_IN_HA_VERSION")]

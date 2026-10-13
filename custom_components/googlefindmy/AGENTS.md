@@ -314,7 +314,7 @@ gate would keep the cached fix permanently fresh and the gate would never releas
 pinned by `tests/test_cache_accuracy_gate.py::test_gate_stops_rejecting_once_the_cached_fix_goes_stale`.
 
 **A refusal is not silence.** The refused fix is retained as side information and published live by the coarse-fix sensor
-(`sensor.*_coarse_fix`); the main tracker holds its `coarse_*` attributes with the observation and takes a new coarse fix only with
+(unique_id suffix `_coarse_fix`); the main tracker holds its `coarse_*` attributes with the observation and takes a new coarse fix only with
 the next observation, and the `_last_location` tracker carries none. So every one of the three callers has to notify the listeners
 even when nothing was committed - and all three already
 do, from a place far enough from the rejection that a reader looking only at the branch will miss it. The poll cycle publishes
