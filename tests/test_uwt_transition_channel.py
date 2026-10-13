@@ -11,12 +11,16 @@ sent for the device, read only from the coordinator of the match's own entry.
 
 from __future__ import annotations
 
+import ast
 import logging
+import re
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from custom_components.googlefindmy import eid_resolver
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.eid_resolver import (
     FMDN_FRAME_TYPE,
@@ -414,3 +418,181 @@ def test_a_failing_channel_does_not_fail_the_match(
         r.getMessage() == "uwt_transition_failed error_type=RuntimeError"
         for r in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# FMDN_UWT_TRANSITION
+# ---------------------------------------------------------------------------
+
+_LINE = re.compile(
+    r"^FMDN_UWT_TRANSITION kind=(change|resync) device=\S+ canonical=\S+ "
+    r"old=(on|off|unknown) new=(on|off) source=(flags_bit|frame_type) "
+    r"flags=(framed|guessed|absent) frame=(0x40|0x41|none) "
+    r"decoded=(0x[0-9a-f]{2}|none) payload_len=\d+ poll_age_s=(\d+|none) "
+    r"prev_seen_age_s=(\d+|none) observed=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ "
+    r"seq=\d+ suppressed=\d+$"
+)
+
+
+def _lines(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    return [
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.name == _RESOLVER_LOGGER
+        and r.getMessage().startswith("FMDN_UWT_TRANSITION ")
+    ]
+
+
+def test_the_line_has_the_documented_form(caplog: pytest.LogCaptureFixture) -> None:
+    resolver = _resolver({"entry-a": _Coordinator({"dev-1": 4.0})})
+    with caplog.at_level(logging.INFO, logger=_RESOLVER_LOGGER):
+        _observe(resolver, False, 10.0, frame_type=FMDN_FRAME_TYPE)
+        _observe(
+            resolver,
+            True,
+            70.0,
+            source=UwtSource.FRAME_TYPE,
+            reading=_FlagsReading(None, "absent"),
+        )
+    (level1, first), (level2, second) = _lines(caplog)
+    assert (level1, level2) == (logging.INFO, logging.INFO)
+    assert _LINE.match(first) and _LINE.match(second)
+    assert first == (
+        "FMDN_UWT_TRANSITION kind=change device=reg-dev-1 canonical=dev-1 "
+        "old=unknown new=off source=flags_bit flags=framed frame=0x40 "
+        "decoded=0x05 payload_len=29 poll_age_s=6 prev_seen_age_s=none "
+        "observed=2027-01-15T08:00:10Z seq=1 suppressed=0"
+    )
+    assert second == (
+        "FMDN_UWT_TRANSITION kind=change device=reg-dev-1 canonical=dev-1 "
+        "old=off new=on source=frame_type flags=absent frame=0x41 "
+        "decoded=none payload_len=29 poll_age_s=66 prev_seen_age_s=60 "
+        "observed=2027-01-15T08:01:10Z seq=2 suppressed=0"
+    )
+
+
+def test_two_entries_write_two_lines(caplog: pytest.LogCaptureFixture) -> None:
+    resolver = _resolver()
+    with caplog.at_level(logging.INFO, logger=_RESOLVER_LOGGER):
+        _observe(resolver, True, 10.0, matches=[_match("entry-a"), _match("entry-b")])
+    assert len(_lines(caplog)) == 2
+
+
+def _flap(resolver: GoogleFindMyEIDResolver, count: int, start: float = 0.0) -> None:
+    for step in range(count):
+        _observe(resolver, step % 2 == 0, start + 60.0 * step)
+
+
+def test_the_thirteenth_change_of_an_hour_goes_to_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolver = _resolver()
+    with caplog.at_level(logging.DEBUG, logger=_RESOLVER_LOGGER):
+        _flap(resolver, 13)
+    levels = [level for level, _ in _lines(caplog)]
+    assert levels == [logging.INFO] * 12 + [logging.DEBUG]
+    assert _lines(caplog)[-1][1].endswith("seq=13 suppressed=1")
+    assert len(_events(resolver)) == 13
+
+
+def test_after_the_hour_a_resync_line_closes_the_throttled_stretch(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """LC-5: a throttled stretch never ends in the log without its end state."""
+    resolver = _resolver()
+    _flap(resolver, 13)
+    caplog.clear()
+    # The 13th change (index 12) showed "on"; one hour after the first INFO
+    # line the budget is free again, and the next observation repeats "on".
+    with caplog.at_level(logging.DEBUG, logger=_RESOLVER_LOGGER):
+        _observe(resolver, True, 3600.0)
+        _observe(resolver, True, 3610.0)
+    lines = _lines(caplog)
+    assert len(lines) == 1
+    level, line = lines[0]
+    assert level == logging.INFO
+    assert _LINE.match(line)
+    assert " kind=resync " in line and " old=on new=on " in line
+    assert line.endswith("seq=14 suppressed=1")
+    assert _events(resolver)[-1].kind == "resync"
+
+
+def test_no_resync_while_the_budget_is_still_used_up(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolver = _resolver()
+    _flap(resolver, 13)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=_RESOLVER_LOGGER):
+        _observe(resolver, True, 3500.0)
+    assert _lines(caplog) == []
+
+
+def test_a_change_after_the_hour_carries_the_suppressed_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolver = _resolver()
+    _flap(resolver, 14)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=_RESOLVER_LOGGER):
+        _observe(resolver, True, 3700.0)
+    ((level, line),) = _lines(caplog)
+    assert level == logging.INFO
+    assert " kind=change " in line and " old=off new=on " in line
+    assert line.endswith("suppressed=2")
+
+
+# ---------------------------------------------------------------------------
+# Log hygiene (AGENTS.md section 5 (b), "Log hygiene for scanners")
+# ---------------------------------------------------------------------------
+
+_RESOLVER_SOURCE = Path(eid_resolver.__file__)
+_SEMGREP_WORDS = re.compile(r"(?i)(api.key|secret|credential|token|password)")
+_ALLOWED_ARGS = re.compile(
+    r"^(_UWT_TRANSITION_FORMAT|level|suppressed|match\.(device_id|canonical_id)"
+    r"|event\.[a-z_]+|.*decoded.*|.*event\.(poll_age_s|prev_seen_age_s).*)$"
+)
+
+
+def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
+    """The format string and the arguments of the transition line stay clean.
+
+    The first source line of the format literal carries no word the Semgrep
+    rule ``python-logger-credential-disclosure`` reacts to, and the arguments
+    are only the class (b) identifiers of the match, fields of the recorded
+    event (fixed labels, numbers, the UTC time), the decoded flags byte and
+    the suppressed count: no name, entity id, address or coordinate.
+
+    Retirement condition: the transition line is lowered to DEBUG or removed
+    (see CA-GFMY-UWT-HA-KORRELATION-001).
+    """
+    source = _RESOLVER_SOURCE.read_text()
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    (assign,) = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "_UWT_TRANSITION_FORMAT"
+            for t in node.targets
+        )
+    ]
+    first_literal_line = lines[assign.value.lineno - 1]
+    if "(" in first_literal_line and '"' not in first_literal_line:
+        first_literal_line = lines[assign.value.lineno]
+    assert "FMDN_UWT_TRANSITION" in first_literal_line
+    assert not _SEMGREP_WORDS.search(first_literal_line)
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and any(
+            isinstance(arg, ast.Name) and arg.id == "_UWT_TRANSITION_FORMAT"
+            for arg in node.args
+        )
+    ]
+    assert len(calls) == 1
+    for arg in calls[0].args:
+        assert _ALLOWED_ARGS.match(ast.unparse(arg)), ast.unparse(arg)

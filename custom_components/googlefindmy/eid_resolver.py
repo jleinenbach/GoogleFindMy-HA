@@ -1111,6 +1111,15 @@ def _effective_uwt_mode(
 _UWT_TRANSITION_INFO_PER_HOUR = 12
 _UWT_TRANSITION_RING_SIZE = 200
 _UWT_TRANSITION_WINDOW_SECONDS = 3600.0
+# One line per recorded event; every field is a fixed label, a number or a
+# class (b) identifier (AGENTS.md section 5): no name, entity id, address,
+# coordinate or key material. ``suppressed`` counts the lines of this device
+# written at DEBUG since its last INFO line.
+_UWT_TRANSITION_FORMAT = (
+    "FMDN_UWT_TRANSITION kind=%s device=%s canonical=%s old=%s new=%s "
+    "source=%s flags=%s frame=%s decoded=%s payload_len=%d poll_age_s=%s "
+    "prev_seen_age_s=%s observed=%s seq=%d suppressed=%d"
+)
 
 
 class UwtTransitionEvent(NamedTuple):
@@ -3773,9 +3782,30 @@ class GoogleFindMyEIDResolver:
             )
             track.last_seen_mono_by_state[mode] = clock.monotonic
             if old == mode:
+                # No change. If lines were held back at DEBUG and the budget
+                # is free again, write the current mode at INFO, so that a
+                # throttled stretch never ends in the log without its end
+                # state.
+                if track.suppressed and self._uwt_budget_free(track, clock.monotonic):
+                    event = self._record_uwt_event(
+                        match,
+                        track,
+                        kind="resync",
+                        old=mode,
+                        new=mode,
+                        source=source,
+                        reading=reading,
+                        frame_type=frame_type,
+                        payload_len=payload_len,
+                        clock=clock,
+                        old_seen_mono=None,
+                    )
+                    self._log_uwt_event(
+                        match, track, event, decoded=reading.decoded, clock=clock
+                    )
                 continue
             track.state = mode
-            self._record_uwt_event(
+            event = self._record_uwt_event(
                 match,
                 track,
                 kind="change",
@@ -3788,6 +3818,64 @@ class GoogleFindMyEIDResolver:
                 clock=clock,
                 old_seen_mono=old_seen,
             )
+            self._log_uwt_event(
+                match, track, event, decoded=reading.decoded, clock=clock
+            )
+
+    @staticmethod
+    def _uwt_budget_free(track: _UwtTrack, now: float) -> bool:
+        """Return whether the device may write another INFO line now.
+
+        The budget is ``_UWT_TRANSITION_INFO_PER_HOUR`` lines per rolling hour
+        on the observation clock; times older than the hour are dropped first.
+        """
+        times = track.info_times
+        while times and now - times[0] >= _UWT_TRANSITION_WINDOW_SECONDS:
+            times.popleft()
+        return len(times) < _UWT_TRANSITION_INFO_PER_HOUR
+
+    def _log_uwt_event(
+        self,
+        match: EIDMatch,
+        track: _UwtTrack,
+        event: UwtTransitionEvent,
+        *,
+        decoded: int | None,
+        clock: ObservationClock,
+    ) -> None:
+        """Write ``FMDN_UWT_TRANSITION`` at INFO within the budget, else DEBUG.
+
+        Every event is written; the budget only decides the level. The event
+        history keeps all of them either way.
+        """
+        if self._uwt_budget_free(track, clock.monotonic):
+            level = logging.INFO
+            track.info_times.append(clock.monotonic)
+            suppressed = track.suppressed
+            track.suppressed = 0
+        else:
+            level = logging.DEBUG
+            track.suppressed += 1
+            suppressed = track.suppressed
+        _LOGGER.log(
+            level,
+            _UWT_TRANSITION_FORMAT,
+            event.kind,
+            match.device_id,
+            match.canonical_id,
+            event.old,
+            event.new,
+            event.source,
+            event.flags,
+            event.frame,
+            f"0x{decoded:02x}" if decoded is not None else "none",
+            event.payload_len,
+            event.poll_age_s if event.poll_age_s is not None else "none",
+            event.prev_seen_age_s if event.prev_seen_age_s is not None else "none",
+            event.observed,
+            event.seq,
+            suppressed,
+        )
 
     def _record_uwt_event(  # noqa: PLR0913
         self,
