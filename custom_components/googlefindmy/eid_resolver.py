@@ -4516,10 +4516,14 @@ class GoogleFindMyEIDResolver:
         """Record a disagreement between the frame type and the UWT flag bit.
 
         Two-stage on purpose. The first disagreement per device is INFO, the
-        same visibility as ``FMDN_FLAGS_PROBE``, so a reporter running a stock
-        build can contribute the observation without turning on debug logging;
-        everything after that is DEBUG and throttled, because a disagreeing
-        beacon disagrees on every single advertisement.
+        same level as ``FMDN_FLAGS_PROBE``, so a reporter can contribute the
+        observation without turning on debug logging. INFO is still hidden at
+        Home Assistant's default level (WARNING without ``--verbose``): the
+        reporter raises this module's logger to ``info`` with the
+        ``logger.set_level`` action first (README, "Reporting unwanted
+        tracking protection mode changes"). Everything after the first line is
+        DEBUG and throttled, because a disagreeing beacon disagrees on every
+        single advertisement.
 
         The emitted fields mirror ``FMDN_FLAGS_PROBE`` exactly -- both the
         ``device``/``canonical`` pair and the throttle key. Emitting only the
