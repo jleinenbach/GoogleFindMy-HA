@@ -11,7 +11,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.core import HomeAssistant
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+try:
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+except ImportError:  # pragma: no cover - optional test dependency
+    pytest.skip(
+        "pytest-homeassistant-custom-component is required for startup regression tests",
+        allow_module_level=True,
+    )
 
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_entries_stub import make_config_entry
