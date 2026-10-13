@@ -827,11 +827,14 @@ class GoogleFindMyCoordinator(
         # Manual locate gating (UX + server protection)
         self._locate_inflight: set[str] = set()  # device_id -> in-flight flag
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
-        # When the integration last sent a location request for a device, on the
-        # ``time.monotonic`` clock. Set immediately before the request is awaited
-        # at both send sites (poll cycle and manual locate), so a request that
-        # raises or times out still counts as sent. ``_last_poll_mono`` cannot
-        # serve here: it is a scheduling base, back-dated by the poll interval.
+        # When the integration last attempted a location request for a device,
+        # on the ``time.monotonic`` clock. Set immediately before the request is
+        # awaited at both send sites (poll cycle and manual locate), so a request
+        # that raises or times out still counts. It marks the attempt: a request
+        # can also fail before it leaves the integration (no push token, failed
+        # push registration), and it is stamped all the same. ``_last_poll_mono``
+        # cannot serve here: it is a scheduling base, back-dated by the poll
+        # interval.
         # Read by the EID resolver for the ``poll_age_s`` field of
         # ``FMDN_UWT_TRANSITION`` through ``locate_requested_mono``.
         self._locate_requested_mono: dict[str, float] = {}
@@ -2519,10 +2522,11 @@ class GoogleFindMyCoordinator(
         )
 
     def locate_requested_mono(self, device_id: str) -> float | None:
-        """Return when a location request was last sent for ``device_id``.
+        """Return when a location request was last attempted for ``device_id``.
 
         The value is on the ``time.monotonic`` clock and is ``None`` when this
-        process has not sent a request for the device yet. Read defensively so
+        process has not attempted a request for the device yet. An attempt may
+        have failed before the request left the integration. Read defensively so
         a coordinator built without ``__init__`` answers ``None`` instead of
         raising.
         """

@@ -1969,8 +1969,8 @@ class PollingOperations(_MixinBase):
                         # make this outer guard win the race and raise a spurious
                         # TimeoutError before the inner request can return its
                         # clean empty result (Nygard: stagger nested timeouts).
-                        # Stamped before the await, not after it: a request
-                        # that times out or raises was still sent. Created
+                        # Stamped before the await, not after it: an attempt
+                        # that times out or raises still counts. Created
                         # lazily for coordinators built without __init__.
                         if not hasattr(self, "_locate_requested_mono"):
                             self._locate_requested_mono = {}

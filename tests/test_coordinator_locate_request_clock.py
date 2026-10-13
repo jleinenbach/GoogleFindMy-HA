@@ -1,12 +1,13 @@
 # tests/test_coordinator_locate_request_clock.py
-"""Per-device clock of sent location requests (``locate_requested_mono``).
+"""Per-device clock of attempted location requests (``locate_requested_mono``).
 
 The EID resolver reports how long before an observation the integration last
-asked Google for a device's location (``poll_age_s`` in
+tried to ask Google for a device's location (``poll_age_s`` in
 ``FMDN_UWT_TRANSITION``). That needs a stamp per device that is set when a
-request is sent, by either send site, and that survives a request which
-raises. ``_last_poll_mono`` cannot serve: it is a scheduling base that is
-back-dated by the poll interval.
+request is attempted, by either send site, and that survives a request which
+raises. An attempt can fail before it leaves the integration; it is stamped
+all the same. ``_last_poll_mono`` cannot serve: it is a scheduling base that
+is back-dated by the poll interval.
 
 The join test at the end pins the second half of the contract: the resolver
 looks the stamp up by ``EIDMatch.canonical_id``, which is produced by
@@ -18,6 +19,7 @@ string, with and without the entry-scoped prefix.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -26,7 +28,6 @@ import pytest
 
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from tests.helpers import drain_loop
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.locate_mixin_stub import LocateStub, make_hass_stub
 from tests.helpers.registry_mixin_stub import RegistryStub
@@ -101,17 +102,18 @@ def _make_coordinator(
     return coordinator
 
 
-def test_no_stamp_before_the_first_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    loop = asyncio.new_event_loop()
-    try:
-        coordinator = _make_coordinator(monkeypatch, loop, _RaisingAPI(), [])
-        assert coordinator.locate_requested_mono("dev-1") is None
-    finally:
-        drain_loop(loop)
+@pytest.mark.asyncio
+async def test_no_stamp_before_the_first_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    coordinator = _make_coordinator(monkeypatch, loop, _RaisingAPI(), [])
+    assert coordinator.locate_requested_mono("dev-1") is None
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("built_by_init", [True, False], ids=["init", "lazy"])
-def test_poll_cycle_stamps_before_the_await_even_when_it_raises(
+async def test_poll_cycle_stamps_before_the_await_even_when_it_raises(
     monkeypatch: pytest.MonkeyPatch, built_by_init: bool
 ) -> None:
     """The stamp is set before the request, not in a ``finally``.
@@ -120,7 +122,7 @@ def test_poll_cycle_stamps_before_the_await_even_when_it_raises(
     the stamp must already be there inside the call and must still be there
     after the failed cycle. A device the cycle never tried has no stamp.
     """
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
     api = _RaisingAPI()
     devices = [{"id": "dev-tried", "name": "Tried Tag"}]
     coordinator = _make_coordinator(monkeypatch, loop, api, devices)
@@ -129,12 +131,14 @@ def test_poll_cycle_stamps_before_the_await_even_when_it_raises(
         # this) gets the map on the first request instead of an AttributeError.
         del coordinator._locate_requested_mono
     api.coordinator = coordinator
-    try:
-        loop.run_until_complete(
-            coordinator._async_start_poll_cycle(devices, force=True)
-        )
-    finally:
-        drain_loop(loop)
+    await coordinator._async_start_poll_cycle(devices, force=True)
+    # The cycle schedules a debounced stats write; cancel it so no task
+    # outlives the test.
+    save_task = coordinator._stats_save_task
+    if save_task is not None:
+        save_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await save_task
 
     in_flight = api.seen_in_flight["dev-tried"]
     assert isinstance(in_flight, float)
@@ -155,7 +159,7 @@ async def test_manual_locate_stamps_before_the_await_even_when_it_raises(
 
     async def _fail(device_id: str, _name: str) -> Any:
         seen.append(coord._locate_requested_mono.get(device_id))
-        raise RuntimeError("request failed after it was sent")
+        raise RuntimeError("request attempt failed")
 
     coord.api.async_get_device_location = AsyncMock(side_effect=_fail)
 
@@ -166,19 +170,17 @@ async def test_manual_locate_stamps_before_the_await_even_when_it_raises(
     assert coord._locate_requested_mono == {"dev-1": 1000.0}
 
 
-def test_purge_device_drops_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_purge_device_drops_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
     """A deleted device re-added under the same id starts without a stamp."""
-    loop = asyncio.new_event_loop()
-    try:
-        coordinator = _make_coordinator(monkeypatch, loop, _RaisingAPI(), [])
-        coordinator._locate_requested_mono["dev-gone"] = 5.0
-        coordinator._locate_requested_mono["dev-kept"] = 6.0
-        coordinator._is_on_hass_loop = lambda: True
-        coordinator.purge_device("dev-gone")
-        assert coordinator.locate_requested_mono("dev-gone") is None
-        assert coordinator.locate_requested_mono("dev-kept") == 6.0
-    finally:
-        drain_loop(loop)
+    loop = asyncio.get_running_loop()
+    coordinator = _make_coordinator(monkeypatch, loop, _RaisingAPI(), [])
+    coordinator._locate_requested_mono["dev-gone"] = 5.0
+    coordinator._locate_requested_mono["dev-kept"] = 6.0
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator.purge_device("dev-gone")
+    assert coordinator.locate_requested_mono("dev-gone") is None
+    assert coordinator.locate_requested_mono("dev-kept") == 6.0
 
 
 def test_reader_answers_none_on_a_coordinator_built_without_init() -> None:

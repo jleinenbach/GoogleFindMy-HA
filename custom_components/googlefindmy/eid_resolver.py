@@ -1112,9 +1112,9 @@ def _effective_uwt_mode(
 _UWT_TRANSITION_INFO_PER_HOUR = 12
 _UWT_TRANSITION_RING_SIZE = 200
 _UWT_TRANSITION_WINDOW_SECONDS = 3600.0
-# One line per recorded event; every field is a fixed label, a number or a
-# class (b) identifier (AGENTS.md section 5): no name, entity id, address,
-# coordinate or key material. ``suppressed`` counts the lines of this device
+# One line per recorded event; every field is a fixed label, a number, the
+# UTC time of the observation or a class (b) identifier (AGENTS.md section 5):
+# no name, entity id, address, coordinate or key material. ``suppressed`` counts the lines of this device
 # written at DEBUG since its last INFO line.
 _UWT_TRANSITION_FORMAT = (
     "FMDN_UWT_TRANSITION kind=%s device=%s canonical=%s old=%s new=%s "
@@ -1126,8 +1126,9 @@ _UWT_TRANSITION_FORMAT = (
 class UwtTransitionEvent(NamedTuple):
     """One recorded change of a device's unwanted-tracking protection mode.
 
-    ``canonical_id`` stays inside the integration: the diagnostics export
-    replaces it by the device's position in the entry (``device_index``).
+    ``canonical_id`` is written to the log line as ``canonical=`` (a class (b)
+    identifier, AGENTS.md section 5); the diagnostics export replaces it by
+    the device's position in the entry (``device_index``).
     ``old`` is ``"unknown"`` for the first known mode of a device in this
     process. ``poll_age_s`` is the age, at the observation, of the last
     location request the integration sent for the device; ``prev_seen_age_s``
@@ -1725,26 +1726,31 @@ class GoogleFindMyEIDResolver:
     def _purge_uwt_state(self) -> None:
         """Drop measurement-channel state of devices and entries now gone.
 
-        A device keeps its track only while an identity of its entry still
-        names it, by canonical id (as ``EIDMatch.canonical_id`` carries it,
-        without an entry prefix) or by registry id; an entry keeps its event
-        history only while it still provides an identity.
+        An entry keeps its event history while it is loaded
+        (``hass.data[DOMAIN]["entries"]``), even when none of its identities
+        could be prepared in this refresh (a key that does not decrypt for a
+        moment must not erase the history). A device keeps its track only
+        while its entry is loaded and an identity of that entry still names
+        it, by canonical id (as ``EIDMatch.canonical_id`` carries it, without
+        an entry prefix) or by registry id; a device that returns later starts
+        again with ``old=unknown``.
         """
         self._ensure_cache_defaults()
+        bucket = self.hass.data.get(DOMAIN)
+        entries = bucket.get("entries") if isinstance(bucket, dict) else None
+        loaded: set[str] = set(entries) if isinstance(entries, dict) else set()
         known_pairs: set[tuple[str, str]] = set()
-        known_entries: set[str] = set()
         for identity in self._cached_identities:
             entry_id = identity.config_entry_id
-            if not entry_id:
+            if not entry_id or entry_id not in loaded:
                 continue
-            known_entries.add(entry_id)
             if identity.canonical_id:
                 known_pairs.add((entry_id, identity.canonical_id.split(":")[-1]))
             if identity.registry_id:
                 known_pairs.add((entry_id, identity.registry_id))
         for key in [key for key in self._uwt_track if key not in known_pairs]:
             del self._uwt_track[key]
-        for entry_id in [e for e in self._uwt_events if e not in known_entries]:
+        for entry_id in [e for e in self._uwt_events if e not in loaded]:
             del self._uwt_events[entry_id]
 
     def reset_device_offset(self, registry_id: str) -> None:
@@ -3753,7 +3759,9 @@ class GoogleFindMyEIDResolver:
         track changes nothing: history replay may deliver sightings out of
         order. An observation without a trustworthy mode (unknown, or frame
         type and flags bit in conflict) is no change either; why it carried
-        none is logged at DEBUG once per reason.
+        none is logged at DEBUG once per reason. Only matches from the EID
+        cache arrive here; a heuristic phone match (``_heuristic_resolve``)
+        records nothing.
         """
         self._ensure_cache_defaults()
         for match in matches:

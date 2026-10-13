@@ -324,7 +324,7 @@ def _identity(entry: str, canonical: str, registry: str | None = None) -> object
 
 @pytest.mark.asyncio
 async def test_refresh_drops_gone_devices_and_unloaded_entries() -> None:
-    resolver = _resolver()
+    resolver = _resolver({"entry-a": object()})
     _observe(resolver, True, 10.0, matches=[_match("entry-a", "dev-1")])
     _observe(resolver, True, 10.0, matches=[_match("entry-a", "dev-2")])
     _observe(resolver, True, 10.0, matches=[_match("entry-b", "dev-3")])
@@ -344,8 +344,19 @@ async def test_refresh_drops_gone_devices_and_unloaded_entries() -> None:
     assert set(resolver._uwt_events) == {"entry-a"}
 
 
+def test_a_loaded_entry_keeps_its_history_without_identities() -> None:
+    """An identity that cannot be prepared for a moment (a key that does not
+    decrypt) drops the device's track, not the history of its loaded entry."""
+    resolver = _resolver({"entry-a": object()})
+    _observe(resolver, True, 10.0)
+    resolver._cached_identities = []
+    resolver._purge_uwt_state()
+    assert resolver._uwt_track == {}
+    assert len(_events(resolver)) == 1
+
+
 def test_a_track_kept_by_registry_id_survives_the_purge() -> None:
-    resolver = _resolver()
+    resolver = _resolver({"entry-a": object()})
     match = EIDMatch("reg-x", "entry-a", "", 0, False)
     _observe(resolver, True, 10.0, matches=[match])
     resolver._cached_identities = [_identity("entry-a", "", "reg-x")]
@@ -507,7 +518,6 @@ def test_after_the_hour_a_resync_line_closes_the_throttled_stretch(
     # line the budget is free again, and the next observation repeats "on".
     with caplog.at_level(logging.DEBUG, logger=_RESOLVER_LOGGER):
         _observe(resolver, True, 3600.0)
-        _observe(resolver, True, 3610.0)
     lines = _lines(caplog)
     assert len(lines) == 1
     level, line = lines[0]
@@ -516,6 +526,32 @@ def test_after_the_hour_a_resync_line_closes_the_throttled_stretch(
     assert " kind=resync " in line and " old=on new=on " in line
     assert line.endswith("seq=14 suppressed=1")
     assert _events(resolver)[-1].kind == "resync"
+
+
+def test_the_resync_line_counts_against_the_budget(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """At 3600 one slot frees up and the resync takes it; a change right
+    after it finds the budget full again and goes to DEBUG."""
+    resolver = _resolver()
+    _flap(resolver, 13)
+    _observe(resolver, True, 3600.0)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=_RESOLVER_LOGGER):
+        _observe(resolver, False, 3610.0)
+    ((level, line),) = _lines(caplog)
+    assert level == logging.DEBUG
+    assert line.endswith("suppressed=1")
+
+
+def test_an_observation_without_mode_still_orders_later_ones() -> None:
+    """A sighting without a trusted mode is still the newest sighting: an
+    older one delivered after it changes nothing."""
+    resolver = _resolver()
+    _observe(resolver, True, 10.0)
+    _observe(resolver, None, 100.0, source=UwtSource.CONFLICT)
+    _observe(resolver, False, 50.0)
+    assert [e.new for e in _events(resolver)] == ["on"]
 
 
 def test_no_resync_while_the_budget_is_still_used_up(
@@ -541,6 +577,12 @@ def test_a_change_after_the_hour_carries_the_suppressed_count(
     assert level == logging.INFO
     assert " kind=change " in line and " old=off new=on " in line
     assert line.endswith("suppressed=2")
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=_RESOLVER_LOGGER):
+        _observe(resolver, False, 3710.0)
+    ((level, line),) = _lines(caplog)
+    assert level == logging.INFO
+    assert line.endswith("suppressed=0")
 
 
 # ---------------------------------------------------------------------------
@@ -549,9 +591,24 @@ def test_a_change_after_the_hour_carries_the_suppressed_count(
 
 _RESOLVER_SOURCE = Path(eid_resolver.__file__)
 _SEMGREP_WORDS = re.compile(r"(?i)(api.key|secret|credential|token|password)")
-_ALLOWED_ARGS = re.compile(
-    r"^(_UWT_TRANSITION_FORMAT|level|suppressed|match\.(device_id|canonical_id)"
-    r"|event\.[a-z_]+|.*decoded.*|.*event\.(poll_age_s|prev_seen_age_s).*)$"
+_EXPECTED_ARGS = (
+    "level",
+    "_UWT_TRANSITION_FORMAT",
+    "event.kind",
+    "match.device_id",
+    "match.canonical_id",
+    "event.old",
+    "event.new",
+    "event.source",
+    "event.flags",
+    "event.frame",
+    "f'0x{decoded:02x}' if decoded is not None else 'none'",
+    "event.payload_len",
+    "event.poll_age_s if event.poll_age_s is not None else 'none'",
+    "event.prev_seen_age_s if event.prev_seen_age_s is not None else 'none'",
+    "event.observed",
+    "event.seq",
+    "suppressed",
 )
 
 
@@ -560,9 +617,11 @@ def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
 
     The first source line of the format literal carries no word the Semgrep
     rule ``python-logger-credential-disclosure`` reacts to, and the arguments
-    are only the class (b) identifiers of the match, fields of the recorded
-    event (fixed labels, numbers, the UTC time), the decoded flags byte and
-    the suppressed count: no name, entity id, address or coordinate.
+    are exactly the expressions listed in ``_EXPECTED_ARGS``: the class (b)
+    identifiers of the match, fields of the recorded event (fixed labels,
+    numbers, the UTC time), the decoded flags byte and the suppressed count;
+    no name, entity id, address or coordinate. Any added, removed or changed
+    argument fails the test and has to be classified again.
 
     Retirement condition: the transition line is lowered to DEBUG or removed.
     """
@@ -594,8 +653,7 @@ def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
         )
     ]
     assert len(calls) == 1
-    for arg in calls[0].args:
-        assert _ALLOWED_ARGS.match(ast.unparse(arg)), ast.unparse(arg)
+    assert tuple(ast.unparse(arg) for arg in calls[0].args) == _EXPECTED_ARGS
 
 
 def test_readme_quotes_the_line_the_code_writes(
@@ -603,9 +661,10 @@ def test_readme_quotes_the_line_the_code_writes(
 ) -> None:
     """The README example starts like the line the code really writes.
 
-    The line is rendered through the real code path, and its prefix up to the
-    first variable field is looked up in a code block of the README section
-    (AGENTS.md: quoted program output is covered by a test).
+    The line is rendered through the real code path; the README example in a
+    code block of the section must start with the same prefix, carry the same
+    keys in the same order, and match the documented form (AGENTS.md: quoted
+    program output is covered by a test).
 
     Retirement condition: the README section is removed.
     """
@@ -621,9 +680,14 @@ def test_readme_quotes_the_line_the_code_writes(
         "### Reporting unwanted tracking protection mode changes", 1
     )[1].split("\n## ", 1)[0]
     code_blocks = re.findall(r"```[a-z]*\n(.*?)```", section, flags=re.DOTALL)
-    assert any(
-        block_line.strip().startswith(prefix)
+    examples = [
+        block_line.strip()
         for block in code_blocks
         for block_line in block.splitlines()
-    )
+        if block_line.strip().startswith(prefix)
+    ]
+    assert examples
+    keys = re.findall(r"(\w+)=", line)
+    assert all(re.findall(r"(\w+)=", example) == keys for example in examples)
+    assert all(_LINE.match(example) for example in examples)
     assert "custom_components.googlefindmy.eid_resolver: info" in section

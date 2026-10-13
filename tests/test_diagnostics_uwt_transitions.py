@@ -5,10 +5,12 @@ The EID resolver records each change of a device's unwanted-tracking
 protection mode it sees, per config entry. The config-entry diagnostics carry that
 history so a user can attach it to an issue without configuring logging.
 Users post this block publicly, so the tests drive the real
-``async_get_config_entry_diagnostics`` and pin, by a difference test, that
-the block adds no registry id and no canonical id to the dump: the id values
-of the test devices in the whole dump are the same set with and without the
-block, and none of them occurs inside the block.
+``async_get_config_entry_diagnostics`` and pin that the block carries no
+registry id and no canonical id of the test devices, not even the
+distinctive part of one, and that the dump without the block holds the same set of id values as
+the dump with it. In this harness the dump without the block holds none, so
+the second check guards only against ids that leak elsewhere through the
+block's builder.
 """
 
 from __future__ import annotations
@@ -116,17 +118,28 @@ def _ids_in(text: str) -> set[str]:
     return {value for value in _ID_VALUES if value in text}
 
 
+def _id_fragments_in(text: str) -> set[str]:
+    """Return the ids whose distinctive hex part occurs in ``text``.
+
+    The common prefixes (``canonic-``, ``registry-``) are the same for every
+    test id; the eight hex characters at the end are what a shortened id
+    would still carry.
+    """
+    return {value for value in _ID_VALUES if value[-8:] in text}
+
+
 @pytest.mark.asyncio
 async def test_block_adds_no_id_value_to_the_dump(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Difference test: the block carries positions, never ids."""
+    """The block carries positions, never ids or parts of them."""
     payload = await _dump(monkeypatch, _ENTRY_A, _resolver_with_history())
 
     block = payload["uwt_transitions"]
     without_block = {k: v for k, v in payload.items() if k != "uwt_transitions"}
     assert _ids_in(json.dumps(payload)) == _ids_in(json.dumps(without_block))
     assert _ids_in(json.dumps(block)) == set()
+    assert _id_fragments_in(json.dumps(block)) == set()
     assert block["events"], "the difference test needs events to bite"
 
 

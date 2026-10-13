@@ -659,25 +659,31 @@ mode*. The integration reads the mode from each advertisement of your own
 trackers (frame type and hashed-flags bit) and shows it as the protection mode
 binary sensor. What makes Google's service turn the mode on for a tracker is
 not published. To narrow it down, the integration records each change of the
-mode it sees in an advertisement, per device, together with how long before the change it last requested
-the device's location from Google.
+mode it sees in an advertisement of one of your trackers, per device, together
+with how long before the change it last tried to request the device's location
+from Google.
 
 1. **Search the log for `FMDN_UWT_TRANSITION`.** One line is written per
    change, for example:
    ```text
    FMDN_UWT_TRANSITION kind=change device=<id> canonical=<id> old=off new=on source=flags_bit flags=framed frame=0x41 decoded=0x01 payload_len=29 poll_age_s=66 prev_seen_age_s=60 observed=2027-01-15T08:01:10Z seq=2 suppressed=0
    ```
-   - `old`/`new`: the mode before and after; after a restart the first known
-     mode of a device is written with `old=unknown`.
+   - `old`/`new`: the mode before and after. The first known mode of a device
+     is written with `old=unknown`: after a restart, after the entry was
+     reloaded, and after the device was missing from the integration for a
+     while.
    - `source`: whether the hashed-flags bit (`flags_bit`) or the frame type
      (`frame_type`) showed the mode.
    - `poll_age_s`: seconds between the last location request this integration
-     sent for the device and the advertisement that showed the change (`none`
-     if it sent none since the start).
+     attempted for the device and the advertisement that showed the change.
+     The attempt counts even if it failed before reaching Google (for
+     example without a working push connection). `none` if there was no
+     attempt since the start, or if it came after the advertisement.
    - `prev_seen_age_s`: seconds since the old mode was last seen.
    - At most 12 lines per device and hour are written at INFO, further ones at
      DEBUG. Once the limit has freed up, the next advertisement of the device
-     writes a line with `kind=resync` that repeats the current mode, and `suppressed=<n>` says how many lines went to DEBUG.
+     writes a line with `kind=resync` that repeats the current mode, and
+     `suppressed=<n>` says how many lines went to DEBUG.
 2. **Make INFO visible.** The line is logged at INFO and is hidden at the
    default level. Call the `logger.set_level` action (no restart needed; it
    lasts until the next restart):
@@ -695,8 +701,9 @@ the device's location from Google.
    kept in the diagnostics: open **Settings → Devices & services → Google Find
    My Device**, choose **Download diagnostics** in the menu of the entry, and
    copy **only** the `uwt_transitions` block. It names each device by a
-   position (`device_index`) and holds up to 200 changes per entry since the
-   last restart.
+   position (`device_index`) and holds the last 200 events of the entry
+   (changes and `resync` lines) since Home Assistant started or the entry was
+   last reloaded.
 4. **What to post:** the `FMDN_UWT_TRANSITION` lines and/or the
    `uwt_transitions` block, your integration version, and your
    `location_poll_interval` setting. `device=` and `canonical=` are
