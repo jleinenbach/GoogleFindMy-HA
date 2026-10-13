@@ -270,7 +270,12 @@ async def test_availability_follows_the_device(freezer: FrozenDateTimeFactory) -
 
     coordinator, entity, _last_seen = await _setup()
     entity.coordinator_has_device = lambda: True
+    coordinator.last_update_success = True
     assert entity.available is True
+    # A failed coordinator update makes the sensor unavailable first.
+    coordinator.last_update_success = False
+    assert entity.available is False
+    coordinator.last_update_success = True
     entity.coordinator_has_device = lambda: False
     assert entity.available is False
     entity._device_id = None
