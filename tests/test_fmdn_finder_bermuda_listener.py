@@ -8,11 +8,13 @@ when area changes are detected on Bermuda tracker entities.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.googlefindmy.eid_resolver import UwtSource
 from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
     ATTR_AREA,
     BERMUDA_TRACKER_SUFFIX,
@@ -1266,6 +1268,20 @@ async def test_finder_uses_the_candidate_key_the_sighting_was_matched_under(
 
     assert upload is not None
     assert upload.eid == advertised
+
+    # The source of the mode travels with it, so that the skip line can tell
+    # an unknown mode from a conflict (R5c-F6).
+    sighting = resolver.last_confirmed_sighting("reg-1")
+    assert sighting is not None
+    resolver._confirmed_sightings["reg-1"] = replace(
+        sighting, uwt_mode=None, uwt_source=UwtSource.CONFLICT
+    )
+    with patch.object(bermuda_listener.time, "time", return_value=_LOCK_NOW + 30):
+        upload = await bermuda_listener._async_get_device_eid(
+            hass, coordinator, "dev-1"
+        )
+    assert upload is not None
+    assert (upload.uwt_mode, upload.uwt_source) == (None, "conflict")
 
 
 @pytest.mark.asyncio

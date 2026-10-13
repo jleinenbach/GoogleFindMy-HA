@@ -4543,7 +4543,7 @@ class GoogleFindMyEIDResolver:
                 _LOGGER.info(
                     "FMDN_FLAGS_CONFLICT device=%s canonical=%s frame=0x%02x "
                     "uwt_bit=%s decoded=0x%02x payload_len=%d; frame type and "
-                    "flags bit disagree, value passed through unchanged",
+                    "flags bit disagree, sensor value passed through unchanged",
                     match.device_id,
                     match.canonical_id,
                     observed_frame,
@@ -4565,7 +4565,7 @@ class GoogleFindMyEIDResolver:
             _LOGGER.debug(
                 "FMDN_FLAGS_CONFLICT device=%s canonical=%s frame=0x%02x "
                 "uwt_bit=%s decoded=0x%02x payload_len=%d; frame type and "
-                "flags bit disagree, value passed through unchanged",
+                "flags bit disagree, sensor value passed through unchanged",
                 match.device_id,
                 match.canonical_id,
                 observed_frame,

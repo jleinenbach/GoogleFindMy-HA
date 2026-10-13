@@ -600,13 +600,21 @@ async def test_upload_carries_the_sighting_mode(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["unknown", "conflict"])
 async def test_unknown_sighting_mode_skips_the_upload_before_info(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, source: str
 ) -> None:
-    """An unknown protection mode uploads nothing and announces nothing at INFO."""
+    """A sighting without a trusted mode uploads nothing and announces nothing
+    at INFO; the DEBUG line names why (unknown or conflict), so the two cases
+    are told apart."""
     upload = _patch_area_change_to_upload(
         monkeypatch,
-        bl._UploadEid(eid=b"\xab" * 20, observed_at=1_699_999_000, uwt_mode=None),
+        bl._UploadEid(
+            eid=b"\xab" * 20,
+            observed_at=1_699_999_000,
+            uwt_mode=None,
+            uwt_source=source,
+        ),
     )
 
     with caplog.at_level(logging.DEBUG, logger=bl.__name__):
@@ -615,7 +623,8 @@ async def test_unknown_sighting_mode_skips_the_upload_before_info(
     upload.assert_not_awaited()
     assert not [r for r in caplog.records if r.levelno >= logging.INFO]
     assert any(
-        "Unknown protection mode" in r.getMessage()
+        "No trusted protection mode" in r.getMessage()
+        and f"(source={source})" in r.getMessage()
         for r in caplog.records
         if r.levelno == logging.DEBUG
     )
