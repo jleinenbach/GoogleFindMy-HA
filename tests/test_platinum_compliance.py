@@ -193,67 +193,188 @@ def test_quality_scale_evidence_existence(integration_root: Path) -> None:
 
 
 _DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_BLOCK_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
 
 
 def _flat_defs(body: list[ast.stmt]) -> list[ast.stmt]:
-    """Return the definitions in ``body``, looking into ``if`` and ``try`` blocks."""
+    """Return the definitions in ``body``, looking into every compound block.
+
+    ``if``, ``try``/``try*`` (with their handlers), ``with``, ``for``, ``while``
+    and ``match`` can all hold a definition at module or class level.
+    """
 
     found: list[ast.stmt] = []
     for node in body:
         if isinstance(node, _DEF_NODES):
             found.append(node)
-        elif isinstance(node, ast.If):
-            found += _flat_defs(node.body) + _flat_defs(node.orelse)
-        elif isinstance(node, ast.Try):
-            found += _flat_defs(node.body) + _flat_defs(node.orelse)
-            found += _flat_defs(node.finalbody)
-            for handler in node.handlers:
-                found += _flat_defs(handler.body)
+            continue
+        for field in _BLOCK_FIELDS:
+            for child in getattr(node, field, None) or []:
+                if isinstance(child, ast.excepthandler | ast.match_case):
+                    found += _flat_defs(child.body)
+                elif isinstance(child, ast.stmt):
+                    found += _flat_defs([child])
     return found
 
 
-def _defined_test_names(path: Path) -> set[str]:
-    """Return every dotted name pytest can collect from ``path``.
+def _decorator_names(node: ast.stmt) -> set[str]:
+    """Return every name and attribute name used in the decorators of ``node``."""
 
-    Functions and classes at module level (also inside ``if``/``try``), nested
-    classes, and methods, including the ones a class inherits from a base class
-    defined in the same module. Bases from other modules are not followed.
+    found: set[str] = set()
+    for decorator in getattr(node, "decorator_list", []):
+        for sub in ast.walk(decorator):
+            if isinstance(sub, ast.Attribute):
+                found.add(sub.attr)
+            elif isinstance(sub, ast.Name):
+                found.add(sub.id)
+    return found
+
+
+def _parametrize_aliases(tree: ast.Module) -> set[str]:
+    """Return the names bound to an expression that uses ``parametrize``.
+
+    Covers ``VARIANTS = pytest.mark.parametrize(...)`` and ``p =
+    pytest.mark.parametrize``, also chained (``q = p``).
+    """
+
+    assigns = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign | ast.AnnAssign) and node.value is not None
+    ]
+    aliases: set[str] = {"parametrize"}
+    while True:
+        grown = set(aliases)
+        for node in assigns:
+            assert node.value is not None
+            used = {
+                sub.attr if isinstance(sub, ast.Attribute) else sub.id
+                for sub in ast.walk(node.value)
+                if isinstance(sub, ast.Attribute | ast.Name)
+            }
+            if used & aliases:
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                grown |= {
+                    target.id for target in targets if isinstance(target, ast.Name)
+                }
+        if grown == aliases:
+            return aliases
+        aliases = grown
+
+
+def _assigned_names(body: list[ast.stmt]) -> dict[str, ast.expr]:
+    """Return the names a class body binds by plain assignment, with their values."""
+
+    bound: dict[str, ast.expr] = {}
+    for node in body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bound[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            if isinstance(node.target, ast.Name):
+                bound[node.target.id] = node.value
+    return bound
+
+
+def _defined_test_names(path: Path) -> dict[str, tuple[bool, bool]]:
+    """Return the test items of ``path`` that pytest's default naming collects.
+
+    The result maps each dotted name to ``(is_class, parametrized)``. Items are
+    ``test*`` functions that are not fixtures, ``Test*`` classes and
+    ``unittest.TestCase`` subclasses, their ``test*`` methods and their nested
+    test classes, also inside compound blocks, including methods and marks a
+    class inherits from a base class defined in the same module. A ``Test*``
+    class is left out when it or a base defines ``__init__`` or ``__new__``,
+    sets ``__test__ = False`` or is a dataclass. ``parametrize`` counts as a
+    decorator, also through a module-level alias. Not modelled, so cite such a
+    test without an id or not at all: branches are not evaluated, a later
+    rebinding of a name is not followed, bases from other modules are not
+    followed, and ids from ``pytestmark`` or a parametrized fixture are not
+    seen.
     """
 
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    aliases = _parametrize_aliases(tree)
     classes: dict[str, ast.ClassDef] = {}
-    names: set[str] = set()
+    names: dict[str, tuple[bool, bool]] = {}
 
-    def _members(cls: ast.ClassDef, seen: frozenset[str]) -> list[ast.stmt]:
-        own = _flat_defs(cls.body)
-        inherited: list[ast.stmt] = []
+    def _marked(node: ast.stmt) -> bool:
+        return bool(_decorator_names(node) & aliases)
+
+    def _bases(cls: ast.ClassDef, seen: frozenset[str]) -> list[ast.ClassDef]:
+        chain: list[ast.ClassDef] = []
         for base in cls.bases:
             if (
                 isinstance(base, ast.Name)
                 and base.id in classes
                 and base.id not in seen
             ):
-                inherited += _members(classes[base.id], seen | {base.id})
-        return own + inherited
+                parent = classes[base.id]
+                chain += [parent, *_bases(parent, seen | {base.id})]
+        return chain
 
-    def _walk(defs: list[ast.stmt], prefix: str) -> None:
+    def _is_unittest(cls: ast.ClassDef, chain: list[ast.ClassDef]) -> bool:
+        return any(
+            (isinstance(base, ast.Name) and base.id.endswith("TestCase"))
+            or (isinstance(base, ast.Attribute) and base.attr.endswith("TestCase"))
+            for owner in [cls, *chain]
+            for base in owner.bases
+        )
+
+    def _skipped(cls: ast.ClassDef, chain: list[ast.ClassDef]) -> bool:
+        for owner in [cls, *chain]:
+            bound = _assigned_names(owner.body)
+            defined = {
+                node.name
+                for node in _flat_defs(owner.body)
+                if not isinstance(node, ast.ClassDef)
+            }
+            if {"__init__", "__new__"} & (defined | set(bound)):
+                return True
+            test_flag = bound.get("__test__")
+            if isinstance(test_flag, ast.Constant) and not test_flag.value:
+                return True
+            if "dataclass" in _decorator_names(owner):
+                return True
+        return False
+
+    def _walk(
+        defs: list[ast.stmt], prefix: str, marked: bool, inside: frozenset[int]
+    ) -> None:
         for node in defs:
             assert isinstance(node, _DEF_NODES)
             dotted = f"{prefix}{node.name}"
-            names.add(dotted)
             if isinstance(node, ast.ClassDef):
-                _walk(_members(node, frozenset({node.name})), f"{dotted}.")
+                if id(node) in inside:
+                    continue
+                chain = _bases(node, frozenset({node.name}))
+                unittest_case = _is_unittest(node, chain)
+                if not unittest_case and (
+                    not node.name.startswith("Test") or _skipped(node, chain)
+                ):
+                    continue
+                class_marked = marked or any(_marked(owner) for owner in [node, *chain])
+                names[dotted] = (True, class_marked)
+                members = _flat_defs(node.body)
+                for owner in chain:
+                    members += _flat_defs(owner.body)
+                _walk(members, f"{dotted}.", class_marked, inside | {id(node)})
+            elif node.name.startswith("test") and "fixture" not in _decorator_names(
+                node
+            ):
+                names.setdefault(dotted, (False, marked or _marked(node)))
 
     top = _flat_defs(tree.body)
     classes.update((n.name, n) for n in top if isinstance(n, ast.ClassDef))
-    _walk(top, "")
+    _walk(top, "", False, frozenset())
     return names
 
 
 _TEST_CITATION = re.compile(r"^(tests/[^:#]+\.py):(.*)$")
-_TEST_NAME = re.compile(
-    r"^:?([A-Za-z_]\w*(?:(?:::|:|\.)[A-Za-z_]\w*)*)(?:\[[^\]]*\])?$"
-)
+_TEST_NAME = re.compile(r"^:?([A-Za-z_]\w*(?:(?:::|:|\.)[A-Za-z_]\w*)*)(\[[^\]]*\])?$")
 
 
 def _unknown_test_citations(
@@ -263,13 +384,16 @@ def _unknown_test_citations(
 
     A citation is evidence that starts with ``tests/<module>.py:``. Its rest must
     be a name, separated by ``::``, ``:`` or ``.`` and optionally followed by a
-    ``[param]`` id, and that name must be defined in the module. Anything else
-    after the module (prose, a broken separator) counts as not resolving rather
-    than being skipped. Citations of a missing module are left to the file
-    check.
+    ``[param]`` id, and that name must be a test item of the module (see
+    ``_defined_test_names`` for what it models and what it does not). A
+    ``[param]`` id needs a parametrized test function or method; the id itself
+    is not checked, because it is only known once pytest collects.
+    Anything else after the module (prose, a broken separator) counts as not
+    resolving rather than being skipped. Citations of a missing module are left
+    to the file check.
     """
 
-    cache: dict[Path, set[str]] = {}
+    cache: dict[Path, dict[str, tuple[bool, bool]]] = {}
     checked = 0
     unknown: list[str] = []
     for evidence in evidence_entries:
@@ -287,7 +411,10 @@ def _unknown_test_citations(
         dotted = re.sub(r"::|:", ".", name.group(1))
         if module not in cache:
             cache[module] = _defined_test_names(module)
-        if dotted not in cache[module]:
+        item = cache[module].get(dotted)
+        if item is None:
+            unknown.append(evidence)
+        elif name.group(2) and (item[0] or not item[1]):
             unknown.append(evidence)
     return checked, unknown
 
@@ -327,15 +454,31 @@ def test_quality_scale_test_evidence_names_exist(integration_root: Path) -> None
 
 
 _CITATION_MODULE = """
+import contextlib
+import dataclasses
 import sys
+import unittest
+
+import pytest
+
+VARIANTS = pytest.mark.parametrize("x", [1])
+p = pytest.mark.parametrize
+q = p
 
 
 class TestBase:
     def test_inh(self):
         pass
 
+    def _helper(self):
+        pass
+
 
 class TestSub(TestBase):
+    pass
+
+
+class TestGrandchild(TestSub):
     pass
 
 
@@ -345,14 +488,145 @@ class TestOuter:
             pass
 
 
+class TestWithInit:
+    def __init__(self):
+        pass
+
+    def test_never_collected(self):
+        pass
+
+
+@pytest.mark.parametrize("x", [1])
+class TestMarked:
+    def test_in_marked(self, x):
+        pass
+
+
 if sys.version_info >= (3, 0):
 
     def test_cond():
         pass
 
 
-async def test_async():
+try:
+
+    def test_in_try():
+        pass
+
+except ImportError:
     pass
+
+try:
+    import _gfmy_absent_module  # noqa: F401
+except ImportError:
+
+    def test_in_handler():
+        pass
+
+
+with contextlib.suppress(Exception):
+
+    def test_in_with():
+        pass
+
+
+for _ in range(1):
+
+    def test_in_for():
+        pass
+
+
+_once = True
+while _once:
+
+    def test_in_while():
+        pass
+
+    _once = False
+
+
+match sys.platform:
+    case _:
+
+        def test_in_match():
+            pass
+
+
+@pytest.mark.parametrize("x", [1])
+async def test_async(x):
+    pass
+
+
+def test_plain():
+    pass
+
+
+def helper():
+    pass
+
+
+class TestAliased:
+    @VARIANTS
+    def test_var(self, x):
+        pass
+
+
+@q("x", [1])
+def test_chained(x):
+    pass
+
+
+class TestMarkedSub(TestMarked):
+    def test_own(self, x):
+        pass
+
+
+class TestNew:
+    def __new__(cls):
+        return super().__new__(cls)
+
+    def test_new(self):
+        pass
+
+
+@dataclasses.dataclass
+class TestDC:
+    def test_dc(self):
+        pass
+
+
+class TestHidden:
+    __test__ = False
+
+    def test_h(self):
+        pass
+
+
+class TestLambdaInit:
+    __init__ = lambda self: None  # noqa: E731
+
+    def test_l(self):
+        pass
+
+
+class Case(unittest.TestCase):
+    def test_u(self):
+        pass
+
+
+@pytest.fixture
+def test_fixture_named():
+    return 1
+
+
+class TestRedefined:
+    pass
+
+
+class TestRedefined:  # noqa: F811
+    class TestNested(TestRedefined):
+        def test_c(self):
+            pass
 """
 
 
@@ -362,9 +636,35 @@ async def test_async():
         ("tests/t_mod.py::TestSub::test_inh", True),
         ("tests/t_mod.py::TestSub.test_inh", True),
         ("tests/t_mod.py:TestSub:test_inh", True),
+        ("tests/t_mod.py::TestGrandchild::test_inh", True),
         ("tests/t_mod.py::TestOuter::TestInner::test_n", True),
+        ("tests/t_mod.py::TestMarked::test_in_marked[1]", True),
         ("tests/t_mod.py::test_cond", True),
-        ("tests/t_mod.py::test_async[case-1]", True),
+        ("tests/t_mod.py::test_in_try", True),
+        ("tests/t_mod.py::test_in_handler", True),
+        ("tests/t_mod.py::test_in_with", True),
+        ("tests/t_mod.py::test_in_for", True),
+        ("tests/t_mod.py::test_in_while", True),
+        ("tests/t_mod.py::test_in_match", True),
+        ("tests/t_mod.py::test_async[1]", True),
+        ("tests/t_mod.py::test_plain", True),
+        ("tests/t_mod.py::test_plain[case-1]", False),
+        ("tests/t_mod.py::helper", False),
+        ("tests/t_mod.py::TestBase::_helper", False),
+        ("tests/t_mod.py::TestWithInit", False),
+        ("tests/t_mod.py::TestWithInit::test_never_collected", False),
+        ("tests/t_mod.py::TestAliased::test_var[1]", True),
+        ("tests/t_mod.py::test_chained[1]", True),
+        ("tests/t_mod.py::TestMarkedSub::test_own[1]", True),
+        ("tests/t_mod.py::TestMarkedSub::test_in_marked[1]", True),
+        ("tests/t_mod.py::Case::test_u", True),
+        ("tests/t_mod.py::TestRedefined::TestNested::test_c", True),
+        ("tests/t_mod.py::TestNew::test_new", False),
+        ("tests/t_mod.py::TestDC::test_dc", False),
+        ("tests/t_mod.py::TestHidden::test_h", False),
+        ("tests/t_mod.py::TestLambdaInit::test_l", False),
+        ("tests/t_mod.py::test_fixture_named", False),
+        ("tests/t_mod.py::TestMarked[1]", False),
         ("tests/t_mod.py::TestBase::test_inh trailing prose", False),
         ("tests/t_mod.py::TestSub::test_missing", False),
         ("tests/t_mod.py::test_missing", False),
@@ -372,7 +672,7 @@ async def test_async():
     ],
 )
 def test_test_citation_predicate(tmp_path: Path, citation: str, resolves: bool) -> None:
-    """Each citation form pytest accepts resolves; prose or a typo does not."""
+    """A citation resolves only to a test item pytest collects by default naming."""
 
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "t_mod.py").write_text(_CITATION_MODULE, encoding="utf-8")
