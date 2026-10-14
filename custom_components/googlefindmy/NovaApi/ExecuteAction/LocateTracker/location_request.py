@@ -451,7 +451,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
         try:
             # The raw protobuf payload is never logged (AGENTS.md section 5);
             # its length follows below, which is all a diagnostic needs.
-            _LOGGER.info("FCM callback triggered for %s, processing response...", name)
+            _LOGGER.debug("FCM callback triggered for %s, processing response", name)
             _LOGGER.debug("FCM response length: %d chars", len(hex_response))
 
             # Lazy imports inside callback (avoid protobuf import side effects during HA startup)
@@ -632,7 +632,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                             )
 
                 if location_data:
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "Successfully decrypted %d location record(s) for %s",
                         len(location_data),
                         name,
@@ -733,7 +733,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             SpotApiEmptyResponseError / DecryptionError / OwnerKeyLookupTransientError:
             re-raised unchanged; this layer still does not classify them.
     """
-    _LOGGER.info("Requesting location data for %s...", name)
+    _LOGGER.debug("Requesting location data for %s", name)
 
     # Fail hard on missing/misconfigured provider: this is a programming/config error.
     fcm_getter = _FCM_ReceiverGetter or _fcm_receiver_state["getter"]
@@ -952,7 +952,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
         )
 
         # Send location request to Google API (async; HA session preferred if provided)
-        _LOGGER.info("Sending location request to Google API for %s...", name)
+        _LOGGER.debug("Sending location request to Google API for %s", name)
         try:
             _ = await async_nova_request(
                 NOVA_ACTION_API_SCOPE,
@@ -1025,7 +1025,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             raise LocationRequestNotAcceptedError(stage="nova_request_failed") from e
 
         # For this RPC the server often returns HTTP 200 with empty body (FCM delivers the data).
-        _LOGGER.info("Location request accepted for %s; awaiting FCM data...", name)
+        _LOGGER.debug("Location request accepted for %s; awaiting FCM data", name)
         # Everything from here on is an ACCEPTED request. An empty result below is
         # the healthy idle outcome of a BLE tag, and the outer handler must stop
         # calling it "not accepted" from this point.
@@ -1033,15 +1033,17 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
 
         # Wait efficiently for FCM callback to signal completion
         timeout = LOCATION_REQUEST_TIMEOUT_S
-        _LOGGER.info("Waiting for location response for %s...", name)
+        _LOGGER.debug("Waiting for location response for %s", name)
         try:
             await asyncio.wait_for(ctx.event.wait(), timeout=timeout)
         except TimeoutError:
             # Expected when no reporter is in range to relay the BLE tag's
             # location within the window; the RPC delivers data asynchronously
             # via FCM. Returning an empty result is the healthy idle outcome,
-            # not a fault (INFO, not WARNING).
-            _LOGGER.info(
+            # not a fault. DEBUG only: the coordinator reports a device that
+            # stays silent once at INFO (Home Assistant quality-scale rule
+            # log-when-unavailable), so this line must not duplicate it.
+            _LOGGER.debug(
                 "No location response received for %s (timeout: %ss)", name, timeout
             )
             # Deliberately still an empty return: the server ACCEPTED this request,
@@ -1076,7 +1078,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
 
         data = ctx.data or []
         if data and data[0].get("canonic_id", "").lower() == canonic_device_id.lower():
-            _LOGGER.info("Successfully received location data for %s", name)
+            _LOGGER.debug("Successfully received location data for %s", name)
             return data
         if not data:
             _LOGGER.debug("No location data found for %s after decryption", name)
