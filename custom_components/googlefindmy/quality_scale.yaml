@@ -219,6 +219,7 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/binary_sensor.py:GoogleFindMyPollingSensor._attr_entity_category"
+        - "custom_components/googlefindmy/sensor.py:COARSE_FIX_DESCRIPTION.entity_category"
     - id: entity-device-class
       status: done
       evidence:

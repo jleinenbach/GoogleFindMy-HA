@@ -295,7 +295,7 @@
           "show_location_age": "Gdy jest włączony (domyślnie), atrybut 'location_age' (zaokrąglony do 1 minuty) jest dodawany do każdej encji lokalizatora. Zachowuje on wiek ostatniej obserwacji i zmienia się dopiero przy następnej (na przykład nowa lokalizacja, przejście do stanu 'Nieaktualna' lub zmiana dostępności). Bieżący wiek pokazuje czujnik 'Ostatnio widziany' każdego urządzenia, a bieżący status jego czujnik 'Status lokalizacji'.",
           "speed_gate_enabled": "Gdy jest włączone (domyślnie), ustalenie lokalizacji, które wymagałoby fizycznie niemożliwej prędkości (na przykład zgłoszenie społecznościowe umieszczające lokalizator setki km dalej w ciągu kilku sekund), jest odrzucane zamiast teleportować lokalizator. Zgłoszenia z własnego GPS zawsze przechodzą. Wyłącz tylko wtedy, gdy prawidłowe szybkie ruchy są pomijane.",
           "roundtrip_confirm_enabled": "Gdy jest włączone (domyślnie), zgłoszenie społecznościowe, które filtr prędkości odrzuciłby jako teleportację, jest mimo to akceptowane, jeśli w ciągu około 15 minut wraca w pobliże pozycji sprzed wcześniej zaakceptowanego długiego skoku. Odzyskuje to prawidłową podróż powrotną, zamiast pozostawiać lokalizator uwięziony w odległej pozycji. Działa tylko tam, gdzie filtr prędkości i tak by odrzucił. Wyłącz, jeśli widzisz, że lokalizator przeskakuje między dwoma miejscami.",
-          "accuracy_gate_enabled": "Gdy opcja jest włączona (domyślnie), przychodząca lokalizacja jest odrzucana, jeśli leży wyraźnie poza okręgiem niepewności pozycji w pamięci podręcznej, jest co najmniej czterokrotnie mniej dokładna niż ona, ma dokładność gorszą niż 200 m, a ta zapisana pozycja jest jednocześnie wiarygodna i wciąż świeża. Nic nie jest odrzucane bez lepszej alternatywy: niedokładna lokalizacja jest zawsze przyjmowana przy zimnym starcie oraz wtedy, gdy zapisana pozycja jest niewiarygodna lub przestarzała. Dzięki temu szeroki raport z sieci nie przesuwa lokalizatora i nie powoduje, że Home Assistant błędnie zgłasza go jako w domu, ponieważ traktuje promień dokładności jako tolerancję strefy. Wyłącz tę opcję tylko wtedy, gdy podejrzewasz, że to ona powoduje problem.",
+          "accuracy_gate_enabled": "Gdy opcja jest włączona (domyślnie), przychodząca lokalizacja jest odrzucana, jeśli leży wyraźnie poza okręgiem niepewności pozycji w pamięci podręcznej, jest co najmniej czterokrotnie mniej dokładna niż ona, ma dokładność gorszą niż 200 m, a ta zapisana pozycja jest jednocześnie wiarygodna i wciąż świeża. Nic nie jest odrzucane bez lepszej alternatywy: niedokładna lokalizacja jest zawsze przyjmowana przy zimnym starcie oraz wtedy, gdy zapisana pozycja jest niewiarygodna lub przestarzała. Dzięki temu szeroki raport z sieci nie przesuwa lokalizatora i nie powoduje, że Home Assistant błędnie zgłasza go jako w domu, ponieważ traktuje promień dokładności jako tolerancję strefy. Wyłącz tę opcję tylko wtedy, gdy podejrzewasz, że to ona powoduje problem. Czujnik 'Odrzucona niedokładna lokalizacja' urządzenia pokazuje odrzuconą lokalizację, dopóki nie zostanie zaakceptowana równie nowa lub nowsza lokalizacja, odrzucona lokalizacja nie przekroczy progu nieaktualności albo integracja nie zostanie ponownie załadowana (jak przy ponownym uruchomieniu Home Assistant); przez resztę czasu czujnik pokazuje stan nieznany, co jest normalne.",
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
           "map_view_enabled": "Domyślnie włączone. Po wyłączeniu żądania widoku mapy są odrzucane jak przy nieprawidłowym tokenie, a linki urządzeń są usuwane. Nie unieważnia istniejących linków; jeśli link mógł wyciec, użyj 'Włącz wygasanie tokenu widoku mapy' (do dwóch tygodni, jeśli było już włączone).",
@@ -674,7 +674,18 @@
         }
       },
       "coarse_fix": {
-        "name": "Przybliżona lokalizacja"
+        "name": "Odrzucona niedokładna lokalizacja",
+        "state_attributes": {
+          "coarse_latitude": {
+            "name": "Szerokość geograficzna niedokładnej lokalizacji"
+          },
+          "coarse_longitude": {
+            "name": "Długość geograficzna niedokładnej lokalizacji"
+          },
+          "coarse_accuracy": {
+            "name": "Dokładność niedokładnej lokalizacji (m)"
+          }
+        }
       },
       "last_seen": {
         "name": "Ostatnio widziany",
