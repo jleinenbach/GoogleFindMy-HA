@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -187,12 +188,16 @@ async def test_async_handle_manual_locate_gated_is_not_reported_as_success(
     registries: tuple[_StubDeviceRegistry, _StubEntityRegistry],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A gated locate returns an empty mapping and must not claim an effect.
+    """An empty result must neither claim an effect nor name a cause.
 
-    ``async_locate_device`` returns ``{}`` when the request was refused by the
-    cooldown, an in-flight request or device absence. The previous log line
-    dropped that return value and announced success regardless, which is the
-    unbacked-success class this change set removes (BSkando#195).
+    ``async_locate_device`` returns ``{}`` for several reasons: the request was
+    refused (cooldown, in-flight request, push transport recovering), the device
+    sent no answer, or the answer was dropped (Google Home filter, invalid
+    coordinates, fusion rejection, a transient owner-key failure). A log line
+    that announced success regardless was the unbacked-success class
+    (BSkando#195); a line that lists only the refusal reasons attributes an
+    unanswered locate to a cause it did not have. The coordinator logs the
+    actual reason where it knows it.
     """
 
     device_registry, _ = registries
@@ -204,7 +209,7 @@ async def test_async_handle_manual_locate_gated_is_not_reported_as_success(
     )
     coordinator = _StubCoordinator()
     coordinator.result = {}
-    caplog.set_level("INFO")
+    caplog.set_level("DEBUG")
     # Awaited on the loop pytest-asyncio manages, not via asyncio.run():
     # tests/AGENTS.md forbids the latter because it starts a competing loop
     # and breaks Home Assistant's managed loop fixtures.
@@ -212,6 +217,18 @@ async def test_async_handle_manual_locate_gated_is_not_reported_as_success(
     assert coordinator.calls == ["canonical-6"]
     assert "produced no location update" in caplog.text
     assert "Successfully" not in caplog.text
+    assert "gated" not in caplog.text
+    assert "accepted" not in caplog.text
+    # An automation can repeat the call: the INFO record carries the id only.
+    info_text = " ".join(
+        rec.getMessage() for rec in caplog.records if rec.levelno >= logging.INFO
+    )
+    assert "canonical-6" in info_text
+    assert "Gated Tag" not in info_text
+    assert any(
+        rec.levelno == logging.DEBUG and "Gated Tag" in rec.getMessage()
+        for rec in caplog.records
+    )
 
 
 def test_async_handle_manual_locate_namespaced_identifier(

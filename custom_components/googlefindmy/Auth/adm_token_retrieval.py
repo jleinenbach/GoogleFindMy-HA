@@ -311,18 +311,21 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
     aas_provider: Callable[[], Awaitable[str]] | None = None
 
     if use_oauth_provider:
-        _LOGGER.info("ADM token: generating new token (will fetch fresh AAS token).")
+        # The provider returns the cached AAS token when there is one, so this
+        # record runs on every renewal and is routine. A new sign-in is logged
+        # at INFO where it happens (`async_get_aas_token`).
+        _LOGGER.debug("ADM token: generating new token via the entry AAS provider")
         aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
     else:
         aas_token_direct = await cache.get(DATA_AAS_TOKEN)
         if not isinstance(aas_token_direct, str) or not aas_token_direct:
             _LOGGER.info(
-                "ADM token: cached AAS token missing. Generating fresh AAS token."
+                "ADM token: cached AAS token missing, generating a fresh AAS token"
             )
             aas_token_direct = None
             aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
         else:
-            _LOGGER.info("ADM token: generating new token using cached AAS token.")
+            _LOGGER.debug("ADM token: generating new token using cached AAS token")
 
     await _resolve_android_id_for_entry(username, cache=cache)
 
@@ -333,7 +336,7 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
         aas_token=aas_token_direct,
         aas_provider=aas_provider,
     )
-    _LOGGER.info("ADM token: successfully generated.")
+    _LOGGER.debug("ADM token: successfully generated")
     return token
 
 

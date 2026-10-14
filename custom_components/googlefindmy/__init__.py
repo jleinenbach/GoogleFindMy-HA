@@ -5483,8 +5483,8 @@ async def async_handle_manual_locate(
     Behavior:
         - Resolve any incoming identifier (`device_id`, `entity_id`, or canonical).
         - On dispatch: log what the coordinator actually returned, distinguishing
-          a locate that produced data from one that was gated away. Neither line
-          claims that the device reported its position.
+          a locate that produced data from one that produced none. The second
+          line names no cause: the coordinator logs the reason where it knows it.
         - On failure: raise HomeAssistantError and mirror a redacted error record
           into the coordinator diagnostics buffer (if present).
 
@@ -5494,18 +5494,26 @@ async def async_handle_manual_locate(
         canonical_id, friendly = _resolve_canonical_from_any(hass, arg)
         # The return value is the evidence, so it is read rather than dropped:
         # async_locate_device returns an empty mapping when the request was
-        # gated away (cooldown, in-flight, device absent). Logging success for
-        # that case claims an effect that never happened -- the same class of
-        # unbacked success claim as the Stop Sound report in BSkando#195.
+        # refused, got no answer, or its answer was dropped. Logging success
+        # for that case claims an effect that never happened -- the same class
+        # of unbacked success claim as the Stop Sound report in BSkando#195.
+        # The empty case names no cause either, because several of those paths
+        # log only at DEBUG and this line cannot tell them apart.
         location = await coordinator.async_locate_device(canonical_id)
         if location:
             _LOGGER.info("Manual locate returned data for %s", friendly)
         else:
+            # A caller can repeat the invocation, so the INFO record names the
+            # device by the resolved identifier (the canonical id when the
+            # registry resolves it, else the caller's argument, which the
+            # previous record carried as well), as the coordinator's own
+            # record for an unanswered locate does; the display name stays at
+            # DEBUG (AGENTS.md section 5 (b)).
             _LOGGER.info(
-                "Manual locate for %s was accepted but produced no location "
-                "update (gated by cooldown, an in-flight request, or absence)",
-                friendly,
+                "Manual locate for device %s produced no location update",
+                canonical_id,
             )
+            _LOGGER.debug("Manual locate without location update for %s", friendly)
     except HomeAssistantError as err:
         diag_buffer = cast(Any, getattr(coordinator, "_diag", None))
         if diag_buffer is not None and hasattr(diag_buffer, "add_error"):
