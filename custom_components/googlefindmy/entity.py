@@ -687,6 +687,8 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         config_entry = getattr(self.coordinator, "config_entry", None)
         if _is_map_view_enabled_for_entry(config_entry):
             info["configuration_url"] = self.device_configuration_url(absolute=True)
+        else:
+            info["configuration_url"] = None  # red probe, reverted next commit
         # A disabled entry leaves ``configuration_url`` out instead of passing
         # ``None``: Home Assistant forwards ``device_info`` as keyword arguments
         # to ``DeviceRegistry.async_get_or_create``, where ``None`` clears the
