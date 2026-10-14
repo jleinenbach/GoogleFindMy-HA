@@ -651,7 +651,7 @@ Citations of a FILE (`tests/foo.py`) stay unchecked by design, so renaming a tes
 
 ### Map View reminders
 
-* Decide whether Map View is on only through `_is_map_view_enabled_for_entry` (in `map_view.py`; `__init__.py` reaches it lazily through `_is_map_view_enabled_for_entry_fn`). Registration, the device-URL refresh, the refresh service and every view must agree on the option and its default. The options flow reads and writes the stored value itself, to prefill and save its form; that is not a decision about Map View.
+* Decide whether Map View is on only through `_is_map_view_enabled_for_entry` (in `map_view.py`; `__init__.py` reaches it lazily through `_is_map_view_enabled_for_entry_fn`). Registration, the device-URL refresh, the refresh service and every view must agree on the option and its default. Code that handles the stored options as data reads and writes the value without deciding anything: the flows in `config_flow.py` (prefill, carry over and save their forms), the options migrations and `_effective_config` in `__init__.py`, which go through `OPTION_KEYS`, and the diagnostics export. That is not a decision about Map View.
 * Values that arrive through a public route (`requires_auth = False`, for example a device id from the URL) go into log messages with `%r`, never `%s`, so a CR, LF, U+2028 or NEL in the value cannot start a forged log line (CWE-117).
 * Share tokens are compared only through `_token_matches`, which runs `hmac.compare_digest` on UTF-8 bytes against every accepted token; `_resolve_entry_by_token` likewise compares against every entry before it returns. Never compare a token with `==`, `in` or an early `return`.
 

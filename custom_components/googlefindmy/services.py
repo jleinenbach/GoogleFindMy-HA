@@ -1150,7 +1150,8 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             Used for the token-expiration option. It needs no cache of its own:
             its only caller, ``_expiration_enabled``, is called only from
             ``_token_for_entry``, which caches per entry, so the option is read
-            once per entry and refresh regardless of device count. Map View enablement is read through
+            once per entry and refresh regardless of device count. Map View
+            enablement is read through
             ``map_view._is_map_view_enabled_for_entry`` so every call site
             shares one rule.
             """
