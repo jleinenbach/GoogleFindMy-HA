@@ -230,29 +230,59 @@ def _decorator_names(node: ast.stmt) -> set[str]:
     return found
 
 
+def _names_parametrize(expr: ast.expr, aliases: set[str]) -> bool:
+    """Return whether ``expr`` is ``parametrize`` or an alias of it.
+
+    Only the root of the expression counts, after stripping calls:
+    ``pytest.mark.parametrize(...)``, ``VARIANTS`` and ``p(...)`` with ``p`` an
+    alias do, ``pytest.mark.slow`` does not, even if an alias is called ``mark``.
+    """
+
+    while isinstance(expr, ast.Call):
+        expr = expr.func
+    if isinstance(expr, ast.Attribute):
+        return expr.attr == "parametrize"
+    return isinstance(expr, ast.Name) and expr.id in aliases
+
+
+def _module_assigns(body: list[ast.stmt]) -> list[ast.Assign | ast.AnnAssign]:
+    """Return the assignments of a module body, also inside compound blocks.
+
+    Function and class bodies are left out: a name bound there is not visible
+    to a decorator at module level.
+    """
+
+    found: list[ast.Assign | ast.AnnAssign] = []
+    for node in body:
+        if isinstance(node, ast.Assign | ast.AnnAssign):
+            if node.value is not None:
+                found.append(node)
+            continue
+        if isinstance(node, _DEF_NODES):
+            continue
+        for field in _BLOCK_FIELDS:
+            for child in getattr(node, field, None) or []:
+                if isinstance(child, ast.excepthandler | ast.match_case):
+                    found += _module_assigns(child.body)
+                elif isinstance(child, ast.stmt):
+                    found += _module_assigns([child])
+    return found
+
+
 def _parametrize_aliases(tree: ast.Module) -> set[str]:
-    """Return the names bound to an expression that uses ``parametrize``.
+    """Return the module-level names bound to ``parametrize`` or a call of it.
 
     Covers ``VARIANTS = pytest.mark.parametrize(...)`` and ``p =
     pytest.mark.parametrize``, also chained (``q = p``).
     """
 
-    assigns = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign | ast.AnnAssign) and node.value is not None
-    ]
+    assigns = _module_assigns(tree.body)
     aliases: set[str] = {"parametrize"}
     while True:
         grown = set(aliases)
         for node in assigns:
             assert node.value is not None
-            used = {
-                sub.attr if isinstance(sub, ast.Attribute) else sub.id
-                for sub in ast.walk(node.value)
-                if isinstance(sub, ast.Attribute | ast.Name)
-            }
-            if used & aliases:
+            if _names_parametrize(node.value, aliases):
                 targets = (
                     node.targets if isinstance(node, ast.Assign) else [node.target]
                 )
@@ -289,11 +319,16 @@ def _defined_test_names(path: Path) -> dict[str, tuple[bool, bool]]:
     class inherits from a base class defined in the same module. A ``Test*``
     class is left out when it or a base defines ``__init__`` or ``__new__``,
     sets ``__test__ = False`` or is a dataclass. ``parametrize`` counts as a
-    decorator, also through a module-level alias. Not modelled, so cite such a
-    test without an id or not at all: branches are not evaluated, a later
-    rebinding of a name is not followed, bases from other modules are not
-    followed, and ids from ``pytestmark`` or a parametrized fixture are not
-    seen.
+    decorator, also through a module-level alias. A base class name resolves to
+    the last class of that name in the module. Not modelled, so cite such a
+    test without an id or not at all: branches are not evaluated, bases from
+    other modules are not followed (any base whose name ends in ``TestCase``
+    counts as ``unittest``), ``__test__`` and abstract classes do not change a
+    ``unittest.TestCase`` subclass, its nested classes or a class not named
+    ``Test*``, a ``__test__ = True`` in a subclass does not undo a base, an id
+    on a ``unittest`` method is not rejected, aliases of a function decorator
+    other than ``parametrize`` are not followed, and ids from ``pytestmark`` or
+    a parametrized fixture are not seen.
     """
 
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -302,7 +337,10 @@ def _defined_test_names(path: Path) -> dict[str, tuple[bool, bool]]:
     names: dict[str, tuple[bool, bool]] = {}
 
     def _marked(node: ast.stmt) -> bool:
-        return bool(_decorator_names(node) & aliases)
+        return any(
+            _names_parametrize(decorator, aliases)
+            for decorator in getattr(node, "decorator_list", [])
+        )
 
     def _bases(cls: ast.ClassDef, seen: frozenset[str]) -> list[ast.ClassDef]:
         chain: list[ast.ClassDef] = []
@@ -619,6 +657,36 @@ def test_fixture_named():
     return 1
 
 
+local = pytest.mark.filterwarnings("ignore")
+
+
+def _local_alias():
+    local = pytest.mark.parametrize("x", [1])
+    return local
+
+
+mark = pytest.mark.parametrize("y", [1])
+
+
+@pytest.mark.filterwarnings("ignore")
+def test_slow():
+    pass
+
+
+@local
+def test_local_named():
+    pass
+
+
+if sys.version_info >= (3, 0):
+    IF_VARIANTS = pytest.mark.parametrize("x", [1])
+
+
+@IF_VARIANTS
+def test_if_alias(x):
+    pass
+
+
 class TestRedefined:
     pass
 
@@ -665,6 +733,10 @@ class TestRedefined:  # noqa: F811
         ("tests/t_mod.py::TestLambdaInit::test_l", False),
         ("tests/t_mod.py::test_fixture_named", False),
         ("tests/t_mod.py::TestMarked[1]", False),
+        ("tests/t_mod.py::test_slow", True),
+        ("tests/t_mod.py::test_slow[x]", False),
+        ("tests/t_mod.py::test_local_named[1]", False),
+        ("tests/t_mod.py::test_if_alias[1]", True),
         ("tests/t_mod.py::TestBase::test_inh trailing prose", False),
         ("tests/t_mod.py::TestSub::test_missing", False),
         ("tests/t_mod.py::test_missing", False),
