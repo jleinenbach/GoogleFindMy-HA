@@ -56,6 +56,7 @@ from .helpers.cache import (
     substitute_zone_accuracy,
 )
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
+from .helpers.locate_clock import retract_if_never_dispatched, stamp_locate_attempt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -372,11 +373,15 @@ class LocateOperations(_MixinBase):
 
             try:
                 # Stamped before the await, not after it: an attempt that
-                # times out or raises still counts. Created lazily for
-                # coordinators built without __init__.
+                # times out or raises after the request was sent still counts.
+                # One that stopped before the send is undone in the
+                # not-accepted branch below. Created lazily for coordinators
+                # built without __init__.
                 if not hasattr(self, "_locate_requested_mono"):
                     self._locate_requested_mono = {}
-                self._locate_requested_mono[device_id] = time.monotonic()
+                locate_stamp = stamp_locate_attempt(
+                    self._locate_requested_mono, device_id, time.monotonic()
+                )
                 location_data = await self.api.async_get_device_location(
                     device_id, name
                 )
@@ -895,6 +900,12 @@ class LocateOperations(_MixinBase):
                 # one line per user action, so naming would be allowed; it keeps
                 # the split anyway, because the DEBUG record beneath it already
                 # carries the device and the test pins exactly that shape.
+                # Without a push token or with a failed push registration the
+                # request was never sent, so it must not count for
+                # ``poll_age_s`` (helpers/locate_clock.py).
+                retract_if_never_dispatched(
+                    self._locate_requested_mono, locate_stamp, not_accepted_err
+                )
                 _LOGGER.warning("Manual locate failed: %s", not_accepted_err)
                 _LOGGER.debug(
                     "Manual locate for %s failed (request not accepted): %s",

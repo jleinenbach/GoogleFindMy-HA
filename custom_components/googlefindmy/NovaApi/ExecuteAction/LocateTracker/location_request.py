@@ -83,6 +83,25 @@ LOCATION_REQUEST_NOT_ACCEPTED_STAGES: frozenset[str] = frozenset(
     }
 )
 
+# The subset of those positions whose raise sites lie BEFORE the call to
+# ``async_nova_request``: the locate request itself was never sent to Google, so
+# nothing on the server side can have reacted to it. Both are FCM stages; FCM is
+# set up first because the request carries the push token. Every other marker
+# may sit after the request reached the server (``rate_limited`` and
+# ``server_error`` are server answers; ``network_error`` and
+# ``nova_request_failed`` cannot tell whether bytes left the host), and
+# ``surfacing_before_accept`` belongs to the outer handler, whose position in the
+# file says nothing about the send. This is still a POSITION, read off the
+# order of the raise sites, not a cause. The test
+# ``test_pre_dispatch_stages_are_the_raise_sites_before_the_send`` derives it
+# from the AST, so moving a raise site across the send call fails there.
+LOCATION_REQUEST_PRE_DISPATCH_STAGES: frozenset[str] = frozenset(
+    {
+        "no_fcm_token",
+        "fcm_registration_failed",
+    }
+)
+
 
 class LocationRequestNotAcceptedError(Exception):
     """Raised when a locate request never got past this integration's accept point.
@@ -208,6 +227,16 @@ class LocationRequestNotAcceptedError(Exception):
             f"stage={stage}" if status is None else f"stage={stage}, status={status}"
         )
         super().__init__(f"Location request not accepted ({detail})")
+
+    @property
+    def before_dispatch(self) -> bool:
+        """Return whether the locate request was never sent to Google.
+
+        True only for the markers in ``LOCATION_REQUEST_PRE_DISPATCH_STAGES``.
+        False does NOT mean the request arrived; it means this layer cannot
+        rule that out.
+        """
+        return self.stage in LOCATION_REQUEST_PRE_DISPATCH_STAGES
 
 
 def _format_cause_chain(exc: BaseException, *, max_depth: int = 8) -> str:

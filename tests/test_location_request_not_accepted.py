@@ -58,6 +58,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
     LOCATION_REQUEST_NOT_ACCEPTED_STAGES,
+    LOCATION_REQUEST_PRE_DISPATCH_STAGES,
     LocationRequestNotAcceptedError,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
@@ -234,6 +235,57 @@ def test_the_stage_markers_are_a_closed_set() -> None:
     assert set(stages) <= LOCATION_REQUEST_NOT_ACCEPTED_STAGES
     assert set(stages) == LOCATION_REQUEST_NOT_ACCEPTED_STAGES
     assert len(stages) == len(set(stages)), f"a marker is used twice: {stages}"
+
+
+def test_pre_dispatch_stages_are_the_raise_sites_before_the_send() -> None:
+    """The "never sent" subset is the set of raise sites ahead of the send call.
+
+    ``poll_age_s`` takes a request back only for these stages, so the subset
+    has to follow the code: a raise site moved across ``async_nova_request``,
+    or a new one added ahead of it, must change the subset or fail here.
+    """
+    tree = ast.parse(_LOCATION_REQUEST_PY.read_text(encoding="utf-8"))
+    flows = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "get_location_data_for_device"
+    ]
+    assert len(flows) == 1, "the request flow moved; this test is blind"
+    sends = [
+        node.lineno
+        for node in ast.walk(flows[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "async_nova_request"
+    ]
+    assert len(sends) == 1, f"expected exactly one send call, found {sends}"
+
+    before: set[str] = set()
+    after: set[str] = set()
+    for node in ast.walk(flows[0]):
+        if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+            continue
+        func = node.exc.func
+        if not (
+            isinstance(func, ast.Name) and func.id == "LocationRequestNotAcceptedError"
+        ):
+            continue
+        for keyword in node.exc.keywords:
+            if keyword.arg == "stage" and isinstance(keyword.value, ast.Constant):
+                (before if node.lineno < sends[0] else after).add(
+                    str(keyword.value.value)
+                )
+
+    assert before == LOCATION_REQUEST_PRE_DISPATCH_STAGES
+    assert before | after == LOCATION_REQUEST_NOT_ACCEPTED_STAGES
+    assert not before & after
+
+
+@pytest.mark.parametrize("stage", sorted(LOCATION_REQUEST_NOT_ACCEPTED_STAGES))
+def test_before_dispatch_follows_the_subset(stage: str) -> None:
+    err = LocationRequestNotAcceptedError(stage=stage)
+    assert err.before_dispatch is (stage in LOCATION_REQUEST_PRE_DISPATCH_STAGES)
 
 
 # ===========================================================================

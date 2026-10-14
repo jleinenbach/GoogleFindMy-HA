@@ -676,9 +676,10 @@ from Google.
      (`frame_type`) showed the mode.
    - `poll_age_s`: seconds between the last location request this integration
      attempted for the device and the advertisement that showed the change.
-     The attempt counts even if it failed before reaching Google (for
-     example without a working push connection). `none` if there was no
-     attempt since the start, or if it came after the advertisement.
+     A request that was never sent (no push token, failed push registration)
+     does not count. A request that was sent counts even if it failed
+     afterwards, for example with a server error. `none` if there was no
+     such request since the start, or if it came after the advertisement.
    - `prev_seen_age_s`: seconds since the old mode was last seen.
    - At most 12 lines per device and hour are written at INFO, further ones at
      DEBUG. Once the limit has freed up, the next advertisement of the device
