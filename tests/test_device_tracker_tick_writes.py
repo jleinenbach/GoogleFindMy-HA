@@ -688,7 +688,7 @@ def test_tf10_coarse_fix_appearing_moves_nothing_on_the_main_tracker(
     """The gate rejects a fix, the published position stays.
 
     The coarse fix is held back until the next observation, so the tick
-    publishes identical attributes and ``last_updated`` stays (Audit F-3).
+    publishes identical attributes and ``last_updated`` stays.
     A later observation carries it if it is still fresh then.
     """
 

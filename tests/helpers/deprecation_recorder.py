@@ -220,9 +220,8 @@ def rebind_active() -> tuple[str, ...]:
     ``homeassistant*`` entry from ``sys.modules`` and imports the real packages
     again.  Every binding made before that point refers to the discarded module
     objects, so without this call the recorder would observe nothing under
-    exactly the fixture that exercises real Core code (see ``EE-30`` in the
-    migration plan).  Returns the freshly bound module names, empty when no
-    recorder is active.
+    exactly the fixture that exercises real Core code.  Returns the freshly
+    bound module names, empty when no recorder is active.
     """
     if not _ACTIVE:
         return ()
