@@ -9,6 +9,7 @@ the currently declared tier is Bronze during the coverage sprint (see
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -189,6 +190,208 @@ def test_quality_scale_evidence_existence(integration_root: Path) -> None:
         "The following evidence files listed in quality_scale.yaml do not exist:\n"
         + "\n".join(sorted(set(missing_files)))
     )
+
+
+_DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _flat_defs(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Return the definitions in ``body``, looking into ``if`` and ``try`` blocks."""
+
+    found: list[ast.stmt] = []
+    for node in body:
+        if isinstance(node, _DEF_NODES):
+            found.append(node)
+        elif isinstance(node, ast.If):
+            found += _flat_defs(node.body) + _flat_defs(node.orelse)
+        elif isinstance(node, ast.Try):
+            found += _flat_defs(node.body) + _flat_defs(node.orelse)
+            found += _flat_defs(node.finalbody)
+            for handler in node.handlers:
+                found += _flat_defs(handler.body)
+    return found
+
+
+def _defined_test_names(path: Path) -> set[str]:
+    """Return every dotted name pytest can collect from ``path``.
+
+    Functions and classes at module level (also inside ``if``/``try``), nested
+    classes, and methods, including the ones a class inherits from a base class
+    defined in the same module. Bases from other modules are not followed.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    classes: dict[str, ast.ClassDef] = {}
+    names: set[str] = set()
+
+    def _members(cls: ast.ClassDef, seen: frozenset[str]) -> list[ast.stmt]:
+        own = _flat_defs(cls.body)
+        inherited: list[ast.stmt] = []
+        for base in cls.bases:
+            if (
+                isinstance(base, ast.Name)
+                and base.id in classes
+                and base.id not in seen
+            ):
+                inherited += _members(classes[base.id], seen | {base.id})
+        return own + inherited
+
+    def _walk(defs: list[ast.stmt], prefix: str) -> None:
+        for node in defs:
+            assert isinstance(node, _DEF_NODES)
+            dotted = f"{prefix}{node.name}"
+            names.add(dotted)
+            if isinstance(node, ast.ClassDef):
+                _walk(_members(node, frozenset({node.name})), f"{dotted}.")
+
+    top = _flat_defs(tree.body)
+    classes.update((n.name, n) for n in top if isinstance(n, ast.ClassDef))
+    _walk(top, "")
+    return names
+
+
+_TEST_CITATION = re.compile(r"^(tests/[^:#]+\.py):(.*)$")
+_TEST_NAME = re.compile(
+    r"^:?([A-Za-z_]\w*(?:(?:::|:|\.)[A-Za-z_]\w*)*)(?:\[[^\]]*\])?$"
+)
+
+
+def _unknown_test_citations(
+    evidence_entries: list[str], repo_root: Path
+) -> tuple[int, list[str]]:
+    """Return how many test citations were checked and which ones do not resolve.
+
+    A citation is evidence that starts with ``tests/<module>.py:``. Its rest must
+    be a name, separated by ``::``, ``:`` or ``.`` and optionally followed by a
+    ``[param]`` id, and that name must be defined in the module. Anything else
+    after the module (prose, a broken separator) counts as not resolving rather
+    than being skipped. Citations of a missing module are left to the file
+    check.
+    """
+
+    cache: dict[Path, set[str]] = {}
+    checked = 0
+    unknown: list[str] = []
+    for evidence in evidence_entries:
+        citation = _TEST_CITATION.match(evidence)
+        if citation is None:
+            continue
+        module = repo_root / citation.group(1)
+        if not module.exists():
+            continue
+        checked += 1
+        name = _TEST_NAME.match(citation.group(2))
+        if name is None:
+            unknown.append(evidence)
+            continue
+        dotted = re.sub(r"::|:", ".", name.group(1))
+        if module not in cache:
+            cache[module] = _defined_test_names(module)
+        if dotted not in cache[module]:
+            unknown.append(evidence)
+    return checked, unknown
+
+
+def test_quality_scale_test_evidence_names_exist(integration_root: Path) -> None:
+    """Verify that test names cited in quality_scale.yaml are defined.
+
+    The file check above passes as long as the test module exists, so a renamed
+    test kept its stale citation. Every ``tests/<module>.py:<name>`` citation
+    must resolve (see ``_unknown_test_citations``).
+    """
+
+    repo_root = Path(__file__).resolve().parent.parent
+    quality_yaml_path = integration_root / "quality_scale.yaml"
+    if not quality_yaml_path.exists():
+        pytest.skip("quality_scale.yaml not found")
+
+    quality_data = yaml.safe_load(quality_yaml_path.read_text(encoding="utf-8"))
+    rules = quality_data.get("rules", {}) if isinstance(quality_data, dict) else {}
+    evidence_entries = [
+        evidence
+        for tier_rules in rules.values()
+        if isinstance(tier_rules, list)
+        for rule in tier_rules
+        if isinstance(rule, dict)
+        for evidence in rule.get("evidence", [])
+        if isinstance(evidence, str)
+    ]
+
+    checked, unknown = _unknown_test_citations(evidence_entries, repo_root)
+
+    assert checked, "no test-name evidence found; the pattern no longer matches"
+    assert not unknown, (
+        "These test names cited in quality_scale.yaml are not defined:\n"
+        + "\n".join(sorted(set(unknown)))
+    )
+
+
+_CITATION_MODULE = """
+import sys
+
+
+class TestBase:
+    def test_inh(self):
+        pass
+
+
+class TestSub(TestBase):
+    pass
+
+
+class TestOuter:
+    class TestInner:
+        def test_n(self):
+            pass
+
+
+if sys.version_info >= (3, 0):
+
+    def test_cond():
+        pass
+
+
+async def test_async():
+    pass
+"""
+
+
+@pytest.mark.parametrize(
+    ("citation", "resolves"),
+    [
+        ("tests/t_mod.py::TestSub::test_inh", True),
+        ("tests/t_mod.py::TestSub.test_inh", True),
+        ("tests/t_mod.py:TestSub:test_inh", True),
+        ("tests/t_mod.py::TestOuter::TestInner::test_n", True),
+        ("tests/t_mod.py::test_cond", True),
+        ("tests/t_mod.py::test_async[case-1]", True),
+        ("tests/t_mod.py::TestBase::test_inh trailing prose", False),
+        ("tests/t_mod.py::TestSub::test_missing", False),
+        ("tests/t_mod.py::test_missing", False),
+        ("tests/t_mod.py::", False),
+    ],
+)
+def test_test_citation_predicate(tmp_path: Path, citation: str, resolves: bool) -> None:
+    """Each citation form pytest accepts resolves; prose or a typo does not."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_mod.py").write_text(_CITATION_MODULE, encoding="utf-8")
+
+    checked, unknown = _unknown_test_citations([citation], tmp_path)
+
+    assert checked == 1
+    assert (unknown == []) is resolves
+
+
+def test_test_citation_predicate_skips_other_evidence(tmp_path: Path) -> None:
+    """Evidence outside ``tests/`` and citations of a missing module are not counted."""
+
+    checked, unknown = _unknown_test_citations(
+        ["README.md#x", "custom_components/x.py:f", "tests/absent.py::test_x"],
+        tmp_path,
+    )
+
+    assert (checked, unknown) == (0, [])
 
 
 # Sprint baseline for the test-coverage quality-scale rule.
