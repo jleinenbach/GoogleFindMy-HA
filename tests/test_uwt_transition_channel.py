@@ -198,6 +198,18 @@ def test_an_older_observation_records_nothing_a_newer_one_does() -> None:
     assert [e.new for e in _events(resolver)] == ["off", "on"]
 
 
+def test_an_observation_as_old_as_the_newest_one_still_counts() -> None:
+    """Only an OLDER sighting is a replay; one at the same instant is not.
+
+    Two frames of one device can carry the same observation time. Treating the
+    second as a replay would drop a real change.
+    """
+    resolver = _resolver()
+    _observe(resolver, False, 100.0)
+    _observe(resolver, True, 100.0)
+    assert [e.new for e in _events(resolver)] == ["off", "on"]
+
+
 def test_prev_seen_age_is_measured_to_the_last_sighting_of_the_old_mode() -> None:
     resolver = _resolver()
     _observe(resolver, False, 100.0)
@@ -617,7 +629,8 @@ def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
 
     The first source line of the format literal carries no word the Semgrep
     rule ``python-logger-credential-disclosure`` reacts to, and the arguments
-    are exactly the expressions listed in ``_EXPECTED_ARGS``: the class (b)
+    are exactly the expressions listed in ``_EXPECTED_ARGS``, with no keyword
+    argument: the class (b)
     identifiers of the match, fields of the recorded event (fixed labels,
     numbers, the UTC time), the decoded flags byte and the suppressed count;
     no name, entity id, address or coordinate. Any added, removed or changed
@@ -654,6 +667,8 @@ def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
     ]
     assert len(calls) == 1
     assert tuple(ast.unparse(arg) for arg in calls[0].args) == _EXPECTED_ARGS
+    # ``extra=`` or ``stack_info=`` would carry values past the list above.
+    assert [ast.unparse(kw) for kw in calls[0].keywords] == []
 
 
 def test_readme_quotes_the_line_the_code_writes(
