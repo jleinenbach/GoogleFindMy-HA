@@ -291,8 +291,8 @@
           "secrets_extra_watch_paths": "Caminhos de monitorização adicionais de secrets.json (um por linha)"
         },
         "data_description": {
-          "stale_threshold": "Após este número de segundos sem atualização de localização, o estado do rastreador muda para desconhecido. Use a entidade 'Última localização' para ver sempre a última posição conhecida. Predefinição: 1800 (30 minutos).",
-          "show_location_age": "Quando ativado (predefinição), um atributo 'location_age' (arredondado para 1 minuto) é adicionado a cada entidade rastreadora. Desative para eliminar todas as escrituras na base de dados para dispositivos estacionários. O atributo absoluto 'last_seen' e as entidades sensor.*_last_seen estão sempre disponíveis.",
+          "stale_threshold": "Após este número de segundos sem atualização de localização, o estado do rastreador muda para desconhecido. Use a entidade 'Última localização' para ver sempre a última posição conhecida. Predefinição: 3900 (65 minutos).",
+          "show_location_age": "Quando ativado (predefinição), um atributo 'location_age' (arredondado para 1 minuto) é adicionado a cada entidade rastreadora. Mantém a idade da última observação e só muda com a seguinte (uma nova localização, a passagem para 'Desatualizada' ou uma alteração de disponibilidade). A idade atual está no sensor 'Visto pela última vez' de cada dispositivo e o estado atual no seu sensor 'Estado da localização'.",
           "speed_gate_enabled": "Quando ativado (predefinição), uma leitura de localização que exigiria uma velocidade fisicamente impossível (por exemplo, um relatório coletivo que coloca o localizador a centenas de km de distância em segundos) é rejeitada em vez de teletransportar o localizador. Os relatórios do próprio GPS passam sempre. Desative apenas se movimentos rápidos legítimos estiverem a ser descartados.",
           "roundtrip_confirm_enabled": "Quando ativado (predefinição), uma leitura coletiva que o controlo de velocidade rejeitaria como um teletransporte é, em vez disso, aceite se aterrar perto da posição imediatamente anterior a um salto longo aceite anteriormente, dentro de cerca de 15 minutos. Isto recupera uma viagem de regresso legítima em vez de deixar o localizador preso na posição distante. Só se aplica onde o controlo de velocidade rejeitaria de outra forma. Desative se vir o localizador a oscilar entre dois locais.",
           "accuracy_gate_enabled": "Quando ativado (predefinição), uma posição recebida é descartada se estiver claramente fora do círculo de incerteza da posição em cache, se for pelo menos quatro vezes menos precisa do que ela, tiver pelo menos 200 m de imprecisão e essa posição em cache for simultaneamente fiável e recente. Nada é descartado sem uma alternativa melhor: uma posição imprecisa é sempre aceite num arranque a frio, ou quando a posição em cache não é fiável ou está desatualizada. Isto impede que um relatório amplo da rede desloque o localizador e que, uma vez que o Home Assistant usa o raio de precisão como tolerância de zona, o assinale erradamente como em casa. Desative apenas se suspeitar que é esta verificação que está a causar um problema.",
@@ -665,6 +665,17 @@
           }
         }
       },
+      "location_status": {
+        "name": "Estado da localização",
+        "state": {
+          "current": "Atual",
+          "aging": "A envelhecer",
+          "stale": "Desatualizada"
+        }
+      },
+      "coarse_fix": {
+        "name": "Localização aproximada"
+      },
       "last_seen": {
         "name": "Visto pela última vez",
         "state_attributes": {
@@ -793,6 +804,14 @@
     "restart_required": {
       "title": "Reinicie o Home Assistant para concluir a atualização",
       "description": "O Google Find My Hub foi atualizado no disco para a versão {installed_version}, mas o Home Assistant ainda está a executar a versão {running_version}. Reinicie o Home Assistant para ativar a versão instalada.\n\nRecarregar a integração não é suficiente: é necessário reiniciar completamente o Home Assistant."
+    },
+    "tracker_attributes_frozen": {
+      "title": "Os atributos do rastreador mantêm agora o valor da última localização",
+      "description": "Os rastreadores de dispositivo de **{entry_title}** já não atualizam os atributos `location_age` e `location_status` entre duas localizações: mantêm o valor da última localização. O rastreador principal mantém da mesma forma os atributos `coarse_*`, e o rastreador «Última localização» já não os tem. Assim, um rastreador sem nova localização já não parece mais atual do que outro, por exemplo para uma pessoa.\n\nPara os valores atuais, utilize estas entidades:\n{replacement_sensors}\n\nEstes atributos serão removidos, o mais tardar com a primeira versão da integração a partir do Home Assistant {breaks_version}.\n\nAutomatizações e scripts que utilizam estes rastreadores (verifique neles `location_status`, `location_age` e `coarse_*`):\n{automations}"
+    },
+    "tracker_attributes_frozen_no_automations": {
+      "title": "Os atributos do rastreador mantêm agora o valor da última localização",
+      "description": "Os rastreadores de dispositivo de **{entry_title}** já não atualizam os atributos `location_age` e `location_status` entre duas localizações: mantêm o valor da última localização. O rastreador principal mantém da mesma forma os atributos `coarse_*`, e o rastreador «Última localização» já não os tem. Assim, um rastreador sem nova localização já não parece mais atual do que outro, por exemplo para uma pessoa.\n\nPara os valores atuais, utilize estas entidades:\n{replacement_sensors}\n\nEstes atributos serão removidos, o mais tardar com a primeira versão da integração a partir do Home Assistant {breaks_version}."
     }
   },
   "exceptions": {

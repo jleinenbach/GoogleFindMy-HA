@@ -60,6 +60,17 @@
       "plus_code": {
         "default": "mdi:map-marker"
       },
+      "location_status": {
+        "default": "mdi:map-marker-question",
+        "state": {
+          "current": "mdi:map-marker-check",
+          "aging": "mdi:map-marker-alert",
+          "stale": "mdi:map-marker-off"
+        }
+      },
+      "coarse_fix": {
+        "default": "mdi:map-marker-radius"
+      },
       "semantic_labels": {
         "default": "mdi:format-list-text"
       },

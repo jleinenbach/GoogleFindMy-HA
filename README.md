@@ -234,10 +234,10 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `delete_caches_on_remove` | true | toggle | Removes stored authentication caches when the integration is deleted. |
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
 | `stale_threshold` | 3900 | seconds | After this many seconds (default: 65 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
-| `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Excluded from Recorder history to keep DB size predictable. |
+| `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Like `location_status`, it holds the value of the last observation and changes only with the next one (a new fix, the change to `stale`, or an availability change), so a tracker without a new fix does not look fresher than another one. The live age is on the "Last Seen" sensor of each device, the live status on its "Location status" sensor. Excluded from Recorder history to keep DB size predictable. |
 | `speed_gate_enabled` | true | toggle | Discards a far jump that would require an implausible speed, so a single stray crowd report cannot teleport a tracker. |
 | `roundtrip_confirm_enabled` | true | toggle | Requires a second, independent report before a device that returned to a previous position is moved back there. |
-| `accuracy_gate_enabled` | true | toggle | Discards a coarse fix (200 m or more, and at least 4x worse than the cached one) when a better, still-fresh position is already known. The coarse position stays visible as `coarse_*` attributes; turning the gate off restores the previous behaviour. |
+| `accuracy_gate_enabled` | true | toggle | Discards a coarse fix (200 m or more, and at least 4x worse than the cached one) when a better, still-fresh position is already known. The coarse position is shown live by the per-device "Coarse fix" sensor (the time of the coarse fix as its state, `coarse_accuracy`, `coarse_latitude` and `coarse_longitude` as attributes, no map marker). The main tracker holds the `coarse_*` attributes of its last observation; the Last Location tracker has none. Turning the gate off restores the previous behaviour. |
 
 ### Map View link expiry (`map_view_token_expiration`)
 
@@ -294,7 +294,7 @@ The service hub subentry, identified by `SERVICE_SUBENTRY_KEY`, represents the a
 
 The tracker subentry, keyed by `TRACKER_SUBENTRY_KEY`, represents the phones, tablets, and tags imported from Google Find My Device.
 
-- Each tracker entry backs per-device entities such as `device_tracker`, “last seen” timestamp sensors, and control buttons for actions like ring / play sound / locate.
+- Each tracker entry backs per-device entities such as `device_tracker`, “last seen” timestamp sensors, location status and coarse-fix sensors, and control buttons for actions like ring / play sound / locate.
 - Trackers register as individual device entries in the Home Assistant device registry with their own unique IDs and `DeviceInfo`. They remain standalone devices—Home Assistant automatically associates them with the correct config-entry subentry without manual `via_device` or `via_device_id` pointers.[1]
 - Trackers never appear in the service hub’s `visible_device_ids` list and are never assigned to the service hub subentry; they stay within the tracker subentry so repairs and options target the correct devices.
 
@@ -333,7 +333,7 @@ The integration provides a couple of Home Assistant Actions for use with automat
 ## Supported devices and functions
 
 - **Device coverage:** Phones, tablets, Wear OS devices, earbuds, and compatible Bluetooth trackers surfaced in the Google Find My Device network.  Any device that appears in the official Google Find My interface is eligible to be imported.
-- **Entities created:** Each tracked device exposes a `device_tracker` entity for live location, a binary sensor for connection state, a "last seen" timestamp sensor, and a Plus Code (Open Location Code) sensor. Optional helper entities (statistics, sound trigger button) are added depending on options and device capabilities, and a BLE battery sensor is added when the device is matched to a local Bermuda BLE tracker that reports battery.
+- **Entities created:** Each tracked device exposes a `device_tracker` entity for live location, a binary sensor for connection state, a "Last Seen" timestamp sensor, a "Location status" sensor (`current`, `aging` or `stale` against the stale threshold; right after a Home Assistant restart it can show `unknown` until the restored location is loaded, so an automation on `stale` should also name the previous state), a "Coarse fix" sensor (the time of a newer, imprecise fix the accuracy gate discarded), and a Plus Code (Open Location Code) sensor. Entity IDs are derived from the entity name when an entity is created: in the system language for most Latin-script languages, otherwise from the English name. A German installation therefore has no `sensor.*_coarse_fix`; look the sensors up by name on the device page. Optional helper entities (statistics, sound trigger button) are added depending on options and device capabilities, and a BLE battery sensor is added when the device is matched to a local Bermuda BLE tracker that reports battery.
 - **Action support:** Sound playback is available on hardware that exposes the native "Play sound" action within Google's ecosystem.  The integration hides the button on devices that do not advertise support, aligning with [Home Assistant action documentation](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-functions/).
 
 ## Data updates and background behavior

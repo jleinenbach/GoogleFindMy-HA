@@ -212,6 +212,7 @@ from .const import (
     TRANSLATION_KEY_RESTART_REQUIRED,
     TRANSLATION_KEY_UNIQUE_ID_COLLISION,
     coerce_ignored_mapping,
+    frozen_attributes_issue_id,
     map_token_hex_digest,
     map_token_secret_seed,
     service_device_identifier,
@@ -10342,6 +10343,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
         _LOGGER.debug(
             "Deleting FCM repair issues during async_remove_entry raised: %s", err
         )
+
+    # The held-attributes issue outlives unloads on purpose, so that a reload
+    # keeps the user's "ignore". Only the removal of the entry retires it.
+    ir.async_delete_issue(hass, DOMAIN, frozen_attributes_issue_id(entry.entry_id))
 
     try:
         owner_index = _ensure_device_owner_index(bucket)

@@ -624,6 +624,9 @@ def _tracker_entity(coarse: dict[str, Any] | None, display: dict[str, Any]):
         config_entry=make_config_entry(entry_id="coarse-entry", data={}, options={}),
         get_coarse_fix=lambda dev: dict(coarse) if coarse else None,
         get_display_location_data_for_subentry=lambda key, dev: display,
+        # The observation signature includes ``available``, so building the
+        # attributes asks the coordinator whether the device is visible.
+        is_device_visible_in_subentry=lambda key, dev: True,
     )
     # The publisher reads through the freshness accessor, so the double carries the REAL
     # one bound to itself rather than a stand-in. A stand-in here would test the entity
@@ -639,6 +642,12 @@ def _tracker_entity(coarse: dict[str, Any] | None, display: dict[str, Any]):
     entity._device = {"id": "dev", "name": "Tracker"}
     entity._subentry_key = "core_tracking"
     entity._attr_extra_state_attributes = {}
+    # Set by __init__, which __new__ skips: availability and the held
+    # observation attributes read them while the attributes are built.
+    entity._last_good_accuracy_data = None
+    entity._logged_visibility_block = False
+    entity._observation_sig = None
+    entity._held_attributes = {}
     entity._select_display_row = lambda: display
     entity._is_location_stale = lambda: False
     entity._get_location_age = lambda row=None: 60.0
@@ -673,12 +682,21 @@ def test_the_publisher_reads_through_the_freshness_accessor() -> None:
         config_entry=make_config_entry(entry_id="raw-only", data={}, options={}),
         get_coarse_fix=lambda dev: dict(fresh),
         get_display_location_data_for_subentry=lambda key, dev: display,
+        # The observation signature includes ``available``, so building the
+        # attributes asks the coordinator whether the device is visible.
+        is_device_visible_in_subentry=lambda key, dev: True,
     )
     entity = dt.GoogleFindMyDeviceTracker.__new__(dt.GoogleFindMyDeviceTracker)
     entity.coordinator = coordinator
     entity._device = {"id": "dev", "name": "Tracker"}
     entity._subentry_key = "core_tracking"
     entity._attr_extra_state_attributes = {}
+    # Set by __init__, which __new__ skips: availability and the held
+    # observation attributes read them while the attributes are built.
+    entity._last_good_accuracy_data = None
+    entity._logged_visibility_block = False
+    entity._observation_sig = None
+    entity._held_attributes = {}
     entity._select_display_row = lambda: display
     entity._is_location_stale = lambda: False
     entity._get_location_age = lambda row=None: 60.0
@@ -752,6 +770,9 @@ def test_tracker_tolerates_a_coordinator_without_the_accessor() -> None:
     coordinator = SimpleNamespace(
         config_entry=make_config_entry(entry_id="no-accessor", data={}, options={}),
         get_display_location_data_for_subentry=lambda key, dev: display,
+        # The observation signature includes ``available``, so building the
+        # attributes asks the coordinator whether the device is visible.
+        is_device_visible_in_subentry=lambda key, dev: True,
     )
     entity = dt.GoogleFindMyDeviceTracker.__new__(dt.GoogleFindMyDeviceTracker)
     entity.coordinator = coordinator
@@ -760,6 +781,12 @@ def test_tracker_tolerates_a_coordinator_without_the_accessor() -> None:
     entity._device = {"id": "dev", "name": "Tracker"}
     entity._subentry_key = "core_tracking"
     entity._attr_extra_state_attributes = {}
+    # Set by __init__, which __new__ skips: availability and the held
+    # observation attributes read them while the attributes are built.
+    entity._last_good_accuracy_data = None
+    entity._logged_visibility_block = False
+    entity._observation_sig = None
+    entity._held_attributes = {}
     entity._select_display_row = lambda: display
     entity._is_location_stale = lambda: False
     entity._get_location_age = lambda row=None: 60.0

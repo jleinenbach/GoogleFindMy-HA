@@ -42,6 +42,8 @@ from .helpers import parse_last_seen_timestamp
 # nested .helpers.geo submodule, which keeps them tolerant of plain ModuleType
 # coordinator stubs in tests. geo is a pure, dependency-light module.
 from .helpers.geo import (
+    LOCATION_STATUS_OPTIONS,
+    classify_location_status,
     encode_plus_code_for_row,
     has_usable_accuracy,
     is_reliable_fix,
@@ -107,6 +109,7 @@ __all__ = [
     "SemanticLabelRecord",
     "SubentryMetadata",
     # Public functions
+    "classify_location_status",
     "encode_plus_code_for_row",
     "format_epoch_utc",
     "get_recorder",
@@ -125,6 +128,7 @@ __all__ = [
     "_as_ha_attributes",
     "_sync_get_last_gps_from_history",
     # Constants
+    "LOCATION_STATUS_OPTIONS",
     "_FCM_FALLBACK_POLL_AFTER_S",
     "_PREDICTION_BUFFER_S",
     # Stats classes

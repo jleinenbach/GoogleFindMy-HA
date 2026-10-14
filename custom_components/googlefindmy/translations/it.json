@@ -291,8 +291,8 @@
           "secrets_extra_watch_paths": "Percorsi aggiuntivi da monitorare per secrets.json (uno per riga)"
         },
         "data_description": {
-          "stale_threshold": "Dopo questo numero di secondi senza aggiornamento di posizione, lo stato del tracker diventa sconosciuto. Usa l'entità 'Ultima posizione' per vedere sempre l'ultima posizione nota. Predefinito: 1800 (30 minuti).",
-          "show_location_age": "Se abilitato (impostazione predefinita), un attributo 'location_age' (arrotondato a 1 minuto) viene aggiunto a ogni entità tracciatore. Disabilitalo per eliminare tutte le scritture nel database per i dispositivi fissi. L'attributo assoluto 'last_seen' e le entità sensor.*_last_seen sono sempre disponibili.",
+          "stale_threshold": "Dopo questo numero di secondi senza aggiornamento di posizione, lo stato del tracker diventa sconosciuto. Usa l'entità 'Ultima posizione' per vedere sempre l'ultima posizione nota. Predefinito: 3900 (65 minuti).",
+          "show_location_age": "Se abilitato (impostazione predefinita), un attributo 'location_age' (arrotondato a 1 minuto) viene aggiunto a ogni entità tracciatore. Mantiene l'età dell'ultima osservazione e cambia solo con la successiva (una nuova posizione, il passaggio a 'Obsoleta' o un cambio di disponibilità). L'età attuale si trova nel sensore 'Ultima volta visto' di ogni dispositivo, lo stato attuale nel suo sensore 'Stato della posizione'.",
           "speed_gate_enabled": "Se abilitato (impostazione predefinita), una posizione che richiederebbe una velocità fisicamente impossibile (ad esempio una segnalazione crowdsourced che colloca il tracker a centinaia di km di distanza in pochi secondi) viene rifiutata invece di teletrasportare il tracker. Le segnalazioni GPS del proprio dispositivo passano sempre. Disabilitalo solo se vengono scartati movimenti rapidi legittimi.",
           "roundtrip_confirm_enabled": "Se abilitato (impostazione predefinita), una posizione della comunità che il controllo di velocità rifiuterebbe come teletrasporto viene invece accettata se si colloca di nuovo vicino alla posizione immediatamente precedente a un salto lungo accettato in precedenza, entro circa 15 minuti. Questo recupera un legittimo viaggio di ritorno invece di lasciare il tracker bloccato nella posizione lontana. Si applica solo dove il controllo di velocità rifiuterebbe altrimenti. Disabilitalo se vedi il tracker oscillare tra due luoghi.",
           "accuracy_gate_enabled": "Quando è attivo (impostazione predefinita), una posizione in arrivo viene scartata se si trova chiaramente al di fuori del cerchio di incertezza della posizione in cache, se è almeno quattro volte meno precisa di essa, ha un'imprecisione di almeno 200 m e quella posizione in cache è al tempo stesso affidabile e recente. Non viene mai scartato nulla senza un'alternativa migliore: una posizione imprecisa viene sempre accettata all'avvio a freddo, oppure quando la posizione in cache non è affidabile o è obsoleta. In questo modo una segnalazione ampia della rete non sposta il tracker e, poiché Home Assistant usa il raggio di precisione come tolleranza della zona, non lo segnala erroneamente come a casa. Disattivalo solo se sospetti che sia questo controllo a causare un problema.",
@@ -665,6 +665,17 @@
           }
         }
       },
+      "location_status": {
+        "name": "Stato della posizione",
+        "state": {
+          "current": "Attuale",
+          "aging": "In invecchiamento",
+          "stale": "Obsoleta"
+        }
+      },
+      "coarse_fix": {
+        "name": "Posizione approssimativa"
+      },
       "last_seen": {
         "name": "Ultima volta visto",
         "state_attributes": {
@@ -793,6 +804,14 @@
     "restart_required": {
       "title": "Riavvia Home Assistant per completare l'aggiornamento",
       "description": "Google Find My Hub è stato aggiornato sul disco alla versione {installed_version}, ma Home Assistant sta ancora eseguendo la versione {running_version}. Riavvia Home Assistant per attivare la versione installata.\n\nRicaricare l'integrazione non è sufficiente: è necessario un riavvio completo di Home Assistant."
+    },
+    "tracker_attributes_frozen": {
+      "title": "Gli attributi del tracciatore mantengono ora il valore dell'ultima posizione",
+      "description": "I tracciatori dei dispositivi di **{entry_title}** non aggiornano più gli attributi `location_age` e `location_status` tra due posizioni: mantengono il valore dell'ultima posizione. Il tracciatore principale mantiene allo stesso modo gli attributi `coarse_*`, e il tracciatore 'Ultima posizione' non li ha più. Così un tracciatore senza una nuova posizione non sembra più aggiornato di un altro, ad esempio per una persona.\n\nPer i valori attuali, usa queste entità:\n{replacement_sensors}\n\nQuesti attributi verranno rimossi, al più tardi con la prima versione dell'integrazione a partire da Home Assistant {breaks_version}.\n\nAutomazioni e script che usano questi tracciatori (controlla in essi `location_status`, `location_age` e `coarse_*`):\n{automations}"
+    },
+    "tracker_attributes_frozen_no_automations": {
+      "title": "Gli attributi del tracciatore mantengono ora il valore dell'ultima posizione",
+      "description": "I tracciatori dei dispositivi di **{entry_title}** non aggiornano più gli attributi `location_age` e `location_status` tra due posizioni: mantengono il valore dell'ultima posizione. Il tracciatore principale mantiene allo stesso modo gli attributi `coarse_*`, e il tracciatore 'Ultima posizione' non li ha più. Così un tracciatore senza una nuova posizione non sembra più aggiornato di un altro, ad esempio per una persona.\n\nPer i valori attuali, usa queste entità:\n{replacement_sensors}\n\nQuesti attributi verranno rimossi, al più tardi con la prima versione dell'integrazione a partire da Home Assistant {breaks_version}."
     }
   },
   "exceptions": {

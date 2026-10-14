@@ -2,9 +2,11 @@
 """Guard sibling device_tracker entities against translation-key drift.
 
 ``GoogleFindMyDeviceTracker`` and ``GoogleFindMyLastLocationTracker`` share the
-same ``_sync_location_attrs`` implementation, so they publish an identical set of
-state attributes. Their ``strings.json`` (and every locale) entry must therefore
-expose the same attribute keys; otherwise one entity renders raw attribute keys
+same ``_sync_location_attrs`` implementation, so every attribute that has a
+translation is published by both. (They do not publish an identical set: only
+the main tracker carries the untranslated ``coarse_*`` keys.) Their
+``strings.json`` (and every locale) entries must therefore expose identical
+translated attribute keys; otherwise one entity renders raw attribute keys
 instead of the localized label (Codex PR #1181 P3-1: ``plus_code`` reached the
 ``device`` tracker translation but not its ``last_location`` sibling).
 """
@@ -35,10 +37,11 @@ def _translation_files() -> list[Path]:
 
 
 def test_sibling_tracker_state_attribute_keys_match() -> None:
-    """The two device_tracker entities must share identical attribute keys.
+    """The two device_tracker entities must share identical translated keys.
 
-    They inherit the same ``_sync_location_attrs`` and thus emit the same
-    attributes; a divergence means one sibling exposes an untranslated key.
+    They inherit the same ``_sync_location_attrs``, which publishes every
+    translated attribute on both; a divergence means one sibling exposes an
+    untranslated key.
     """
 
     for path in _translation_files():

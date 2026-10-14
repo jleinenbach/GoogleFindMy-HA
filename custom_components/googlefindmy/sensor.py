@@ -16,6 +16,7 @@ Best practices:
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -45,11 +46,15 @@ from .const import (
     TRANSLATION_KEY_ENCRYPTION_KEY_STATUS,
 )
 from .coordinator import (
+    LOCATION_STATUS_OPTIONS,
     CryptoStatus,
     GoogleFindMyCoordinator,
     SemanticLabelRecord,
     _as_ha_attributes,
+    classify_location_status,
     encode_plus_code_for_row,
+    location_age_seconds,
+    resolve_stale_threshold,
 )
 from .entity import (
     GoogleFindMyDeviceEntity,
@@ -95,6 +100,22 @@ PLUS_CODE_DESCRIPTION = SensorEntityDescription(
     key="plus_code",
     translation_key="plus_code",
     icon="mdi:map-marker",
+)
+
+# Icons come from icons.json (default plus one per state), not from here.
+LOCATION_STATUS_DESCRIPTION = SensorEntityDescription(
+    key="location_status",
+    translation_key="location_status",
+    device_class=SensorDeviceClass.ENUM,
+    options=list(LOCATION_STATUS_OPTIONS),
+)
+
+# A TIMESTAMP sensor has no state_class (none is allowed), so no long-term
+# statistics. Icon from icons.json.
+COARSE_FIX_DESCRIPTION = SensorEntityDescription(
+    key="coarse_fix",
+    translation_key="coarse_fix",
+    device_class=SensorDeviceClass.TIMESTAMP,
 )
 
 SEMANTIC_LABEL_DESCRIPTION = SensorEntityDescription(
@@ -565,6 +586,31 @@ async def async_setup_entry(
                             added_unique_ids.add(pc_uid)
                         entities.append(plus_code_entity)
 
+                    # --- Location status and coarse-fix sensors (always,
+                    # alongside LastSeen) ---
+                    # In this setup path they are built only here, right after
+                    # LastSeen was added for this device for the first time,
+                    # and their unique_ids are derived from the same device id:
+                    # a duplicate cannot reach this point, so no unique-id
+                    # check of their own. The recovery factory below builds
+                    # them separately, only for missing unique_ids.
+                    entities.append(
+                        GoogleFindMyLocationStatusSensor(
+                            coordinator,
+                            device,
+                            subentry_key=tracker_scope.subentry_key,
+                            subentry_identifier=tracker_identifier,
+                        )
+                    )
+                    entities.append(
+                        GoogleFindMyCoarseFixSensor(
+                            coordinator,
+                            device,
+                            subentry_key=tracker_scope.subentry_key,
+                            subentry_identifier=tracker_identifier,
+                        )
+                    )
+
                 # --- BLE Battery sensor (when resolver has data) ---
                 if dev_id not in known_battery_ids and resolver is not None:
                     battery_state = None
@@ -817,6 +863,12 @@ async def async_setup_entry(
                     expected.add(
                         f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"
                     )
+                    expected.add(
+                        f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_location_status"
+                    )
+                    expected.add(
+                        f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_coarse_fix"
+                    )
             return expected
 
         def _build_entities(missing: set[str]) -> list[SensorEntity]:
@@ -863,6 +915,8 @@ async def async_setup_entry(
                         continue
                     ls_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
                     pc_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"
+                    st_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_location_status"
+                    cf_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_coarse_fix"
                     if ls_uid in missing:
                         built.append(
                             GoogleFindMyLastSeenSensor(
@@ -875,6 +929,24 @@ async def async_setup_entry(
                     if pc_uid in missing:
                         built.append(
                             GoogleFindMyPlusCodeSensor(
+                                coordinator,
+                                device,
+                                subentry_key=tracker_scope.subentry_key,
+                                subentry_identifier=tracker_scope.identifier,
+                            )
+                        )
+                    if st_uid in missing:
+                        built.append(
+                            GoogleFindMyLocationStatusSensor(
+                                coordinator,
+                                device,
+                                subentry_key=tracker_scope.subentry_key,
+                                subentry_identifier=tracker_scope.identifier,
+                            )
+                        )
+                    if cf_uid in missing:
+                        built.append(
+                            GoogleFindMyCoarseFixSensor(
                                 coordinator,
                                 device,
                                 subentry_key=tracker_scope.subentry_key,
@@ -1548,7 +1620,230 @@ class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
         return super().device_info
 
 
+# ----------------------------- Per-Device Location Status ----------------------
+
+
+class GoogleFindMyLocationStatusSensor(GoogleFindMyDeviceEntity, SensorEntity):
+    """Per-device enum sensor with the live age class of the published fix.
+
+    Takes over the live part of the device_tracker ``location_status``
+    attribute, which holds the value of the last observation so that a tick
+    without a new fix writes nothing new on the tracker. The value is derived
+    live on every coordinator tick from the coordinator display row
+    (``get_display_location_data_for_subentry``) and the shared
+    ``classify_location_status``. The tracker uses the same function and the
+    same row selection (``select_display_row`` over the current row and the
+    last reliable fix). The two last-good caches can still differ: after the
+    device was hidden the tracker clears its own while the coordinator keeps
+    its until the device is purged, and a tracker entity that was disabled
+    starts again without one:
+
+    - ``current``, ``aging`` or ``stale`` against the configured stale threshold;
+    - ``None`` (HA state ``unknown``) when there is no row or no usable age.
+
+    Every tick writes; HA records a change only when the value changes, so an
+    unchanged class across ticks is a report, not a change (``force_update``
+    stays ``False``).
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    entity_description = LOCATION_STATUS_DESCRIPTION
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            f"{safe_id}_location_status",
+            separator="_",
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return ``current``/``aging``/``stale`` or ``None`` when unknown."""
+        dev_id = self._device_id
+        if not dev_id:
+            return None
+        row = self.coordinator.get_display_location_data_for_subentry(
+            self.subentry_key, dev_id
+        )
+        status = classify_location_status(
+            location_age_seconds(row, time.time()),
+            resolve_stale_threshold(self.coordinator),
+        )
+        return None if status == "unknown" else status
+
+    @property
+    def available(self) -> bool:
+        """Mirror device presence, falling back to coordinator availability."""
+        if not super().available:
+            return False
+        if not self._device_id:
+            return False
+        return self.coordinator_has_device()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Keep the device label in sync and push the recomputed state."""
+        if not self.coordinator_has_device():
+            self.async_write_ha_state()
+            return
+        self.refresh_device_label_from_coordinator(log_prefix="LocationStatus")
+        current_name = self._device.get("name")
+        if isinstance(current_name, str):
+            self.maybe_update_device_registry_name(current_name)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Expose DeviceInfo using the shared entity helper."""
+
+        return super().device_info
+
+
 # ----------------------------- Per-Device BLE Battery ---------------------------
+
+
+# ----------------------------- Per-Device Coarse Fix ---------------------------
+
+
+class GoogleFindMyCoarseFixSensor(GoogleFindMyDeviceEntity, SensorEntity):
+    """Per-device timestamp of a coarse fix the accuracy gate discarded (#216).
+
+    The gate refuses a wide fix as a POSITION, so Home Assistant's zone logic
+    never sees it; its information (a newer, but imprecise sighting) stays
+    useful. The main device_tracker holds its ``coarse_*`` attributes with the
+    observation and the ``_last_location`` tracker carries none, so this
+    sensor is the live carrier:
+
+    - state: the time of the coarse fix (``coarse_last_seen``) while the
+      coordinator still offers a fresh one, read through
+      ``get_fresh_coarse_fix`` (the accessor the contract reserves for
+      publishers); otherwise ``None`` (HA state ``unknown``, not
+      ``unavailable``). A coarse fix exists only while it is newer than the
+      adopted fix, so ``state > sensor.*_last_seen`` means "a newer, imprecise
+      sighting exists";
+    - attributes: ``coarse_accuracy`` in metres and the coordinates only as
+      ``coarse_latitude``/``coarse_longitude`` (the names redacted in
+      diagnostics), never ``latitude``/``longitude``, so no map marker and no
+      zone logic.
+    """
+
+    _attr_has_entity_name = True
+    # Enabled by default: this is the only live carrier of the coarse fix, and
+    # disabled it would vanish silently for every user. Recorder cost is about
+    # two state changes per coarse fix (appear, expire); measured about 12 rows
+    # a day for a whole installation.
+    _attr_entity_registry_enabled_default = True
+    entity_description = COARSE_FIX_DESCRIPTION
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            f"{safe_id}_coarse_fix",
+            separator="_",
+        )
+
+    def _coarse_fix(self) -> Mapping[str, Any] | None:
+        """Return the fresh coarse fix of this device, if the coordinator has one."""
+        dev_id = self._device_id
+        get_fresh = getattr(self.coordinator, "get_fresh_coarse_fix", None)
+        if not dev_id or not callable(get_fresh):
+            return None
+        coarse = get_fresh(dev_id)
+        return coarse if isinstance(coarse, Mapping) and coarse else None
+
+    @property
+    def native_value(self) -> datetime | None:
+        """Return the time of the fresh coarse fix, or ``None`` without one."""
+        coarse = self._coarse_fix()
+        if coarse is None:
+            return None
+        try:
+            return datetime.fromtimestamp(float(coarse["last_seen"]), tz=UTC)
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return accuracy and coordinates under the ``coarse_*`` names only."""
+        coarse = self._coarse_fix()
+        if coarse is None:
+            return None
+        attrs: dict[str, Any] = {}
+        lat, lon = coarse.get("latitude"), coarse.get("longitude")
+        if lat is not None and lon is not None:
+            attrs["coarse_latitude"] = lat
+            attrs["coarse_longitude"] = lon
+        if coarse.get("accuracy") is not None:
+            attrs["coarse_accuracy"] = coarse["accuracy"]
+        return attrs or None
+
+    @property
+    def available(self) -> bool:
+        """Mirror device presence, falling back to coordinator availability."""
+        if not super().available:
+            return False
+        if not self._device_id:
+            return False
+        return self.coordinator_has_device()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Keep the device label in sync and push the recomputed state."""
+        if not self.coordinator_has_device():
+            self.async_write_ha_state()
+            return
+        self.refresh_device_label_from_coordinator(log_prefix="CoarseFix")
+        current_name = self._device.get("name")
+        if isinstance(current_name, str):
+            self.maybe_update_device_registry_name(current_name)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Expose DeviceInfo using the shared entity helper."""
+
+        return super().device_info
 
 
 class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):

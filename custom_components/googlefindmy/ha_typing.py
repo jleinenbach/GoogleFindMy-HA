@@ -64,6 +64,9 @@ if TYPE_CHECKING:
 
         def async_write_ha_state(self) -> None: ...
 
+        @property
+        def available(self) -> bool: ...
+
     class CoordinatorEntity(_EntityBase, Generic[_CoordinatorT]):
         """Structural type for coordinator-backed entities."""
 
