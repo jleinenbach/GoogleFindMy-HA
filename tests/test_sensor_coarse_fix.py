@@ -12,7 +12,8 @@ three rules of the sensor:
   ``sensor.*_last_seen``;
 - (2) ``coarse_accuracy`` and the coordinates only under the ``coarse_*``
   names, never ``latitude``/``longitude`` (no map marker, no zone logic);
-- (3) enabled by default, a TIMESTAMP without ``state_class``.
+- (3) enabled by default, in the diagnostic category, a TIMESTAMP without
+  ``state_class``.
 
 The coarse fix enters through the coordinator's own producer
 (``_record_coarse_fix``) and leaves through its freshness accessor
@@ -247,9 +248,10 @@ async def test_unusable_coarse_stamp_or_missing_accessor_is_unknown(
 
 @pytest.mark.asyncio
 async def test_entity_contract(freezer: FrozenDateTimeFactory) -> None:
-    """Rule (3): TIMESTAMP without state class, enabled, tracker scope, own key."""
+    """Rule (3): TIMESTAMP, no state class, enabled, diagnostic, tracker scope, own key."""
 
     from homeassistant.components.sensor import SensorDeviceClass
+    from homeassistant.helpers.entity import EntityCategory
 
     _coordinator_obj, entity, _last_seen = await _setup()
     description = entity.entity_description
@@ -260,7 +262,9 @@ async def test_entity_contract(freezer: FrozenDateTimeFactory) -> None:
     # one defaults to ``None``. Either way no state class is set.
     assert getattr(description, "state_class", None) is None
     assert entity._attr_entity_registry_enabled_default is True
-    assert getattr(entity, "_attr_entity_category", None) is None
+    # The category comes from the description (the entity property falls back
+    # to it), so assert it there; ``_attr_entity_category`` stays unset.
+    assert description.entity_category == EntityCategory.DIAGNOSTIC
     assert entity.unique_id.endswith("_dev-1_coarse_fix")
 
 

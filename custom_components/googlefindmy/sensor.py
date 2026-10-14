@@ -111,11 +111,16 @@ LOCATION_STATUS_DESCRIPTION = SensorEntityDescription(
 )
 
 # A TIMESTAMP sensor has no state_class (none is allowed), so no long-term
-# statistics. Icon from icons.json.
+# statistics. Icon from icons.json. Diagnostic: the state is ``unknown`` most of
+# the time (only a discarded coarse fix that is still fresh sets it), so it sits
+# with the diagnostics instead of next to the location entities, where an
+# ``unknown`` reads like a missing position. It stays enabled by default; see
+# GoogleFindMyCoarseFixSensor.
 COARSE_FIX_DESCRIPTION = SensorEntityDescription(
     key="coarse_fix",
     translation_key="coarse_fix",
     device_class=SensorDeviceClass.TIMESTAMP,
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 SEMANTIC_LABEL_DESCRIPTION = SensorEntityDescription(

@@ -295,7 +295,7 @@
           "show_location_age": "Lorsqu'il est activé (par défaut), un attribut « location_age » (arrondi à 1 minute) est ajouté à chaque entité de suivi. Il conserve l'âge de la dernière observation et ne change qu'avec la suivante (par exemple nouvelle position, passage à « Obsolète » ou changement de disponibilité). L'âge actuel se trouve dans le capteur « Vu pour la dernière fois » de chaque appareil, l'état actuel dans son capteur « État de la position ».",
           "speed_gate_enabled": "Lorsqu'elle est activée (par défaut), une position qui nécessiterait une vitesse physiquement impossible (par exemple un rapport participatif plaçant le traceur à des centaines de km en quelques secondes) est rejetée au lieu de téléporter le traceur. Les rapports GPS propres passent toujours. Ne la désactivez que si des déplacements rapides légitimes sont écartés.",
           "roundtrip_confirm_enabled": "Lorsqu'elle est activée (par défaut), une position participative que le filtre de vitesse rejetterait comme une téléportation est acceptée si elle revient près de la position occupée juste avant un long saut accepté précédemment, dans un délai d'environ 15 minutes. Cela permet de récupérer un trajet de retour légitime au lieu de laisser le traceur bloqué à la position lointaine. Cela ne s'applique que là où le filtre de vitesse rejetterait autrement la position. Désactivez cette option si vous voyez le traceur osciller entre deux endroits.",
-          "accuracy_gate_enabled": "Lorsque cette option est activée (par défaut), une position entrante est rejetée si elle se situe nettement en dehors du cercle d'incertitude de la position en cache, si elle est au moins quatre fois moins précise qu'elle, si son imprécision atteint au moins 200 m et si cette position en cache est à la fois fiable et récente. Rien n'est jamais rejeté sans meilleure solution de rechange : une position imprécise est toujours acceptée au démarrage à froid, ou lorsque la position en cache n'est pas fiable ou est périmée. Cela empêche un signalement large du réseau de déplacer le traceur et, comme Home Assistant utilise le rayon de précision comme tolérance de zone, de le signaler à tort comme étant à la maison. À désactiver uniquement si vous soupçonnez que ce filtre est lui-même à l'origine d'un problème.",
+          "accuracy_gate_enabled": "Lorsque cette option est activée (par défaut), une position entrante est rejetée si elle se situe nettement en dehors du cercle d'incertitude de la position en cache, si elle est au moins quatre fois moins précise qu'elle, si son imprécision atteint au moins 200 m et si cette position en cache est à la fois fiable et récente. Rien n'est jamais rejeté sans meilleure solution de rechange : une position imprécise est toujours acceptée au démarrage à froid, ou lorsque la position en cache n'est pas fiable ou est périmée. Cela empêche un signalement large du réseau de déplacer le traceur et, comme Home Assistant utilise le rayon de précision comme tolérance de zone, de le signaler à tort comme étant à la maison. À désactiver uniquement si vous soupçonnez que ce filtre est lui-même à l'origine d'un problème. Le capteur 'Position imprécise rejetée' de l'appareil affiche la position rejetée jusqu'à ce qu'une position aussi récente ou plus récente soit acceptée, que la position rejetée dépasse le seuil d'obsolescence ou que l'intégration soit rechargée (comme lors d'un redémarrage de Home Assistant) ; le reste du temps, ce capteur affiche inconnu, ce qui est normal.",
           "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
           "map_view_token_expiration": "Lorsqu'elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu'elle est désactivée (par défaut), ils n'expirent pas.",
           "map_view_enabled": "Activée par défaut. Si désactivée, les requêtes de la vue carte sont refusées comme avec un jeton invalide et les liens des appareils sont effacés. Ne fait pas tourner les liens existants ; si un lien a pu fuiter, utilisez « Activer l'expiration du jeton de la vue carte » (jusqu'à deux semaines si déjà activée).",
@@ -674,7 +674,18 @@
         }
       },
       "coarse_fix": {
-        "name": "Position approximative"
+        "name": "Position imprécise rejetée",
+        "state_attributes": {
+          "coarse_latitude": {
+            "name": "Latitude de la position imprécise"
+          },
+          "coarse_longitude": {
+            "name": "Longitude de la position imprécise"
+          },
+          "coarse_accuracy": {
+            "name": "Précision de la position imprécise (m)"
+          }
+        }
       },
       "last_seen": {
         "name": "Vu pour la dernière fois",
