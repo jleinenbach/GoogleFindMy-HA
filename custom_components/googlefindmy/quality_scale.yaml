@@ -170,7 +170,7 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/diagnostics.py:async_get_config_entry_diagnostics"
-        - "tests/test_diagnostics_buffer_summary.py:test_as_dict_limits_items"
+        - "tests/test_diagnostics_buffer_summary.py:test_async_get_config_entry_diagnostics_includes_buffer"
     - id: discovery-update-info
       status: done
       evidence:
@@ -263,7 +263,7 @@ rules:
         - "README.md#subentries-and-feature-groups"
         - "tests/test_options_flow_subentries.py::test_repairs_move_assigns_devices_to_selected_subentry"
         - "tests/test_options_flow_subentries.py::test_repairs_delete_moves_devices_and_removes_subentry"
-        - "tests/test_device_tracker_tick_writes.py::test_repair_issue_one_per_entry_removed_with_that_entry"
+        - "tests/test_device_tracker_tick_writes.py::test_repair_issue_one_per_entry_kept_over_an_unload"
     - id: stale-devices
       status: done
       evidence:

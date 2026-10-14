@@ -213,9 +213,9 @@ def _async_track_frozen_attributes_issue(
     ids come from the entity registry, not from runtime entities. On a
     running Home Assistant (an entry added from the UI) the start callback
     runs at once, before any entity of the entry is registered; such an entry
-    has no tracker yet, so it has no users of the held attributes and gets no
-    issue until the next start. Unloading the entry cancels a pending start
-    callback but keeps the issue, so a reload does not undo the user's
+    has no tracker of its own yet and gets no issue until the next start.
+    Unloading the entry cancels a pending start callback but keeps the issue,
+    so a reload does not undo the user's
     "ignore"; disabling the entry deletes it, ``async_remove_entry`` deletes
     it, and a non-persistent issue of an entry that is no longer set up turns
     inactive with the next start.

@@ -612,7 +612,18 @@ def _resolve_entry_by_token(
 
     We iterate over all config entries for this DOMAIN and compare the provided token
     against the per-entry accepted token set (weekly/static as per options).
+
+    Every entry is compared, also after a match, and the first match is returned
+    once the loop is done. The time spent in this function therefore does not
+    depend on which entry the token belongs to or whether it belongs to any.
+    Two things stay observable: the number of entries, and the work the caller
+    does after a match. The caller checks whether Map View is enabled and
+    refuses a disabled entry with the same response as an invalid token, but
+    that check (and its debug log) runs only for a valid token, so the timing
+    of the refusal can tell the holder of a valid token that it is valid; it
+    tells nothing to somebody guessing.
     """
+    found: tuple[ConfigEntry, set[str]] | None = None
     for entry in hass.config_entries.async_entries(DOMAIN):
         token_exp = entry.options.get(
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -621,9 +632,11 @@ def _resolve_entry_by_token(
             ),
         )
         accepted = _entry_accept_tokens(hass, entry.entry_id, bool(token_exp))
-        if _token_matches(auth_token, accepted):
-            return entry, accepted
-    return None, None
+        if _token_matches(auth_token, accepted) and found is None:
+            found = (entry, accepted)
+    if found is None:
+        return None, None
+    return found
 
 
 def _token_matches(auth_token: str, accepted: set[str]) -> bool:
@@ -644,12 +657,15 @@ def _token_matches(auth_token: str, accepted: set[str]) -> bool:
     return matched
 
 
-def _is_map_view_enabled_for_entry(entry: ConfigEntry) -> bool:
+def _is_map_view_enabled_for_entry(entry: ConfigEntry | None) -> bool:
     """Return whether Map View is enabled for the resolved config entry.
 
     Shared by every view that resolves an entry from a share token, since
     views stay registered process-wide (no unregister_view API) even after
     an entry turns the feature off.
+
+    ``None`` (an entity without a config entry yet) reads as an entry without
+    the option and returns ``DEFAULT_MAP_VIEW_ENABLED``.
     """
     entry_options = getattr(entry, "options", {}) or {}
     entry_data = getattr(entry, "data", {}) or {}

@@ -86,8 +86,12 @@ def test_any_wrong_token_is_refused_without_raising(guess: str) -> None:
     assert map_view._resolve_entry_by_token(hass, guess) == (None, None)
 
 
+_ACCEPTED = ("a" * 64, "b" * 64, "c" * 64)
+
+
+@pytest.mark.parametrize("token", _ACCEPTED, ids=["match-a", "match-b", "match-c"])
 def test_every_accepted_token_goes_through_compare_digest(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, token: str
 ) -> None:
     calls: list[tuple[bytes, bytes]] = []
     real = map_view.hmac.compare_digest
@@ -97,11 +101,13 @@ def test_every_accepted_token_goes_through_compare_digest(
         return real(a, b)
 
     monkeypatch.setattr(map_view.hmac, "compare_digest", _recording)
-    accepted = {"a" * 64, "b" * 64}
+    accepted = set(_ACCEPTED)
 
-    assert map_view._token_matches("a" * 64, accepted) is True
-    # No early exit: the second candidate is compared although the first matched.
-    assert len(calls) == 2
+    assert map_view._token_matches(token, accepted) is True
+    # No early exit: every candidate is compared, wherever the match sits in
+    # the set's iteration order. One case per element, so for any hash seed
+    # one of them has its match first.
+    assert len(calls) == len(accepted)
     assert all(isinstance(a, bytes) and isinstance(b, bytes) for a, b in calls)
 
 

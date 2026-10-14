@@ -569,7 +569,7 @@ def _ensure_runtime_imports() -> None:
     _RUNTIME_IMPORTS_LOADED = True
 
 
-def _is_map_view_enabled_for_entry_fn(entry: ConfigEntry) -> bool:
+def _is_map_view_enabled_for_entry_fn(entry: ConfigEntry | None) -> bool:
     """Return whether Map View is enabled for ``entry`` (one shared rule).
 
     Delegates to ``map_view._is_map_view_enabled_for_entry`` so registration,

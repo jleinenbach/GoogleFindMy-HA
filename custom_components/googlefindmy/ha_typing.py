@@ -64,6 +64,10 @@ if TYPE_CHECKING:
 
         def async_write_ha_state(self) -> None: ...
 
+        # Core's documented override point for customising a state write
+        # (docstring of ``Entity.async_write_ha_state``); every write path ends here.
+        def _async_write_ha_state(self) -> None: ...
+
         @property
         def available(self) -> bool: ...
 

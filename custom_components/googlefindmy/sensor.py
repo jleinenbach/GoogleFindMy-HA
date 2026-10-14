@@ -1726,6 +1726,11 @@ class GoogleFindMyLocationStatusSensor(GoogleFindMyDeviceEntity, SensorEntity):
 # ----------------------------- Per-Device Coarse Fix ---------------------------
 
 
+# Marks "no write in progress" for GoogleFindMyCoarseFixSensor; ``None`` is
+# a valid snapshot (no coarse fix), so it cannot serve as the marker.
+_NO_SNAPSHOT = object()
+
+
 class GoogleFindMyCoarseFixSensor(GoogleFindMyDeviceEntity, SensorEntity):
     """Per-device timestamp of a coarse fix the accuracy gate discarded (#216).
 
@@ -1773,6 +1778,7 @@ class GoogleFindMyCoarseFixSensor(GoogleFindMyDeviceEntity, SensorEntity):
             fallback_label=device.get("name"),
         )
         self._device_id: str | None = device.get("id")
+        self._write_snapshot: object = _NO_SNAPSHOT
         safe_id = self._device_id if self._device_id is not None else "unknown"
         entry_id = self.entry_id or "default"
         self._attr_unique_id = self.build_unique_id(
@@ -1784,6 +1790,18 @@ class GoogleFindMyCoarseFixSensor(GoogleFindMyDeviceEntity, SensorEntity):
         )
 
     def _coarse_fix(self) -> Mapping[str, Any] | None:
+        """Return the coarse fix for the state being built.
+
+        During a state write the state and the attributes come from one read
+        (see ``_async_write_ha_state``), so a fix that expires between the two reads
+        cannot give a timestamp state with no attributes, or the reverse.
+        Outside a write every call reads afresh.
+        """
+        if self._write_snapshot is not _NO_SNAPSHOT:
+            return cast("Mapping[str, Any] | None", self._write_snapshot)
+        return self._read_coarse_fix()
+
+    def _read_coarse_fix(self) -> Mapping[str, Any] | None:
         """Return the fresh coarse fix of this device, if the coordinator has one."""
         dev_id = self._device_id
         get_fresh = getattr(self.coordinator, "get_fresh_coarse_fix", None)
@@ -1826,6 +1844,22 @@ class GoogleFindMyCoarseFixSensor(GoogleFindMyDeviceEntity, SensorEntity):
         if not self._device_id:
             return False
         return self.coordinator_has_device()
+
+    @callback
+    def _async_write_ha_state(self) -> None:
+        """Write the state with one read of the coarse fix for state and attributes.
+
+        Core sends every state write through this method
+        (``async_write_ha_state``, ``async_update_ha_state`` and
+        ``schedule_update_ha_state``) and names it as the one to override when
+        an integration customises a write; ``async_write_ha_state`` is
+        ``@final`` from Core 2026.10 on.
+        """
+        self._write_snapshot = self._read_coarse_fix()
+        try:
+            super()._async_write_ha_state()
+        finally:
+            self._write_snapshot = _NO_SNAPSHOT
 
     @callback
     def _handle_coordinator_update(self) -> None:

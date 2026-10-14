@@ -307,3 +307,96 @@ async def test_coordinator_update_writes_once(freezer: FrozenDateTimeFactory) ->
     assert writes == [None, None, None]
     assert renames == ["Pixel"]
     assert entity.device_info is not None
+
+
+@pytest.mark.asyncio
+async def test_one_write_reads_the_coarse_fix_once(
+    monkeypatch: pytest.MonkeyPatch, freezer: FrozenDateTimeFactory
+) -> None:
+    """State and attributes of one write come from one read of the coarse fix.
+
+    The accessor answers with a fix on the first call and with nothing on every
+    later one, as if the fix expired between two reads. The written state and
+    attributes must still belong together, and outside a write the sensor reads
+    afresh again. The write is driven through ``_async_write_ha_state``, the
+    method every Core write path ends in.
+    """
+
+    sensor = importlib.import_module("custom_components.googlefindmy.sensor")
+    coordinator, entity, _last_seen = await _setup()
+    seen = _now() - 30
+    answers: list[dict[str, Any] | None] = [
+        {"last_seen": seen, "latitude": 1.5, "longitude": 2.5, "accuracy": 900.0}
+    ]
+    calls: list[str] = []
+
+    def _fresh(dev_id: str) -> dict[str, Any] | None:
+        calls.append(dev_id)
+        return answers.pop(0) if answers else None
+
+    coordinator.get_fresh_coarse_fix = _fresh
+    written: list[tuple[Any, Any]] = []
+
+    def _base_write(self: Any) -> None:
+        written.append((self.native_value, self.extra_state_attributes))
+
+    # The test stub of Entity has no ``_async_write_ha_state``; real Core does.
+    monkeypatch.setattr(
+        sensor.GoogleFindMyDeviceEntity,
+        "_async_write_ha_state",
+        _base_write,
+        raising=False,
+    )
+
+    entity._async_write_ha_state()
+
+    assert calls == ["dev-1"]
+    assert written == [
+        (
+            datetime.fromtimestamp(seen, tz=UTC),
+            {"coarse_latitude": 1.5, "coarse_longitude": 2.5, "coarse_accuracy": 900.0},
+        )
+    ]
+    # The snapshot ends with the write: the next read sees the expired fix.
+    assert entity.native_value is None
+    assert entity.extra_state_attributes is None
+    assert calls == ["dev-1", "dev-1", "dev-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_write_still_ends_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch, freezer: FrozenDateTimeFactory
+) -> None:
+    """An exception from the base write does not leave a stale snapshot behind."""
+
+    sensor = importlib.import_module("custom_components.googlefindmy.sensor")
+    coordinator, entity, _last_seen = await _setup()
+    answers: list[dict[str, Any] | None] = [{"last_seen": _now() - 30}]
+    coordinator.get_fresh_coarse_fix = lambda _dev: answers.pop(0) if answers else None
+
+    def _boom(self: Any) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(
+        sensor.GoogleFindMyDeviceEntity, "_async_write_ha_state", _boom, raising=False
+    )
+
+    with pytest.raises(RuntimeError):
+        entity._async_write_ha_state()
+    assert entity.native_value is None
+
+
+def test_the_sensor_hooks_the_write_every_core_path_ends_in() -> None:
+    """The snapshot sits on ``_async_write_ha_state``, not on the public method.
+
+    Core's ``async_write_ha_state``, ``async_update_ha_state`` (the
+    ``update_entity`` service) and ``schedule_update_ha_state`` all end in
+    ``_async_write_ha_state``, and Core names it as the method to override;
+    ``async_write_ha_state`` is ``@final`` from Core 2026.10 on. An override of
+    the public method would miss the other two paths.
+    """
+
+    sensor = importlib.import_module("custom_components.googlefindmy.sensor")
+    own = sensor.GoogleFindMyCoarseFixSensor.__dict__
+    assert "_async_write_ha_state" in own
+    assert "async_write_ha_state" not in own

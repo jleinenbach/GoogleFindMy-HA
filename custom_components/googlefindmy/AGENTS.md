@@ -649,6 +649,12 @@ sentence above and checked both its number and its names. What was loose until n
 other contracts under this component. A name may therefore not be written into any of them before the test exists.
 Citations of a FILE (`tests/foo.py`) stay unchecked by design, so renaming a test module still dangles silently.
 
+### Map View reminders
+
+* Decide whether Map View is on only through `_is_map_view_enabled_for_entry` (in `map_view.py`; `__init__.py` reaches it lazily through `_is_map_view_enabled_for_entry_fn`). Registration, the device-URL refresh, the refresh service and every view must agree on the option and its default. The options flow reads and writes the stored value itself, to prefill and save its form; that is not a decision about Map View.
+* Values that arrive through a public route (`requires_auth = False`, for example a device id from the URL) go into log messages with `%r`, never `%s`, so a CR, LF, U+2028 or NEL in the value cannot start a forged log line (CWE-117).
+* Share tokens are compared only through `_token_matches`, which runs `hmac.compare_digest` on UTF-8 bytes against every accepted token; `_resolve_entry_by_token` likewise compares against every entry before it returns. Never compare a token with `==`, `in` or an early `return`.
+
 ### Import deferral reminder
 
 Heavyweight runtime dependencies (for example, browser drivers such as `undetected_chromedriver`) must be imported lazily inside
