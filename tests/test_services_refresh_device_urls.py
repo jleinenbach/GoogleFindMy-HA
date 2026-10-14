@@ -797,3 +797,78 @@ async def test_refresh_device_urls_leaves_an_already_empty_link_alone(
 
     assert device_registry.updated == {}
     assert "Refreshed URLs for 0 Google Find My devices" in caplog.text
+
+
+def _raising_opt(entry: Any, key: str, default: bool) -> bool:
+    raise RuntimeError("opt reader broken")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "opt_reader",
+    [None, _raising_opt],
+    ids=["no-opt-reader", "opt-reader-raises"],
+)
+async def test_refresh_device_urls_reads_token_expiration_without_the_opt_reader(
+    monkeypatch: pytest.MonkeyPatch, opt_reader: Any
+) -> None:
+    """Without a usable ``opt`` reader the expiration option comes from the entry.
+
+    The token policy must still follow the entry: an entry with token
+    expiration on gets the weekly token, not the static one.
+    """
+
+    fake_now = 1_209_600
+    base_url = "https://example.test"
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={const.OPT_MAP_VIEW_TOKEN_EXPIRATION: True},
+        data={},
+        runtime_data=SimpleNamespace(coordinator=SimpleNamespace()),
+    )
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = _StubConfigEntries([entry])
+
+    ctx: dict[str, Any] = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "default_map_view_token_expiration": False,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+    if opt_reader is not None:
+        ctx["opt"] = opt_reader
+
+    devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            config_entries={"entry-1"},
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+            configuration_url=None,
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
+    monkeypatch.setattr(services.time, "time", lambda: fake_now)
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
+
+    weekly = const.map_token_hex_digest(
+        const.map_token_secret_seed("ha-uuid", "entry-1", True, now=fake_now)
+    )
+    assert device_registry.updated == {
+        "ha-dev-1": f"{base_url}/api/googlefindmy/map/device-alpha?token={weekly}"
+    }

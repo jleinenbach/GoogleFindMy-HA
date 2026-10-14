@@ -620,3 +620,91 @@ def test_migrate_legacy_unique_ids_scopes_the_service_device_to_this_entry(
     assert (DOMAIN, "integration_entry-ours") in ours.identifiers
     assert (DOMAIN, "integration") not in ours.identifiers
     assert theirs.identifiers == {(DOMAIN, "integration")}
+
+
+@pytest.mark.asyncio
+async def test_async_refresh_device_urls_skips_a_device_with_malformed_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device whose identifiers cannot be read is skipped, the others refresh."""
+
+    base_url = "https://example.test"
+    entry = make_config_entry(entry_id="entry-1", options={OPT_MAP_VIEW_ENABLED: True})
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+    monkeypatch.setattr(integration, "get_url", lambda _hass, **kwargs: base_url)
+
+    registry = dr.async_get(hass)
+    broken = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, "placeholder")},
+        manufacturer="Google",
+        model="Nest",
+        name="Broken",
+    )
+    # ``len()`` of a non-sized identifier raises TypeError inside the scan.
+    broken.identifiers = {7}  # type: ignore[assignment]
+    good = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:device-alpha")},
+        manufacturer="Google",
+        model="Nest",
+        name="Alpha",
+    )
+
+    await integration._async_refresh_device_urls(hass)
+
+    updated_ids = [update["device_id"] for update in registry.updated]
+    assert good.id in updated_ids
+    assert broken.id not in updated_ids
+
+
+@pytest.mark.asyncio
+async def test_async_refresh_device_urls_survives_a_failing_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry error while clearing one disabled link does not stop the others."""
+
+    base_url = "https://example.test"
+    entry = make_config_entry(entry_id="entry-1", options={OPT_MAP_VIEW_ENABLED: False})
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+    monkeypatch.setattr(integration, "get_url", lambda _hass, **kwargs: base_url)
+
+    registry = dr.async_get(hass)
+    devices = [
+        registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, f"{entry.entry_id}:device-{name}")},
+            manufacturer="Google",
+            model="Nest",
+            name=name,
+        )
+        for name in ("alpha", "beta")
+    ]
+    for device in devices:
+        registry.async_update_device(
+            device_id=device.id, configuration_url=f"{base_url}/stale"
+        )
+    registry.updated.clear()
+
+    real_update = registry.async_update_device
+    failed: list[str] = []
+
+    def _update(**kwargs: object) -> object:
+        if not failed:
+            failed.append(str(kwargs["device_id"]))
+            raise ValueError("registry rejected the update")
+        return real_update(**kwargs)
+
+    monkeypatch.setattr(registry, "async_update_device", _update)
+
+    await integration._async_refresh_device_urls(hass)
+
+    assert len(failed) == 1
+    cleared = [
+        u["device_id"] for u in registry.updated if u["configuration_url"] is None
+    ]
+    assert cleared == [d.id for d in devices if d.id != failed[0]]
