@@ -210,9 +210,13 @@ def _async_track_frozen_attributes_issue(
     started: ``automation`` and ``script`` need not be loaded while this
     platform sets up (they would report no references), and neither is a
     dependency of the integration. The tracker and replacement sensor entity
-    ids come from the entity registry, not from runtime entities. Unloading
-    the entry cancels a pending start callback but keeps the issue, so a
-    reload does not undo the user's "ignore"; ``async_remove_entry`` deletes
+    ids come from the entity registry, not from runtime entities. On a
+    running Home Assistant (an entry added from the UI) the start callback
+    runs at once, before any entity of the entry is registered; such an entry
+    has no tracker yet, so it has no users of the held attributes and gets no
+    issue until the next start. Unloading the entry cancels a pending start
+    callback but keeps the issue, so a reload does not undo the user's
+    "ignore"; disabling the entry deletes it, ``async_remove_entry`` deletes
     it, and a non-persistent issue of an entry that is no longer set up turns
     inactive with the next start.
     """
@@ -226,6 +230,11 @@ def _async_track_frozen_attributes_issue(
         trackers = [
             entry.entity_id for entry in registered if entry.domain == "device_tracker"
         ]
+        if not trackers:
+            _LOGGER.debug(
+                "Held-attributes repair issue skipped: no tracker registered yet"
+            )
+            return
         replacements = sorted(
             entry.entity_id
             for entry in registered
@@ -244,7 +253,9 @@ def _async_track_frozen_attributes_issue(
         )
         placeholders = {
             "entry_title": config_entry.title or config_entry.entry_id,
-            "replacement_sensors": "\n".join(f"- {ref}" for ref in replacements) or "-",
+            "replacement_sensors": "\n".join(f"- {ref}" for ref in replacements)
+            # Not "-": under the sentence it would turn it into a heading.
+            or "\u2026",
             "breaks_version": TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
         }
         translation_key = TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS
@@ -271,6 +282,14 @@ def _async_track_frozen_attributes_issue(
         _LOGGER.debug("Held-attributes repair issue not scheduled: no start state")
         return
     config_entry.async_on_unload(async_at_started(hass, _create_issue))
+
+    @callback
+    def _delete_issue_if_disabled() -> None:
+        # Home Assistant sets ``disabled_by`` before it unloads the entry.
+        if getattr(config_entry, "disabled_by", None) is not None:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+    config_entry.async_on_unload(_delete_issue_if_disabled)
 
 
 async def async_setup_entry(

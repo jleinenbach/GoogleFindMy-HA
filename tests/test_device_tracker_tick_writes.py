@@ -1165,6 +1165,7 @@ class _Entry:
     def __init__(self, entry_id: str) -> None:
         self.entry_id = entry_id
         self.title = entry_id
+        self.disabled_by: str | None = None
         self.on_unload: list[Callable[[], None]] = []
 
     def async_on_unload(self, func: Callable[[], None]) -> None:
@@ -1341,8 +1342,50 @@ def test_repair_issue_lists_automations_loaded_after_the_platform(
     assert issue["translation_placeholders"]["automations"] == (
         "- automation.arrives\n- script.notify"
     )
-    # No replacement sensor registered for this entry: a placeholder, not "".
-    assert issue["translation_placeholders"]["replacement_sensors"] == "-"
+    # No replacement sensor registered for this entry: a placeholder, not "",
+    # and not "-", which under the sentence would render it as a heading.
+    assert issue["translation_placeholders"]["replacement_sensors"] == "\u2026"
+
+
+def test_repair_issue_skipped_while_no_tracker_is_registered(
+    repair_platform: Any, issue_registry_capture: Any
+) -> None:
+    """An entry added on a running Home Assistant gets no issue yet.
+
+    The start callback runs at once, before any entity of the entry is
+    registered; without a tracker there is nobody using the held attributes.
+    """
+
+    hass = _StartingHass(started=True)
+    entry = _Entry("entry-new")
+    repair_platform.module._async_track_frozen_attributes_issue(hass, entry)
+
+    assert issue_registry_capture.created == []
+    assert issue_registry_capture.registry.issues == {}
+
+
+def test_repair_issue_deleted_when_the_entry_is_disabled(
+    repair_platform: Any, issue_registry_capture: Any
+) -> None:
+    """Disabling the entry deletes its issue; a plain unload keeps it."""
+
+    from custom_components.googlefindmy.const import DOMAIN
+
+    hass = _StartingHass(started=True)
+    kept, disabled = _Entry("entry-a"), _Entry("entry-b")
+    repair_platform.module._async_track_frozen_attributes_issue(hass, kept)
+    repair_platform.module._async_track_frozen_attributes_issue(hass, disabled)
+
+    kept.unload()
+    disabled.disabled_by = "user"
+    disabled.unload()
+
+    assert issue_registry_capture.deleted == [
+        (DOMAIN, "tracker_attributes_frozen_entry-b")
+    ]
+    assert set(issue_registry_capture.registry.issues) == {
+        "tracker_attributes_frozen_entry-a"
+    }
 
 
 def test_repair_issue_not_created_when_unloaded_before_start(
