@@ -141,8 +141,14 @@ scanner) has resolved at least one advertisement for the device.
 | `BLE battery sensor created` | **INFO** | Once per device when entity is created | Confirms sensor appeared in HA |
 
 The first-decode `FMDN_FLAGS_PROBE` is at **INFO** level intentionally.
-It fires exactly once per device per HA session, so it is not spammy.
-Users need to see this in default HA logs to confirm the pipeline works.
+It fires exactly once per device per HA session, so it adds no noise when
+the integration's log level is raised to INFO for troubleshooting. It is not
+visible by default: without a `logger:` configuration (and without
+`--verbose`) Home Assistant sets the root logger to WARNING, so the probe
+appears only once INFO is enabled for the integration, for example with
+`custom_components.googlefindmy: info` (step 2 of "Reporting P-256 tracker
+results" in the README shows two ways to set it). The log view under **Settings → System → Logs** lists warnings and errors only; the
+probe appears in the full log.
 
 ---
 
@@ -175,21 +181,25 @@ easy to pick the wrong one.
 ### 6.2  Log level demotion hides diagnostics
 
 **Symptom:** User demoted `FMDN_FLAGS_PROBE` from INFO to DEBUG.
-Afterward, the log message disappeared entirely from the HA log viewer
-(which defaults to INFO level).  User concluded the code was broken.
+Afterward, the message disappeared from the log the user was reading,
+and the user concluded the code was broken.
 
-**Root cause:** Not a code bug — HA's default log level filters out
-DEBUG messages.  The demotion was structurally correct but made the
-one-time diagnostic probe invisible.
+**Root cause:** Not a code bug. Which records reach the log depends on
+the `logger:` configuration. Without one (and without `--verbose`), Home
+Assistant sets the root logger to WARNING, so INFO and DEBUG are both filtered; with
+`custom_components.googlefindmy: info`, INFO passes and DEBUG does not.
+The demotion moved the one-time probe below the level enabled for
+troubleshooting.
 
 **Fix:** Reverted the first-decode `FMDN_FLAGS_PROBE` to INFO.  It
 fires once per device per session, so it is acceptable at INFO.  All
 subsequent/repeated logs remain at DEBUG.
 
-**Lesson:** One-time-per-device diagnostic logs should stay at INFO.
-They are essential for confirming end-to-end functionality and do not
-create log noise.  Only repeated / per-advertisement logs should be
-demoted to DEBUG.
+**Lesson:** A one-time-per-device diagnostic may stay at INFO: it
+confirms end-to-end functionality once the integration is raised to INFO
+and creates no log noise. INFO is not visible by default, so a level
+choice should not rest on default visibility. Repeated /
+per-advertisement logs stay at DEBUG.
 
 ### 6.3  `resolve_eid()` is a public API with no internal callers
 

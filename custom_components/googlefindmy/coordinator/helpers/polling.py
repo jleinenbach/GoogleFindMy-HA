@@ -14,8 +14,10 @@ from __future__ import annotations
 from typing import Any
 
 # Age thresholds for log level determination
-_AGE_THRESHOLD_INFO_HOURS = 24  # Log at INFO level above this
-_AGE_THRESHOLD_DEBUG_HOURS = 1  # Log at DEBUG level above this
+# Age categories, not log levels: the poll path logs both at DEBUG because the
+# record repeats on every poll (AGENTS.md section 5 (b)).
+_AGE_THRESHOLD_INFO_HOURS = 24  # Category "info" (stale) above this
+_AGE_THRESHOLD_DEBUG_HOURS = 1  # Category "debug" above this
 
 __all__ = [
     "calculate_location_age_hours",
@@ -47,18 +49,22 @@ def calculate_location_age_hours(
 
 
 def get_age_log_level(age_hours: float) -> tuple[str | None, bool]:
-    """Determine the appropriate log level based on location age.
+    """Classify a location age for the poll path's age record.
 
-    Returns a tuple of (log_level, should_log):
-    - "info" for age > 24 hours (stale data warning)
+    Returns a tuple of (category, should_log):
+    - "info" for age > 24 hours (stale data)
     - "debug" for 1 < age <= 24 hours (informational)
-    - None for age <= 1 hour (no logging needed)
+    - None for age <= 1 hour (no record needed)
+
+    The category names are historical. The caller picks the record text from
+    the category and logs both at DEBUG, because the record repeats on every
+    poll and carries the device name (AGENTS.md section 5 (b)).
 
     Args:
         age_hours: The location age in hours.
 
     Returns:
-        Tuple of (log_level, should_log).
+        Tuple of (category, should_log).
     """
     if age_hours > _AGE_THRESHOLD_INFO_HOURS:
         return ("info", True)

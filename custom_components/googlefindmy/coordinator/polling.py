@@ -2259,14 +2259,17 @@ class PollingOperations(_MixinBase):
                         # Skip redundant fusion inside update_device_cache when reusing this payload.
                         location["_fusion_preapplied"] = True
 
-                        # Age diagnostics (informational) - use Phase 11 helpers
+                        # Age diagnostics - use Phase 11 helpers. Both age
+                        # categories log at DEBUG: a stale location repeats on
+                        # every poll and the record carries the device name, so
+                        # it may not appear at INFO (AGENTS.md section 5 (b)).
                         wall_now = time.time()
                         last_seen = location.get("last_seen", 0)
                         age_hours = calculate_location_age_hours(last_seen, wall_now)
                         if age_hours is not None:
                             log_level, should_log = get_age_log_level(age_hours)
                             if should_log and log_level == "info":
-                                _LOGGER.info(
+                                _LOGGER.debug(
                                     "Using old location data for %s (age=%.1fh)",
                                     dev_name,
                                     age_hours,
@@ -2316,9 +2319,13 @@ class PollingOperations(_MixinBase):
 
                     except TimeoutError as terr:
                         if self.is_fcm_connected:
+                            # The outer guard repeats unattended, so the INFO
+                            # record names the device by its id; the idle
+                            # diagnostics below carry the name at DEBUG
+                            # (AGENTS.md section 5 (b)).
                             _LOGGER.info(
-                                "Poll timed out for %s (FCM connected); ignoring error to keep status healthy.",
-                                dev_name,
+                                "Poll timed out for device %s (FCM connected); ignoring error to keep status healthy",
+                                dev_id,
                             )
                             self._log_idle_poll_diagnostics(
                                 dev_id, dev_name, source="outer-timeout"
@@ -2326,9 +2333,14 @@ class PollingOperations(_MixinBase):
                             self.increment_stat("timeouts")
                         else:
                             _LOGGER.info(
-                                "Location request timed out for %s after %s seconds",
-                                dev_name,
+                                "Location request timed out for device %s after %s seconds",
+                                dev_id,
                                 POLL_DEVICE_OUTER_TIMEOUT_S,
+                            )
+                            _LOGGER.debug(
+                                "Location request timeout for %s (device %s)",
+                                dev_name,
+                                dev_id,
                             )
                             self.increment_stat("timeouts")
                             self._consecutive_timeouts += 1

@@ -861,8 +861,8 @@ class TTLPolicy:
                 threshold = max(0.0, float(best_ttl) - self.TTL_MARGIN_SEC)
                 threshold = self._jitter_sec(threshold, self.JITTER_SEC)
                 if age >= threshold:
-                    self.log.info(
-                        "ADM token reached measured threshold – proactively refreshing..."
+                    self.log.debug(
+                        "ADM token reached measured threshold, proactively refreshing"
                     )
                     self._do_refresh(now)
             except (ValueError, TypeError) as e:
@@ -1209,8 +1209,8 @@ class AsyncTTLPolicy(TTLPolicy):
                 threshold = max(0.0, float(best_ttl) - self.TTL_MARGIN_SEC)
                 threshold = self._jitter_sec(threshold, self.JITTER_SEC)
                 if age >= threshold:
-                    self.log.info(
-                        "ADM token reached measured threshold – proactively refreshing (async)…"
+                    self.log.debug(
+                        "ADM token reached measured threshold, proactively refreshing (async)"
                     )
                     await self._do_refresh_async(now)
             except (ValueError, TypeError) as e:

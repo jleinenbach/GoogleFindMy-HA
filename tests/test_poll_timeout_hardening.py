@@ -444,6 +444,111 @@ def test_fcm_connected_timeout_is_benign(
     assert coordinator._consecutive_timeouts == 0
 
 
+@pytest.mark.parametrize(
+    ("fcm_status", "needle"),
+    [
+        (FcmStatus.CONNECTED, "Poll timed out for device"),
+        (FcmStatus.DISCONNECTED, "Location request timed out for device"),
+    ],
+)
+def test_outer_timeout_info_record_carries_id_not_name(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fcm_status: FcmStatus,
+    needle: str,
+) -> None:
+    """The outer poll guard repeats unattended, so the polling logger's INFO
+    record names the device by its id and its timeout record with the display
+    name is at DEBUG (``AGENTS.md`` section 5 (b)). In the FCM-connected branch
+    the name is carried by the idle diagnostics line, in the disconnected
+    branch by a DEBUG record of its own. Not covered: the ``UpdateFailed``
+    text of the disconnected branch still carries the name, and Home
+    Assistant logs it at ERROR through ``async_set_update_error``; the test
+    stubs that method."""
+
+    loop = asyncio.new_event_loop()
+    devices = [{"id": "dev-1", "name": "Hall Tag"}]
+    coordinator = _make_coordinator(monkeypatch, loop, _TimeoutAPI(), devices)
+    coordinator._fcm_status_state = fcm_status
+
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_POLLING_LOGGER):
+            loop.run_until_complete(
+                coordinator._async_start_poll_cycle(devices, force=True)
+            )
+    finally:
+        drain_loop(loop)
+
+    polling_records = [rec for rec in caplog.records if rec.name == _POLLING_LOGGER]
+    info_records = [rec for rec in polling_records if rec.levelno >= logging.INFO]
+    assert len(info_records) == 1, [rec.getMessage() for rec in info_records]
+    message = info_records[0].getMessage()
+    assert needle in message
+    assert "dev-1" in message
+    assert "Hall Tag" not in message
+    assert not message.rstrip().endswith(".")
+    # Other DEBUG records of the cycle name the device as well, so only a
+    # record about the timeout itself proves where the name went.
+    # The disconnected branch's own DEBUG record also carries the id, so the
+    # INFO record can be matched to it in a log with several devices; the
+    # idle diagnostics line of the connected branch predates this and names
+    # the device only.
+    needs_id = fcm_status is FcmStatus.DISCONNECTED
+    assert any(
+        rec.levelno == logging.DEBUG
+        and "Hall Tag" in rec.getMessage()
+        and "timeout" in rec.getMessage().lower()
+        and (not needs_id or "dev-1" in rec.getMessage())
+        for rec in polling_records
+    ), [rec.getMessage() for rec in polling_records if rec.levelno == logging.DEBUG]
+
+
+class _StaleAPI:
+    """API stub returning a location whose last report is 48 hours old."""
+
+    async def async_get_device_location(self, dev_id: str, dev_name: str):
+        return {
+            "id": dev_id,
+            "name": dev_name,
+            "latitude": 1.0,
+            "longitude": 1.0,
+            "accuracy": 5.0,
+            "last_seen": time.time() - 48 * 3600,
+        }
+
+
+def test_old_location_data_logs_at_debug_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A location older than 24 hours is reported on every poll, so the age
+    record is routine: DEBUG only, nothing at INFO from the polling logger."""
+
+    loop = asyncio.new_event_loop()
+    devices = [{"id": "dev-old", "name": "Attic Tag"}]
+    coordinator = _make_coordinator(monkeypatch, loop, _StaleAPI(), devices)
+
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_POLLING_LOGGER):
+            loop.run_until_complete(
+                coordinator._async_start_poll_cycle(devices, force=True)
+            )
+    finally:
+        drain_loop(loop)
+
+    age_records = [
+        rec
+        for rec in caplog.records
+        if rec.name == _POLLING_LOGGER and "Using old location data" in rec.getMessage()
+    ]
+    assert len(age_records) == 1, "expected the stale-age record on this poll"
+    assert age_records[0].levelno == logging.DEBUG
+    assert not [
+        rec
+        for rec in caplog.records
+        if rec.name == _POLLING_LOGGER and rec.levelno >= logging.INFO
+    ]
+
+
 def _make_idle_diag_stub(**attrs: object) -> SimpleNamespace:
     """Build a minimal stand-in exposing only what ``_log_idle_poll_diagnostics``
     reads. This keeps the helper tests as true unit tests, without constructing a
