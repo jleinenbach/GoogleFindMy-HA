@@ -23,6 +23,10 @@ The gate only works as a whole. Each check below guards one link:
 Fork-specific: do not upstream this test together with the gate.
 BSkando/GoogleFindMy-HA has no ``ci-freigabe`` environment.
 
+Conditions are compared as whole expressions (whitespace removed), not as
+substrings: an appended ``|| always()`` or ``|| github.event_name == ...`` keeps
+every substring but disables the gate.
+
 ``CI_YML_PATH`` overrides the workflow path; it exists for red probes against an
 older or mutated copy of the file.
 """
@@ -40,6 +44,11 @@ DEFAULT_CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 GATE = "approval_gate"
 SUMMARY = "ci-success"
+HASSFEST_CONDITION = (
+    "${{ !cancelled() && (needs.approval_gate.result == 'success' || "
+    "(github.event_name == 'push' && needs.approval_gate.result == 'skipped')) }}"
+)
+GATE_CHECK = '[[ "$EVENT" == "pull_request" && "$GATE" != "success" ]]'
 
 
 def _load_ci() -> dict[str, Any]:
@@ -63,6 +72,10 @@ def _needs(job: dict[str, Any]) -> list[str]:
     return [str(item) for item in needs]
 
 
+def _compact(text: str) -> str:
+    return "".join(text.split())
+
+
 def _condition(name: str, job: dict[str, Any]) -> str:
     condition = job.get("if")
     assert isinstance(condition, str), f"job {name} needs an explicit if condition"
@@ -83,6 +96,14 @@ def test_gate_job_waits_for_environment_on_pull_requests() -> None:
     assert not _needs(gate), "the gate must be the first job"
 
 
+def test_workflow_name_is_ci() -> None:
+    """Helper tools of this fork find the CI checks by the workflow name."""
+
+    assert _load_ci().get("name") == "CI", (
+        "renaming the workflow breaks the approval tooling that matches name CI"
+    )
+
+
 def test_one_live_run_per_pull_request() -> None:
     """A new push cancels the previous PR run; push runs never share a group."""
 
@@ -98,15 +119,9 @@ def test_hassfest_runs_only_behind_an_approved_gate_or_on_push() -> None:
     """hassfest accepts a skipped gate only for push events."""
 
     hassfest = _jobs()["hassfest"]
-    assert GATE in _needs(hassfest)
+    assert _needs(hassfest) == [GATE]
     condition = _condition("hassfest", hassfest)
-    assert condition.startswith("${{") and condition.endswith("}}")
-    assert "!cancelled()" in condition
-    assert "needs.approval_gate.result == 'success'" in condition
-    assert (
-        "github.event_name == 'push' && needs.approval_gate.result == 'skipped'"
-        in condition
-    )
+    assert _compact(condition) == _compact(HASSFEST_CONDITION)
 
 
 def test_every_job_requires_its_needs_explicitly() -> None:
@@ -117,16 +132,17 @@ def test_every_job_requires_its_needs_explicitly() -> None:
     for name, job in jobs.items():
         if name in (GATE, SUMMARY):
             continue
-        condition = _condition(name, job)
-        assert condition.startswith("${{") and condition.endswith("}}"), (
-            f"job {name}: a condition with a status function belongs in ${{{{ }}}}"
-        )
-        assert "!cancelled()" in condition, f"job {name} must not run after cancel"
         needs = _needs(job)
         assert needs, f"job {name} must depend on the gate chain"
-        for need in needs:
-            assert f"needs.{need}.result == 'success'" in condition, (
-                f"job {name} must require needs.{need}.result == 'success'"
+        if name != "hassfest":
+            assert GATE not in needs, f"job {name} must reach the gate via hassfest"
+            assert "hassfest" in needs, f"job {name} must need hassfest"
+            required = " && ".join(
+                f"needs.{need}.result == 'success'" for need in needs
+            )
+            expected = f"${{{{ !cancelled() && {required} }}}}"
+            assert _compact(_condition(name, job)) == _compact(expected), (
+                f"job {name}: condition must be exactly {expected}"
             )
         checked += 1
     assert checked >= 7, "expected hassfest and the six jobs behind it"
@@ -145,4 +161,12 @@ def test_ci_success_includes_the_gate() -> None:
     env = check.get("env", {})
     assert env.get("GATE") == "${{ needs.approval_gate.result }}"
     assert env.get("EVENT") == "${{ github.event_name }}"
-    assert '"$EVENT" == "pull_request" && "$GATE" != "success"' in check["run"]
+    lines = [line.strip() for line in str(check["run"]).splitlines()]
+    opening = f"if {GATE_CHECK}; then"
+    assert opening in lines, "the gate check must be a live if-line"
+    start = lines.index(opening)
+    end = lines.index("fi", start)
+    assert "exit 1" in lines[start:end], "the gate check must fail the job"
+    assert start < lines.index('echo "All CI jobs passed!"'), (
+        "the gate check must run before the success message"
+    )
