@@ -11,9 +11,9 @@ on:
 permissions:
   contents: read
 
-# One live CI run per pull request: a new push supersedes the previous run,
-# including one that still waits for approval. Push runs on main get a
-# unique group (run_id), so they never cancel each other.
+# One live CI run per pull request: a push that starts a new run supersedes the
+# previous run, including one that still waits for approval. Push runs on main
+# get a unique group (run_id), so they never cancel each other.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: true
@@ -721,6 +721,9 @@ jobs:
     steps:
       - name: Check all jobs passed
         id: check
+        # Pinned so a workflow-level defaults.run.shell cannot switch the check to
+        # sh, where [[ is not found and both checks fall through to success.
+        shell: bash
         env:
           EVENT: ${{ github.event_name }}
           GATE: ${{ needs.approval_gate.result }}

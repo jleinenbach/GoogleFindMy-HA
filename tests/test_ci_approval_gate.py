@@ -17,8 +17,10 @@ The gate only works as a whole. Each check below guards one link:
   gate condition cannot let tests run on a pull request without approval;
 * ``CI Success`` depends on the gate and fails a pull request run whose gate was
   not approved (second lock behind the required status check);
-* one live run per pull request: a new push cancels the previous run, push runs
-  on ``main`` never share a group.
+* one live run per pull request: a push that starts a new run cancels the
+  previous one, push runs on ``main`` never share a group;
+* the workflow triggers stay ``pull_request`` and ``push`` to ``main``, and the
+  workflow sets no ``defaults`` or ``env`` that the check step would inherit.
 
 Fork-specific: do not upstream this test together with the gate.
 BSkando/GoogleFindMy-HA has no ``ci-freigabe`` environment.
@@ -54,11 +56,23 @@ CONCURRENCY_GROUP = (
     "format('ci-pr-{0}', github.event.pull_request.number) || "
     "format('ci-run-{0}', github.run_id) }}"
 )
-# Keys outside these sets (continue-on-error, a step-level if, timeout tricks) could let a
-# rejected run pass, so the jobs and the check step that carry the gate allow no others.
+# Keys outside these sets (continue-on-error, a step-level if, an inherited shell) could let
+# a rejected run pass, so the jobs and the check step that carry the gate allow no others.
+# Adding a key on purpose: first make sure it cannot turn a rejected run into success,
+# then extend the set here.
+# YAML reads the key on: as True.
+WORKFLOW_KEYS = {"name", True, "permissions", "concurrency", "jobs"}
+WORKFLOW_TRIGGERS = {"pull_request": None, "push": {"branches": ["main"]}}
 GATE_JOB_KEYS = {"name", "if", "runs-on", "environment", "permissions", "steps"}
 SUMMARY_JOB_KEYS = {"name", "runs-on", "needs", "if", "steps"}
-CHECK_STEP_KEYS = {"name", "id", "env", "run"}
+CHECK_STEP_KEYS = {"name", "id", "shell", "env", "run"}
+GATE_BLOCK = [
+    f"if {GATE_CHECK}; then",
+    'echo "CI approval gate not approved (result: $GATE)"',
+    'echo "passed=false" >> "$GITHUB_OUTPUT"',
+    "exit 1",
+    "fi",
+]
 
 
 def _load_ci() -> dict[str, Any]:
@@ -109,6 +123,19 @@ def test_gate_job_waits_for_environment_on_pull_requests() -> None:
     assert not _needs(gate), "the gate must be the first job"
 
 
+def test_workflow_level_is_fixed() -> None:
+    """No inherited defaults or env reach the check, and the triggers stay as gated."""
+
+    data = _load_ci()
+    assert set(data) <= WORKFLOW_KEYS, (
+        f"unexpected workflow keys {set(data) - WORKFLOW_KEYS}: defaults or env would be "
+        "inherited by the check step; extend WORKFLOW_KEYS only after checking that"
+    )
+    assert data.get(True) == WORKFLOW_TRIGGERS, (
+        "ci.yml triggers changed; ungated push runs would add Home Assistant test load"
+    )
+
+
 def test_workflow_name_is_ci() -> None:
     """Helper tools of this fork find the CI checks by the workflow name."""
 
@@ -118,7 +145,7 @@ def test_workflow_name_is_ci() -> None:
 
 
 def test_one_live_run_per_pull_request() -> None:
-    """A new push cancels the previous PR run; push runs never share a group."""
+    """A push that starts a new PR run cancels the previous one; push runs never share a group."""
 
     concurrency = _load_ci().get("concurrency")
     assert isinstance(concurrency, dict), "ci.yml must define workflow concurrency"
@@ -165,13 +192,24 @@ def test_ci_success_includes_the_gate() -> None:
     jobs = _jobs()
     summary = jobs[SUMMARY]
     assert summary.get("if") == "always()"
+    assert summary.get("name") == "CI Success", "the required check is named CI Success"
+    others = [
+        name
+        for name, job in jobs.items()
+        if name != SUMMARY and job.get("name") == "CI Success"
+    ]
+    assert not others, f"only {SUMMARY} may be named CI Success, also: {others}"
     assert set(summary) <= SUMMARY_JOB_KEYS, (
         f"unexpected CI Success job keys: {set(summary) - SUMMARY_JOB_KEYS}"
     )
     expected = {name for name in jobs if name != SUMMARY}
     assert expected <= set(_needs(summary))
 
-    check = next(step for step in summary["steps"] if step.get("id") == "check")
+    check = summary["steps"][0]
+    assert check.get("id") == "check", (
+        "the check must be the first step: an earlier step could change its environment"
+    )
+    assert check.get("shell") == "bash", "the check uses [[ and needs bash"
     assert set(check) <= CHECK_STEP_KEYS, (
         f"unexpected check step keys: {set(check) - CHECK_STEP_KEYS}"
     )
@@ -179,14 +217,15 @@ def test_ci_success_includes_the_gate() -> None:
     assert env == {
         "EVENT": "${{ github.event_name }}",
         "GATE": "${{ needs.approval_gate.result }}",
-    }
+    }, "the check step env must be exactly EVENT and GATE; extend this test on purpose"
     lines = [line.strip() for line in str(check["run"]).splitlines()]
     code = [line for line in lines if line and not line.startswith("#")]
     opening = f"if {GATE_CHECK}; then"
     assert code and code[0] == opening, "the gate check must be the first command"
     start = lines.index(opening)
-    end = lines.index("fi", start)
-    assert "exit 1" in lines[start:end], "the gate check must fail the job"
+    assert lines[start : start + len(GATE_BLOCK)] == GATE_BLOCK, (
+        "the gate check block must be exactly GATE_BLOCK (no early exit 0 or trap)"
+    )
     assert start < lines.index('echo "All CI jobs passed!"'), (
         "the gate check must run before the success message"
     )
