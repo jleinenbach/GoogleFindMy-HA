@@ -957,8 +957,9 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   * **PR CI runs only after manual approval (this fork).** In
     `.github/workflows/ci.yml` the first job, `approval_gate`, runs only on
     `pull_request` and is bound to the environment `ci-freigabe`, whose
-    required reviewer must approve the run before any job starts; every other
-    job needs it. Pushes to `main` skip the gate and run all jobs (each job
+    required reviewer must approve the run before any job starts; `hassfest`
+    needs it, and every other job needs `hassfest`. Pushes to `main` skip the
+    gate and run all jobs (each job
     states an explicit `if:` so the skipped gate does not skip them). A run
     that is not approved, is rejected or expires never turns `CI Success`
     green: `CI Success` depends on the gate and fails a pull request run
