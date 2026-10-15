@@ -14,9 +14,11 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 import yaml
+from coverage.config import CoverageConfig
 
 from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
@@ -206,7 +208,8 @@ def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
     drops the variables through which the outer run would reach it
     (``PYTEST_*``, such as ``PYTEST_ADDOPTS``; ``COVERAGE_PROCESS_*``, through
     which coverage.py measures subprocesses; ``COV_CORE_*`` for pytest-cov
-    before 7). Limits: an option the project adds to ``addopts`` that changes
+    before 7). Only lines that start with a requested module and ``::`` count as
+    node ids, so an indented tree listing cannot pass for one. Limits: an option the project adds to ``addopts`` that changes
     collection is not applied here, and an id containing ``]`` cannot be cited.
     A failed or timed-out collection, or one that lists no node id although it
     succeeded, fails the calling test with pytest's output.
@@ -244,9 +247,13 @@ def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
     except subprocess.TimeoutExpired as err:
         pytest.fail(
             f"pytest --collect-only timed out after {_COLLECT_TIMEOUT_S} s:\n"
-            + str(err.stdout or "")[-4000:]
+            + _as_text(err.stdout)[-4000:]
+            + _as_text(err.stderr)[-4000:]
         )
-    node_ids = {line for line in result.stdout.splitlines() if "::" in line}
+    prefixes = tuple(f"{module}::" for module in modules)
+    node_ids = {
+        line for line in result.stdout.splitlines() if line.startswith(prefixes)
+    }
     if result.returncode not in (0, 5) or (result.returncode == 0 and not node_ids):
         pytest.fail(
             f"pytest --collect-only failed with rc {result.returncode}"
@@ -255,6 +262,18 @@ def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
             + result.stderr[-4000:]
         )
     return node_ids
+
+
+def _as_text(output: str | bytes | None) -> str:
+    """Return captured subprocess output as text.
+
+    ``TimeoutExpired`` carries the output captured so far as ``bytes`` even when
+    the run used ``text=True``.
+    """
+
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output or ""
 
 
 def _unknown_test_citations(
@@ -691,7 +710,11 @@ def test_collected_node_ids_fails_loudly(tmp_path: Path) -> None:
 def test_collected_node_ids_ignores_outer_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Project ``addopts``, ``PYTEST_ADDOPTS`` and subprocess coverage do not reach the run."""
+    """Project ``addopts``, ``PYTEST_ADDOPTS`` and subprocess coverage do not reach the run.
+
+    Both ``COVERAGE_PROCESS_START`` and ``COVERAGE_PROCESS_CONFIG`` (set by
+    coverage.py 7.10+ with ``patch = subprocess``) start a measurement on their own.
+    """
 
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "t_ok.py").write_text(
@@ -707,6 +730,11 @@ def test_collected_node_ids_ignores_outer_options(
     )
     monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-option-env")
     monkeypatch.setenv("COVERAGE_PROCESS_START", str(rcfile))
+    config = CoverageConfig()
+    # coverage.py 7.10+ only; older versions ignore the variable.
+    if hasattr(config, "serialize"):
+        config.data_file = str(tmp_path / "cov" / "data")
+        monkeypatch.setenv("COVERAGE_PROCESS_CONFIG", config.serialize())
 
     assert _collected_node_ids(["tests/t_ok.py"], tmp_path) == {"tests/t_ok.py::test_x"}
     assert not (tmp_path / "cov").exists()
@@ -725,6 +753,45 @@ def test_collected_node_ids_rejects_an_empty_listing(tmp_path: Path) -> None:
 
     with pytest.raises(pytest.fail.Exception, match="rc 0 and 0 node ids"):
         _collected_node_ids(["tests/t_ok.py"], tmp_path)
+
+
+def test_collected_node_ids_ignores_an_indented_tree_listing(tmp_path: Path) -> None:
+    """A tree line whose parameter id contains ``::`` does not count as a node id."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_ok.py").write_text(
+        "import pytest\n\n\n"
+        '@pytest.mark.parametrize("v", ["a::b"])\n'
+        "def test_x(v):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\nverbosity_test_cases = 1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="rc 0 and 0 node ids"):
+        _collected_node_ids(["tests/t_ok.py"], tmp_path)
+
+
+def test_collected_node_ids_timeout_shows_both_streams_as_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timeout message decodes the captured ``bytes`` and includes stderr."""
+
+    def _timeout(*args: object, **kwargs: object) -> NoReturn:
+        raise subprocess.TimeoutExpired(
+            cmd="pytest", timeout=1, output=b"out-marker", stderr=b"err-marker"
+        )
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        _collected_node_ids(["tests/t_ok.py"], tmp_path)
+
+    message = str(excinfo.value)
+    assert "out-marker" in message
+    assert "err-marker" in message
+    assert "b'" not in message
 
 
 def test_collected_node_ids_reports_a_timeout(
