@@ -10,6 +10,7 @@ the currently declared tier is Bronze during the coverage sprint (see
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -18,7 +19,6 @@ from typing import NoReturn
 
 import pytest
 import yaml
-from coverage.config import CoverageConfig
 
 from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
@@ -197,6 +197,7 @@ def test_quality_scale_evidence_existence(integration_root: Path) -> None:
 _TEST_CITATION = re.compile(r"^(tests/[^:#]+\.py):(.*)$")
 _TEST_NAME = re.compile(r"^:?([A-Za-z_]\w*(?:(?:::|:|\.)[A-Za-z_]\w*)*)(\[[^\]]*\])?$")
 _COLLECT_TIMEOUT_S = 600
+_STDERR_SEPARATOR = "\n--- stderr ---\n"
 
 
 def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
@@ -208,9 +209,11 @@ def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
     drops the variables through which the outer run would reach it
     (``PYTEST_*``, such as ``PYTEST_ADDOPTS``; ``COVERAGE_PROCESS_*``, through
     which coverage.py measures subprocesses; ``COV_CORE_*`` for pytest-cov
-    before 7). Only lines that start with a requested module and ``::`` count as
-    node ids, so an indented tree listing cannot pass for one. Limits: an option the project adds to ``addopts`` that changes
-    collection is not applied here, and an id containing ``]`` cannot be cited.
+    before 7). Only lines that start with a requested module (normalized, as
+    pytest prints it) and ``::`` count as node ids, so an indented tree listing
+    or a warning location cannot pass for one. Limits: an option the project adds
+    to ``addopts`` that changes collection is not applied here, and an id
+    containing ``]`` cannot be cited.
     A failed or timed-out collection, or one that lists no node id although it
     succeeded, fails the calling test with pytest's output.
     """
@@ -248,9 +251,10 @@ def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
         pytest.fail(
             f"pytest --collect-only timed out after {_COLLECT_TIMEOUT_S} s:\n"
             + _as_text(err.stdout)[-4000:]
+            + _STDERR_SEPARATOR
             + _as_text(err.stderr)[-4000:]
         )
-    prefixes = tuple(f"{module}::" for module in modules)
+    prefixes = tuple(f"{posixpath.normpath(module)}::" for module in modules)
     node_ids = {
         line for line in result.stdout.splitlines() if line.startswith(prefixes)
     }
@@ -259,6 +263,7 @@ def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
             f"pytest --collect-only failed with rc {result.returncode}"
             f" and {len(node_ids)} node ids:\n"
             + result.stdout[-4000:]
+            + _STDERR_SEPARATOR
             + result.stderr[-4000:]
         )
     return node_ids
@@ -267,8 +272,8 @@ def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
 def _as_text(output: str | bytes | None) -> str:
     """Return captured subprocess output as text.
 
-    ``TimeoutExpired`` carries the output captured so far as ``bytes`` even when
-    the run used ``text=True``.
+    On POSIX, ``TimeoutExpired`` carries the output captured so far as ``bytes``
+    even when the run used ``text=True``; on Windows it is already ``str``.
     """
 
     if isinstance(output, bytes):
@@ -713,7 +718,9 @@ def test_collected_node_ids_ignores_outer_options(
     """Project ``addopts``, ``PYTEST_ADDOPTS`` and subprocess coverage do not reach the run.
 
     Both ``COVERAGE_PROCESS_START`` and ``COVERAGE_PROCESS_CONFIG`` (set by
-    coverage.py 7.10+ with ``patch = subprocess``) start a measurement on their own.
+    coverage.py 7.10.3+ with ``patch = subprocess``) start a measurement on their
+    own through the ``.pth`` file coverage.py ships from 7.12.1 on. Before that
+    neither variable starts one here, so the probe has nothing to catch there.
     """
 
     (tmp_path / "tests").mkdir()
@@ -730,14 +737,44 @@ def test_collected_node_ids_ignores_outer_options(
     )
     monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-option-env")
     monkeypatch.setenv("COVERAGE_PROCESS_START", str(rcfile))
-    config = CoverageConfig()
-    # coverage.py 7.10+ only; older versions ignore the variable.
-    if hasattr(config, "serialize"):
-        config.data_file = str(tmp_path / "cov" / "data")
-        monkeypatch.setenv("COVERAGE_PROCESS_CONFIG", config.serialize())
+    config_value = _coverage_process_config(tmp_path / "cov" / "data")
+    if config_value is not None:
+        monkeypatch.setenv("COVERAGE_PROCESS_CONFIG", config_value)
 
     assert _collected_node_ids(["tests/t_ok.py"], tmp_path) == {"tests/t_ok.py::test_x"}
     assert not (tmp_path / "cov").exists()
+
+
+def _coverage_process_config(data_file: Path) -> str | None:
+    """Return a ``COVERAGE_PROCESS_CONFIG`` value for ``data_file``, if supported.
+
+    ``coverage.config`` is not a documented API and ``serialize`` exists from
+    coverage.py 7.10.3 on, so the import stays local to this test bench and a
+    missing piece returns ``None`` instead of breaking the whole module.
+    """
+
+    try:
+        from coverage.config import CoverageConfig
+    except ImportError:
+        return None
+    config = CoverageConfig()
+    if not hasattr(config, "serialize"):
+        return None
+    config.data_file = str(data_file)
+    return str(config.serialize())
+
+
+def test_collected_node_ids_normalizes_the_module_path(tmp_path: Path) -> None:
+    """A module given as ``tests/./x.py`` still matches pytest's ``tests/x.py`` ids."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_ok.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8"
+    )
+
+    assert _collected_node_ids(["tests/./t_ok.py"], tmp_path) == {
+        "tests/t_ok.py::test_x"
+    }
 
 
 def test_collected_node_ids_rejects_an_empty_listing(tmp_path: Path) -> None:
@@ -756,13 +793,15 @@ def test_collected_node_ids_rejects_an_empty_listing(tmp_path: Path) -> None:
 
 
 def test_collected_node_ids_ignores_an_indented_tree_listing(tmp_path: Path) -> None:
-    """A tree line whose parameter id contains ``::`` does not count as a node id."""
+    """Neither a tree line with ``::`` in its id nor a warning location counts as a node id."""
 
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "t_ok.py").write_text(
         "import pytest\n\n\n"
         '@pytest.mark.parametrize("v", ["a::b"])\n'
-        "def test_x(v):\n    pass\n",
+        "def test_x(v):\n    pass\n\n\n"
+        "class TestWarns:\n"
+        "    def __init__(self):\n        pass\n",
         encoding="utf-8",
     )
     (tmp_path / "pyproject.toml").write_text(
@@ -792,6 +831,15 @@ def test_collected_node_ids_timeout_shows_both_streams_as_text(
     assert "out-marker" in message
     assert "err-marker" in message
     assert "b'" not in message
+    assert "out-marker" + _STDERR_SEPARATOR + "err-marker" in message
+
+
+def test_as_text_accepts_every_capture_type() -> None:
+    """``bytes`` is decoded, ``str`` passes through and ``None`` becomes empty."""
+
+    assert _as_text(b"a\xffb") == "a\ufffdb"
+    assert _as_text("text") == "text"
+    assert _as_text(None) == ""
 
 
 def test_collected_node_ids_reports_a_timeout(
