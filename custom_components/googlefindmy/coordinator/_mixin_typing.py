@@ -103,6 +103,7 @@ class _MixinBase:
     # Polling state
     _consecutive_timeouts: int
     _last_poll_result: str | None
+    _empty_location_streak: dict[str, int]
     _last_device_list: list[dict[str, Any]]
     _empty_list_streak: int
     _last_list_poll_mono: float

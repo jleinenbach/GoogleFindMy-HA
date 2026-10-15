@@ -146,6 +146,17 @@ _COOLDOWN_MIN_HIGH_TRAFFIC_S = 5 * 60  # 5 minutes
 # Accept an empty device list only on the 2nd consecutive result (defers once)
 _EMPTY_LIST_QUORUM = 2
 
+# A device counts as silent once this many consecutive polls returned no
+# location data; only then is it reported at INFO, once, together with a single
+# INFO record when it answers again (Home Assistant quality-scale rule
+# ``log-when-unavailable``). A lower value floods the log for BLE tags at the
+# edge of reporter coverage: measured on a live instance over three days, one
+# tag alternated between empty results and locations 688 times, and only two of
+# those empty runs reached a length of three (568 had length one, 118 length
+# two). With a quorum of one, that tag alone would have produced about 1,375
+# INFO records instead of four.
+_EMPTY_LOCATION_QUORUM = 3
+
 # Maximum number of transient auth failures before triggering re-auth
 _MAX_TRANSIENT_AUTH_FAILURES = 3
 
@@ -282,6 +293,49 @@ class PollingOperations(_MixinBase):
     def is_fcm_connected(self) -> bool:
         """Convenience boolean for entities relying on push transport availability."""
         return self._fcm_status_state == FcmStatus.CONNECTED
+
+    def _note_empty_location_result(self, dev_id: str, dev_name: str) -> None:
+        """Log an empty location result and report a silent device once.
+
+        Every empty result logs at DEBUG with the device name. The poll that
+        completes ``_EMPTY_LOCATION_QUORUM`` consecutive empty results adds one
+        INFO record that names the device by its id only: the poll loop repeats
+        unattended, so the display name stays at DEBUG (AGENTS.md section 5 (b)).
+        Only logging state lives here; the auth and cycle bookkeeping of the
+        caller is untouched.
+        """
+        _LOGGER.debug("No location data returned for %s", dev_name)
+        streaks = getattr(self, "_empty_location_streak", None)
+        if streaks is None:
+            # Coordinators built via __new__ in tests skip __init__.
+            streaks = self._empty_location_streak = {}
+        streak = streaks.get(dev_id, 0) + 1
+        streaks[dev_id] = streak
+        if streak == _EMPTY_LOCATION_QUORUM:
+            _LOGGER.info(
+                "Device %s returned no location data in %d consecutive polls",
+                dev_id,
+                streak,
+            )
+
+    def _note_location_content(self, dev_id: str, dev_name: str) -> None:
+        """Clear the silence streak and report the recovery of a silent device.
+
+        Logs one INFO record (id only) when the device had been reported silent
+        by ``_note_empty_location_result``; a streak below the quorum is cleared
+        without any record at INFO.
+        """
+        streaks = getattr(self, "_empty_location_streak", None)
+        if not streaks:
+            return
+        streak = streaks.pop(dev_id, 0)
+        if streak >= _EMPTY_LOCATION_QUORUM:
+            _LOGGER.info(
+                "Device %s is returning location data again after %d empty polls",
+                dev_id,
+                streak,
+            )
+            _LOGGER.debug("Location data is back for %s", dev_name)
 
     def _log_idle_poll_diagnostics(
         self, dev_id: str, dev_name: str, *, source: str
@@ -1923,9 +1977,10 @@ class PollingOperations(_MixinBase):
                         if not location:
                             # Expected for BLE tags with no reporter nearby: the
                             # inner FCM wait returns an empty result rather than
-                            # raising. This is a healthy idle outcome, not a fault
-                            # (kept at INFO, symmetric with the timeout branch).
-                            _LOGGER.info("No location data returned for %s", dev_name)
+                            # raising. This is a healthy idle outcome, not a fault:
+                            # DEBUG per poll, INFO once for a device that stays
+                            # silent (see _note_empty_location_result).
+                            self._note_empty_location_result(dev_id, dev_name)
                             self._log_idle_poll_diagnostics(
                                 dev_id, dev_name, source="empty-result"
                             )
@@ -1936,6 +1991,8 @@ class PollingOperations(_MixinBase):
                             # state, and it does not zero the counter here.
                             cycle_accepted_requests += 1
                             continue
+
+                        self._note_location_content(dev_id, dev_name)
 
                         # A location WITH content, and only that, proves on this
                         # path that the credentials worked -- the same rule the

@@ -829,6 +829,41 @@ async def test_locate_on_a_healthy_idle_tag_returns_empty_and_clears_nothing(
     coord.note_error.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_locate_on_an_idle_tag_logs_one_info_record_by_device_id(
+    locate_coord: LocateStub,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A user-triggered locate without an answer leaves one INFO record.
+
+    The inner FCM-wait timeout logs at DEBUG only, so without this record a
+    locate button press on a silent tag would leave nothing at INFO. An
+    automation can repeat the call, so the INFO record names the device by its
+    canonical id and keeps the display name at DEBUG (AGENTS.md section 5 (b)).
+    """
+    coord = locate_coord
+    coord.api.async_get_device_location = AsyncMock(return_value={})
+    coord.get_device_display_name = lambda _device_id: "Silent Tag"
+
+    with caplog.at_level(
+        logging.DEBUG, logger="custom_components.googlefindmy.coordinator.locate"
+    ):
+        result = await coord.async_locate_device("dev-1")
+
+    assert result == {}
+    records = [
+        rec for rec in caplog.records if "returned no location data" in rec.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    assert "dev-1" in records[0].getMessage()
+    assert "Silent Tag" not in records[0].getMessage()
+    assert any(
+        rec.levelno == logging.DEBUG and "Silent Tag" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
 def test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

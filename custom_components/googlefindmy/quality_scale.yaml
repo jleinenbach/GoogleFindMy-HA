@@ -134,6 +134,7 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/coordinator/polling.py:PollingOperations._note_fcm_deferral"
+        - "custom_components/googlefindmy/coordinator/polling.py:PollingOperations._note_empty_location_result"
     - id: parallel-updates
       status: done
       evidence:

@@ -376,6 +376,17 @@ class LocateOperations(_MixinBase):
                 )
 
                 if not location_data:
+                    # The inner FCM-wait timeout logs at DEBUG only, so without
+                    # this record a locate that got no answer leaves nothing at
+                    # INFO (the error branches in api.py log their own WARNING or
+                    # ERROR before returning empty). An automation can repeat the
+                    # invocation, so the INFO record carries the canonical id and
+                    # the display name stays at DEBUG (AGENTS.md section 5 (b)).
+                    _LOGGER.info(
+                        "Manual locate for device %s returned no location data",
+                        device_id,
+                    )
+                    _LOGGER.debug("Manual locate without location data for %s", name)
                     return {}
 
                 # A result WITH content, and only that, proves on this path that
