@@ -5,9 +5,9 @@ The EID resolver reports how long before an observation the integration last
 tried to ask Google for a device's location (``poll_age_s`` in
 ``FMDN_UWT_TRANSITION``). That needs a stamp per device that is set when a
 request is attempted, by either send site, and that survives a request which
-raises after it was sent. A request that stopped before it was sent (no push
-token, failed push registration) is taken back, and the stamp it replaced
-comes back: otherwise a push outage would look like a request Google received.
+raises after it was sent. A request the request layer reports as never handed
+to Google (``before_dispatch``) is taken back, and the value before it comes
+back: otherwise a push outage would look like a request Google received.
 ``_last_poll_mono`` cannot serve: it is a scheduling base that is back-dated by
 the poll interval.
 
@@ -31,11 +31,13 @@ import pytest
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator.helpers.locate_clock import (
+    MAX_TRACKED_ATTEMPTS,
+    LocateStamps,
+    ensure_locate_stamps,
     retract_if_never_dispatched,
     stamp_locate_attempt,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
-    LOCATION_REQUEST_NOT_ACCEPTED_STAGES,
     LocationRequestNotAcceptedError,
 )
 from tests.helpers.config_entries_stub import make_config_entry
@@ -88,22 +90,32 @@ class _RaisingAPI:
 class _NotAcceptedAPI:
     """Records the stamp seen in flight, then reports a request not accepted."""
 
-    def __init__(self, stage: str) -> None:
+    def __init__(self, stage: str, dispatched: bool) -> None:
         self.stage = stage
+        self.dispatched = dispatched
         self.coordinator: GoogleFindMyCoordinator | None = None
         self.seen_in_flight: dict[str, float | None] = {}
 
     async def async_get_device_location(self, dev_id: str, _dev_name: str) -> Any:
         assert self.coordinator is not None
         self.seen_in_flight[dev_id] = self.coordinator.locate_requested_mono(dev_id)
-        raise LocationRequestNotAcceptedError(stage=self.stage)
+        raise LocationRequestNotAcceptedError(
+            stage=self.stage, dispatched=self.dispatched
+        )
 
 
-# Measured against ``location_request.py``: these two are raised before
-# ``async_nova_request`` is called. Spelled out here instead of imported, so the
-# tests below fail if the production subset grows or shrinks without a reason.
-_NEVER_SENT = ("no_fcm_token", "fcm_registration_failed")
-_MAYBE_SENT = tuple(sorted(LOCATION_REQUEST_NOT_ACCEPTED_STAGES - set(_NEVER_SENT)))
+# The coordinator decides on ``dispatched`` alone, never on the stage name.
+# ``surfacing_before_accept`` is on both lists for that reason: the request
+# layer raises it before and after the send (measured in
+# ``test_location_request_not_accepted.py``), and the stamp must follow the flag.
+_NEVER_SENT = ("no_fcm_token", "fcm_registration_failed", "surfacing_before_accept")
+_MAYBE_SENT = (
+    "nova_request_failed",
+    "network_error",
+    "rate_limited",
+    "server_error",
+    "surfacing_before_accept",
+)
 
 
 async def _cancel_stats_save(coordinator: GoogleFindMyCoordinator) -> None:
@@ -215,14 +227,14 @@ async def test_manual_locate_stamps_before_the_await_even_when_it_raises(
 async def test_poll_cycle_takes_back_a_request_that_was_never_sent(
     monkeypatch: pytest.MonkeyPatch, stage: str, previous: float | None
 ) -> None:
-    """Without a push token the request never reaches Google; it must not count.
+    """A request never handed to Google must not count.
 
     The stamp is still set while the request is in flight (the request layer
     only finds out inside the call), and afterwards the value it replaced is
     back: none at all for a first attempt, the earlier stamp otherwise.
     """
     loop = asyncio.get_running_loop()
-    api = _NotAcceptedAPI(stage)
+    api = _NotAcceptedAPI(stage, dispatched=False)
     devices = [{"id": "dev-1", "name": "Tag"}]
     coordinator = _make_coordinator(monkeypatch, loop, api, devices)
     if previous is not None:
@@ -242,9 +254,9 @@ async def test_poll_cycle_takes_back_a_request_that_was_never_sent(
 async def test_poll_cycle_keeps_a_request_that_may_have_been_sent(
     monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
-    """A 429, a 5xx or a network error may have reached Google; it still counts."""
+    """A request that may have reached Google still counts, whatever the stage."""
     loop = asyncio.get_running_loop()
-    api = _NotAcceptedAPI(stage)
+    api = _NotAcceptedAPI(stage, dispatched=True)
     devices = [{"id": "dev-1", "name": "Tag"}]
     coordinator = _make_coordinator(monkeypatch, loop, api, devices)
     coordinator._locate_requested_mono["dev-1"] = 42.0
@@ -281,7 +293,7 @@ async def test_manual_locate_takes_back_only_a_request_that_was_never_sent(
 
     async def _not_accepted(device_id: str, _name: str) -> Any:
         seen.append(coord._locate_requested_mono.get(device_id))
-        raise LocationRequestNotAcceptedError(stage=stage)
+        raise LocationRequestNotAcceptedError(stage=stage, dispatched=not never_sent)
 
     coord.api.async_get_device_location = AsyncMock(side_effect=_not_accepted)
 
@@ -292,26 +304,120 @@ async def test_manual_locate_takes_back_only_a_request_that_was_never_sent(
     assert coord._locate_requested_mono.get("dev-1") == expected
 
 
-def test_retraction_leaves_a_stamp_it_did_not_set() -> None:
-    """A later attempt or a purge owns the slot now; the old token must not undo it."""
-    never_sent = LocationRequestNotAcceptedError(stage="no_fcm_token")
+_NEVER = LocationRequestNotAcceptedError(stage="no_fcm_token", dispatched=False)
+_MAYBE = LocationRequestNotAcceptedError(stage="server_error", dispatched=True)
 
-    stamps: dict[str, float] = {"dev-1": 1.0}
+
+def test_retraction_ignores_a_request_that_may_have_been_sent() -> None:
+    stamps = LocateStamps([("dev-1", 1.0)])
     token = stamp_locate_attempt(stamps, "dev-1", 2.0)
-    stamps["dev-1"] = 3.0  # a later attempt
-    assert retract_if_never_dispatched(stamps, token, never_sent) is False
+    assert retract_if_never_dispatched(stamps, token, _MAYBE) is False
+    assert stamps == {"dev-1": 2.0}
+
+
+def test_retraction_leaves_a_stamp_it_did_not_set() -> None:
+    """An outside write or a purge owns the slot now; the old token must not undo it."""
+    stamps = LocateStamps([("dev-1", 1.0)])
+    token = stamp_locate_attempt(stamps, "dev-1", 2.0)
+    stamps["dev-1"] = 3.0  # an outside write
+    assert retract_if_never_dispatched(stamps, token, _NEVER) is False
     assert stamps == {"dev-1": 3.0}
 
-    stamps = {}
+    stamps = LocateStamps()
     token = stamp_locate_attempt(stamps, "dev-1", 2.0)
-    del stamps["dev-1"]  # purge_device
-    assert retract_if_never_dispatched(stamps, token, never_sent) is False
+    del stamps["dev-1"]
+    assert retract_if_never_dispatched(stamps, token, _NEVER) is False
     assert stamps == {}
 
-    stamps = {"dev-2": 7.0}
+    stamps = LocateStamps()
     token = stamp_locate_attempt(stamps, "dev-1", 2.0)
-    assert retract_if_never_dispatched(stamps, token, never_sent) is True
+    stamps.pop("dev-1", None)  # purge_device
+    assert retract_if_never_dispatched(stamps, token, _NEVER) is False
+    assert stamps == {}
+
+    stamps = LocateStamps([("dev-2", 7.0)])
+    token = stamp_locate_attempt(stamps, "dev-1", 2.0)
+    assert retract_if_never_dispatched(stamps, token, _NEVER) is True
     assert stamps == {"dev-2": 7.0}
+
+    stamps = LocateStamps()
+    token = stamp_locate_attempt(stamps, "dev-1", 2.0)
+    stamps.clear()
+    assert retract_if_never_dispatched(stamps, token, _NEVER) is False
+    assert stamps == {}
+
+
+def test_overlapping_attempts_never_restore_an_attempt_taken_back() -> None:
+    """A manual locate in its push phase while the poll cycle asks again (R2-4).
+
+    Both fail before the send, the older one first. The value before both
+    must come back, not the older attempt's stamp.
+    """
+    stamps = LocateStamps([("dev-1", 5.0)])
+    manual = stamp_locate_attempt(stamps, "dev-1", 10.0)
+    poll = stamp_locate_attempt(stamps, "dev-1", 20.0)
+    assert retract_if_never_dispatched(stamps, manual, _NEVER) is True
+    assert stamps == {"dev-1": 20.0}
+    assert retract_if_never_dispatched(stamps, poll, _NEVER) is True
+    assert stamps == {"dev-1": 5.0}
+
+
+def test_overlapping_attempts_keep_the_one_that_may_have_been_sent() -> None:
+    stamps = LocateStamps()
+    manual = stamp_locate_attempt(stamps, "dev-1", 10.0)
+    poll = stamp_locate_attempt(stamps, "dev-1", 20.0)
+    assert retract_if_never_dispatched(stamps, poll, _NEVER) is True
+    assert stamps == {"dev-1": 10.0}
+    assert retract_if_never_dispatched(stamps, manual, _MAYBE) is False
+    assert stamps == {"dev-1": 10.0}
+
+
+def test_taking_back_the_oldest_of_three_keeps_the_newest_visible() -> None:
+    stamps = LocateStamps()
+    oldest = stamp_locate_attempt(stamps, "dev-1", 10.0)
+    stamp_locate_attempt(stamps, "dev-1", 20.0)
+    stamp_locate_attempt(stamps, "dev-1", 30.0)
+    assert retract_if_never_dispatched(stamps, oldest, _NEVER) is True
+    assert stamps == {"dev-1": 30.0}
+
+
+def test_two_attempts_on_the_same_clock_reading_stay_apart() -> None:
+    """A frozen or coarse clock gives two attempts the same stamp (R2-5).
+
+    Taking back the older one must not remove the newer one.
+    """
+    stamps = LocateStamps()
+    older = stamp_locate_attempt(stamps, "dev-1", 1000.0)
+    newer = stamp_locate_attempt(stamps, "dev-1", 1000.0)
+    assert retract_if_never_dispatched(stamps, older, _NEVER) is True
+    assert stamps == {"dev-1": 1000.0}
+    assert retract_if_never_dispatched(stamps, older, _NEVER) is False
+    assert retract_if_never_dispatched(stamps, newer, _NEVER) is True
+    assert stamps == {}
+
+
+def test_an_attempt_beyond_the_kept_window_is_folded_into_the_base() -> None:
+    """Only the newest attempts can be taken back; the list stays bounded."""
+    stamps = LocateStamps()
+    tokens = [
+        stamp_locate_attempt(stamps, "dev-1", float(index))
+        for index in range(MAX_TRACKED_ATTEMPTS + 1)
+    ]
+    assert retract_if_never_dispatched(stamps, tokens[0], _NEVER) is False
+    for token in reversed(tokens[1:]):
+        assert retract_if_never_dispatched(stamps, token, _NEVER) is True
+    assert stamps == {"dev-1": 0.0}
+
+
+def test_ensure_locate_stamps_keeps_values_and_identity() -> None:
+    existing = LocateStamps([("dev-1", 1.0)])
+    assert ensure_locate_stamps(existing) is existing
+    converted = ensure_locate_stamps({"dev-1": 2.0})
+    assert isinstance(converted, LocateStamps)
+    assert converted == {"dev-1": 2.0}
+    fresh = ensure_locate_stamps(None)
+    assert isinstance(fresh, LocateStamps)
+    assert fresh == {}
 
 
 @pytest.mark.asyncio

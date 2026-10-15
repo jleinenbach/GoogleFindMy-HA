@@ -83,24 +83,16 @@ LOCATION_REQUEST_NOT_ACCEPTED_STAGES: frozenset[str] = frozenset(
     }
 )
 
-# The subset of those positions whose raise sites lie BEFORE the call to
-# ``async_nova_request``: the locate request itself was never sent to Google, so
-# nothing on the server side can have reacted to it. Both are FCM stages; FCM is
-# set up first because the request carries the push token. Every other marker
-# may sit after the request reached the server (``rate_limited`` and
-# ``server_error`` are server answers; ``network_error`` and
-# ``nova_request_failed`` cannot tell whether bytes left the host), and
-# ``surfacing_before_accept`` belongs to the outer handler, whose position in the
-# file says nothing about the send. This is still a POSITION, read off the
-# order of the raise sites, not a cause. The test
-# ``test_pre_dispatch_stages_are_the_raise_sites_before_the_send`` derives it
-# from the AST, so moving a raise site across the send call fails there.
-LOCATION_REQUEST_PRE_DISPATCH_STAGES: frozenset[str] = frozenset(
-    {
-        "no_fcm_token",
-        "fcm_registration_failed",
-    }
-)
+# Whether the locate request was handed to Google is NOT a property of the
+# stage. ``surfacing_before_accept`` proves it: the outer handler catches
+# failures from both sides of the send call, and in today's code almost all of
+# them come from before it (building the request payload). The answer is
+# therefore read off a second flag, ``request_dispatched``, set immediately
+# before ``async_nova_request`` is awaited, and every raise site passes it as
+# ``dispatched``. ``test_every_raise_site_states_whether_it_dispatched`` pins
+# the explicit argument at each site, and
+# ``test_before_dispatch_matches_whether_google_was_called`` drives every stage
+# through the real flow and counts the calls to ``async_nova_request``.
 
 
 class LocationRequestNotAcceptedError(Exception):
@@ -209,7 +201,9 @@ class LocationRequestNotAcceptedError(Exception):
     not re-raise. The base class only guarantees that no NARROW handler
     misroutes the signal along the way.
 
-    The payload is ``stage`` plus an optional HTTP ``status`` -- carried wherever
+    The payload is ``stage``, the boolean ``dispatched`` (whether
+    ``async_nova_request`` had been called), and an optional HTTP ``status`` --
+    the status carried wherever
     the failing layer knows one, measured today at exactly two sites: the server
     error, which reads it off ``NovaHTTPError.status``, and the rate limit, which
     has no such attribute and takes the transport's ``HTTP_TOO_MANY_REQUESTS``
@@ -219,10 +213,18 @@ class LocationRequestNotAcceptedError(Exception):
     user-facing records.
     """
 
-    def __init__(self, *, stage: str, status: int | None = None) -> None:
-        """Record the flow position and, for a server error, its HTTP status."""
+    def __init__(
+        self, *, stage: str, status: int | None = None, dispatched: bool = True
+    ) -> None:
+        """Record the flow position, an HTTP status, and whether Google was called.
+
+        ``dispatched`` defaults to True, the cautious reading: "this layer cannot
+        rule out that the request reached Google". Every raise site in this
+        module passes it explicitly.
+        """
         self.stage = stage
         self.status = status
+        self.dispatched = dispatched
         detail = (
             f"stage={stage}" if status is None else f"stage={stage}, status={status}"
         )
@@ -230,13 +232,13 @@ class LocationRequestNotAcceptedError(Exception):
 
     @property
     def before_dispatch(self) -> bool:
-        """Return whether the locate request was never sent to Google.
+        """Return whether the locate request was never handed to Google.
 
-        True only for the markers in ``LOCATION_REQUEST_PRE_DISPATCH_STAGES``.
-        False does NOT mean the request arrived; it means this layer cannot
-        rule that out.
+        True only when the raise site stood before the call to
+        ``async_nova_request``. False does NOT mean the request arrived; it
+        means this layer cannot rule that out.
         """
-        return self.stage in LOCATION_REQUEST_PRE_DISPATCH_STAGES
+        return not self.dispatched
 
 
 def _format_cause_chain(exc: BaseException, *, max_depth: int = 8) -> str:
@@ -790,6 +792,10 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
     # a position in the file (``custom_components/googlefindmy/AGENTS.md``, the
     # paragraph beginning "Where the resolution belongs is measured").
     request_accepted = False
+    # Set immediately before ``async_nova_request`` is awaited. Unlike the stage,
+    # it tells the outer handler whether Google can have seen the request; see
+    # the comment above ``LocationRequestNotAcceptedError``.
+    request_dispatched = False
     ctx = _CallbackContext()
     loop = asyncio.get_running_loop()
 
@@ -951,7 +957,9 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
                 # No exception to chain from: the register call returned a falsy
                 # token rather than raising, so ``from`` would have nothing to
                 # attach. The stage marker IS the whole cause here.
-                raise LocationRequestNotAcceptedError(stage="no_fcm_token")
+                raise LocationRequestNotAcceptedError(
+                    stage="no_fcm_token", dispatched=False
+                )
             registered = True
             _LOGGER.debug("FCM token obtained for %s (len=%d)", name, len(fcm_token))
         except LocationRequestNotAcceptedError:
@@ -968,7 +976,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             _LOGGER.debug("FCM registration failed for %s", name)
             _LOGGER.debug("FCM registration traceback: %s", traceback.format_exc())
             raise LocationRequestNotAcceptedError(
-                stage="fcm_registration_failed"
+                stage="fcm_registration_failed", dispatched=False
             ) from fcm_error
 
         # Create location request payload
@@ -983,6 +991,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
         # Send location request to Google API (async; HA session preferred if provided)
         _LOGGER.debug("Sending location request to Google API for %s", name)
         try:
+            request_dispatched = True
             _ = await async_nova_request(
                 NOVA_ACTION_API_SCOPE,
                 hex_payload,
@@ -1006,7 +1015,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             # rate-limiting errors after retries"), so it comes from the transport's
             # own constant rather than from a getattr that would silently yield None.
             raise LocationRequestNotAcceptedError(
-                stage="rate_limited", status=HTTP_TOO_MANY_REQUESTS
+                stage="rate_limited", status=HTTP_TOO_MANY_REQUESTS, dispatched=True
             ) from e
         except NovaHTTPError as e:
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
@@ -1015,7 +1024,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             )
             _LOGGER.debug("Server error while requesting location for %s", name)
             raise LocationRequestNotAcceptedError(
-                stage="server_error", status=e.status
+                stage="server_error", status=e.status, dispatched=True
             ) from e
         except NovaAuthError as e:
             # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
@@ -1046,12 +1055,16 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.warning("Network/client error while requesting location: %s", e)
             _LOGGER.debug("Network/client error while requesting location for %s", name)
-            raise LocationRequestNotAcceptedError(stage="network_error") from e
+            raise LocationRequestNotAcceptedError(
+                stage="network_error", dispatched=True
+            ) from e
         except Exception as e:
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.error("Nova API request failed: %s", e)
             _LOGGER.debug("Nova API request failed for %s", name)
-            raise LocationRequestNotAcceptedError(stage="nova_request_failed") from e
+            raise LocationRequestNotAcceptedError(
+                stage="nova_request_failed", dispatched=True
+            ) from e
 
         # For this RPC the server often returns HTTP 200 with empty body (FCM delivers the data).
         _LOGGER.debug("Location request accepted for %s; awaiting FCM data", name)
@@ -1190,7 +1203,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             # signal then claims is a position at THIS integration's accept point,
             # never one on the wire (see the class docstring).
             raise LocationRequestNotAcceptedError(
-                stage="surfacing_before_accept"
+                stage="surfacing_before_accept", dispatched=request_dispatched
             ) from e
         return []
     finally:

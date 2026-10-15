@@ -58,7 +58,6 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
     LOCATION_REQUEST_NOT_ACCEPTED_STAGES,
-    LOCATION_REQUEST_PRE_DISPATCH_STAGES,
     LocationRequestNotAcceptedError,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
@@ -136,13 +135,13 @@ def test_the_signal_is_not_a_runtime_or_decryption_or_nova_error(
 
 
 def test_the_signal_carries_a_stage_and_no_device_name() -> None:
-    """R6: the payload is stage plus status -- never the raw device display name."""
+    """R6: the payload is stage, status and the dispatch flag -- never a device name."""
     error = LocationRequestNotAcceptedError(stage="server_error", status=503)
 
     assert error.stage == "server_error"
     assert error.status == 503
     assert "503" in str(error)
-    assert set(vars(error)) == {"stage", "status"}
+    assert set(vars(error)) == {"stage", "status", "dispatched"}
 
     bare = LocationRequestNotAcceptedError(stage="no_fcm_token")
     assert bare.status is None
@@ -154,7 +153,7 @@ def test_the_signal_carries_a_stage_and_no_device_name() -> None:
     # there is no parameter to pass one through. Asserting "the sample name is absent"
     # on an instance built WITHOUT that name would be circular; the signature is not.
     parameters = inspect.signature(LocationRequestNotAcceptedError).parameters
-    assert set(parameters) == {"stage", "status"}
+    assert set(parameters) == {"stage", "status", "dispatched"}
     assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters.values())
 
     # And the message stays derived from those two, so a name cannot be baked in
@@ -237,55 +236,46 @@ def test_the_stage_markers_are_a_closed_set() -> None:
     assert len(stages) == len(set(stages)), f"a marker is used twice: {stages}"
 
 
-def test_pre_dispatch_stages_are_the_raise_sites_before_the_send() -> None:
-    """The "never sent" subset is the set of raise sites ahead of the send call.
+def test_every_raise_site_states_whether_it_dispatched() -> None:
+    """Each raise site passes ``dispatched`` instead of relying on the default.
 
-    ``poll_age_s`` takes a request back only for these stages, so the subset
-    has to follow the code: a raise site moved across ``async_nova_request``,
-    or a new one added ahead of it, must change the subset or fail here.
+    The default is the cautious "cannot rule out a send". A new raise site that
+    forgot the argument would therefore keep a stamp it should take back, and
+    nothing at run time would show it.
     """
     tree = ast.parse(_LOCATION_REQUEST_PY.read_text(encoding="utf-8"))
-    flows = [
-        node
+    sites = [
+        node.exc
         for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef)
-        and node.name == "get_location_data_for_device"
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+        and node.exc.func.id == "LocationRequestNotAcceptedError"
     ]
-    assert len(flows) == 1, "the request flow moved; this test is blind"
-    sends = [
-        node.lineno
-        for node in ast.walk(flows[0])
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "async_nova_request"
+    assert len(sites) == 7, f"expected seven raise sites, found {len(sites)}"
+    missing = [
+        call.lineno
+        for call in sites
+        if not any(keyword.arg == "dispatched" for keyword in call.keywords)
     ]
-    assert len(sends) == 1, f"expected exactly one send call, found {sends}"
-
-    before: set[str] = set()
-    after: set[str] = set()
-    for node in ast.walk(flows[0]):
-        if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
-            continue
-        func = node.exc.func
-        if not (
-            isinstance(func, ast.Name) and func.id == "LocationRequestNotAcceptedError"
-        ):
-            continue
-        for keyword in node.exc.keywords:
-            if keyword.arg == "stage" and isinstance(keyword.value, ast.Constant):
-                (before if node.lineno < sends[0] else after).add(
-                    str(keyword.value.value)
-                )
-
-    assert before == LOCATION_REQUEST_PRE_DISPATCH_STAGES
-    assert before | after == LOCATION_REQUEST_NOT_ACCEPTED_STAGES
-    assert not before & after
+    assert not missing, f"raise sites without dispatched=: lines {missing}"
 
 
-@pytest.mark.parametrize("stage", sorted(LOCATION_REQUEST_NOT_ACCEPTED_STAGES))
-def test_before_dispatch_follows_the_subset(stage: str) -> None:
-    err = LocationRequestNotAcceptedError(stage=stage)
-    assert err.before_dispatch is (stage in LOCATION_REQUEST_PRE_DISPATCH_STAGES)
+@pytest.mark.parametrize(
+    ("dispatched", "expected"),
+    [(False, True), (True, False)],
+    ids=["never-sent", "maybe-sent"],
+)
+def test_before_dispatch_is_the_negated_flag(dispatched: bool, expected: bool) -> None:
+    err = LocationRequestNotAcceptedError(stage="server_error", dispatched=dispatched)
+    assert err.dispatched is dispatched
+    assert err.before_dispatch is expected
+
+
+def test_the_default_cannot_rule_out_a_send() -> None:
+    err = LocationRequestNotAcceptedError(stage="no_fcm_token")
+    assert err.dispatched is True
+    assert err.before_dispatch is False
 
 
 # ===========================================================================
@@ -1179,6 +1169,101 @@ async def test_surfacing_before_accept_raises_instead_of_returning_empty(
 
     assert excinfo.value.stage == "surfacing_before_accept"
     assert excinfo.value.__cause__ is boom
+
+
+def _count_nova_calls(
+    monkeypatch: pytest.MonkeyPatch, outcome: Exception | None
+) -> list[int]:
+    """Replace the send call; count its calls and raise ``outcome`` if given."""
+    calls: list[int] = []
+
+    async def _send(*_a: object, **_k: object) -> bytes:
+        calls.append(1)
+        if outcome is not None:
+            raise outcome
+        return b""
+
+    monkeypatch.setattr(location_request_module, "async_nova_request", _send)
+    return calls
+
+
+def _fail_on_the_accept_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the accept log line raise, so the outer handler sees a post-send error."""
+    original = location_request_module._LOGGER.info
+
+    def _info(msg: str, *args: object, **kwargs: Any) -> None:
+        if msg.startswith("Location request accepted"):
+            raise RuntimeError("accept line failed")
+        original(msg, *args, **kwargs)
+
+    monkeypatch.setattr(location_request_module._LOGGER, "info", _info)
+
+
+def _boom_payload(*_a: object, **_k: object) -> str:
+    raise RuntimeError("payload build failed")
+
+
+# (case id, stage, receiver, payload builder, send outcome, accept line fails,
+# calls to async_nova_request). The call count is a literal on purpose: the
+# assertion below compares ``before_dispatch`` with the MEASURED count, and the
+# literal keeps each case from passing vacuously on a flow that never ran.
+_DISPATCH_CASES = [
+    ("no-token", "no_fcm_token", "empty", None, None, False, 0),
+    ("registration", "fcm_registration_failed", "raising", None, None, False, 0),
+    ("payload", "surfacing_before_accept", "token", _boom_payload, None, False, 0),
+    ("rate", "rate_limited", "token", None, NovaRateLimitError("q"), False, 1),
+    ("server", "server_error", "token", None, NovaHTTPError(503, "x"), False, 1),
+    ("network", "network_error", "token", None, aiohttp.ClientError("x"), False, 1),
+    ("nova", "nova_request_failed", "token", None, RuntimeError("x"), False, 1),
+    ("after-send", "surfacing_before_accept", "token", None, None, True, 1),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "receiver", "payload", "outcome", "accept_fails", "expected_calls"),
+    [case[1:] for case in _DISPATCH_CASES],
+    ids=[case[0] for case in _DISPATCH_CASES],
+)
+async def test_before_dispatch_matches_whether_google_was_called(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    receiver: str,
+    payload: Any,
+    outcome: Exception | None,
+    accept_fails: bool,
+    expected_calls: int,
+) -> None:
+    """``before_dispatch`` is true exactly when ``async_nova_request`` was not called.
+
+    Every stage is driven through the real flow. ``surfacing_before_accept``
+    appears twice, once from the payload build before the send and once from
+    the accept line after it: the stage alone does not decide.
+    """
+    receivers = {
+        "empty": _TokenFcmReceiver(token=""),
+        "raising": _RaisingFcmReceiver(RuntimeError("registration down")),
+        "token": _TokenFcmReceiver(),
+    }
+    monkeypatch.setattr(
+        location_request_module, "_FCM_ReceiverGetter", lambda *_a: receivers[receiver]
+    )
+    _capture_ctx(monkeypatch)
+    monkeypatch.setattr(
+        location_request_module,
+        "create_location_request",
+        payload or (lambda *a, **k: "deadbeef"),
+    )
+    calls = _count_nova_calls(monkeypatch, outcome)
+    if accept_fails:
+        _fail_on_the_accept_line(monkeypatch)
+
+    with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
+        await _locate()
+
+    assert excinfo.value.stage == stage
+    assert len(calls) == expected_calls
+    assert excinfo.value.before_dispatch is (len(calls) == 0)
 
 
 @pytest.mark.asyncio

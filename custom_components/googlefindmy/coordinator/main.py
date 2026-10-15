@@ -91,6 +91,7 @@ from .helpers.geo import (
 from .helpers.geo import (
     coerce_float as _coerce_float_impl,
 )
+from .helpers.locate_clock import LocateStamps
 from .helpers.stats import (
     ApiStatus,
     CryptoStatus,
@@ -830,14 +831,14 @@ class GoogleFindMyCoordinator(
         # When the integration last attempted a location request for a device,
         # on the ``time.monotonic`` clock. Set immediately before the request is
         # awaited at both send sites (poll cycle and manual locate), so a request
-        # that raises or times out after it was sent still counts. A request that
-        # stopped before it was sent (no push token, failed push registration) is
-        # taken back and the previous stamp restored
-        # (``coordinator/helpers/locate_clock.py``). ``_last_poll_mono`` cannot
+        # that raises or times out after it was sent still counts. An attempt the
+        # request layer reports as never handed to Google (``before_dispatch``) is
+        # taken back; a few attempts that never reached Google still count, see
+        # ``coordinator/helpers/locate_clock.py``. ``_last_poll_mono`` cannot
         # serve here: it is a scheduling base, back-dated by the poll interval.
         # Read by the EID resolver for the ``poll_age_s`` field of
         # ``FMDN_UWT_TRANSITION`` through ``locate_requested_mono``.
-        self._locate_requested_mono: dict[str, float] = {}
+        self._locate_requested_mono: LocateStamps = LocateStamps()
 
         # Per-device action locks to prevent race conditions on concurrent requests
         self._device_action_locks: dict[str, asyncio.Lock] = {}
@@ -2525,11 +2526,13 @@ class GoogleFindMyCoordinator(
         """Return when a location request for ``device_id`` was last attempted.
 
         The value is on the ``time.monotonic`` clock and is ``None`` when this
-        process has not attempted a request for the device yet. Attempts that
-        stopped before the request was sent to Google (no push token, failed
-        push registration) do not count; an attempt that was sent may still
-        have failed afterwards. Read defensively so a coordinator built without
-        ``__init__`` answers ``None`` instead of raising.
+        process has not attempted a request for the device yet. It marks the
+        start of the attempt, before push registration. Attempts the request
+        layer reports as never handed to Google do not count; some that never
+        reached Google still do (see ``helpers/locate_clock.py``), and an
+        attempt that was sent may still have failed afterwards. Read
+        defensively so a coordinator built without ``__init__`` answers
+        ``None`` instead of raising.
         """
         stamps: dict[str, float] = getattr(self, "_locate_requested_mono", {})
         return stamps.get(device_id)

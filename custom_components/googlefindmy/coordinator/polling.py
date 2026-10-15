@@ -79,7 +79,11 @@ from .helpers.cache import (
     substitute_zone_accuracy,
 )
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
-from .helpers.locate_clock import retract_if_never_dispatched, stamp_locate_attempt
+from .helpers.locate_clock import (
+    ensure_locate_stamps,
+    retract_if_never_dispatched,
+    stamp_locate_attempt,
+)
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 from .helpers.update import (
@@ -1975,8 +1979,9 @@ class PollingOperations(_MixinBase):
                         # still counts. One that stopped before the send is
                         # undone in the not-accepted branch below. Created
                         # lazily for coordinators built without __init__.
-                        if not hasattr(self, "_locate_requested_mono"):
-                            self._locate_requested_mono = {}
+                        self._locate_requested_mono = ensure_locate_stamps(
+                            getattr(self, "_locate_requested_mono", None)
+                        )
                         locate_stamp = stamp_locate_attempt(
                             self._locate_requested_mono, dev_id, time.monotonic()
                         )
@@ -2718,9 +2723,9 @@ class PollingOperations(_MixinBase):
                         #   of the ten clear it unconditionally, `TimeoutError`
                         #   never does (it increments), and `NovaAuthError`
                         #   clears it on only one of its three exits.
-                        # Without a push token or with a failed push
-                        # registration the request was never sent, so it must
-                        # not count for ``poll_age_s`` (helpers/locate_clock.py).
+                        # A request the request layer never handed to Google
+                        # (``before_dispatch``) must not count for
+                        # ``poll_age_s`` (helpers/locate_clock.py).
                         retract_if_never_dispatched(
                             self._locate_requested_mono, locate_stamp, not_accepted_err
                         )
