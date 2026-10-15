@@ -395,9 +395,10 @@ def test_the_sensor_hooks_the_write_every_core_path_ends_in() -> None:
 
     Core's ``async_write_ha_state``, ``async_update_ha_state`` (the
     ``update_entity`` service) and ``schedule_update_ha_state`` all end in
-    ``_async_write_ha_state``, and Core names it as the method to override;
-    ``async_write_ha_state`` is ``@final`` from Core 2026.10 on. An override of
-    the public method would miss the other two paths.
+    ``_async_write_ha_state`` on every Core line the CI tests. From Core 2026.5 on
+    ``async_write_ha_state`` is ``@final`` and Core names the private method as
+    the one to override. An override of the public method would miss the other
+    two paths.
     """
 
     sensor = importlib.import_module("custom_components.googlefindmy.sensor")

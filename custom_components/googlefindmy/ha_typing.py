@@ -64,8 +64,8 @@ if TYPE_CHECKING:
 
         def async_write_ha_state(self) -> None: ...
 
-        # Core's documented override point for customising a state write
-        # (docstring of ``Entity.async_write_ha_state``); every write path ends here.
+        # Every state write path ends here on the Core lines CI tests; from 2026.5 the
+        # docstring of ``Entity.async_write_ha_state`` names it as the override point.
         def _async_write_ha_state(self) -> None: ...
 
         @property

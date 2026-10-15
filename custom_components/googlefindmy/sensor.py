@@ -1854,11 +1854,11 @@ class GoogleFindMyCoarseFixSensor(GoogleFindMyDeviceEntity, SensorEntity):
     def _async_write_ha_state(self) -> None:
         """Write the state with one read of the coarse fix for state and attributes.
 
-        Core sends every state write through this method
-        (``async_write_ha_state``, ``async_update_ha_state`` and
-        ``schedule_update_ha_state``) and names it as the one to override when
-        an integration customises a write; ``async_write_ha_state`` is
-        ``@final`` from Core 2026.10 on.
+        On every Core line the CI tests, each state write goes
+        through this method (``async_write_ha_state``, ``async_update_ha_state``
+        and ``schedule_update_ha_state``). From Core 2026.5 on,
+        ``async_write_ha_state`` is ``@final`` and its docstring names this
+        method as the one to override.
         """
         self._write_snapshot = self._read_coarse_fix()
         try:
