@@ -13,15 +13,34 @@ about 16 such lines per minute.
 
 The check is static (AST) on purpose: driving the success path end to end needs
 the protobuf decoder and the decryption stack, and what this test pins is the
-level of each call, not the flow around it.
+level of each call, not the flow around it. The decryption record is also
+driven once at runtime, through the FCM callback with the decoder and the
+decryption module stubbed, because no other test reaches its success branch.
 """
 
 from __future__ import annotations
 
 import ast
+import asyncio
+import logging
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
+    location_request,
+)
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    DecryptionError,
+    OwnerKeyLookupTransientError,
+    StaleOwnerKeyError,
+)
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+    SpotApiEmptyResponseError,
+)
 
 _PACKAGE = Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
 
@@ -112,3 +131,64 @@ def test_routine_locate_record_has_no_trailing_period(module: str, prefix: str) 
 
     _, fmt = _logger_calls(module, prefix)[0]
     assert not fmt.rstrip().endswith("."), f"{fmt!r} ends with a period"
+
+
+@pytest.mark.asyncio
+async def test_decryption_success_record_logs_at_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A decrypted FCM response logs its record count at DEBUG only.
+
+    The callback also tags the first record with the lower-cased canonical id
+    the response arrived for; the mixed-case response id pins that step.
+    """
+
+    decrypted = [{"latitude": 49.89}, {"latitude": 49.90}]
+
+    async def _decrypt(*_: Any, **__: Any) -> list[dict[str, Any]]:
+        return decrypted
+
+    decoder_module = SimpleNamespace(parse_device_update_protobuf=lambda _hex: object())
+    decrypt_module = SimpleNamespace(
+        async_decrypt_location_response_locations=_decrypt,
+        DecryptionError=DecryptionError,
+        StaleOwnerKeyError=StaleOwnerKeyError,
+        OwnerKeyLookupTransientError=OwnerKeyLookupTransientError,
+    )
+    eid_module = SimpleNamespace(SpotApiEmptyResponseError=SpotApiEmptyResponseError)
+    monkeypatch.setattr(
+        location_request, "_import_decoder_module", lambda: decoder_module
+    )
+    monkeypatch.setattr(
+        location_request, "_import_decrypt_locations_module", lambda: decrypt_module
+    )
+    monkeypatch.setattr(location_request, "_import_eid_info_module", lambda: eid_module)
+
+    caplog.set_level(logging.DEBUG, logger=location_request.__name__)
+    ctx = location_request._CallbackContext()
+    callback = location_request._make_location_callback(
+        name="Backpack Tracker",
+        canonic_device_id="device-canonic-id",
+        ctx=ctx,
+        loop=asyncio.get_running_loop(),
+        cache=MagicMock(),
+    )
+    callback("Device-Canonic-ID", "00")
+    await asyncio.wait_for(ctx.event.wait(), timeout=2.0)
+
+    success = [
+        rec
+        for rec in caplog.records
+        if rec.getMessage()
+        == "Successfully decrypted 2 location record(s) for Backpack Tracker"
+    ]
+    assert [rec.levelno for rec in success] == [logging.DEBUG]
+    above_debug = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.name == location_request.__name__ and rec.levelno > logging.DEBUG
+    ]
+    assert above_debug == [], f"routine success path logged above DEBUG: {above_debug}"
+    assert ctx.data == decrypted
+    assert ctx.data[0]["canonic_id"] == "device-canonic-id"
