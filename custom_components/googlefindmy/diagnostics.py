@@ -20,6 +20,7 @@ Additional privacy hardening (message bodies):
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections.abc import Mapping
@@ -60,6 +61,8 @@ from .const import (
 )
 from .redaction import REDACTED, async_redact_data
 from .shared_helpers import normalize_fcm_entry_snapshot, safe_fcm_health_snapshots
+
+_LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .coordinator import GoogleFindMyCoordinator  # noqa: F401
@@ -587,7 +590,10 @@ def _uwt_transitions_block(hass: HomeAssistant, entry_id: str) -> dict[str, Any]
                 for event in snapshot.events
             ],
         }
-    except Exception:  # noqa: BLE001 - diagnostics must not fail on this block
+    except Exception as err:  # noqa: BLE001 - diagnostics must not fail on this block
+        # Only the type: the message of an error raised while reading the
+        # resolver could carry an identifier (AGENTS.md section 5).
+        _LOGGER.debug("uwt_transitions_block_failed error=%s", type(err).__name__)
         return empty
 
 

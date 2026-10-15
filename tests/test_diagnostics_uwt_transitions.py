@@ -16,6 +16,7 @@ block's builder.
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -190,11 +191,15 @@ async def test_block_is_empty_without_a_resolver(
 
 @pytest.mark.asyncio
 async def test_block_is_empty_when_the_resolver_fails(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     class _Broken:
         def uwt_transition_snapshot(self, entry_id: str) -> object:
             raise RuntimeError("resolver state unavailable")
 
-    payload = await _dump(monkeypatch, _ENTRY_A, _Broken())
+    with caplog.at_level(logging.DEBUG, logger=diagnostics.__name__):
+        payload = await _dump(monkeypatch, _ENTRY_A, _Broken())
     assert payload["uwt_transitions"]["events"] == []
+    assert [r.getMessage() for r in caplog.records] == [
+        "uwt_transitions_block_failed error=RuntimeError"
+    ]

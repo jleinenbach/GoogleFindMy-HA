@@ -670,19 +670,26 @@ from Google.
    ```
    - `old`/`new`: the mode before and after. The first known mode of a device
      is written with `old=unknown`: after a restart, after the entry was
-     reloaded, and after the device was missing from the integration for a
-     while.
+     reloaded, and after a single refresh in which the device's identity was
+     not available, for example because its key could not be decrypted once.
    - `source`: whether the hashed-flags bit (`flags_bit`) or the frame type
      (`frame_type`) showed the mode.
    - `poll_age_s`: seconds between the last location request this integration
      attempted for the device and the advertisement that showed the change.
-     A request that was never sent (no push token, failed push registration)
+     The clock starts when the attempt starts, before the push registration;
+     on a reconnect the request may leave up to about 44 seconds later.
+     An attempt that stopped before the request was handed to Google (no push
+     token, failed push registration, a failure while building the request)
      does not count. A request that was sent counts even if it failed
-     afterwards, for example with a server error. `none` if there was no
-     such request since the start, or if it came after the advertisement.
+     afterwards, for example with a server error. A few attempts that never
+     reached Google still count: configuration errors such as a missing push
+     provider, and a poll attempt cut off by its time limit while the push
+     registration was still running. `none` if there was no such request
+     since the start, or if it came after the advertisement.
    - `prev_seen_age_s`: seconds since the old mode was last seen.
-   - At most 12 lines per device and hour are written at INFO, further ones at
-     DEBUG. Once the limit has freed up, the next advertisement of the device
+   - At most 12 lines per device and hour are written at INFO, counted per
+     account: a tracker shared between two accounts can write 24. Further
+     ones go to DEBUG. Once the limit has freed up, the next advertisement of the device
      writes a line with `kind=resync` that repeats the current mode, and
      `suppressed=<n>` says how many lines went to DEBUG.
 2. **Make INFO visible.** The line is logged at INFO and is hidden at the

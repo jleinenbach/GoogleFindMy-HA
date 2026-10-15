@@ -1132,7 +1132,9 @@ class UwtTransitionEvent(NamedTuple):
     ``old`` is ``"unknown"`` for the first known mode of a device in this
     process. ``poll_age_s`` is the age, at the observation, of the last
     location request the integration attempted for the device, not counting
-    attempts that stopped before the request was sent; ``prev_seen_age_s``
+    attempts the request layer reports as never handed to Google (a few that
+    never reached Google still count, see ``coordinator/helpers/locate_clock.py``);
+    ``prev_seen_age_s``
     the age of the last observation of the old mode. Both are ``None`` when
     there is nothing to measure them against.
     """
@@ -3814,7 +3816,9 @@ class GoogleFindMyEIDResolver:
                         match, track, event, decoded=reading.decoded, clock=clock
                     )
                 continue
-            track.state = mode
+            # The state moves only after the event was built and stored: if
+            # building it fails, the next sighting of this mode is still a
+            # change and is recorded then.
             event = self._record_uwt_event(
                 match,
                 track,
@@ -3828,6 +3832,7 @@ class GoogleFindMyEIDResolver:
                 clock=clock,
                 old_seen_mono=old_seen,
             )
+            track.state = mode
             self._log_uwt_event(
                 match, track, event, decoded=reading.decoded, clock=clock
             )
@@ -3902,8 +3907,12 @@ class GoogleFindMyEIDResolver:
         clock: ObservationClock,
         old_seen_mono: float | None,
     ) -> UwtTransitionEvent:
-        """Append one event to the history of the match's config entry."""
-        track.seq += 1
+        """Append one event to the history of the match's config entry.
+
+        ``track.seq`` advances only once the event is stored, so a failure
+        while building it leaves the track as it was.
+        """
+        seq = track.seq + 1
         prev_seen_age_s: int | None = None
         if old_seen_mono is not None:
             prev_seen_age_s = int(max(0.0, clock.monotonic - old_seen_mono))
@@ -3919,7 +3928,7 @@ class GoogleFindMyEIDResolver:
             poll_age_s=self._uwt_poll_age_s(match, clock.monotonic),
             prev_seen_age_s=prev_seen_age_s,
             observed=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock.wall)),
-            seq=track.seq,
+            seq=seq,
         )
         ring = self._uwt_events.get(match.config_entry_id)
         if ring is None:
@@ -3928,6 +3937,7 @@ class GoogleFindMyEIDResolver:
         if len(ring.events) == ring.events.maxlen:
             ring.dropped += 1
         ring.events.append(event)
+        track.seq = seq
         return event
 
     def _uwt_poll_age_s(self, match: EIDMatch, observed_mono: float) -> int | None:

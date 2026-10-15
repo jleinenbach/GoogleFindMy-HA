@@ -113,7 +113,7 @@ def test_first_known_mode_is_recorded_with_old_unknown() -> None:
 
 
 def test_an_observation_without_frame_type_is_labelled_none() -> None:
-    """A bare EID carries no frame type: ``frame=none``, ``flags=absent``."""
+    """A bare EID carries no frame type: ``frame=none``."""
     resolver = _resolver()
     _observe(
         resolver,
@@ -285,6 +285,13 @@ def test_poll_age_reads_a_bare_coordinator_as_well() -> None:
     assert _events(resolver)[0].poll_age_s == 8
 
 
+def test_a_request_at_the_observation_gives_poll_age_zero() -> None:
+    """Only a request AFTER the sighting has no age; one at the same instant is 0."""
+    resolver = _resolver({"entry-a": _Coordinator({"dev-1": 10.0})})
+    _observe(resolver, True, 10.0)
+    assert _events(resolver)[0].poll_age_s == 0
+
+
 def test_a_request_after_the_observation_gives_no_poll_age(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -354,6 +361,37 @@ async def test_refresh_drops_gone_devices_and_unloaded_entries() -> None:
 
     assert set(resolver._uwt_track) == {("entry-a", "dev-1")}
     assert set(resolver._uwt_events) == {"entry-a"}
+
+
+def test_an_identity_of_an_unloaded_entry_keeps_no_track() -> None:
+    """An identity still names the device, but its entry is gone: the track goes."""
+    resolver = _resolver({"entry-a": object()})
+    _observe(resolver, True, 10.0, matches=[_match("entry-b", "dev-1")])
+    assert set(resolver._uwt_track) == {("entry-b", "dev-1")}
+    resolver._cached_identities = [_identity("entry-b", "dev-1")]
+    resolver._purge_uwt_state()
+    assert resolver._uwt_track == {}
+
+
+def test_a_failure_while_building_the_event_changes_nothing() -> None:
+    """The state and the sequence move only once the event is stored.
+
+    The next sighting of the same mode is then still a change and is recorded.
+    """
+    resolver = _resolver()
+    _observe(resolver, False, 10.0)
+    with patch.object(eid_resolver.time, "gmtime", side_effect=OverflowError):
+        with pytest.raises(OverflowError):
+            _observe(resolver, True, 20.0)
+    (track,) = resolver._uwt_track.values()
+    assert track.state is False
+    assert track.seq == 1
+    _observe(resolver, True, 30.0)
+    events = _events(resolver)
+    assert [(event.old, event.new, event.seq) for event in events] == [
+        ("unknown", "off", 1),
+        ("off", "on", 2),
+    ]
 
 
 def test_a_loaded_entry_keeps_its_history_without_identities() -> None:
@@ -635,6 +673,12 @@ def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
     numbers, the UTC time), the decoded flags byte and the suppressed count;
     no name, entity id, address or coordinate. Any added, removed or changed
     argument fails the test and has to be classified again.
+
+    Not seen: the call is found only by ``_UWT_TRANSITION_FORMAT`` passed as a
+    positional argument. A second name bound to the format, a message
+    formatted with ``%`` before the call, or a second log call with its own
+    ``FMDN_UWT_TRANSITION`` literal would pass unnoticed (none of them exists
+    today).
 
     Retirement condition: the transition line is lowered to DEBUG or removed.
     """

@@ -649,6 +649,17 @@ sentence above and checked both its number and its names. What was loose until n
 other contracts under this component. A name may therefore not be written into any of them before the test exists.
 Citations of a FILE (`tests/foo.py`) stay unchecked by design, so renaming a test module still dangles silently.
 
+### Location request clock (`poll_age_s`)
+
+Every site that awaits `api.async_get_device_location` for a locate stamps the device with `stamp_locate_attempt`
+(`coordinator/helpers/locate_clock.py`) immediately BEFORE the await, and passes the token to
+`retract_if_never_dispatched` in its `LocationRequestNotAcceptedError` branch. A new send site that skips either step
+leaves `poll_age_s` silently wrong for its requests. Whether an attempt counts is read off `before_dispatch`, which
+`location_request.py` derives from the `dispatched` flag it sets right before `async_nova_request`; never from the
+stage name, because `surfacing_before_accept` occurs on both sides of the send. Every raise site passes `dispatched=`
+explicitly (`test_every_raise_site_states_whether_it_dispatched`), and
+`test_before_dispatch_matches_whether_google_was_called` counts the send calls per stage.
+
 ### Map View reminders
 
 * Decide whether Map View is on only through `_is_map_view_enabled_for_entry` (in `map_view.py`; `__init__.py` reaches it lazily through `_is_map_view_enabled_for_entry_fn`). Registration, the device-URL refresh, the refresh service and every view must agree on the option and its default. Code that handles the stored options as data reads and writes the value without deciding anything: the flows in `config_flow.py` (prefill, carry over and save their forms), the options migrations and `_effective_config` in `__init__.py`, which go through `OPTION_KEYS`, and the diagnostics export. That is not a decision about Map View.
