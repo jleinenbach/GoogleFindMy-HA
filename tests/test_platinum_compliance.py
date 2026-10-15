@@ -9,7 +9,7 @@ the currently declared tier is Bronze during the coverage sprint (see
 
 from __future__ import annotations
 
-import ast
+import os
 import re
 import subprocess
 import sys
@@ -192,273 +192,117 @@ def test_quality_scale_evidence_existence(integration_root: Path) -> None:
     )
 
 
-_DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-_BLOCK_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
-
-
-def _flat_defs(body: list[ast.stmt]) -> list[ast.stmt]:
-    """Return the definitions in ``body``, looking into every compound block.
-
-    ``if``, ``try``/``try*`` (with their handlers), ``with``, ``for``, ``while``
-    and ``match`` can all hold a definition at module or class level.
-    """
-
-    found: list[ast.stmt] = []
-    for node in body:
-        if isinstance(node, _DEF_NODES):
-            found.append(node)
-            continue
-        for field in _BLOCK_FIELDS:
-            for child in getattr(node, field, None) or []:
-                if isinstance(child, ast.excepthandler | ast.match_case):
-                    found += _flat_defs(child.body)
-                elif isinstance(child, ast.stmt):
-                    found += _flat_defs([child])
-    return found
-
-
-def _decorator_names(node: ast.stmt) -> set[str]:
-    """Return every name and attribute name used in the decorators of ``node``."""
-
-    found: set[str] = set()
-    for decorator in getattr(node, "decorator_list", []):
-        for sub in ast.walk(decorator):
-            if isinstance(sub, ast.Attribute):
-                found.add(sub.attr)
-            elif isinstance(sub, ast.Name):
-                found.add(sub.id)
-    return found
-
-
-def _names_parametrize(expr: ast.expr, aliases: set[str]) -> bool:
-    """Return whether ``expr`` is ``parametrize`` or an alias of it.
-
-    Only the root of the expression counts, after stripping calls:
-    ``pytest.mark.parametrize(...)``, ``VARIANTS`` and ``p(...)`` with ``p`` an
-    alias do, ``pytest.mark.slow`` does not, even if an alias is called ``mark``.
-    """
-
-    while isinstance(expr, ast.Call):
-        expr = expr.func
-    if isinstance(expr, ast.Attribute):
-        return expr.attr == "parametrize"
-    return isinstance(expr, ast.Name) and expr.id in aliases
-
-
-def _module_assigns(body: list[ast.stmt]) -> list[ast.Assign | ast.AnnAssign]:
-    """Return the assignments of a module body, also inside compound blocks.
-
-    Function and class bodies are left out: a name bound there is not visible
-    to a decorator at module level.
-    """
-
-    found: list[ast.Assign | ast.AnnAssign] = []
-    for node in body:
-        if isinstance(node, ast.Assign | ast.AnnAssign):
-            if node.value is not None:
-                found.append(node)
-            continue
-        if isinstance(node, _DEF_NODES):
-            continue
-        for field in _BLOCK_FIELDS:
-            for child in getattr(node, field, None) or []:
-                if isinstance(child, ast.excepthandler | ast.match_case):
-                    found += _module_assigns(child.body)
-                elif isinstance(child, ast.stmt):
-                    found += _module_assigns([child])
-    return found
-
-
-def _parametrize_aliases(tree: ast.Module) -> set[str]:
-    """Return the module-level names bound to ``parametrize`` or a call of it.
-
-    Covers ``VARIANTS = pytest.mark.parametrize(...)`` and ``p =
-    pytest.mark.parametrize``, also chained (``q = p``).
-    """
-
-    assigns = _module_assigns(tree.body)
-    aliases: set[str] = {"parametrize"}
-    while True:
-        grown = set(aliases)
-        for node in assigns:
-            assert node.value is not None
-            if _names_parametrize(node.value, aliases):
-                targets = (
-                    node.targets if isinstance(node, ast.Assign) else [node.target]
-                )
-                grown |= {
-                    target.id for target in targets if isinstance(target, ast.Name)
-                }
-        if grown == aliases:
-            return aliases
-        aliases = grown
-
-
-def _assigned_names(body: list[ast.stmt]) -> dict[str, ast.expr]:
-    """Return the names a class body binds by plain assignment, with their values."""
-
-    bound: dict[str, ast.expr] = {}
-    for node in body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    bound[target.id] = node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            if isinstance(node.target, ast.Name):
-                bound[node.target.id] = node.value
-    return bound
-
-
-def _defined_test_names(path: Path) -> dict[str, tuple[bool, bool]]:
-    """Return the test items of ``path`` that pytest's default naming collects.
-
-    The result maps each dotted name to ``(is_class, parametrized)``. Items are
-    ``test*`` functions that are not fixtures, ``Test*`` classes and
-    ``unittest.TestCase`` subclasses, their ``test*`` methods and their nested
-    test classes, also inside compound blocks, including methods and marks a
-    class inherits from a base class defined in the same module. A ``Test*``
-    class is left out when it or a base defines ``__init__`` or ``__new__``,
-    sets ``__test__ = False`` or is a dataclass. ``parametrize`` counts as a
-    decorator, also through a module-level alias. A base class name resolves to
-    the last class of that name in the module. Not modelled, so cite such a
-    test without an id or not at all: branches are not evaluated, bases from
-    other modules are not followed (any base whose name ends in ``TestCase``
-    counts as ``unittest``), ``__test__`` and abstract classes do not change a
-    ``unittest.TestCase`` subclass, its nested classes or a class not named
-    ``Test*``, a ``__test__ = True`` in a subclass does not undo a base, an id
-    on a ``unittest`` method is not rejected, aliases of a function decorator
-    other than ``parametrize`` are not followed, and ids from ``pytestmark`` or
-    a parametrized fixture are not seen.
-    """
-
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    aliases = _parametrize_aliases(tree)
-    classes: dict[str, ast.ClassDef] = {}
-    names: dict[str, tuple[bool, bool]] = {}
-
-    def _marked(node: ast.stmt) -> bool:
-        return any(
-            _names_parametrize(decorator, aliases)
-            for decorator in getattr(node, "decorator_list", [])
-        )
-
-    def _bases(cls: ast.ClassDef, seen: frozenset[str]) -> list[ast.ClassDef]:
-        chain: list[ast.ClassDef] = []
-        for base in cls.bases:
-            if (
-                isinstance(base, ast.Name)
-                and base.id in classes
-                and base.id not in seen
-            ):
-                parent = classes[base.id]
-                chain += [parent, *_bases(parent, seen | {base.id})]
-        return chain
-
-    def _is_unittest(cls: ast.ClassDef, chain: list[ast.ClassDef]) -> bool:
-        return any(
-            (isinstance(base, ast.Name) and base.id.endswith("TestCase"))
-            or (isinstance(base, ast.Attribute) and base.attr.endswith("TestCase"))
-            for owner in [cls, *chain]
-            for base in owner.bases
-        )
-
-    def _skipped(cls: ast.ClassDef, chain: list[ast.ClassDef]) -> bool:
-        for owner in [cls, *chain]:
-            bound = _assigned_names(owner.body)
-            defined = {
-                node.name
-                for node in _flat_defs(owner.body)
-                if not isinstance(node, ast.ClassDef)
-            }
-            if {"__init__", "__new__"} & (defined | set(bound)):
-                return True
-            test_flag = bound.get("__test__")
-            if isinstance(test_flag, ast.Constant) and not test_flag.value:
-                return True
-            if "dataclass" in _decorator_names(owner):
-                return True
-        return False
-
-    def _walk(
-        defs: list[ast.stmt], prefix: str, marked: bool, inside: frozenset[int]
-    ) -> None:
-        for node in defs:
-            assert isinstance(node, _DEF_NODES)
-            dotted = f"{prefix}{node.name}"
-            if isinstance(node, ast.ClassDef):
-                if id(node) in inside:
-                    continue
-                chain = _bases(node, frozenset({node.name}))
-                unittest_case = _is_unittest(node, chain)
-                if not unittest_case and (
-                    not node.name.startswith("Test") or _skipped(node, chain)
-                ):
-                    continue
-                class_marked = marked or any(_marked(owner) for owner in [node, *chain])
-                names[dotted] = (True, class_marked)
-                members = _flat_defs(node.body)
-                for owner in chain:
-                    members += _flat_defs(owner.body)
-                _walk(members, f"{dotted}.", class_marked, inside | {id(node)})
-            elif node.name.startswith("test") and "fixture" not in _decorator_names(
-                node
-            ):
-                names.setdefault(dotted, (False, marked or _marked(node)))
-
-    top = _flat_defs(tree.body)
-    classes.update((n.name, n) for n in top if isinstance(n, ast.ClassDef))
-    _walk(top, "", False, frozenset())
-    return names
-
-
 _TEST_CITATION = re.compile(r"^(tests/[^:#]+\.py):(.*)$")
 _TEST_NAME = re.compile(r"^:?([A-Za-z_]\w*(?:(?:::|:|\.)[A-Za-z_]\w*)*)(\[[^\]]*\])?$")
+_COLLECT_TIMEOUT_S = 600
+
+
+def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
+    """Return the node ids pytest collects from ``modules`` (paths relative to ``root``).
+
+    pytest itself decides what a test item is, so the guard does not model the
+    collection rules (naming, ``__init__``, fixtures, dataclasses, unittest,
+    markers, aliases, inheritance). The run ignores ``addopts`` and the cache and
+    drops the variables through which the outer run would reach it
+    (``PYTEST_*``, such as ``PYTEST_ADDOPTS``; ``COVERAGE_PROCESS_*``, through
+    which coverage.py measures subprocesses; ``COV_CORE_*`` for pytest-cov
+    before 7). Limits: an option the project adds to ``addopts`` that changes
+    collection is not applied here, and an id containing ``]`` cannot be cited.
+    A failed or timed-out collection, or one that lists no node id although it
+    succeeded, fails the calling test with pytest's output.
+    """
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("COV_CORE_", "COVERAGE_PROCESS_", "PYTEST_"))
+    }
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "--collect-only",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-o",
+        "addopts=",
+        "--rootdir",
+        str(root),
+        *modules,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=_COLLECT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as err:
+        pytest.fail(
+            f"pytest --collect-only timed out after {_COLLECT_TIMEOUT_S} s:\n"
+            + str(err.stdout or "")[-4000:]
+        )
+    node_ids = {line for line in result.stdout.splitlines() if "::" in line}
+    if result.returncode not in (0, 5) or (result.returncode == 0 and not node_ids):
+        pytest.fail(
+            f"pytest --collect-only failed with rc {result.returncode}"
+            f" and {len(node_ids)} node ids:\n"
+            + result.stdout[-4000:]
+            + result.stderr[-4000:]
+        )
+    return node_ids
 
 
 def _unknown_test_citations(
-    evidence_entries: list[str], repo_root: Path
+    evidence_entries: list[str],
+    repo_root: Path,
+    node_ids: set[str] | None = None,
 ) -> tuple[int, list[str]]:
     """Return how many test citations were checked and which ones do not resolve.
 
     A citation is evidence that starts with ``tests/<module>.py:``. Its rest must
     be a name, separated by ``::``, ``:`` or ``.`` and optionally followed by a
-    ``[param]`` id, and that name must be a test item of the module (see
-    ``_defined_test_names`` for what it models and what it does not). A
-    ``[param]`` id needs a parametrized test function or method; the id itself
-    is not checked, because it is only known once pytest collects.
-    Anything else after the module (prose, a broken separator) counts as not
-    resolving rather than being skipped. Citations of a missing module are left
-    to the file check.
+    ``[param]`` id. It resolves if pytest collects an item with that node id;
+    without an id it also resolves to the items of a parametrized test or of a
+    class. Anything else after the module (prose, a broken separator) counts as
+    not resolving. Citations of a missing module are left to the file check.
+    ``node_ids`` replaces the collection run (for tests of this function).
     """
 
-    cache: dict[Path, dict[str, tuple[bool, bool]]] = {}
-    checked = 0
-    unknown: list[str] = []
+    cited: list[tuple[str, str]] = []
     for evidence in evidence_entries:
         citation = _TEST_CITATION.match(evidence)
-        if citation is None:
+        if citation is None or not (repo_root / citation.group(1)).exists():
             continue
-        module = repo_root / citation.group(1)
-        if not module.exists():
-            continue
-        checked += 1
-        name = _TEST_NAME.match(citation.group(2))
+        cited.append((evidence, citation.group(1)))
+    if node_ids is None and cited:
+        node_ids = _collected_node_ids(sorted({m for _, m in cited}), repo_root)
+
+    unknown: list[str] = []
+    for evidence, module in cited:
+        name = _TEST_NAME.match(evidence[len(module) + 1 :])
         if name is None:
             unknown.append(evidence)
             continue
-        dotted = re.sub(r"::|:", ".", name.group(1))
-        if module not in cache:
-            cache[module] = _defined_test_names(module)
-        item = cache[module].get(dotted)
-        if item is None:
+        node = module + "::" + re.sub(r"::|:|\.", "::", name.group(1))
+        if name.group(2):
+            found = node + name.group(2) in (node_ids or set())
+        else:
+            found = any(
+                item == node or item.startswith((node + "[", node + "::"))
+                for item in node_ids or set()
+            )
+        if not found:
             unknown.append(evidence)
-        elif name.group(2) and (item[0] or not item[1]):
-            unknown.append(evidence)
-    return checked, unknown
+    return len(cited), unknown
 
 
 def test_quality_scale_test_evidence_names_exist(integration_root: Path) -> None:
-    """Verify that test names cited in quality_scale.yaml are defined.
+    """Verify that test names cited in quality_scale.yaml are collected by pytest.
 
     The file check above passes as long as the test module exists, so a renamed
     test kept its stale citation. Every ``tests/<module>.py:<name>`` citation
@@ -486,7 +330,7 @@ def test_quality_scale_test_evidence_names_exist(integration_root: Path) -> None
 
     assert checked, "no test-name evidence found; the pattern no longer matches"
     assert not unknown, (
-        "These test names cited in quality_scale.yaml are not defined:\n"
+        "These test names cited in quality_scale.yaml are not collected:\n"
         + "\n".join(sorted(set(unknown)))
     )
 
@@ -695,7 +539,66 @@ class TestRedefined:  # noqa: F811
     class TestNested(TestRedefined):
         def test_c(self):
             pass
+def _passthrough(func):
+    return func
+
+
+def _ignoring(_arg):
+    def decorate(func):
+        return func
+
+    return decorate
+
+
+@_passthrough(pytest.fixture)
+def test_passthrough_fixture():
+    pass
+
+
+@_ignoring(pytest.fixture)
+def test_wrapped_fixture_arg():
+    pass
+
+
+@pytest.mark.dataclass
+class TestMarkedDataclassName:
+    def test_m(self):
+        pass
+
+
+class TestClassAlias:
+    mark = pytest.mark.parametrize("x", [1])
+
+    @mark
+    def test_class_alias(self, x):
+        pass
+
+
+rebound = pytest.mark.parametrize("x", [1])
+rebound = pytest.mark.filterwarnings("ignore")
+
+
+@rebound
+def test_rebound():
+    pass
+
+
+@pytest.mark.parametrize("a, b", [(1, 2)], ids=["pair"])
+def test_with_ids(a, b):
+    pass
 """
+
+
+@pytest.fixture(name="citation_module", scope="module")
+def fixture_citation_module(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, set[str]]:
+    """Write ``_CITATION_MODULE`` once and collect it with the real pytest."""
+
+    root = tmp_path_factory.mktemp("citations")
+    (root / "tests").mkdir()
+    (root / "tests" / "t_mod.py").write_text(_CITATION_MODULE, encoding="utf-8")
+    return root, _collected_node_ids(["tests/t_mod.py"], root)
 
 
 @pytest.mark.parametrize(
@@ -741,15 +644,24 @@ class TestRedefined:  # noqa: F811
         ("tests/t_mod.py::TestSub::test_missing", False),
         ("tests/t_mod.py::test_missing", False),
         ("tests/t_mod.py::", False),
+        ("tests/t_mod.py::test_wrapped_fixture_arg", True),
+        ("tests/t_mod.py::test_passthrough_fixture", False),
+        ("tests/t_mod.py::TestMarkedDataclassName::test_m", True),
+        ("tests/t_mod.py::TestClassAlias::test_class_alias[1]", True),
+        ("tests/t_mod.py::test_rebound", True),
+        ("tests/t_mod.py::test_rebound[1]", False),
+        ("tests/t_mod.py::test_with_ids[pair]", True),
+        ("tests/t_mod.py::test_with_ids[1-2]", False),
+        ("tests/t_mod.py::TestSub", True),
     ],
 )
-def test_test_citation_predicate(tmp_path: Path, citation: str, resolves: bool) -> None:
-    """A citation resolves only to a test item pytest collects by default naming."""
+def test_test_citation_predicate(
+    citation_module: tuple[Path, set[str]], citation: str, resolves: bool
+) -> None:
+    """A citation resolves only to an item pytest collects from the module."""
 
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "t_mod.py").write_text(_CITATION_MODULE, encoding="utf-8")
-
-    checked, unknown = _unknown_test_citations([citation], tmp_path)
+    root, node_ids = citation_module
+    checked, unknown = _unknown_test_citations([citation], root, node_ids)
 
     assert checked == 1
     assert (unknown == []) is resolves
@@ -764,6 +676,70 @@ def test_test_citation_predicate_skips_other_evidence(tmp_path: Path) -> None:
     )
 
     assert (checked, unknown) == (0, [])
+
+
+def test_collected_node_ids_fails_loudly(tmp_path: Path) -> None:
+    """A module pytest cannot collect fails the guard instead of resolving nothing."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_bad.py").write_text("def test_x(:\n", encoding="utf-8")
+
+    with pytest.raises(pytest.fail.Exception, match="rc 2"):
+        _collected_node_ids(["tests/t_bad.py"], tmp_path)
+
+
+def test_collected_node_ids_ignores_outer_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Project ``addopts``, ``PYTEST_ADDOPTS`` and subprocess coverage do not reach the run."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_ok.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = ["--no-such-option-addopts"]\n',
+        encoding="utf-8",
+    )
+    rcfile = tmp_path / "coveragerc"
+    rcfile.write_text(
+        f"[run]\ndata_file = {tmp_path / 'cov' / 'data'}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-option-env")
+    monkeypatch.setenv("COVERAGE_PROCESS_START", str(rcfile))
+
+    assert _collected_node_ids(["tests/t_ok.py"], tmp_path) == {"tests/t_ok.py::test_x"}
+    assert not (tmp_path / "cov").exists()
+
+
+def test_collected_node_ids_rejects_an_empty_listing(tmp_path: Path) -> None:
+    """A collection that succeeds but lists no node id fails instead of resolving nothing."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_ok.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\nverbosity_test_cases = 1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="rc 0 and 0 node ids"):
+        _collected_node_ids(["tests/t_ok.py"], tmp_path)
+
+
+def test_collected_node_ids_reports_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A collection that runs into the time limit fails with its own message."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_ok.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_COLLECT_TIMEOUT_S", 0.001)
+
+    with pytest.raises(pytest.fail.Exception, match="timed out after"):
+        _collected_node_ids(["tests/t_ok.py"], tmp_path)
 
 
 # Sprint baseline for the test-coverage quality-scale rule.
