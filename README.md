@@ -677,21 +677,22 @@ from Google.
    - `poll_age_s`: seconds between the last location request this integration
      attempted for the device and the advertisement that showed the change.
      The clock starts when the attempt starts, before the push registration;
-     on a reconnect the request may leave up to about 44 seconds later.
+     on a reconnect the request may leave 44 seconds or more later.
      An attempt that stopped before the request was handed to Google (no push
      token, failed push registration, a failure while building the request)
      does not count. A request that was sent counts even if it failed
      afterwards, for example with a server error. A few attempts that never
      reached Google still count: configuration errors such as a missing push
-     provider, and a poll attempt cut off by its time limit while the push
-     registration was still running. `none` if there was no such request
-     since the start, or if it came after the advertisement.
+     provider, a poll attempt cut off by its time limit while the push
+     registration was still running, and an attempt cancelled during it.
+     `none` if there was no such request since the start, or if it came after
+     the advertisement.
    - `prev_seen_age_s`: seconds since the old mode was last seen.
    - At most 12 lines per device and hour are written at INFO, counted per
      account: a tracker shared between two accounts can write 24. Further
-     ones go to DEBUG. Once the limit has freed up, the next advertisement of the device
-     writes a line with `kind=resync` that repeats the current mode, and
-     `suppressed=<n>` says how many lines went to DEBUG.
+     ones go to DEBUG. Once the limit has freed up, the next advertisement of
+     the device writes a line with `kind=resync` that repeats the current
+     mode, and `suppressed=<n>` says how many lines went to DEBUG.
 2. **Make INFO visible.** The line is logged at INFO and is hidden at the
    default level. Call the `logger.set_level` action (no restart needed; it
    lasts until the next restart):

@@ -7,8 +7,9 @@ Both send sites (the poll cycle and the manual locate) stamp the device
 immediately BEFORE they await the request, because a reply, or the tag's
 reaction to it, can arrive while the request is still in flight. The stamp
 therefore marks the start of the ATTEMPT, not the moment the request left the
-host: push registration runs first and can take up to about 44 seconds on a
-reconnect.
+host: push registration runs first and can take 44 seconds or more on a
+reconnect (two waits for readiness of up to 22 seconds each, plus the client
+and token setup, plus waiting for a reconnect that is already running).
 
 A stamp set before the await cannot know whether the request will be sent at
 all. When the request layer raises ``LocationRequestNotAcceptedError`` with
@@ -36,7 +37,10 @@ Not every attempt that never reached Google is taken back. These still count:
   ``api.async_get_device_location`` turns into an empty result;
 * a poll attempt cut off by the outer ``asyncio.wait_for`` while the push
   registration is still running, because a timeout carries no information
-  about the send.
+  about the send;
+* an attempt cancelled while the push registration is still running (for
+  example when the entry unloads), because ``asyncio.CancelledError`` passes
+  through unchanged.
 
 ``poll_age_s`` is therefore "time since the last attempt that was not shown to
 have stopped before the send", not proof that Google received a request.
@@ -71,7 +75,11 @@ class LocateStamps(dict[str, float]):
     Readers use it as a plain mapping. Writing a value or removing a device from
     outside the two functions below (a purge, a test fixture) drops that
     device's attempt list, so a later retraction cannot restore a value that
-    was replaced in the meantime.
+    was replaced in the meantime. Every writing ``dict`` method does this:
+    ``[]=``, ``del``, ``pop``, ``popitem``, ``clear``, ``update``, ``|=`` and
+    ``setdefault``. A copy (``copy.copy``, ``copy.deepcopy``, ``pickle``)
+    carries the values but no attempts, so nothing in a copy can be taken back;
+    ``dict.copy`` and ``|`` return a plain ``dict``.
     """
 
     __slots__ = ("_attempts", "_base", "_serials")
@@ -98,11 +106,43 @@ class LocateStamps(dict[str, float]):
         self._forget(key)
         return super().pop(key, *default)
 
+    def popitem(self) -> tuple[str, float]:
+        """Remove the last device, as ``dict.popitem`` does, and forget its attempts."""
+        key, value = super().popitem()
+        self._forget(key)
+        return key, value
+
     def clear(self) -> None:
         """Remove every device and every attempt."""
         self._attempts.clear()
         self._base.clear()
         super().clear()
+
+    def update(self, *args: Any, **kwargs: float) -> None:
+        """Write values from outside, as ``dict.update`` does, and forget their attempts."""
+        values: dict[str, float] = dict(*args, **kwargs)
+        for key in values:
+            self._forget(key)
+        super().update(values)
+
+    def __ior__(self, other: Any) -> LocateStamps:  # type: ignore[override,misc]
+        """``|=`` writes from outside like ``update``."""
+        self.update(other)
+        return self
+
+    def setdefault(self, key: str, default: float | None = None) -> Any:
+        """Write ``default`` only for a missing device, forgetting stale attempts."""
+        if key not in self:
+            self._forget(key)
+        return super().setdefault(key, default)  # type: ignore[arg-type]
+
+    def __reduce__(self) -> tuple[type[LocateStamps], tuple[list[tuple[str, float]]]]:
+        """Copy and pickle the values, not the attempts.
+
+        ``copy.copy`` and ``copy.deepcopy`` go through this as well, so a copy
+        never shares the attempt lists of the original.
+        """
+        return (LocateStamps, (list(self.items()),))
 
     def _forget(self, key: str) -> None:
         self._attempts.pop(key, None)

@@ -237,28 +237,35 @@ def test_the_stage_markers_are_a_closed_set() -> None:
 
 
 def test_every_raise_site_states_whether_it_dispatched() -> None:
-    """Each raise site passes ``dispatched`` instead of relying on the default.
+    """Each construction of the signal passes ``dispatched`` instead of the default.
 
-    The default is the cautious "cannot rule out a send". A new raise site that
+    The default is the cautious "cannot rule out a send". A construction that
     forgot the argument would therefore keep a stamp it should take back, and
-    nothing at run time would show it.
+    nothing at run time would show it. Every CALL is counted, not only
+    ``raise X(...)``: a signal built first and raised later, a qualified name,
+    and a construction in another module of the integration are all found.
+    The count is pinned, so a new site has to be looked at here.
+    Not seen: a call through an alias of the class, ``getattr`` or a factory.
     """
-    tree = ast.parse(_LOCATION_REQUEST_PY.read_text(encoding="utf-8"))
-    sites = [
-        node.exc
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Raise)
-        and isinstance(node.exc, ast.Call)
-        and isinstance(node.exc.func, ast.Name)
-        and node.exc.func.id == "LocationRequestNotAcceptedError"
-    ]
-    assert len(sites) == 7, f"expected seven raise sites, found {len(sites)}"
-    missing = [
-        call.lineno
-        for call in sites
-        if not any(keyword.arg == "dispatched" for keyword in call.keywords)
-    ]
-    assert not missing, f"raise sites without dispatched=: lines {missing}"
+    package = _LOCATION_REQUEST_PY.parents[3]
+    assert package.name == "googlefindmy"
+    sites: list[tuple[str, int, bool]] = []
+    for path in sorted(package.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if name != "LocationRequestNotAcceptedError":
+                continue
+            states = any(keyword.arg == "dispatched" for keyword in node.keywords)
+            sites.append((path.relative_to(package).as_posix(), node.lineno, states))
+    files = {site[0] for site in sites}
+    assert files == {"NovaApi/ExecuteAction/LocateTracker/location_request.py"}
+    assert len(sites) == 7, f"expected seven constructions, found {sites}"
+    missing = [site for site in sites if not site[2]]
+    assert not missing, f"constructions without dispatched=: {missing}"
 
 
 @pytest.mark.parametrize(

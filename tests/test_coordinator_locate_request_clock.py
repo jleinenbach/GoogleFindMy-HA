@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import pickle
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -407,6 +409,51 @@ def test_an_attempt_beyond_the_kept_window_is_folded_into_the_base() -> None:
     for token in reversed(tokens[1:]):
         assert retract_if_never_dispatched(stamps, token, _NEVER) is True
     assert stamps == {"dev-1": 0.0}
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda stamps: stamps.update({"dev-1": 9.0}),
+        lambda stamps: stamps.update([("dev-1", 9.0)]),
+        lambda stamps: stamps.__ior__({"dev-1": 9.0}),
+        lambda stamps: stamps.popitem(),
+    ],
+    ids=["update", "update-pairs", "ior", "popitem"],
+)
+def test_every_outside_write_forgets_the_attempts(write: Any) -> None:
+    """A value written from outside is not this attempt's to take back."""
+    stamps = LocateStamps()
+    token = stamp_locate_attempt(stamps, "dev-1", 2.0)
+    write(stamps)
+    assert retract_if_never_dispatched(stamps, token, _NEVER) is False
+
+
+def test_setdefault_on_a_missing_device_forgets_stale_attempts() -> None:
+    stamps = LocateStamps()
+    token = stamp_locate_attempt(stamps, "dev-1", 2.0)
+    dict.pop(stamps, "dev-1")  # bypasses the bookkeeping on purpose
+    assert stamps.setdefault("dev-1", 9.0) == 9.0
+    assert retract_if_never_dispatched(stamps, token, _NEVER) is False
+    assert stamps == {"dev-1": 9.0}
+
+
+@pytest.mark.parametrize(
+    "duplicate",
+    [copy.copy, copy.deepcopy, lambda stamps: pickle.loads(pickle.dumps(stamps))],
+    ids=["copy", "deepcopy", "pickle"],
+)
+def test_a_copy_carries_the_values_but_no_attempts(duplicate: Any) -> None:
+    stamps = LocateStamps([("dev-2", 7.0)])
+    token = stamp_locate_attempt(stamps, "dev-1", 2.0)
+    duplicated = duplicate(stamps)
+    assert isinstance(duplicated, LocateStamps)
+    assert duplicated == {"dev-1": 2.0, "dev-2": 7.0}
+    assert retract_if_never_dispatched(duplicated, token, _NEVER) is False
+    # The original keeps its attempts: a shallow copy must not share them.
+    duplicated["dev-1"] = 3.0
+    assert retract_if_never_dispatched(stamps, token, _NEVER) is True
+    assert stamps == {"dev-2": 7.0}
 
 
 def test_ensure_locate_stamps_keeps_values_and_identity() -> None:
