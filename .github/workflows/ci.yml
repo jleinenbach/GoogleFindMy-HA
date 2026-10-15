@@ -11,10 +11,37 @@ on:
 permissions:
   contents: read
 
+# One live CI run per pull request: a new push supersedes the previous run,
+# including one that still waits for approval. Push runs on main get a
+# unique group (run_id), so they never cancel each other.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 jobs:
+  # Fork-specific: pull request runs wait for a manual approval in the
+  # environment "ci-freigabe" before any test job starts, so the Home
+  # Assistant test load only happens when it is wanted. Pushes to main run
+  # without the gate. Guarded by tests/test_ci_approval_gate.py.
+  # Do not upstream this job: BSkando/GoogleFindMy-HA has no such environment.
+  approval_gate:
+    name: CI approval gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: ci-freigabe
+    permissions: {}
+    steps:
+      - name: Record approval
+        run: echo "CI run approved in environment ci-freigabe."
+
   hassfest:
     name: Hassfest validation
     runs-on: ubuntu-latest
+    needs: approval_gate
+    # Every job states its condition explicitly: a skipped gate (push) must
+    # not skip the jobs that depend on hassfest, and on a pull request only
+    # an approved gate lets anything run.
+    if: ${{ !cancelled() && (needs.approval_gate.result == 'success' || (github.event_name == 'push' && needs.approval_gate.result == 'skipped')) }}
     # checks: read is the documented permission for /commits/{sha}/check-runs
     # (GitHub REST, "List check runs for a Git reference"), which the auto-fix
     # detection below reads twice: the inline query and
@@ -119,6 +146,7 @@ jobs:
     name: HACS validation
     runs-on: ubuntu-latest
     needs: hassfest
+    if: ${{ !cancelled() && needs.hassfest.result == 'success' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -221,6 +249,7 @@ jobs:
     name: Translations validation
     runs-on: ubuntu-latest
     needs: hassfest
+    if: ${{ !cancelled() && needs.hassfest.result == 'success' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -276,6 +305,7 @@ jobs:
     name: Vendored assets freshness
     runs-on: ubuntu-latest
     needs: hassfest
+    if: ${{ !cancelled() && needs.hassfest.result == 'success' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -316,6 +346,7 @@ jobs:
     name: Lint (${{ matrix.check }})
     runs-on: ubuntu-latest
     needs: hassfest
+    if: ${{ !cancelled() && needs.hassfest.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -473,6 +504,7 @@ jobs:
     needs:
       - hassfest
       - hacs
+    if: ${{ !cancelled() && needs.hassfest.result == 'success' && needs.hacs.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -556,6 +588,7 @@ jobs:
     needs:
       - hassfest
       - hacs
+    if: ${{ !cancelled() && needs.hassfest.result == 'success' && needs.hacs.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -682,12 +715,21 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [hassfest, hacs, lint, test, test_legacy_python, translations, vendored_assets]
+    needs: [approval_gate, hassfest, hacs, lint, test, test_legacy_python, translations, vendored_assets]
     if: always()
     steps:
       - name: Check all jobs passed
         id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          GATE: ${{ needs.approval_gate.result }}
         run: |
+          # Second lock: a pull request run only passes with an approved gate.
+          if [[ "$EVENT" == "pull_request" && "$GATE" != "success" ]]; then
+            echo "CI approval gate not approved (result: $GATE)"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           if [[ "${{ needs.hassfest.result }}" != "success" ]] || \
              [[ "${{ needs.hacs.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
@@ -710,6 +752,14 @@ jobs:
             echo ""
             echo "| Job | Status |"
             echo "|-----|--------|"
+
+            if [ "${{ needs.approval_gate.result }}" = "success" ]; then
+              echo "| Approval gate | ✅ Approved |"
+            elif [ "${{ needs.approval_gate.result }}" = "skipped" ]; then
+              echo "| Approval gate | ⏭️ Not required (push) |"
+            else
+              echo "| Approval gate | ❌ ${{ needs.approval_gate.result }} |"
+            fi
 
             if [ "${{ needs.hassfest.result }}" = "success" ]; then
               echo "| Hassfest | ✅ Pass |"

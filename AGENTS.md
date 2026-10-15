@@ -954,6 +954,20 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   `pycares>=4.4.0` lives in `requirements-dev.txt`).
 * Actual coverage today (each claim cites the workflow proving its *effective*
   behaviour):
+  * **PR CI runs only after manual approval (this fork).** In
+    `.github/workflows/ci.yml` the first job, `approval_gate`, runs only on
+    `pull_request` and is bound to the environment `ci-freigabe`, whose
+    required reviewer must approve the run before any job starts; every other
+    job needs it. Pushes to `main` skip the gate and run all jobs (each job
+    states an explicit `if:` so the skipped gate does not skip them). A run
+    that is not approved, is rejected or expires never turns `CI Success`
+    green: `CI Success` depends on the gate and fails a pull request run
+    whose gate result is not `success`. Workflow `concurrency` keeps one live
+    `CI` run per pull request; a new push cancels the previous run. The other
+    PR workflows (CodeQL, Semgrep, pip-audit, hassfest auto-fix, semantic PR
+    title) are not gated. `tests/test_ci_approval_gate.py` locks this shape.
+    Fork-specific: keep both files out of pull requests against
+    `BSkando/GoogleFindMy-HA`, which has no such environment.
   * **`pip-audit` on PRs is report-only.** `.github/workflows/pip-audit.yml`
     guards the PR job with `if: github.event_name == 'pull_request'` and runs it
     as "Audit requirements (report-only; keep CI green)", failing only on a
