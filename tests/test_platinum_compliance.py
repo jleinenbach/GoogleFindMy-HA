@@ -202,47 +202,59 @@ def _collected_node_ids(modules: list[str], root: Path) -> set[str]:
 
     pytest itself decides what a test item is, so the guard does not model the
     collection rules (naming, ``__init__``, fixtures, dataclasses, unittest,
-    markers, aliases, inheritance) and cannot drift from them. The run ignores
-    ``addopts`` and the cache and drops the coverage and pytest variables from
-    the environment, so it neither adds coverage data nor inherits options of
-    the outer run. A failed collection fails the calling test with pytest's
-    output instead of resolving nothing.
+    markers, aliases, inheritance). The run ignores ``addopts`` and the cache and
+    drops the variables through which the outer run would reach it
+    (``PYTEST_*``, such as ``PYTEST_ADDOPTS``; ``COVERAGE_PROCESS_*``, through
+    which coverage.py measures subprocesses; ``COV_CORE_*`` for pytest-cov
+    before 7). Limits: an option the project adds to ``addopts`` that changes
+    collection is not applied here, and an id containing ``]`` cannot be cited.
+    A failed or timed-out collection, or one that lists no node id although it
+    succeeded, fails the calling test with pytest's output.
     """
 
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("COV_CORE_", "PYTEST_"))
+        if not key.startswith(("COV_CORE_", "COVERAGE_PROCESS_", "PYTEST_"))
     }
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--collect-only",
-            "-q",
-            "-p",
-            "no:cacheprovider",
-            "-o",
-            "addopts=",
-            "--rootdir",
-            str(root),
-            *modules,
-        ],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-        timeout=_COLLECT_TIMEOUT_S,
-    )
-    if result.returncode not in (0, 5):
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "--collect-only",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-o",
+        "addopts=",
+        "--rootdir",
+        str(root),
+        *modules,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=_COLLECT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as err:
         pytest.fail(
-            f"pytest --collect-only failed with rc {result.returncode}:\n"
+            f"pytest --collect-only timed out after {_COLLECT_TIMEOUT_S} s:\n"
+            + str(err.stdout or "")[-4000:]
+        )
+    node_ids = {line for line in result.stdout.splitlines() if "::" in line}
+    if result.returncode not in (0, 5) or (result.returncode == 0 and not node_ids):
+        pytest.fail(
+            f"pytest --collect-only failed with rc {result.returncode}"
+            f" and {len(node_ids)} node ids:\n"
             + result.stdout[-4000:]
             + result.stderr[-4000:]
         )
-    return {line for line in result.stdout.splitlines() if "::" in line}
+    return node_ids
 
 
 def _unknown_test_citations(
@@ -674,6 +686,60 @@ def test_collected_node_ids_fails_loudly(tmp_path: Path) -> None:
 
     with pytest.raises(pytest.fail.Exception, match="rc 2"):
         _collected_node_ids(["tests/t_bad.py"], tmp_path)
+
+
+def test_collected_node_ids_ignores_outer_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Project ``addopts``, ``PYTEST_ADDOPTS`` and subprocess coverage do not reach the run."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_ok.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = ["--no-such-option-addopts"]\n',
+        encoding="utf-8",
+    )
+    rcfile = tmp_path / "coveragerc"
+    rcfile.write_text(
+        f"[run]\ndata_file = {tmp_path / 'cov' / 'data'}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-option-env")
+    monkeypatch.setenv("COVERAGE_PROCESS_START", str(rcfile))
+
+    assert _collected_node_ids(["tests/t_ok.py"], tmp_path) == {"tests/t_ok.py::test_x"}
+    assert not (tmp_path / "cov").exists()
+
+
+def test_collected_node_ids_rejects_an_empty_listing(tmp_path: Path) -> None:
+    """A collection that succeeds but lists no node id fails instead of resolving nothing."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_ok.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\nverbosity_test_cases = 1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="rc 0 and 0 node ids"):
+        _collected_node_ids(["tests/t_ok.py"], tmp_path)
+
+
+def test_collected_node_ids_reports_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A collection that runs into the time limit fails with its own message."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_ok.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_COLLECT_TIMEOUT_S", 0.001)
+
+    with pytest.raises(pytest.fail.Exception, match="timed out after"):
+        _collected_node_ids(["tests/t_ok.py"], tmp_path)
 
 
 # Sprint baseline for the test-coverage quality-scale rule.
