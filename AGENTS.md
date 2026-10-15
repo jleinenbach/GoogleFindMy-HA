@@ -963,8 +963,10 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     gate does not skip them). A run that is not approved, is rejected or
     expires never turns `CI Success` green: `CI Success` depends on the gate
     and fails a pull request run whose gate result is not `success`. Workflow
-    `concurrency` keeps one live `CI` run per pull request; a new push cancels
-    the previous run. The gate is only as strong as the environment: GitHub
+    `concurrency` keeps one live `CI` run per pull request; a push that starts
+    a new run cancels the previous one (a push that starts no run, such as a
+    `[skip ci]` commit, leaves the waiting run in place, so approve only the
+    run for the current head). The gate is only as strong as the environment: GitHub
     creates a missing environment without protection rules when a job
     references it, so the approval is enforced only while
     `gh api repos/jleinenbach/GoogleFindMy-HA/environments/ci-freigabe --jq '.protection_rules[].type'`

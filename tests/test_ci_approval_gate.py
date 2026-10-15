@@ -49,6 +49,16 @@ HASSFEST_CONDITION = (
     "(github.event_name == 'push' && needs.approval_gate.result == 'skipped')) }}"
 )
 GATE_CHECK = '[[ "$EVENT" == "pull_request" && "$GATE" != "success" ]]'
+CONCURRENCY_GROUP = (
+    "${{ github.event_name == 'pull_request' && "
+    "format('ci-pr-{0}', github.event.pull_request.number) || "
+    "format('ci-run-{0}', github.run_id) }}"
+)
+# Keys outside these sets (continue-on-error, a step-level if, timeout tricks) could let a
+# rejected run pass, so the jobs and the check step that carry the gate allow no others.
+GATE_JOB_KEYS = {"name", "if", "runs-on", "environment", "permissions", "steps"}
+SUMMARY_JOB_KEYS = {"name", "runs-on", "needs", "if", "steps"}
+CHECK_STEP_KEYS = {"name", "id", "env", "run"}
 
 
 def _load_ci() -> dict[str, Any]:
@@ -93,6 +103,9 @@ def test_gate_job_waits_for_environment_on_pull_requests() -> None:
         _condition(GATE, gate).replace(" ", "") == "github.event_name=='pull_request'"
     )
     assert gate.get("permissions") == {}, "the gate job needs no token permissions"
+    assert set(gate) <= GATE_JOB_KEYS, (
+        f"unexpected gate job keys: {set(gate) - GATE_JOB_KEYS}"
+    )
     assert not _needs(gate), "the gate must be the first job"
 
 
@@ -109,9 +122,7 @@ def test_one_live_run_per_pull_request() -> None:
 
     concurrency = _load_ci().get("concurrency")
     assert isinstance(concurrency, dict), "ci.yml must define workflow concurrency"
-    group = str(concurrency.get("group", ""))
-    assert "github.event.pull_request.number" in group
-    assert "github.run_id" in group
+    assert _compact(str(concurrency.get("group", ""))) == _compact(CONCURRENCY_GROUP)
     assert concurrency.get("cancel-in-progress") is True
 
 
@@ -154,16 +165,25 @@ def test_ci_success_includes_the_gate() -> None:
     jobs = _jobs()
     summary = jobs[SUMMARY]
     assert summary.get("if") == "always()"
+    assert set(summary) <= SUMMARY_JOB_KEYS, (
+        f"unexpected CI Success job keys: {set(summary) - SUMMARY_JOB_KEYS}"
+    )
     expected = {name for name in jobs if name != SUMMARY}
     assert expected <= set(_needs(summary))
 
     check = next(step for step in summary["steps"] if step.get("id") == "check")
+    assert set(check) <= CHECK_STEP_KEYS, (
+        f"unexpected check step keys: {set(check) - CHECK_STEP_KEYS}"
+    )
     env = check.get("env", {})
-    assert env.get("GATE") == "${{ needs.approval_gate.result }}"
-    assert env.get("EVENT") == "${{ github.event_name }}"
+    assert env == {
+        "EVENT": "${{ github.event_name }}",
+        "GATE": "${{ needs.approval_gate.result }}",
+    }
     lines = [line.strip() for line in str(check["run"]).splitlines()]
+    code = [line for line in lines if line and not line.startswith("#")]
     opening = f"if {GATE_CHECK}; then"
-    assert opening in lines, "the gate check must be a live if-line"
+    assert code and code[0] == opening, "the gate check must be the first command"
     start = lines.index(opening)
     end = lines.index("fi", start)
     assert "exit 1" in lines[start:end], "the gate check must fail the job"
