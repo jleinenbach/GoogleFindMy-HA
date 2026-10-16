@@ -1518,7 +1518,8 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                 if fresh_token:
                     headers["Authorization"] = f"Bearer {fresh_token}"
                     _LOGGER.debug(
-                        "Nova API: using refreshed token for request to %s.", api_scope
+                        "Nova API: using the refreshed authorization for the request to %s.",
+                        api_scope,
                     )
         except (ValueError, TypeError):
             pass  # Invalid deadline, proceed normally

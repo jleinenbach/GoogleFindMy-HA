@@ -918,13 +918,15 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
                     "Manual locate skipped: no FCM token available "
                     "(see the preceding warning for the specific cause)",
                 )
-                _LOGGER.debug("No FCM token for %s; skipping this locate", name)
+                _LOGGER.debug("No push registration for %s; skipping this locate", name)
                 # No exception to chain from: the register call returned a falsy
                 # token rather than raising, so ``from`` would have nothing to
                 # attach. The stage marker IS the whole cause here.
                 raise LocationRequestNotAcceptedError(stage="no_fcm_token")
             registered = True
-            _LOGGER.debug("FCM token obtained for %s (len=%d)", name, len(fcm_token))
+            _LOGGER.debug(
+                "FCM registration ready for %s (length %d)", name, len(fcm_token)
+            )
         except LocationRequestNotAcceptedError:
             # The no-FCM-token branch above raises INSIDE this try body, so the
             # broad handler below would catch the signal and flatten it right back
