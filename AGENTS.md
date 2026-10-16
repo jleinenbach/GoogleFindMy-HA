@@ -954,6 +954,39 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   `pycares>=4.4.0` lives in `requirements-dev.txt`).
 * Actual coverage today (each claim cites the workflow proving its *effective*
   behaviour):
+  * **PR CI runs only after manual approval (this fork).** In
+    `.github/workflows/ci.yml` the first job, `approval_gate`, runs only on
+    `pull_request` and is bound to the environment `ci-freigabe`, whose
+    required reviewer must approve the run before any job starts; `hassfest`
+    needs it, and every other job needs `hassfest`. Pushes to `main` skip the
+    gate and run all jobs (each job states an explicit `if:` so the skipped
+    gate does not skip them). A run that is not approved, is rejected or
+    expires never turns `CI Success` green: `CI Success` depends on the gate
+    and fails a pull request run whose gate result is not `success`. Workflow
+    `concurrency` keeps one live `CI` run per pull request; a push that starts
+    a new run cancels the previous one (a push that starts no run, such as a
+    `[skip ci]` commit, leaves the waiting run in place, so approve only the
+    run for the current head). The gate is only as strong as the environment: GitHub
+    creates a missing environment without protection rules when a job
+    references it, so the approval is enforced only while
+    `gh api repos/jleinenbach/GoogleFindMy-HA/environments/ci-freigabe --jq '.protection_rules[].type'`
+    prints `required_reviewers`. The gate is a load control, not a security
+    boundary, and the guarantees above hold only for the unmodified
+    `ci.yml`: a `pull_request` run uses the `ci.yml` of the pull request's
+    merge commit, so a pull request that edits or removes the gate job (or
+    the guard test, which itself only runs after approval) runs `CI` without
+    approval. This is accepted. Do not move the gate to `pull_request_target`
+    or `workflow_run`: those run in the base repository's context, where the
+    token can be write-scoped and repository secrets are available, and the
+    test jobs would check out the pull request's code there. The other pull
+    request workflows are not gated: CodeQL, Semgrep (SAST), pip-audit,
+    hassfest (auto-fix), Semantic PR and the Home Assistant Dependency
+    Compatibility Check
+    (`.github/workflows/ha-dependency-check.yml`, which installs
+    `homeassistant` on every pull request). `tests/test_ci_approval_gate.py`
+    locks the shape of `ci.yml`. Fork-specific: keep both files and this
+    bullet out of pull requests against `BSkando/GoogleFindMy-HA`, which has
+    no such environment.
   * **`pip-audit` on PRs is report-only.** `.github/workflows/pip-audit.yml`
     guards the PR job with `if: github.event_name == 'pull_request'` and runs it
     as "Audit requirements (report-only; keep CI green)", failing only on a
