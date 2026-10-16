@@ -652,6 +652,76 @@ see also "Foreign-report readings" in
    are built to contain none of these.
 6. **Where:** <https://github.com/BSkando/GoogleFindMy-HA/issues/223>
 
+### Reporting unwanted tracking protection mode changes (#210, #211, #222)
+
+Trackers in the Find Hub network can enter *unwanted tracking protection
+mode*. The integration reads the mode from each advertisement of your own
+trackers (frame type and hashed-flags bit) and shows it as the protection mode
+binary sensor. What makes Google's service turn the mode on for a tracker is
+not published. To narrow it down, the integration records each change of the
+mode it sees in an advertisement of one of your trackers, per device, together
+with how long before the change it last tried to request the device's location
+from Google.
+
+1. **Search the log for `FMDN_UWT_TRANSITION`.** One line is written per
+   change, for example:
+   ```text
+   FMDN_UWT_TRANSITION kind=change device=<id> canonical=<id> old=off new=on source=flags_bit flags=framed frame=0x41 decoded=0x01 payload_len=29 poll_age_s=66 prev_seen_age_s=60 observed=2027-01-15T08:01:10Z seq=2 suppressed=0
+   ```
+   - `old`/`new`: the mode before and after. The first known mode of a device
+     is written with `old=unknown`: after a restart, after the entry was
+     reloaded, and after a single refresh in which the device's identity was
+     not available, for example because its key could not be decrypted once.
+   - `source`: whether the hashed-flags bit (`flags_bit`) or the frame type
+     (`frame_type`) showed the mode.
+   - `poll_age_s`: seconds between the last location request this integration
+     sent for the device and the advertisement that showed the change. The
+     clock starts immediately before the request is sent, after the push
+     registration and the token fetch (together a minute or more on a
+     reconnect). An attempt that stopped before that does not count, whatever
+     the reason: no push token, a failed push registration, a configuration
+     error, a failure while building the request or fetching a token, or a
+     time limit or cancellation before the request was sent. A request that
+     was sent counts even if it failed afterwards, for example with a network
+     or server error.
+     `none` if there was no such request since the start, or if it came after
+     the advertisement.
+   - `prev_seen_age_s`: seconds since the old mode was last seen.
+   - At most 12 lines per device and hour are written at INFO, counted per
+     account: a tracker shared between two accounts can write 24. Further
+     ones go to DEBUG. Once the limit has freed up, the next advertisement of
+     the device writes a line with `kind=resync` that repeats the current
+     mode, and `suppressed=<n>` says how many lines went to DEBUG.
+2. **Make INFO visible.** The line is logged at INFO and is hidden at the
+   default level. Call the `logger.set_level` action (no restart needed; it
+   lasts until the next restart):
+   ```yaml
+   action: logger.set_level
+   data:
+     custom_components.googlefindmy.eid_resolver: info
+   ```
+   or add the same line under `logger:` → `logs:` in your `configuration.yaml`
+   and restart Home Assistant (one `logger:` section only, as described for
+   #223 above). The log view under **Settings → System → Logs** lists warnings
+   and errors only; the line appears in the full log. It is written with the
+   next change after INFO was enabled.
+3. **Diagnostics.** Without any logging configuration, the same changes are
+   kept in the diagnostics: open **Settings → Devices & services → Google Find
+   My Device**, choose **Download diagnostics** in the menu of the entry, and
+   copy **only** the `uwt_transitions` block. It names each device by a
+   position (`device_index`) and holds the last 200 events of the entry
+   (changes and `resync` lines) since Home Assistant started or the entry was
+   last reloaded.
+4. **What to post:** the `FMDN_UWT_TRANSITION` lines and/or the
+   `uwt_transitions` block, your integration version, and your
+   `location_poll_interval` setting. `device=` and `canonical=` are
+   identifiers of your own Home Assistant instance and your own Google account
+   (class (b) in `AGENTS.md`), they carry no meaning outside it, so posting
+   them is harmless; device names never appear in this line.
+5. **Never post keys, EIDs, coordinates, device names or e-mail addresses.**
+   The line and the block are built to contain none of these.
+6. **Where:** <https://github.com/BSkando/GoogleFindMy-HA/issues/210>
+
 ## Privacy and Security
 
 - All location data uses Google's end-to-end encryption

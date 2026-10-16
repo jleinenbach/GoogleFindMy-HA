@@ -56,6 +56,9 @@ from .identity import (
     store_if_value,
 )
 
+# locate_clock.py - 2 functions
+from .locate_clock import ensure_locate_stamps, stamp_on_dispatch
+
 # polling.py - 3 functions
 from .polling import (
     calculate_location_age_hours,
@@ -205,4 +208,7 @@ __all__ = [
     "calculate_location_age_hours",
     "get_age_log_level",
     "should_preserve_previous_coordinates",
+    # locate_clock.py
+    "ensure_locate_stamps",
+    "stamp_on_dispatch",
 ]

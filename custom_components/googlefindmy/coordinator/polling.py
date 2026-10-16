@@ -79,6 +79,7 @@ from .helpers.cache import (
     substitute_zone_accuracy,
 )
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
+from .helpers.locate_clock import ensure_locate_stamps, stamp_on_dispatch
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 from .helpers.update import (
@@ -1969,10 +1970,21 @@ class PollingOperations(_MixinBase):
                         # make this outer guard win the race and raise a spurious
                         # TimeoutError before the inner request can return its
                         # clean empty result (Nygard: stagger nested timeouts).
-                        location = await asyncio.wait_for(
-                            self.api.async_get_device_location(dev_id, dev_name),
-                            timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
+                        # The transport stamps the device immediately before it
+                        # POSTs the request (helpers/locate_clock.py): an attempt
+                        # cut off or failing in its push or token phase leaves
+                        # no stamp. The observer is a context variable, and
+                        # ``wait_for`` awaits the call in this task (Python 3.12
+                        # and later), so it reaches the request. Created lazily
+                        # for coordinators built without __init__.
+                        self._locate_requested_mono = ensure_locate_stamps(
+                            getattr(self, "_locate_requested_mono", None)
                         )
+                        with stamp_on_dispatch(self._locate_requested_mono, dev_id):
+                            location = await asyncio.wait_for(
+                                self.api.async_get_device_location(dev_id, dev_name),
+                                timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
+                            )
 
                         if not location:
                             # Expected for BLE tags with no reporter nearby: the

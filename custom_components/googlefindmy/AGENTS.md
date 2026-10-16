@@ -649,6 +649,16 @@ sentence above and checked both its number and its names. What was loose until n
 other contracts under this component. A name may therefore not be written into any of them before the test exists.
 Citations of a FILE (`tests/foo.py`) stay unchecked by design, so renaming a test module still dangles silently.
 
+### Location request clock (`poll_age_s`)
+
+Every site that awaits `api.async_get_device_location` for a locate wraps the await in `stamp_on_dispatch`
+(`coordinator/helpers/locate_clock.py`). The stamp is written by the transport, not by the send site:
+`NovaApi/nova_request.py` calls the observer of the current context immediately before each `session.post`. A new
+send site that skips the wrapper leaves its requests out of `poll_age_s`. Never stamp before the await: a reader
+logs the value at once, so a stamp for an attempt that later stops in its push or token phase cannot be taken back.
+`test_dispatch_observer_fires_once_per_post` counts observer calls against POSTs, and
+`test_reader_sees_no_stamp_while_the_attempt_is_in_its_push_phase` pins the second rule.
+
 ### Map View reminders
 
 * Decide whether Map View is on only through `_is_map_view_enabled_for_entry` (in `map_view.py`; `__init__.py` reaches it lazily through `_is_map_view_enabled_for_entry_fn`). Registration, the device-URL refresh, the refresh service and every view must agree on the option and its default. Code that handles the stored options as data reads and writes the value without deciding anything: the flows in `config_flow.py` (prefill, carry over and save their forms), the options migrations and `_effective_config` in `__init__.py`, which go through `OPTION_KEYS`, and the diagnostics export. That is not a decision about Map View.

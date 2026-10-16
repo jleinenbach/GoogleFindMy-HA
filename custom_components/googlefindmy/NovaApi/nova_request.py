@@ -31,7 +31,8 @@ import contextvars
 import logging
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from importlib import import_module
@@ -590,6 +591,50 @@ def resolve_cache_from_provider() -> TokenCache | None:
     except Exception as exc:  # pragma: no cover - defensive guard
         _LOGGER.warning("Cache provider callable failed: %s", exc)
         return None
+
+
+# Who wants to know when a request leaves this host. A caller sets it around its
+# await (``observe_request_dispatch``), and the POST loop below calls it
+# immediately before each ``session.post``, the same point at which a request
+# can first reach the wire (``reached_wire``). The coordinator stamps
+# ``poll_age_s`` from it (``coordinator/helpers/locate_clock.py``), so anything
+# that stops earlier leaves no stamp: no push token, a failed push registration,
+# a failure while the payload is built, a failed token fetch, a wait for another
+# request's token refresh, a time limit or a cancellation during any of these.
+# A ``ContextVar`` rather than a parameter: a locate reaches this function
+# through ``api.async_get_device_location`` and its fallbacks to older
+# signatures of the request layer, which would drop a new keyword argument
+# without a trace. Every request that runs in the setting context, including
+# tasks created there, reaches the same observer; ``stamp_on_dispatch`` closes
+# its observer when its block ends.
+_REQUEST_DISPATCH_OBSERVER: contextvars.ContextVar[Callable[[], None] | None] = (
+    contextvars.ContextVar("_request_dispatch_observer", default=None)
+)
+
+
+@contextmanager
+def observe_request_dispatch(callback: Callable[[], None]) -> Iterator[None]:
+    """Call ``callback`` each time a request awaited inside is about to be POSTed."""
+    token = _REQUEST_DISPATCH_OBSERVER.set(callback)
+    try:
+        yield
+    finally:
+        _REQUEST_DISPATCH_OBSERVER.reset(token)
+
+
+def _notify_request_dispatch() -> None:
+    """Tell the observer of this context that a POST is about to go out.
+
+    A failing observer must not cost the request: it only feeds a measurement.
+    The failure is logged at DEBUG with its type name, not its message.
+    """
+    callback = _REQUEST_DISPATCH_OBSERVER.get()
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception as err:  # noqa: BLE001 - a measurement hook must not break the request
+        _LOGGER.debug("Request dispatch observer failed: %s", type(err).__name__)
 
 
 def _get_cache_provider() -> TokenCache | None:
@@ -1524,6 +1569,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                 timeout = aiohttp.ClientTimeout(
                     total=NOVA_REQUEST_TOTAL_TIMEOUT_S, connect=10, sock_read=30
                 )
+                _notify_request_dispatch()
                 async with session.post(
                     url,
                     headers=headers,

@@ -112,12 +112,16 @@ class _UploadEid(NamedTuple):
 
     ``uwt_mode`` is the unwanted-tracking protection mode the sighting showed,
     ``None`` when it showed none that can be trusted (see
-    ``eid_resolver._effective_uwt_mode``).
+    ``eid_resolver._effective_uwt_mode``). ``uwt_source`` says where the mode
+    came from; with ``uwt_mode`` ``None`` it tells an unknown mode
+    (``unknown``) from frame type and flags bit contradicting each other
+    (``conflict``).
     """
 
     eid: bytes
     observed_at: int
     uwt_mode: bool | None
+    uwt_source: str = "unknown"
 
 
 # Log formatting
@@ -435,8 +439,10 @@ async def _async_handle_area_change(
         # nothing is uploaded; decided here so no INFO line announces an
         # upload that does not happen.
         _LOGGER.debug(
-            "Unknown protection mode for GoogleFindMy device %s, skipping upload",
+            "No trusted protection mode for GoogleFindMy device %s "
+            "(source=%s), skipping upload",
             google_device_id,
+            upload.uwt_source,
         )
         return
     eid = upload.eid
@@ -782,7 +788,10 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912
         )
 
         return _UploadEid(
-            eid=eid, observed_at=sighting.observed_at, uwt_mode=sighting.uwt_mode
+            eid=eid,
+            observed_at=sighting.observed_at,
+            uwt_mode=sighting.uwt_mode,
+            uwt_source=sighting.uwt_source.value,
         )
 
     except Exception as err:
