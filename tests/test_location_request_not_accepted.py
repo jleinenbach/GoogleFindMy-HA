@@ -1194,16 +1194,53 @@ def _count_nova_calls(
     return calls
 
 
-def _fail_on_the_accept_line(monkeypatch: pytest.MonkeyPatch) -> None:
+_LOG_METHODS = frozenset(
+    {"debug", "info", "warning", "warn", "error", "exception", "critical", "fatal"}
+)
+
+
+class _AcceptLineFails:
+    """Stand-in for the module logger that raises on the accept message.
+
+    The only statement between a successful send and ``request_accepted`` is the
+    accept log line, so a post-send, pre-accept failure can only be injected
+    there. The trigger matches the MESSAGE through every logging method (and
+    ``log``), not one method: an earlier version patched ``_LOGGER.info``, and
+    lowering that line to DEBUG on ``main`` silently disarmed it. Matching on
+    the message also keeps the trigger independent of the logger's level,
+    because the stand-in raises before ``isEnabledFor`` is ever consulted.
+    """
+
+    def __init__(self, real: logging.Logger) -> None:
+        self._real = real
+        self.raised: RuntimeError | None = None
+
+    def _check(self, msg: object) -> None:
+        if isinstance(msg, str) and msg.startswith("Location request accepted"):
+            self.raised = RuntimeError("accept line failed")
+            raise self.raised
+
+    def log(self, level: int, msg: object, *args: object, **kwargs: Any) -> None:
+        self._check(msg)
+        self._real.log(level, msg, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._real, name)
+        if name not in _LOG_METHODS:
+            return attr
+
+        def _method(msg: object, *args: object, **kwargs: Any) -> None:
+            self._check(msg)
+            attr(msg, *args, **kwargs)
+
+        return _method
+
+
+def _fail_on_the_accept_line(monkeypatch: pytest.MonkeyPatch) -> _AcceptLineFails:
     """Make the accept log line raise, so the outer handler sees a post-send error."""
-    original = location_request_module._LOGGER.info
-
-    def _info(msg: str, *args: object, **kwargs: Any) -> None:
-        if msg.startswith("Location request accepted"):
-            raise RuntimeError("accept line failed")
-        original(msg, *args, **kwargs)
-
-    monkeypatch.setattr(location_request_module._LOGGER, "info", _info)
+    stand_in = _AcceptLineFails(location_request_module._LOGGER)
+    monkeypatch.setattr(location_request_module, "_LOGGER", stand_in)
+    return stand_in
 
 
 def _boom_payload(*_a: object, **_k: object) -> str:
@@ -1262,12 +1299,15 @@ async def test_before_dispatch_matches_whether_google_was_called(
         payload or (lambda *a, **k: "deadbeef"),
     )
     calls = _count_nova_calls(monkeypatch, outcome)
-    if accept_fails:
-        _fail_on_the_accept_line(monkeypatch)
+    stand_in = _fail_on_the_accept_line(monkeypatch) if accept_fails else None
 
     with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
         await _locate()
 
+    if stand_in is not None:
+        # The trigger fired, and its error is what the outer handler wrapped.
+        assert stand_in.raised is not None
+        assert excinfo.value.__cause__ is stand_in.raised
     assert excinfo.value.stage == stage
     assert len(calls) == expected_calls
     assert excinfo.value.before_dispatch is (len(calls) == 0)
