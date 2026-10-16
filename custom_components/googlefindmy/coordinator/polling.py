@@ -2392,7 +2392,7 @@ class PollingOperations(_MixinBase):
                             # must not displace anything.
                             if last_exception is None:
                                 last_exception = UpdateFailed(
-                                    f"Location request timed out for {dev_name}"
+                                    f"Location request timed out for device {dev_id}"
                                 )
                                 last_exception.__cause__ = terr
                             # INVARIANT, not a live condition: mutating
@@ -2409,7 +2409,7 @@ class PollingOperations(_MixinBase):
                                 and independent_error is None
                             ):
                                 independent_error = UpdateFailed(
-                                    f"Location request timed out for {dev_name}"
+                                    f"Location request timed out for device {dev_id}"
                                 )
                                 independent_error.__cause__ = terr
                     except SpotAuthPermanentError:

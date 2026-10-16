@@ -461,10 +461,12 @@ def test_outer_timeout_info_record_carries_id_not_name(
     record names the device by its id and its timeout record with the display
     name is at DEBUG (``AGENTS.md`` section 5 (b)). In the FCM-connected branch
     the name is carried by the idle diagnostics line, in the disconnected
-    branch by a DEBUG record of its own. Not covered: the ``UpdateFailed``
-    text of the disconnected branch still carries the name, and Home
-    Assistant logs it at ERROR through ``async_set_update_error``; the test
-    stubs that method."""
+    branch by a DEBUG record of its own. Not covered here: the ``UpdateFailed``
+    text of the disconnected branch, which Home Assistant logs at ERROR
+    through ``async_set_update_error``; the test stubs that method. That text
+    no longer carries the name: it names the device by its id and is pinned in
+    ``tests/test_coordinator_status.py``
+    (``test_timeout_report_names_the_device_by_id``)."""
 
     loop = asyncio.new_event_loop()
     devices = [{"id": "dev-1", "name": "Hall Tag"}]
