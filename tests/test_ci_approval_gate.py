@@ -1,11 +1,13 @@
 # tests/test_ci_approval_gate.py
-"""Lock the manual approval gate of the CI workflow (fork-specific).
+"""Lock the approval gate of the CI workflow.
 
-Pull request runs of ``ci.yml`` wait in the job ``approval_gate`` for a manual
-approval in the environment ``ci-freigabe`` before any test job starts. The
-point is the Home Assistant test load: it should only happen when it is wanted.
-Pushes to ``main`` run without the gate. The contract is documented in the root
-``AGENTS.md`` (bullet "PR CI runs only after manual approval").
+Pull request runs of ``ci.yml`` pass the job ``approval_gate``, bound to the
+environment ``ci-freigabe``, before any test job starts. Where the environment
+has a required reviewer, the run waits for a manual approval, so the Home
+Assistant test load only happens when it is wanted; where it has no protection
+rules, the gate passes within seconds. Pushes to ``main`` run without the gate.
+The contract is documented in the root ``AGENTS.md``
+(bullet "PR CI passes an approval gate").
 
 The gate only works as a whole. Each check below guards one link:
 
@@ -22,8 +24,9 @@ The gate only works as a whole. Each check below guards one link:
 * the workflow triggers stay ``pull_request`` and ``push`` to ``main``, and the
   workflow sets no ``defaults`` or ``env`` that the check step would inherit.
 
-Fork-specific: do not upstream this test together with the gate.
-BSkando/GoogleFindMy-HA has no ``ci-freigabe`` environment.
+Repository-neutral: the test checks the shape of ``ci.yml``, not the protection
+rules of ``ci-freigabe``, so it holds in every repository that carries the
+workflow, with or without a required reviewer.
 
 Conditions are compared as whole expressions (whitespace removed), not as
 substrings: an appended ``|| always()`` or ``|| github.event_name == ...`` keeps
