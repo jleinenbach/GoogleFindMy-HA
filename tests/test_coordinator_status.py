@@ -1744,7 +1744,7 @@ def test_without_content_the_rejection_keeps_the_report_it_booked(
     less specific one ("nobody answered"). Measured: the report was
     ``UpdateFailed('Location request timed out for Slow')`` where it should name
     the rejection. That was the wording at the time of the measurement;
-    since this change the timeout text reads
+    the timeout text now reads
     ``'Location request timed out for device dev-slow'``.
     """
 

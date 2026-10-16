@@ -6,11 +6,13 @@ log") forbids the account e-mail on every log level, and it forbids logging a
 cache key name, because per-account keys embed the address
 (``adm_token_<email>``). This module pins both for ``nova_request.py``:
 
-* Static: no logger call passes ``self.username`` or a name that carries a key
-  built from it (``key``, ``token_base``, ``issued_base``, ``probe_base``,
+* Static: no logger call passes ``self.username``, a per-account key property
+  (``self.k_*``), a call of ``_key_variants`` or a name that carries a key built
+  from the account (``key``, ``token_base``, ``issued_base``, ``probe_base``,
   ``normalized_user``, ``username``, ``user``, ``base``, ``cache_key``,
   ``token_key``), neither among the arguments after the format string nor as a
-  keyword value such as ``extra``.
+  keyword value such as ``extra``, nor inside a format argument that is not a
+  plain string literal (an f-string or a ``%`` expression).
 * Static: the two namespaced-mirror records in ``_get_initial_token_async``
   pass no ``exc_info`` and no ``extra`` and log only ``type(err).__name__``.
   The text of a cache backend's exception can carry the key (for example
@@ -21,8 +23,9 @@ cache key name, because per-account keys embed the address
   failure record of ``async_on_401`` name no account and no key.
 
 Not covered: logger calls through a bound name (``log_fn(...)``), strings
-formatted before the call, values passed on under a name that is not in the
-list above, and every module other than ``nova_request.py``. The test can be
+formatted into a local before the call, values passed on under a name that is
+not in the list above (a local alias such as ``acct = self.username``), and
+every module other than ``nova_request.py``. The test can be
 retired when a package-wide guard takes over the static predicate.
 """
 
@@ -84,11 +87,31 @@ def _logger_calls(node: ast.AST) -> list[ast.Call]:
 
 def _carries_account(value: ast.AST) -> bool:
     for sub in ast.walk(value):
-        if isinstance(sub, ast.Attribute) and sub.attr == "username":
+        if isinstance(sub, ast.Attribute) and (
+            sub.attr == "username" or sub.attr.startswith("k_")
+        ):
+            return True
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "_key_variants"
+        ):
             return True
         if isinstance(sub, ast.Name) and sub.id in _KEY_NAMES:
             return True
     return False
+
+
+def _checked_values(call: ast.Call) -> list[ast.AST]:
+    """Arguments after the format string, keyword values, and a computed format."""
+
+    values: list[ast.AST] = list(call.args[1:])
+    values.extend(keyword.value for keyword in call.keywords)
+    if call.args and not (
+        isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)
+    ):
+        values.append(call.args[0])
+    return values
 
 
 def test_policy_logger_is_detected() -> None:
@@ -106,15 +129,34 @@ def test_policy_logger_is_detected() -> None:
 
 
 def test_no_logger_call_passes_the_account_name() -> None:
-    """No argument after the format string and no keyword value names the account."""
+    """No logged value names the account or a key built from it."""
 
     offenders = [
         f"{call.lineno}: {ast.unparse(value)}"
         for call in _logger_calls(_tree())
-        for value in call.args[1:] + [keyword.value for keyword in call.keywords]
+        for value in _checked_values(call)
         if _carries_account(value)
     ]
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'self.log.info("a %s", self.username)',
+        'self.log.info(f"a {self.username}")',
+        'self.log.info("a %s" % self.username)',
+        'self.log.info("a %s", self.k_issued)',
+        'self.log.info("a %s", self._key_variants("x"))',
+        'self.log.debug("a", extra={"cache_key": cache_key})',
+    ],
+    ids=["argument", "f-string", "percent", "key-property", "key-variants", "extra"],
+)
+def test_account_predicate_detects_each_form(source: str) -> None:
+    """Every form the static check claims to cover is detected (vacuum guard)."""
+
+    call = _logger_calls(ast.parse(source))[0]
+    assert any(_carries_account(value) for value in _checked_values(call))
 
 
 def test_namespaced_mirror_records_log_only_the_exception_type() -> None:

@@ -21,9 +21,9 @@ Two groups are covered:
   failure (warning and error severities), and the empty-after-decrypt path.
 
 The cancellation of a locate request is logged at INFO, below the WARNING line
-this sweep is about. It follows every outer poll timeout and so recurs on an
-unattended path; its INFO record names the device by the canonical id, and the
-display name appears only in a DEBUG companion record.
+this sweep is about. An outer poll timeout can cancel the request, so the record
+can recur on an unattended path; its INFO record names the device by the
+canonical id, and the display name appears only in a DEBUG companion record.
 
 The flows are exercised through the same stubbing style the sibling suites use
 (no ``asyncio.run`` in tests).

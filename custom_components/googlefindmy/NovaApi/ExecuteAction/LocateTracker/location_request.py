@@ -1100,9 +1100,9 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
         return []
 
     except asyncio.CancelledError:
-        # A cancellation follows every outer poll timeout, so this path runs
-        # unattended: name the device by its canonical id at INFO and keep the
-        # display name at DEBUG (AGENTS.md section 5 (b)).
+        # An outer poll timeout can cancel the request while it waits here, so
+        # this path can run unattended: name the device by its canonical id at
+        # INFO and keep the display name at DEBUG (AGENTS.md section 5 (b)).
         _LOGGER.info("Location request cancelled for device %s", canonic_device_id)
         _LOGGER.debug(
             "Location request cancelled for %s (device %s)", name, canonic_device_id
