@@ -294,6 +294,8 @@ def _unknown_test_citations(
     without an id it also resolves to the items of a parametrized test or of a
     class. Anything else after the module (prose, a broken separator) counts as
     not resolving. Citations of a missing module are left to the file check.
+    The module path is normalized as pytest prints it, so ``tests/./x.py`` cites
+    the items of ``tests/x.py``.
     ``node_ids`` replaces the collection run (for tests of this function).
     """
 
@@ -304,7 +306,9 @@ def _unknown_test_citations(
             continue
         cited.append((evidence, citation.group(1)))
     if node_ids is None and cited:
-        node_ids = _collected_node_ids(sorted({m for _, m in cited}), repo_root)
+        node_ids = _collected_node_ids(
+            sorted({posixpath.normpath(m) for _, m in cited}), repo_root
+        )
 
     unknown: list[str] = []
     for evidence, module in cited:
@@ -312,7 +316,9 @@ def _unknown_test_citations(
         if name is None:
             unknown.append(evidence)
             continue
-        node = module + "::" + re.sub(r"::|:|\.", "::", name.group(1))
+        node = (
+            posixpath.normpath(module) + "::" + re.sub(r"::|:|\.", "::", name.group(1))
+        )
         if name.group(2):
             found = node + name.group(2) in (node_ids or set())
         else:
@@ -677,6 +683,9 @@ def fixture_citation_module(
         ("tests/t_mod.py::test_with_ids[pair]", True),
         ("tests/t_mod.py::test_with_ids[1-2]", False),
         ("tests/t_mod.py::TestSub", True),
+        ("tests/./t_mod.py::test_plain", True),
+        ("tests/./t_mod.py:TestSub:test_inh", True),
+        ("tests/./t_mod.py::test_missing", False),
     ],
 )
 def test_test_citation_predicate(
@@ -708,8 +717,10 @@ def test_collected_node_ids_fails_loudly(tmp_path: Path) -> None:
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "t_bad.py").write_text("def test_x(:\n", encoding="utf-8")
 
-    with pytest.raises(pytest.fail.Exception, match="rc 2"):
+    with pytest.raises(pytest.fail.Exception, match="rc 2") as excinfo:
         _collected_node_ids(["tests/t_bad.py"], tmp_path)
+
+    assert _STDERR_SEPARATOR in str(excinfo.value)
 
 
 def test_collected_node_ids_ignores_outer_options(
@@ -719,7 +730,9 @@ def test_collected_node_ids_ignores_outer_options(
 
     Both ``COVERAGE_PROCESS_START`` and ``COVERAGE_PROCESS_CONFIG`` (set by
     coverage.py 7.10.3+ with ``patch = subprocess``) start a measurement on their
-    own through the ``.pth`` file coverage.py ships from 7.12.1 on. Before that
+    own through the ``.pth`` file coverage.py ships from 7.13.0 on (7.12.1b1 as a
+    pre-release). From 7.10.0 to 7.12.0 only the temporary ``.pth`` that an outer
+    run with ``patch = subprocess`` writes starts one; without that setting
     neither variable starts one here, so the probe has nothing to catch there.
     """
 
