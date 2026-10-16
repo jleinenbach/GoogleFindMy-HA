@@ -25,9 +25,9 @@ jobs:
   # run waits for a manual approval, so the Home Assistant test load only
   # happens when it is wanted. Where it has no protection rules (GitHub
   # creates a missing environment without rules when a job references it, as
-  # in BSkando/GoogleFindMy-HA), the gate passes within seconds. Other pull
-  # request workflows are not gated (AGENTS.md). Pushes to main run without
-  # the gate. Guarded by tests/test_ci_approval_gate.py.
+  # in BSkando/GoogleFindMy-HA), the gate passes without waiting for
+  # approval. Other pull request workflows are not gated (AGENTS.md). Pushes
+  # to main run without the gate. Guarded by tests/test_ci_approval_gate.py.
   approval_gate:
     name: CI approval gate
     if: github.event_name == 'pull_request'

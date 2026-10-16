@@ -5,7 +5,8 @@ Pull request runs of ``ci.yml`` pass the job ``approval_gate``, bound to the
 environment ``ci-freigabe``, before any test job starts. Where the environment
 has a required reviewer, the run waits for a manual approval, so the Home
 Assistant test load only happens when it is wanted; where it has no protection
-rules, the gate passes within seconds. Pushes to ``main`` run without the gate.
+rules, the gate passes without waiting for approval. Pushes to ``main`` run
+without the gate.
 The contract is documented in the root ``AGENTS.md``
 (bullet "PR CI passes an approval gate").
 

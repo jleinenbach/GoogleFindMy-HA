@@ -960,9 +960,9 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     needs it, and every other job needs `hassfest`. Where `ci-freigabe` has a
     required reviewer (in `jleinenbach/GoogleFindMy-HA`), that reviewer must
     approve the run before any job starts; where it has no protection rules
-    (in `BSkando/GoogleFindMy-HA`), the gate passes within seconds. Pushes to
-    `main` skip the
-    gate and run all jobs (each job states an explicit `if:` so the skipped
+    (in `BSkando/GoogleFindMy-HA`), the gate passes without waiting for
+    approval. Pushes to `main` skip the gate and run all jobs (each job
+    states an explicit `if:` so the skipped
     gate does not skip them). A run that is not approved, is rejected or
     expires never turns `CI Success` green: `CI Success` depends on the gate
     and fails a pull request run whose gate result is not `success`. Workflow
@@ -973,13 +973,14 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     creates a missing environment without protection rules when a job
     references it, so the approval is enforced only while
     `gh api repos/<owner>/<repo>/environments/ci-freigabe --jq '.protection_rules[].type'`
-    prints `required_reviewers` for that repository. Name it explicitly: in a
-    checkout with an `upstream` remote, gh resolves the `{owner}/{repo}`
-    placeholders to the upstream repository. The gate is a load control, not a security
+    prints `required_reviewers` for that repository. Name it explicitly:
+    without `GH_REPO`, gh resolves the `{owner}/{repo}` placeholders from the
+    checkout's git remotes, and in a fork checkout with an `upstream` remote
+    they resolve to the upstream repository. The gate is a load control, not a security
     boundary, and the guarantees above hold only for the unmodified
     `ci.yml`: a `pull_request` run uses the `ci.yml` of the pull request's
     merge commit, so a pull request that edits or removes the gate job (or
-    the guard test, which itself only runs after approval) runs `CI` without
+    the guard test, which itself only runs once the gate has passed) runs `CI` without
     approval. This is accepted. Do not move the gate to `pull_request_target`
     or `workflow_run`: those run in the base repository's context, where the
     token can be write-scoped and repository secrets are available, and the
