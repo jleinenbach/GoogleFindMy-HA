@@ -2189,9 +2189,18 @@ class PollingOperations(_MixinBase):
                                         # is not reclassified as a real measurement.
                                         carry_reused_accuracy(location, prev_location)
                                     else:
+                                        # Unattended poll path: name the device by
+                                        # its id; the display name and the Google
+                                        # Home label go to DEBUG only (AGENTS.md
+                                        # section 5 (b)).
                                         _LOGGER.info(
-                                            "Google Home filter: %s detected at '%s', substituting with Home coordinates",
+                                            "Google Home filter: device %s detected at a Google Home location, substituting with Home coordinates",
+                                            dev_id,
+                                        )
+                                        _LOGGER.debug(
+                                            "Google Home filter: %s (device %s) detected at '%s', substituting with Home coordinates",
                                             dev_name,
+                                            dev_id,
                                             semantic_name,
                                         )
                                         if (
