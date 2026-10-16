@@ -1131,10 +1131,9 @@ class UwtTransitionEvent(NamedTuple):
     the device's position in the entry (``device_index``).
     ``old`` is ``"unknown"`` for the first known mode of a device in this
     process. ``poll_age_s`` is the age, at the observation, of the last
-    location request the integration attempted for the device, not counting
-    attempts the request layer reports as never handed to Google (a few that
-    never reached Google still count, see ``coordinator/helpers/locate_clock.py``);
-    ``prev_seen_age_s``
+    location request the integration handed to Google for the device (attempts
+    that stopped earlier leave no stamp, see
+    ``coordinator/helpers/locate_clock.py``); ``prev_seen_age_s``
     the age of the last observation of the old mode. Both are ``None`` when
     there is nothing to measure them against.
     """

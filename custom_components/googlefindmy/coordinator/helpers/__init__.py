@@ -56,15 +56,8 @@ from .identity import (
     store_if_value,
 )
 
-# locate_clock.py - 1 constant + 2 classes + 3 functions
-from .locate_clock import (
-    MAX_TRACKED_ATTEMPTS,
-    LocateStamp,
-    LocateStamps,
-    ensure_locate_stamps,
-    retract_if_never_dispatched,
-    stamp_locate_attempt,
-)
+# locate_clock.py - 2 functions
+from .locate_clock import ensure_locate_stamps, stamp_on_dispatch
 
 # polling.py - 3 functions
 from .polling import (
@@ -216,10 +209,6 @@ __all__ = [
     "get_age_log_level",
     "should_preserve_previous_coordinates",
     # locate_clock.py
-    "MAX_TRACKED_ATTEMPTS",
-    "LocateStamp",
-    "LocateStamps",
     "ensure_locate_stamps",
-    "retract_if_never_dispatched",
-    "stamp_locate_attempt",
+    "stamp_on_dispatch",
 ]

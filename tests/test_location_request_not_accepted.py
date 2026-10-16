@@ -59,6 +59,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
     LOCATION_REQUEST_NOT_ACCEPTED_STAGES,
     LocationRequestNotAcceptedError,
+    observe_locate_dispatch,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
@@ -135,13 +136,13 @@ def test_the_signal_is_not_a_runtime_or_decryption_or_nova_error(
 
 
 def test_the_signal_carries_a_stage_and_no_device_name() -> None:
-    """R6: the payload is stage, status and the dispatch flag -- never a device name."""
+    """R6: the payload is stage plus status -- never the raw device display name."""
     error = LocationRequestNotAcceptedError(stage="server_error", status=503)
 
     assert error.stage == "server_error"
     assert error.status == 503
     assert "503" in str(error)
-    assert set(vars(error)) == {"stage", "status", "dispatched"}
+    assert set(vars(error)) == {"stage", "status"}
 
     bare = LocationRequestNotAcceptedError(stage="no_fcm_token")
     assert bare.status is None
@@ -153,7 +154,7 @@ def test_the_signal_carries_a_stage_and_no_device_name() -> None:
     # there is no parameter to pass one through. Asserting "the sample name is absent"
     # on an instance built WITHOUT that name would be circular; the signature is not.
     parameters = inspect.signature(LocationRequestNotAcceptedError).parameters
-    assert set(parameters) == {"stage", "status", "dispatched"}
+    assert set(parameters) == {"stage", "status"}
     assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters.values())
 
     # And the message stays derived from those two, so a name cannot be baked in
@@ -234,55 +235,6 @@ def test_the_stage_markers_are_a_closed_set() -> None:
     assert set(stages) <= LOCATION_REQUEST_NOT_ACCEPTED_STAGES
     assert set(stages) == LOCATION_REQUEST_NOT_ACCEPTED_STAGES
     assert len(stages) == len(set(stages)), f"a marker is used twice: {stages}"
-
-
-def test_every_raise_site_states_whether_it_dispatched() -> None:
-    """Each construction of the signal passes ``dispatched`` instead of the default.
-
-    The default is the cautious "cannot rule out a send". A construction that
-    forgot the argument would therefore keep a stamp it should take back, and
-    nothing at run time would show it. Every CALL is counted, not only
-    ``raise X(...)``: a signal built first and raised later, a qualified name,
-    and a construction in another module of the integration are all found.
-    The count is pinned, so a new site has to be looked at here.
-    Not seen: a call through an alias of the class, ``getattr`` or a factory.
-    """
-    package = _LOCATION_REQUEST_PY.parents[3]
-    assert package.name == "googlefindmy"
-    sites: list[tuple[str, int, bool]] = []
-    for path in sorted(package.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-            if name != "LocationRequestNotAcceptedError":
-                continue
-            states = any(keyword.arg == "dispatched" for keyword in node.keywords)
-            sites.append((path.relative_to(package).as_posix(), node.lineno, states))
-    files = {site[0] for site in sites}
-    assert files == {"NovaApi/ExecuteAction/LocateTracker/location_request.py"}
-    assert len(sites) == 7, f"expected seven constructions, found {sites}"
-    missing = [site for site in sites if not site[2]]
-    assert not missing, f"constructions without dispatched=: {missing}"
-
-
-@pytest.mark.parametrize(
-    ("dispatched", "expected"),
-    [(False, True), (True, False)],
-    ids=["never-sent", "maybe-sent"],
-)
-def test_before_dispatch_is_the_negated_flag(dispatched: bool, expected: bool) -> None:
-    err = LocationRequestNotAcceptedError(stage="server_error", dispatched=dispatched)
-    assert err.dispatched is dispatched
-    assert err.before_dispatch is expected
-
-
-def test_the_default_cannot_rule_out_a_send() -> None:
-    err = LocationRequestNotAcceptedError(stage="no_fcm_token")
-    assert err.dispatched is True
-    assert err.before_dispatch is False
 
 
 # ===========================================================================
@@ -1249,7 +1201,7 @@ def _boom_payload(*_a: object, **_k: object) -> str:
 
 # (case id, stage, receiver, payload builder, send outcome, accept line fails,
 # calls to async_nova_request). The call count is a literal on purpose: the
-# assertion below compares ``before_dispatch`` with the MEASURED count, and the
+# assertion below compares the observer calls with the MEASURED count, and the
 # literal keeps each case from passing vacuously on a flow that never ran.
 _DISPATCH_CASES = [
     ("no-token", "no_fcm_token", "empty", None, None, False, 0),
@@ -1269,7 +1221,7 @@ _DISPATCH_CASES = [
     [case[1:] for case in _DISPATCH_CASES],
     ids=[case[0] for case in _DISPATCH_CASES],
 )
-async def test_before_dispatch_matches_whether_google_was_called(
+async def test_dispatch_observer_matches_whether_google_was_called(
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
     receiver: str,
@@ -1278,11 +1230,12 @@ async def test_before_dispatch_matches_whether_google_was_called(
     accept_fails: bool,
     expected_calls: int,
 ) -> None:
-    """``before_dispatch`` is true exactly when ``async_nova_request`` was not called.
+    """The dispatch observer runs exactly when ``async_nova_request`` is called.
 
     Every stage is driven through the real flow. ``surfacing_before_accept``
     appears twice, once from the payload build before the send and once from
-    the accept line after it: the stage alone does not decide.
+    the accept line after it: the stage alone does not decide whether Google
+    was called, and the observer, not the stage, is what stamps ``poll_age_s``.
     """
     receivers = {
         "empty": _TokenFcmReceiver(token=""),
@@ -1301,7 +1254,16 @@ async def test_before_dispatch_matches_whether_google_was_called(
     calls = _count_nova_calls(monkeypatch, outcome)
     stand_in = _fail_on_the_accept_line(monkeypatch) if accept_fails else None
 
-    with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
+    observed: list[int] = []
+
+    def _observer() -> None:
+        # Called before the send, never after it.
+        observed.append(len(calls))
+
+    with (
+        observe_locate_dispatch(_observer),
+        pytest.raises(LocationRequestNotAcceptedError) as excinfo,
+    ):
         await _locate()
 
     if stand_in is not None:
@@ -1310,7 +1272,51 @@ async def test_before_dispatch_matches_whether_google_was_called(
         assert excinfo.value.__cause__ is stand_in.raised
     assert excinfo.value.stage == stage
     assert len(calls) == expected_calls
-    assert excinfo.value.before_dispatch is (len(calls) == 0)
+    assert observed == [0] * expected_calls
+
+
+@pytest.mark.asyncio
+async def test_a_failing_dispatch_observer_does_not_cost_the_request(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The observer only feeds a measurement; its failure must not change the flow.
+
+    The send still happens, the stage is the one the server answer decides, and
+    the DEBUG record names the error type but not its message.
+    """
+    monkeypatch.setattr(
+        location_request_module, "_FCM_ReceiverGetter", lambda *_a: _TokenFcmReceiver()
+    )
+    _capture_ctx(monkeypatch)
+    monkeypatch.setattr(
+        location_request_module, "create_location_request", lambda *a, **k: "deadbeef"
+    )
+    calls = _count_nova_calls(monkeypatch, NovaHTTPError(503, "x"))
+
+    def _broken() -> None:
+        raise ValueError("secret-detail")
+
+    caplog.set_level(logging.DEBUG, logger=location_request_module.__name__)
+    with (
+        observe_locate_dispatch(_broken),
+        pytest.raises(LocationRequestNotAcceptedError) as excinfo,
+    ):
+        await _locate()
+
+    assert len(calls) == 1
+    assert excinfo.value.stage == "server_error"
+    assert "Locate dispatch observer failed: ValueError" in caplog.text
+    assert "secret-detail" not in caplog.text
+
+
+def test_the_dispatch_observer_is_reset_after_its_block() -> None:
+    """A send outside the block must not reach an observer set for an earlier one."""
+    seen: list[int] = []
+    with observe_locate_dispatch(lambda: seen.append(1)):
+        location_request_module._notify_locate_dispatch()
+    location_request_module._notify_locate_dispatch()
+    assert seen == [1]
+    assert location_request_module._LOCATE_DISPATCH_OBSERVER.get() is None
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,6 @@ if TYPE_CHECKING:
 
     from .._reauth_reason import ReauthReason, ReauthReasonCode
     from ..api import GoogleFindMyAPI
-    from .helpers.locate_clock import LocateStamps
     from .subentry import SubentryMetadata
 
 
@@ -86,7 +85,7 @@ class _MixinBase:
     _push_cooldown_until: float
     _locate_inflight: set[str]
     _locate_cooldown_until: dict[str, float]
-    _locate_requested_mono: LocateStamps
+    _locate_requested_mono: dict[str, float]
     _device_action_locks: dict[str, asyncio.Lock]
     _sound_request_uuids: dict[str, str]
     _device_poll_cooldown_until: dict[str, float]

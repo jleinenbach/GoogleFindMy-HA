@@ -79,11 +79,7 @@ from .helpers.cache import (
     substitute_zone_accuracy,
 )
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
-from .helpers.locate_clock import (
-    ensure_locate_stamps,
-    retract_if_never_dispatched,
-    stamp_locate_attempt,
-)
+from .helpers.locate_clock import ensure_locate_stamps, stamp_on_dispatch
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 from .helpers.update import (
@@ -1974,21 +1970,21 @@ class PollingOperations(_MixinBase):
                         # make this outer guard win the race and raise a spurious
                         # TimeoutError before the inner request can return its
                         # clean empty result (Nygard: stagger nested timeouts).
-                        # Stamped before the await, not after it: an attempt
-                        # that times out or raises after the request was sent
-                        # still counts. One that stopped before the send is
-                        # undone in the not-accepted branch below. Created
-                        # lazily for coordinators built without __init__.
+                        # The request layer stamps the device at the moment it
+                        # hands the request to Google (helpers/locate_clock.py):
+                        # an attempt cut off or failing in its push phase leaves
+                        # no stamp. ``wait_for`` runs the call in a task that
+                        # copies the context, so the observer set here reaches
+                        # it. Created lazily for coordinators built without
+                        # __init__.
                         self._locate_requested_mono = ensure_locate_stamps(
                             getattr(self, "_locate_requested_mono", None)
                         )
-                        locate_stamp = stamp_locate_attempt(
-                            self._locate_requested_mono, dev_id, time.monotonic()
-                        )
-                        location = await asyncio.wait_for(
-                            self.api.async_get_device_location(dev_id, dev_name),
-                            timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
-                        )
+                        with stamp_on_dispatch(self._locate_requested_mono, dev_id):
+                            location = await asyncio.wait_for(
+                                self.api.async_get_device_location(dev_id, dev_name),
+                                timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
+                            )
 
                         if not location:
                             # Expected for BLE tags with no reporter nearby: the
@@ -2723,12 +2719,6 @@ class PollingOperations(_MixinBase):
                         #   of the ten clear it unconditionally, `TimeoutError`
                         #   never does (it increments), and `NovaAuthError`
                         #   clears it on only one of its three exits.
-                        # A request the request layer never handed to Google
-                        # (``before_dispatch``) must not count for
-                        # ``poll_age_s`` (helpers/locate_clock.py).
-                        retract_if_never_dispatched(
-                            self._locate_requested_mono, locate_stamp, not_accepted_err
-                        )
                         _LOGGER.debug(
                             "Location request for %s was not accepted (%s); "
                             "skipping this device for this cycle",

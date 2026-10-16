@@ -651,14 +651,13 @@ Citations of a FILE (`tests/foo.py`) stay unchecked by design, so renaming a tes
 
 ### Location request clock (`poll_age_s`)
 
-Every site that awaits `api.async_get_device_location` for a locate stamps the device with `stamp_locate_attempt`
-(`coordinator/helpers/locate_clock.py`) immediately BEFORE the await, and passes the token to
-`retract_if_never_dispatched` in its `LocationRequestNotAcceptedError` branch. A new send site that skips either step
-leaves `poll_age_s` silently wrong for its requests. Whether an attempt counts is read off `before_dispatch`, which
-`location_request.py` derives from the `dispatched` flag it sets right before `async_nova_request`; never from the
-stage name, because `surfacing_before_accept` occurs on both sides of the send. Every raise site passes `dispatched=`
-explicitly (`test_every_raise_site_states_whether_it_dispatched`), and
-`test_before_dispatch_matches_whether_google_was_called` counts the send calls per stage.
+Every site that awaits `api.async_get_device_location` for a locate wraps the await in `stamp_on_dispatch`
+(`coordinator/helpers/locate_clock.py`). The stamp is written by the request layer, not by the send site:
+`location_request.py` calls the observer of the awaiting task once, immediately before `async_nova_request`. A new
+send site that skips the wrapper leaves its requests out of `poll_age_s`. Never stamp before the await: a reader
+logs the value at once, so a stamp for an attempt that later stops in its push phase cannot be taken back.
+`test_dispatch_observer_matches_whether_google_was_called` counts observer calls against send calls per stage, and
+`test_reader_sees_no_stamp_while_the_attempt_is_in_its_push_phase` pins the second rule.
 
 ### Map View reminders
 
