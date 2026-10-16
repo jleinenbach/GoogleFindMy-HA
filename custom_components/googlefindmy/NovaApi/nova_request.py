@@ -705,9 +705,8 @@ async def _get_initial_token_async(
                 await resolved_cache.set(cache_key, fallback)
             except Exception as err:  # pragma: no cover - defensive logging
                 logger.debug(
-                    "Failed to mirror ADM token to namespaced key",
-                    extra={"cache_key": cache_key},
-                    exc_info=err,
+                    "Failed to mirror the ADM entry to the namespaced cache slot (%s)",
+                    type(err).__name__,
                 )
             return fallback
 
@@ -718,9 +717,8 @@ async def _get_initial_token_async(
             await resolved_cache.set(cache_key, token)
         except Exception as err:  # pragma: no cover - defensive logging
             logger.debug(
-                "Failed to persist ADM token to namespaced key",
-                extra={"cache_key": cache_key},
-                exc_info=err,
+                "Failed to persist the ADM entry to the namespaced cache slot (%s)",
+                type(err).__name__,
             )
 
     return token
@@ -1050,8 +1048,7 @@ class AsyncTTLPolicy(TTLPolicy):
             observed_ttl = now - issued_at
             observed_ttl_hours = observed_ttl / 3600
             self.log.info(
-                "AAS token for %s lived %.1f hours before invalidation.",
-                self.username,
+                "AAS lifetime before invalidation: %.1f hours.",
                 observed_ttl_hours,
             )
             # Skip TTL learning for very short lifetimes - these typically indicate
@@ -1074,8 +1071,7 @@ class AsyncTTLPolicy(TTLPolicy):
                     except Exception:  # noqa: BLE001 - defensive cache write
                         pass
                 self.log.info(
-                    "Updated AAS best TTL for %s to %.1f hours (with 5%% margin).",
-                    self.username,
+                    "Updated learned AAS lifetime to %.1f hours (with 5%% margin).",
                     safe_ttl / 3600,
                 )
         except (TypeError, ValueError) as e:
@@ -1095,8 +1091,7 @@ class AsyncTTLPolicy(TTLPolicy):
         await self._learn_aas_ttl(now)
 
         self.log.warning(
-            "Invalidating cached AAS token for %s due to persistent 401 errors.",
-            self.username,
+            "Invalidating the cached AAS entry due to persistent 401 errors."
         )
         for key in self._key_variants(DATA_AAS_TOKEN):
             try:
@@ -1145,9 +1140,8 @@ class AsyncTTLPolicy(TTLPolicy):
                 # let gpsoauth validate the AAS on the next ADM refresh: if it's
                 # truly expired, InvalidAasTokenError propagates correctly.
                 self.log.info(
-                    "AAS token for %s past learned threshold (%.1f hours); "
+                    "AAS age past learned threshold (%.1f hours); "
                     "will validate on next ADM refresh.",
-                    self.username,
                     best_ttl / 3600,
                 )
                 return False
@@ -1290,7 +1284,8 @@ class AsyncTTLPolicy(TTLPolicy):
                         candidate = await self._aget(key)
                     except Exception as err:  # noqa: BLE001 - defensive cache read
                         self.log.debug(
-                            "Failed to read cached token from key '%s': %s", key, err
+                            "Cache read failed for one ADM key variant (%s).",
+                            type(err).__name__,
                         )
                         continue
                     if isinstance(candidate, bytes):
