@@ -1970,13 +1970,13 @@ class PollingOperations(_MixinBase):
                         # make this outer guard win the race and raise a spurious
                         # TimeoutError before the inner request can return its
                         # clean empty result (Nygard: stagger nested timeouts).
-                        # The request layer stamps the device at the moment it
-                        # hands the request to Google (helpers/locate_clock.py):
-                        # an attempt cut off or failing in its push phase leaves
-                        # no stamp. ``wait_for`` runs the call in a task that
-                        # copies the context, so the observer set here reaches
-                        # it. Created lazily for coordinators built without
-                        # __init__.
+                        # The transport stamps the device immediately before it
+                        # POSTs the request (helpers/locate_clock.py): an attempt
+                        # cut off or failing in its push or token phase leaves
+                        # no stamp. The observer is a context variable, and
+                        # ``wait_for`` awaits the call in this task (Python 3.12
+                        # and later), so it reaches the request. Created lazily
+                        # for coordinators built without __init__.
                         self._locate_requested_mono = ensure_locate_stamps(
                             getattr(self, "_locate_requested_mono", None)
                         )

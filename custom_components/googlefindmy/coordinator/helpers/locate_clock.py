@@ -2,39 +2,46 @@
 """Per-device clock of location requests, read for ``poll_age_s``.
 
 The EID resolver reports how long before an observation the integration last
-handed a location request for the device to Google (``poll_age_s`` in
+sent a location request for the device (``poll_age_s`` in
 ``FMDN_UWT_TRANSITION``). Both send sites (the poll cycle and the manual locate)
 wrap their await of ``api.async_get_device_location`` in ``stamp_on_dispatch``.
-The request layer calls the observer once, immediately before
-``async_nova_request`` (``location_request.observe_locate_dispatch``), and only
-that call writes the stamp.
+The transport calls the observer immediately before each ``session.post``
+(``nova_request.observe_request_dispatch``), and only that call writes the
+stamp.
 
-The stamp therefore exists only for requests that were handed to the send call,
-and it carries the moment of the hand-over, not the start of the attempt: push
-registration runs first and can take 44 seconds or more on a reconnect. An
+The stamp therefore exists only for requests that were about to leave the host,
+and it carries that moment, not the start of the attempt: push registration and
+the token fetch run first, and together they can take a minute or more. An
 attempt that stops earlier writes nothing, whatever the reason (no push token, a
-failed push registration, a configuration error, a failure while the request is
-built, a time limit or a cancellation during the push registration). A reader
-that runs while an attempt is still in its push phase sees the previous value,
-so nothing it logs has to be taken back later.
+failed push registration, a failure while the payload is built, a failed token
+fetch, a time limit or a cancellation before the POST). A reader that runs while
+an attempt is still in one of these phases sees the previous value, so nothing
+it logs has to be taken back later.
 
-A request that was handed over counts even if it failed afterwards, for example
-with a network or server error: the stamp says that the integration sent a
-request, not that Google received or answered it.
+A request that was POSTed counts even if it failed afterwards, for example with
+a network or server error: the stamp says that the integration sent a request,
+not that Google received or answered it. A retry stamps again.
 
 Two overlapping requests for the same device (a manual locate still in flight
-while the poll cycle asks again) each stamp at their own hand-over; the later
-hand-over wins, because the observer belongs to the awaiting task.
+while the poll cycle asks again) each stamp at their own POST, because each
+send site sets its own observer in its own context; the later POST wins. The
+observer stops writing when its block ends, so a task that was created inside
+the block and outlives it (the push receiver's supervisor is started on the
+first locate) cannot stamp the device later.
+
+A device purged while its request is still before the POST gets a stamp again
+at the POST. The value then refers to a request that was really sent for that
+id; it is accepted rather than guarded, because the purge runs only when a
+device is deleted.
 """
 
 from __future__ import annotations
 
 import time
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
+from contextlib import contextmanager
 
-from ...NovaApi.ExecuteAction.LocateTracker.location_request import (
-    observe_locate_dispatch,
-)
+from ...NovaApi.nova_request import observe_request_dispatch
 
 
 def ensure_locate_stamps(existing: object) -> dict[str, float]:
@@ -48,12 +55,17 @@ def ensure_locate_stamps(existing: object) -> dict[str, float]:
     return {}
 
 
-def stamp_on_dispatch(
-    stamps: dict[str, float], device_id: str
-) -> AbstractContextManager[None]:
-    """Stamp ``device_id`` with ``time.monotonic()`` when the request inside is handed over."""
+@contextmanager
+def stamp_on_dispatch(stamps: dict[str, float], device_id: str) -> Iterator[None]:
+    """Stamp ``device_id`` with ``time.monotonic()`` at each POST inside the block."""
+    is_open = True
 
     def _stamp() -> None:
-        stamps[device_id] = time.monotonic()
+        if is_open:
+            stamps[device_id] = time.monotonic()
 
-    return observe_locate_dispatch(_stamp)
+    try:
+        with observe_request_dispatch(_stamp):
+            yield
+    finally:
+        is_open = False

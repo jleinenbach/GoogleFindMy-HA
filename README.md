@@ -675,14 +675,15 @@ from Google.
    - `source`: whether the hashed-flags bit (`flags_bit`) or the frame type
      (`frame_type`) showed the mode.
    - `poll_age_s`: seconds between the last location request this integration
-     handed to Google for the device and the advertisement that showed the
-     change. The clock starts at the hand-over, after the push registration
-     (which can take 44 seconds or more on a reconnect). An attempt that
-     stopped before the hand-over does not count, whatever the reason: no push
-     token, a failed push registration, a configuration error, a failure while
-     building the request, or a time limit or cancellation during the push
-     registration. A request that was handed over counts even if it failed
-     afterwards, for example with a network or server error.
+     sent for the device and the advertisement that showed the change. The
+     clock starts immediately before the request is sent, after the push
+     registration and the token fetch (together a minute or more on a
+     reconnect). An attempt that stopped before that does not count, whatever
+     the reason: no push token, a failed push registration, a configuration
+     error, a failure while building the request or fetching a token, or a
+     time limit or cancellation before the request was sent. A request that
+     was sent counts even if it failed afterwards, for example with a network
+     or server error.
      `none` if there was no such request since the start, or if it came after
      the advertisement.
    - `prev_seen_age_s`: seconds since the old mode was last seen.

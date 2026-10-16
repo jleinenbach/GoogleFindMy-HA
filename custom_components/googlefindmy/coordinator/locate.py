@@ -372,9 +372,9 @@ class LocateOperations(_MixinBase):
             google_home_filter = self._get_google_home_filter()
 
             try:
-                # The request layer stamps the device at the moment it hands
-                # the request to Google, not here: an attempt that stops in its
-                # push phase leaves no stamp a reader could log in the meantime
+                # The transport stamps the device immediately before it POSTs
+                # the request, not here: an attempt that stops in its push or
+                # token phase leaves no stamp a reader could log in the meantime
                 # (helpers/locate_clock.py). Created lazily for coordinators
                 # built without __init__.
                 self._locate_requested_mono = ensure_locate_stamps(

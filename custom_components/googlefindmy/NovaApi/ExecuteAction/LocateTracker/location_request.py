@@ -8,9 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Awaitable, Callable
 from importlib import import_module
 from types import ModuleType
 from typing import Any, Protocol, cast, runtime_checkable
@@ -57,47 +55,6 @@ from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
-
-# Who wants to know the moment a locate request is handed to Google. A send
-# site sets it around its await (``observe_locate_dispatch``), and this module
-# calls it once, immediately before ``async_nova_request``. The coordinator
-# stamps ``poll_age_s`` from it (``coordinator/helpers/locate_clock.py``), so a
-# request that stops earlier (no push token, a failed push registration, a
-# failure while the request is built, a time limit or a cancellation during the
-# push registration) leaves no stamp at all, and nothing has to be taken back.
-# A ``ContextVar`` rather than a parameter: the call passes through
-# ``api.async_get_device_location`` and its fallbacks to older signatures of
-# this function, which would drop a new keyword argument without a trace. The
-# variable belongs to the awaiting task, so two overlapping requests (a manual
-# locate and a poll) each reach their own observer.
-_LOCATE_DISPATCH_OBSERVER: ContextVar[Callable[[], None] | None] = ContextVar(
-    "googlefindmy_locate_dispatch_observer", default=None
-)
-
-
-@contextmanager
-def observe_locate_dispatch(callback: Callable[[], None]) -> Iterator[None]:
-    """Call ``callback`` when a locate request awaited inside is handed to Google."""
-    token = _LOCATE_DISPATCH_OBSERVER.set(callback)
-    try:
-        yield
-    finally:
-        _LOCATE_DISPATCH_OBSERVER.reset(token)
-
-
-def _notify_locate_dispatch() -> None:
-    """Tell the observer of this task that the request is being handed over.
-
-    A failing observer must not cost the request: it only feeds a measurement.
-    The failure is logged at DEBUG with its type name, not its message.
-    """
-    callback = _LOCATE_DISPATCH_OBSERVER.get()
-    if callback is None:
-        return
-    try:
-        callback()
-    except Exception as err:  # noqa: BLE001 - a measurement hook must not break the request
-        _LOGGER.debug("Locate dispatch observer failed: %s", type(err).__name__)
 
 
 # Flow-position markers for ``LocationRequestNotAcceptedError``. This is a CLOSED
@@ -996,7 +953,6 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
 
         # Send location request to Google API (async; HA session preferred if provided)
         _LOGGER.debug("Sending location request to Google API for %s", name)
-        _notify_locate_dispatch()
         try:
             _ = await async_nova_request(
                 NOVA_ACTION_API_SCOPE,

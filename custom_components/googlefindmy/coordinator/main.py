@@ -827,11 +827,11 @@ class GoogleFindMyCoordinator(
         # Manual locate gating (UX + server protection)
         self._locate_inflight: set[str] = set()  # device_id -> in-flight flag
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
-        # When the integration last handed a location request for a device to
-        # Google, on the ``time.monotonic`` clock. Written by the request layer
-        # at the hand-over, for both send sites (poll cycle and manual locate),
-        # so an attempt that stops in its push phase leaves no value; a request
-        # that fails after the hand-over still counts. See
+        # When the integration last sent a location request for a device, on
+        # the ``time.monotonic`` clock. Written by the transport immediately
+        # before the POST, for both send sites (poll cycle and manual locate),
+        # so an attempt that stops in its push or token phase leaves no value;
+        # a request that fails after the POST still counts. See
         # ``coordinator/helpers/locate_clock.py``. ``_last_poll_mono`` cannot
         # serve here: it is a scheduling base, back-dated by the poll interval.
         # Read by the EID resolver for the ``poll_age_s`` field of
@@ -2521,12 +2521,12 @@ class GoogleFindMyCoordinator(
         )
 
     def locate_requested_mono(self, device_id: str) -> float | None:
-        """Return when a location request for ``device_id`` was last handed to Google.
+        """Return when a location request for ``device_id`` was last sent.
 
         The value is on the ``time.monotonic`` clock and is ``None`` when this
-        process has not handed a request for the device over yet. It marks the
-        hand-over to the send call, after push registration; an attempt that
-        stopped earlier left no value, and a request that was handed over may
+        process has not sent a request for the device yet. It marks the moment
+        before the POST, after push registration and token fetch; an attempt
+        that stopped earlier left no value, and a request that was sent may
         still have failed afterwards (see ``helpers/locate_clock.py``). Read
         defensively so a coordinator built without ``__init__`` answers
         ``None`` instead of raising.

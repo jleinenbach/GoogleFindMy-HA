@@ -42,6 +42,7 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     TTLPolicy,
     async_nova_request,
     is_credential_rejection,
+    observe_request_dispatch,
     register_cache_provider,
     unregister_cache_provider,
 )
@@ -3458,3 +3459,117 @@ class TestTheDocumentedExtentStaysTrue:
         assert [name for name in cited if name not in defined] == [], {
             name: where for name, where in sorted(cited.items()) if name not in defined
         }
+
+
+# ---------------------------------------------------------------------------
+# Dispatch observer: the point ``poll_age_s`` is stamped from
+# (``coordinator/helpers/locate_clock.py``). It must fire immediately before
+# each POST and never for a request that stops earlier.
+# ---------------------------------------------------------------------------
+
+
+def _seed_adm_token(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException | None = None
+) -> None:
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        if error is not None:
+            raise error
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+
+async def _nova(session: Any) -> str:
+    return await async_nova_request(
+        "testScope",
+        "00",
+        username="user@example.com",
+        cache=_StubCache(),
+        session=session,
+    )
+
+
+async def test_dispatch_observer_fires_once_per_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retried request fires the observer once per POST, each time before it.
+
+    The observer records how many POSTs had gone out when it ran: ``[0, 1]``
+    means it ran immediately before the first and before the second.
+    """
+    _seed_adm_token(monkeypatch)
+    session = _DummySession([_DummyResponse(503, b""), _DummyResponse(200, b"\x01")])
+    seen: list[int] = []
+    with observe_request_dispatch(lambda: seen.append(len(session.calls))):
+        assert await _nova(session) == "01"
+    assert len(session.calls) == 2
+    assert seen == [0, 1]
+
+
+async def test_dispatch_observer_does_not_fire_without_a_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token fetch that fails stops the request before any POST: no call."""
+    _seed_adm_token(monkeypatch, error=RuntimeError("token fetch failed"))
+    session = _DummySession([_DummyResponse(200, b"\x01")])
+    seen: list[int] = []
+    with (
+        observe_request_dispatch(lambda: seen.append(1)),
+        pytest.raises(Exception),
+    ):
+        await _nova(session)
+    assert session.calls == []
+    assert seen == []
+
+
+async def test_a_failing_dispatch_observer_does_not_cost_the_request(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The observer only feeds a measurement; the request still succeeds.
+
+    The DEBUG record names the error type but not its message.
+    """
+    _seed_adm_token(monkeypatch)
+    session = _DummySession([_DummyResponse(200, b"\x01")])
+
+    def _broken() -> None:
+        raise ValueError("secret-detail")
+
+    caplog.set_level(
+        logging.DEBUG, logger="custom_components.googlefindmy.NovaApi.nova_request"
+    )
+    with observe_request_dispatch(_broken):
+        assert await _nova(session) == "01"
+    assert len(session.calls) == 1
+    assert "Request dispatch observer failed: ValueError" in caplog.text
+    assert "secret-detail" not in caplog.text
+
+
+async def test_the_dispatch_observer_is_reset_after_its_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request after the block must not reach the observer set for it."""
+    _seed_adm_token(monkeypatch)
+    session = _DummySession(
+        [_DummyResponse(200, b"\x01"), _DummyResponse(200, b"\x02")]
+    )
+    seen: list[int] = []
+    with observe_request_dispatch(lambda: seen.append(1)):
+        await _nova(session)
+    await _nova(session)
+    assert len(session.calls) == 2
+    assert seen == [1]

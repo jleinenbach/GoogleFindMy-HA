@@ -1,21 +1,21 @@
 # tests/test_coordinator_locate_request_clock.py
-"""Per-device clock of location requests handed to Google (``locate_requested_mono``).
+"""Per-device clock of sent location requests (``locate_requested_mono``).
 
 The EID resolver reports how long before an observation the integration last
-handed a location request for a device to Google (``poll_age_s`` in
-``FMDN_UWT_TRANSITION``). The request layer calls a dispatch observer
-immediately before ``async_nova_request``, and both send sites wrap their await
-in ``stamp_on_dispatch`` so that this call, and nothing earlier, writes the
-stamp. A reader that runs while an attempt is still in its push phase therefore
+sent a location request for a device (``poll_age_s`` in
+``FMDN_UWT_TRANSITION``). The transport calls a dispatch observer immediately
+before each POST, and both send sites wrap their await in ``stamp_on_dispatch``
+so that this call, and nothing earlier, writes the stamp. A reader that runs while an attempt is still in its push phase therefore
 sees the previous value, and an attempt that stops before the hand-over leaves
 nothing that would have to be taken back after a reader already logged it.
 ``_last_poll_mono`` cannot serve: it is a scheduling base that is back-dated by
 the poll interval.
 
 The fakes below stand in for ``api.async_get_device_location`` and call the
-request layer's own ``_notify_locate_dispatch`` where the real flow would hand
-the request over; that the real flow calls it exactly then is measured per stage
-in ``test_location_request_not_accepted.py``.
+transport's own ``_notify_request_dispatch`` where the real flow would POST;
+that the transport calls it exactly then is measured in
+``test_nova_request.py``, and one test here drives the real
+``GoogleFindMyAPI`` to show the observer survives that layer.
 
 The join test at the end pins the second half of the contract: the resolver
 looks the stamp up by ``EIDMatch.canonical_id``, which is produced by
@@ -34,6 +34,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from custom_components.googlefindmy import api as api_module
+from custom_components.googlefindmy.api import GoogleFindMyAPI
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator.helpers import locate_clock
@@ -41,12 +43,11 @@ from custom_components.googlefindmy.coordinator.helpers.locate_clock import (
     ensure_locate_stamps,
     stamp_on_dispatch,
 )
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
-    location_request as location_request_module,
-)
+from custom_components.googlefindmy.NovaApi import nova_request as nova_request_module
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
     LocationRequestNotAcceptedError,
 )
+from tests.helpers.api_stub import StubCache
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.locate_mixin_stub import LocateStub, make_hass_stub
 from tests.helpers.registry_mixin_stub import RegistryStub
@@ -121,7 +122,7 @@ class _FlowAPI:
         await asyncio.sleep(0)
         if self.hand_over:
             self.clock.now = self.hand_over_at
-            location_request_module._notify_locate_dispatch()
+            nova_request_module._notify_request_dispatch()
             self.after_hand_over.append(self.reader(dev_id))
         if self.outcome is not None:
             raise self.outcome
@@ -336,12 +337,12 @@ async def test_overlapping_attempts_each_stamp_at_their_own_hand_over(
             manual_waiting.set()
             await manual_go.wait()
             clock.now = 20.0
-            location_request_module._notify_locate_dispatch()
+            nova_request_module._notify_request_dispatch()
 
     async def _poll() -> None:
         with stamp_on_dispatch(stamps, "dev-1"):
             clock.now = 10.0
-            location_request_module._notify_locate_dispatch()
+            nova_request_module._notify_request_dispatch()
 
     async def _failing() -> None:
         with stamp_on_dispatch(stamps, "dev-1"):
@@ -366,13 +367,60 @@ async def test_a_task_started_outside_the_block_does_not_stamp() -> None:
 
     async def _elsewhere() -> None:
         await gate.wait()
-        location_request_module._notify_locate_dispatch()
+        nova_request_module._notify_request_dispatch()
 
     other = asyncio.create_task(_elsewhere())
     with stamp_on_dispatch(stamps, "dev-1"):
         gate.set()
         await other
     assert stamps == {}
+
+
+@pytest.mark.asyncio
+async def test_a_task_started_inside_the_block_cannot_stamp_after_it() -> None:
+    """A task created in the block inherits the observer, but it is closed on exit.
+
+    The push receiver's supervisor is such a task: started on the first locate,
+    it outlives the request. A POST it makes later must not stamp the device.
+    """
+    stamps: dict[str, float] = {}
+    later = asyncio.Event()
+
+    async def _outlives_the_block() -> None:
+        await later.wait()
+        nova_request_module._notify_request_dispatch()
+
+    with stamp_on_dispatch(stamps, "dev-1"):
+        child = asyncio.create_task(_outlives_the_block())
+    later.set()
+    await child
+    assert stamps == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("posted", [True, False], ids=["posted", "stopped-early"])
+async def test_the_observer_survives_the_real_api_layer(
+    monkeypatch: pytest.MonkeyPatch, posted: bool
+) -> None:
+    """``GoogleFindMyAPI.async_get_device_location`` keeps the caller's context.
+
+    Only the request layer below it is replaced; if the API ever ran the
+    request in a fresh context (an executor job, ``Context().run``), the
+    ``posted`` case would lose its stamp.
+    """
+    monkeypatch.setattr(locate_clock.time, "monotonic", _Clock(7.0))
+
+    async def _request(*_a: Any, **_k: Any) -> list[Any]:
+        if posted:
+            nova_request_module._notify_request_dispatch()
+        return []
+
+    monkeypatch.setattr(api_module, "get_location_data_for_device", _request)
+    api = GoogleFindMyAPI(cache=StubCache(entry_id="entry-1"), session=None)
+    stamps: dict[str, float] = {}
+    with stamp_on_dispatch(stamps, "dev-1"):
+        await api.async_get_device_location("dev-1", "Tag")
+    assert stamps == ({"dev-1": 7.0} if posted else {})
 
 
 def test_ensure_locate_stamps_keeps_values_and_identity() -> None:
