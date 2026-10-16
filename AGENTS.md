@@ -970,9 +970,18 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     creates a missing environment without protection rules when a job
     references it, so the approval is enforced only while
     `gh api repos/jleinenbach/GoogleFindMy-HA/environments/ci-freigabe --jq '.protection_rules[].type'`
-    prints `required_reviewers`. The other pull request workflows are not
-    gated: CodeQL, Semgrep (SAST), pip-audit, hassfest (auto-fix), Semantic PR
-    and the Home Assistant Dependency Compatibility Check
+    prints `required_reviewers`. The gate is a load control, not a security
+    boundary, and the guarantees above hold only for the unmodified
+    `ci.yml`: a `pull_request` run uses the `ci.yml` of the pull request's
+    merge commit, so a pull request that edits or removes the gate job (or
+    the guard test, which itself only runs after approval) runs `CI` without
+    approval. This is accepted. Do not move the gate to `pull_request_target`
+    or `workflow_run`: those run in the base repository's context, where the
+    token can be write-scoped and repository secrets are available, and the
+    test jobs would check out the pull request's code there. The other pull
+    request workflows are not gated: CodeQL, Semgrep (SAST), pip-audit,
+    hassfest (auto-fix), Semantic PR and the Home Assistant Dependency
+    Compatibility Check
     (`.github/workflows/ha-dependency-check.yml`, which installs
     `homeassistant` on every pull request). `tests/test_ci_approval_gate.py`
     locks the shape of `ci.yml`. Fork-specific: keep both files and this
