@@ -295,7 +295,8 @@ def _unknown_test_citations(
     class. Anything else after the module (prose, a broken separator) counts as
     not resolving. Citations of a missing module are left to the file check.
     The module path is normalized as pytest prints it, so ``tests/./x.py`` cites
-    the items of ``tests/x.py``.
+    the items of ``tests/x.py``; a path that leaves ``tests/`` once normalized
+    (``tests/../x.py``) does not resolve and is not collected.
     ``node_ids`` replaces the collection run (for tests of this function).
     """
 
@@ -305,15 +306,14 @@ def _unknown_test_citations(
         if citation is None or not (repo_root / citation.group(1)).exists():
             continue
         cited.append((evidence, citation.group(1)))
-    if node_ids is None and cited:
-        node_ids = _collected_node_ids(
-            sorted({posixpath.normpath(m) for _, m in cited}), repo_root
-        )
+    in_tests = {m for _, m in cited if posixpath.normpath(m).startswith("tests/")}
+    if node_ids is None and in_tests:
+        node_ids = _collected_node_ids(sorted(in_tests), repo_root)
 
     unknown: list[str] = []
     for evidence, module in cited:
         name = _TEST_NAME.match(evidence[len(module) + 1 :])
-        if name is None:
+        if name is None or module not in in_tests:
             unknown.append(evidence)
             continue
         node = (
@@ -360,8 +360,8 @@ def test_quality_scale_test_evidence_names_exist(integration_root: Path) -> None
 
     assert checked, "no test-name evidence found; the pattern no longer matches"
     assert not unknown, (
-        "These test names cited in quality_scale.yaml are not collected:\n"
-        + "\n".join(sorted(set(unknown)))
+        "These test names cited in quality_scale.yaml are not collected"
+        " or leave tests/:\n" + "\n".join(sorted(set(unknown)))
     )
 
 
@@ -711,6 +711,69 @@ def test_test_citation_predicate_skips_other_evidence(tmp_path: Path) -> None:
     assert (checked, unknown) == (0, [])
 
 
+def test_test_citation_predicate_stays_inside_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A citation whose normalized module leaves ``tests/`` neither resolves nor is collected."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "t_out.py").write_text("def test_o():\n    pass\n", encoding="utf-8")
+    citation = "tests/../t_out.py::test_o"
+
+    assert _unknown_test_citations([citation], tmp_path, {"t_out.py::test_o"}) == (
+        1,
+        [citation],
+    )
+
+    def _no_collection(*args: object, **kwargs: object) -> NoReturn:
+        raise AssertionError("collection run for a module outside tests/")
+
+    monkeypatch.setattr(subprocess, "run", _no_collection)
+
+    assert _unknown_test_citations([citation], tmp_path) == (1, [citation])
+
+
+def test_test_citation_predicate_rejects_sibling_of_tests(tmp_path: Path) -> None:
+    """A module that normalizes into a sibling such as ``tests_x/`` stays outside ``tests/``."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests_x").mkdir()
+    (tmp_path / "tests_x" / "t_out.py").write_text(
+        "def test_o():\n    pass\n", encoding="utf-8"
+    )
+    citation = "tests/../tests_x/t_out.py::test_o"
+
+    assert _unknown_test_citations(
+        [citation], tmp_path, {"tests_x/t_out.py::test_o"}
+    ) == (1, [citation])
+
+
+def test_test_citation_predicate_collects_only_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Next to a citation inside ``tests/``, a module outside is not collected."""
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_in.py").write_text(
+        "def test_i():\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "t_out.py").write_text("def test_o():\n    pass\n", encoding="utf-8")
+    asked: list[list[str]] = []
+
+    def _collect(modules: list[str], root: Path) -> set[str]:
+        asked.append(modules)
+        return {"tests/t_in.py::test_i"}
+
+    monkeypatch.setattr(sys.modules[__name__], "_collected_node_ids", _collect)
+    outside = "tests/../t_out.py::test_o"
+
+    assert _unknown_test_citations(["tests/t_in.py::test_i", outside], tmp_path) == (
+        2,
+        [outside],
+    )
+    assert asked == [["tests/t_in.py"]]
+
+
 def test_collected_node_ids_fails_loudly(tmp_path: Path) -> None:
     """A module pytest cannot collect fails the guard instead of resolving nothing."""
 
@@ -723,6 +786,22 @@ def test_collected_node_ids_fails_loudly(tmp_path: Path) -> None:
     assert _STDERR_SEPARATOR in str(excinfo.value)
 
 
+def test_collected_node_ids_rc_message_shows_both_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The non-zero exit message keeps stdout before and stderr after the separator."""
+
+    def _failed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess("pytest", 2, "out-marker", "err-marker")
+
+    monkeypatch.setattr(subprocess, "run", _failed)
+
+    with pytest.raises(pytest.fail.Exception, match="rc 2") as excinfo:
+        _collected_node_ids(["tests/t_ok.py"], tmp_path)
+
+    assert "out-marker" + _STDERR_SEPARATOR + "err-marker" in str(excinfo.value)
+
+
 def test_collected_node_ids_ignores_outer_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -730,9 +809,11 @@ def test_collected_node_ids_ignores_outer_options(
 
     Both ``COVERAGE_PROCESS_START`` and ``COVERAGE_PROCESS_CONFIG`` (set by
     coverage.py 7.10.3+ with ``patch = subprocess``) start a measurement on their
-    own through the ``.pth`` file coverage.py ships from 7.13.0 on (7.12.1b1 as a
-    pre-release). From 7.10.0 to 7.12.0 only the temporary ``.pth`` that an outer
-    run with ``patch = subprocess`` writes starts one; without that setting
+    own through the ``.pth`` file coverage.py ships from 7.13.0 on (7.12.1b1, a
+    pre-release, ships it too, but its pure-Python wheel installs it under a fixed
+    ``python3.11`` path). From 7.10.0 to 7.12.0
+    only the temporary ``.pth`` that an outer run with ``patch = subprocess``
+    writes starts one; without that setting
     neither variable starts one here, so the probe has nothing to catch there.
     """
 
