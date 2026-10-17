@@ -53,7 +53,8 @@
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
-          "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa"
+          "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
+          "map_view_enabled": "Ativar a visualização do mapa"
         }
       },
       "select_hub_for_visibility": {
@@ -284,18 +285,20 @@
           "enable_stats_entities": "Criar entidades estatísticas",
           "delete_caches_on_remove": "Exclua caches ao remover entrada",
           "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
+          "map_view_enabled": "Ativar a visualização do mapa",
           "contributor_mode": "Modo de contribuidor de localização",
           "subentry": "Grupo de recursos",
           "secrets_extra_watch_paths": "Caminhos adicionais de monitoramento do secrets.json (um por linha)"
         },
         "data_description": {
-          "stale_threshold": "Após este número de segundos sem atualização de localização, o status do rastreador muda para desconhecido. Use a entidade 'Última localização' para ver sempre a última posição conhecida. Padrão: 1800 (30 minutos).",
-          "show_location_age": "Quando ativado (padrão), um atributo 'location_age' (arredondado para 1 minuto) é adicionado a cada entidade rastreadora. Desative para eliminar todas as gravações de banco de dados para dispositivos estacionários. O atributo absoluto 'last_seen' e as entidades sensor.*_last_seen estão sempre disponíveis.",
+          "stale_threshold": "Após este número de segundos sem atualização de localização, o status do rastreador muda para desconhecido. Use a entidade 'Última localização' para ver sempre a última posição conhecida. Padrão: 3900 (65 minutos).",
+          "show_location_age": "Quando ativado (padrão), um atributo 'location_age' (arredondado para 1 minuto) é adicionado a cada entidade rastreadora. Ele mantém a idade da última observação e só muda com a próxima (por exemplo, uma nova localização, a passagem para 'Desatualizada' ou uma mudança de disponibilidade). A idade atual está no sensor 'Visto pela última vez' de cada dispositivo e o status atual no seu sensor 'Status da localização'.",
           "speed_gate_enabled": "Quando ativado (padrão), uma correção de localização que exigiria uma velocidade fisicamente impossível (por exemplo, um relatório colaborativo que coloca o rastreador a centenas de km de distância em segundos) é rejeitada em vez de teletransportar o rastreador. Relatórios do próprio GPS sempre passam. Desative apenas se movimentos rápidos legítimos estiverem sendo descartados.",
           "roundtrip_confirm_enabled": "Quando ativado (padrão), uma correção colaborativa que o controle de velocidade rejeitaria como teletransporte é aceita, em vez disso, se ela retornar para perto da posição imediatamente anterior a um salto longo aceito anteriormente, dentro de cerca de 15 minutos. Isso recupera uma viagem de retorno legítima em vez de deixar o rastreador preso na posição distante. Aplica-se somente onde o controle de velocidade rejeitaria de outra forma. Desative se você vir o rastreador oscilando entre dois lugares.",
-          "accuracy_gate_enabled": "Quando ativado (padrão), uma posição recebida é descartada se estiver claramente fora do círculo de incerteza da posição em cache, se for pelo menos quatro vezes menos precisa que ela, tiver pelo menos 200 m de imprecisão e essa posição em cache for ao mesmo tempo confiável e recente. Nada é descartado sem uma alternativa melhor: uma posição imprecisa é sempre aceita em uma partida a frio, ou quando a posição em cache é não confiável ou está desatualizada. Isso impede que um relatório amplo da rede desloque o rastreador e que, como o Home Assistant usa o raio de precisão como tolerância de zona, ele seja indicado erroneamente como em casa. Desative apenas se suspeitar que é esta verificação que está causando um problema.",
+          "accuracy_gate_enabled": "Quando ativado (padrão), uma posição recebida é descartada se estiver claramente fora do círculo de incerteza da posição em cache, se for pelo menos quatro vezes menos precisa que ela, tiver pelo menos 200 m de imprecisão e essa posição em cache for ao mesmo tempo confiável e recente. Nada é descartado sem uma alternativa melhor: uma posição imprecisa é sempre aceita em uma partida a frio, ou quando a posição em cache é não confiável ou está desatualizada. Isso impede que um relatório amplo da rede desloque o rastreador e que, como o Home Assistant usa o raio de precisão como tolerância de zona, ele seja indicado erroneamente como em casa. Desative apenas se suspeitar que é esta verificação que está causando um problema. O sensor 'Posição imprecisa descartada' do dispositivo mostra a posição descartada até que uma posição igualmente recente ou mais recente seja aceita, a posição descartada ultrapasse o limite de obsolescência ou a integração seja recarregada (como ao reiniciar o Home Assistant); no resto do tempo, esse sensor mostra desconhecido, o que é normal.",
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
+          "map_view_enabled": "Ativado por padrão. Quando desativado, solicitações da visualização do mapa são recusadas como com um token inválido e os links de dispositivo são apagados. Não renova links existentes; se um link pode ter vazado, use 'Ativar a expiração do token de visualização do mapa' (até duas semanas se já estava ativada).",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (todas as áreas por padrão para relatórios de crowdsourcing ou apenas áreas de alto tráfego).",
           "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos.",
           "secrets_extra_watch_paths": "Opcional. Caminhos absolutos adicionais para arquivos secrets.json que a integração deve monitorar para captura automática, um por linha. Deixe em branco para monitorar apenas os locais padrão."
@@ -662,6 +665,28 @@
           }
         }
       },
+      "location_status": {
+        "name": "Status da localização",
+        "state": {
+          "current": "Atual",
+          "aging": "Envelhecendo",
+          "stale": "Desatualizada"
+        }
+      },
+      "coarse_fix": {
+        "name": "Posição imprecisa descartada",
+        "state_attributes": {
+          "coarse_latitude": {
+            "name": "Latitude da posição imprecisa"
+          },
+          "coarse_longitude": {
+            "name": "Longitude da posição imprecisa"
+          },
+          "coarse_accuracy": {
+            "name": "Precisão da posição imprecisa (m)"
+          }
+        }
+      },
       "last_seen": {
         "name": "Visto pela última vez",
         "state_attributes": {
@@ -790,6 +815,14 @@
     "restart_required": {
       "title": "Reinicie o Home Assistant para concluir a atualização",
       "description": "O Google Find My Hub foi atualizado no disco para a versão {installed_version}, mas o Home Assistant ainda está executando a versão {running_version}. Reinicie o Home Assistant para ativar a versão instalada.\n\nRecarregar a integração não é suficiente: é necessário reiniciar completamente o Home Assistant."
+    },
+    "tracker_attributes_frozen": {
+      "title": "Os atributos do rastreador agora mantêm o valor da última observação",
+      "description": "Os rastreadores de dispositivo de **{entry_title}** não atualizam mais os atributos `location_age` e `location_status` entre duas observações: eles mantêm o valor da última observação e só mudam com a próxima (por exemplo, uma nova localização, a passagem para “Desatualizada” ou uma mudança de disponibilidade). O rastreador principal mantém da mesma forma os atributos `coarse_*`, e o rastreador “Última localização” não os tem mais. Assim, um rastreador sem nova localização não parece mais atual do que outro, por exemplo para uma pessoa.\n\nPara os valores atuais, use estas entidades:\n{replacement_sensors}\n\nEsses atributos serão removidos, no máximo com a primeira versão da integração a partir do Home Assistant {breaks_version}.\n\nAutomações e scripts que usam esses rastreadores (verifique neles `location_status`, `location_age` e `coarse_*`):\n{automations}"
+    },
+    "tracker_attributes_frozen_no_automations": {
+      "title": "Os atributos do rastreador agora mantêm o valor da última observação",
+      "description": "Os rastreadores de dispositivo de **{entry_title}** não atualizam mais os atributos `location_age` e `location_status` entre duas observações: eles mantêm o valor da última observação e só mudam com a próxima (por exemplo, uma nova localização, a passagem para “Desatualizada” ou uma mudança de disponibilidade). O rastreador principal mantém da mesma forma os atributos `coarse_*`, e o rastreador “Última localização” não os tem mais. Assim, um rastreador sem nova localização não parece mais atual do que outro, por exemplo para uma pessoa.\n\nPara os valores atuais, use estas entidades:\n{replacement_sensors}\n\nEsses atributos serão removidos, no máximo com a primeira versão da integração a partir do Home Assistant {breaks_version}."
     }
   },
   "exceptions": {

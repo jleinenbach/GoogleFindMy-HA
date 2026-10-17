@@ -147,9 +147,15 @@ listener that:
 3. Enforces a 60-second minimum interval per device
    (`MIN_UPLOAD_INTERVAL_SECONDS`) to respect FMDN throttling.
 4. Prepares an end-to-end encrypted Finder report and hands it to the
-   uploader. The uploader currently short-circuits and logs that the upload
-   is disabled (DroidGuard attestation unavailable); no traffic reaches
-   Google.
+   uploader. The report is encrypted to the EID of the tracker's last
+   sighting that the EID resolver confirmed and carries the time of that
+   sighting; without such a sighting, or when it is older than one rotation
+   period (1024 s), no report is prepared. The location is the area Bermuda
+   reports now; Bermuda asks the EID resolver to resolve the tracker's
+   advertisements as it processes them, so the sighting is normally seconds
+   old. The uploader currently
+   short-circuits and logs that the upload is disabled (DroidGuard
+   attestation unavailable); no traffic reaches Google.
 
 **Privacy posture.** The end-to-end encryption design intentionally allows
 only the device owner to decrypt Finder reports, so once the upload path is

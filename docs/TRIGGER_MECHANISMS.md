@@ -71,7 +71,7 @@ The ecosystem for Android—comprising devices like the Chipolo One Point, Chipo
 Unlike the proprietary obscurity of Apple's initial launch, the DULT specification¹ clearly defines the device states. FMDN trackers maintain a state variable that dictates their advertising payload.
 
 * **Near-Owner State:** In this state, the tracker assumes it is safe. It advertises a rotating MAC address and an Ephemeral ID (EID) that changes frequently—typically every 15 minutes or 1024 seconds. This rapid rotation is a privacy feature to prevent third-party scanning infrastructure (like retail beacons) from tracking the owner.¹⁶  
-* **Separated State:** The transition to the Separated state occurs when the tracker fails to connect to the bonded owner device for a relatively short duration, defined as **30 minutes** in the DULT drafts.¹⁶ That figure is normative, not a field report: `draft-detecting-unwanted-location-trackers-01` section 3.4.4 with table 2 makes the transition a `SHALL`, and section 3.4.5 the way back. However, entering the Separated *state* does not immediately trigger the alarm; it merely starts the countdown to **motion-detector activation** (`T_(SEPARATED_UT_TIMEOUT)`, section 4.2). The state and that later event are two things, and this document formerly called the later one "Unwanted Tracking mode", which is the FMDN term for the state itself.
+* **Separated State:** In DULT, the transition to the Separated state occurs when the tracker fails to connect to the bonded owner device for a relatively short duration, defined as **30 minutes** in the DULT drafts.¹⁶ The Find Hub specification adds who switches the FMDN mode: the service can turn it on (Data ID `0x07`, relayed through the Find Hub network) and only a holder of the identity key turns it off (`0x08`); DULT's 30 minutes bound the separation criterion, and Google's server criteria are not published (see the 2026-10-11 note in section 4.2). The figure is normative, not a field report: `draft-detecting-unwanted-location-trackers-01` section 3.4.4 with table 2 makes the transition a `SHALL`, and section 3.4.5 the way back. However, entering the Separated *state* does not immediately trigger the alarm; it merely starts the countdown to **motion-detector activation** (`T_(SEPARATED_UT_TIMEOUT)`, section 4.2). The state and that later event are two things, and this document formerly called the later one "Unwanted Tracking mode", which is the FMDN term for the state itself.
 
 ### **4.2 Motion-Detector Activation in the Separated State**
 
@@ -100,6 +100,16 @@ Unlike the proprietary obscurity of Apple's initial launch, the DULT specificati
 > advertisement does not say whether that timer has expired. Do not build separation
 > timers on this sensor ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)). See
 > `custom_components/googlefindmy/binary_sensor.py::GoogleFindMyUWTModeSensor`.
+>
+> **Third revision, 2026-10-11.** The block above still calls `0x07` / `0x08` an
+> additional path and lets the state begin after 30 minutes of separation. The Find Hub
+> specification says that "The Find Hub service can relay an unwanted tracking protection
+> mode activation request through the Find Hub network", and deactivation additionally
+> requires that "The hashed ephemeral identity key matches the current ephemeral identity
+> key". So the service can turn the mode on (`0x07`, relayed through the Find Hub network)
+> and only a holder of the identity key turns it off (`0x08`); DULT's 30 minutes bound the
+> separation criterion, Google's server criteria are not published, and other vendors'
+> firmware is not public. Field data: `docs/UWT_FIELD_DATA.md`.
 
 This later event is the critical operational phase for anti-stalking alerts. When a device has been in the Separated state for `T_(SEPARATED_UT_TIMEOUT)`, it enables its motion detector, and it is already advertising in a way that makes it more visible to detection networks.
 

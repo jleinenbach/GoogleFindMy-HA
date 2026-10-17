@@ -42,7 +42,7 @@ Runtime telemetry (for diagnostics)
 -----------------------------------
 * Per-receiver metrics retained for compatibility:
   `last_start_monotonic`, `last_stop_monotonic`, `start_count` (aggregate view).
-* Logs include routing details:
+* DEBUG logs include routing details (one record per received push):
   `push_received(entry=<id>|unknown, device=..., fanout_targets=n, route=token|owner_index|client|fallback)`.
 
 Retry/404 mitigation (unchanged behavior)
@@ -2766,8 +2766,8 @@ class FcmReceiverHA:
         route_src: str,
         fanout_targets: int,
     ) -> None:
-        """Log the push receipt with routing context."""
-        _LOGGER.info(
+        """Log the push receipt with routing context (DEBUG: one per locate)."""
+        _LOGGER.debug(
             "push_received(entry=%s, device=%s, fanout_targets=%d, route=%s)",
             ",".join(sorted(target_entries)) if target_entries else "unknown",
             canonic_id[:8],
@@ -4422,7 +4422,7 @@ class FcmReceiverHA:
                     )
 
             if token is not None:
-                _LOGGER.info(
+                _LOGGER.debug(
                     "[entry=%s] Manual locate registration ready for %s",
                     entry_id,
                     canonic_id[:8],

@@ -28,6 +28,8 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, Codespell, Bandit, `mypy --strict`, and `pytest -q --cov` on Python 3.14 to protect code quality before merges. Python 3.14 is the axis Home Assistant Core itself requires from 2026.3.0 onwards. Python 3.13 stays covered by a second, lock-free test job that runs on two axes: the floor declared in `hacs.json` (2025.9.1), and the last Home Assistant line that still supports 3.13. Together they cover what installations on Core 2025.9.1 through 2026.2.x actually run. The language level the code is written against remains 3.13 (`ruff target-version = "py313"`, `mypy python_version = "3.13"`).
 
+On pull requests, the `CI` workflow first runs the job `CI approval gate`, bound to the environment `ci-freigabe`. Where that environment has a required reviewer (as in `jleinenbach/GoogleFindMy-HA`), the remaining jobs only start once the reviewer approves the run; until then `CI Success` does not pass, and a rejected or expired run fails it. Where it has no protection rules (as in `BSkando/GoogleFindMy-HA`, where GitHub created it without rules on the first run), the gate passes without waiting for approval. Pushes to `main` run without the gate. The gate saves runner load; it is not a security boundary, because a pull request that edits `ci.yml` can remove it. Details and the guard test are listed in [AGENTS.md](AGENTS.md) under "Actual coverage today".
+
 For the quickest way to bootstrap Home Assistant test stubs before running `pytest -q`, see the Environment verification bullets in [AGENTS.md](AGENTS.md#environment-verification).
 
 #### Quickstart checks
@@ -229,14 +231,15 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `google_home_filter_enabled` | true | toggle | Enables or disables Google Home device location filtering. |
 | `google_home_filter_keywords` | nest,google,home,mini,hub,display,chromecast,speaker | text input | Comma-separated keywords used to filter out location data from Google Home devices. |
 | `map_view_token_expiration` | false | toggle | Enables expiration of generated API tokens used in Map View history queries. |
+| `map_view_enabled` | true | toggle | Enables the Map View web page and tile-token endpoint for this entry; disabling refuses requests exactly like an invalid token and clears device `configuration_url` links. Does not rotate existing share links -- see [Map View link expiry](#map-view-link-expiry-map_view_token_expiration) below. |
 | `semantic_locations` | none | - | User-defined semantic location zones (managed via a dedicated options flow step). |
 | `delete_caches_on_remove` | true | toggle | Removes stored authentication caches when the integration is deleted. |
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
 | `stale_threshold` | 3900 | seconds | After this many seconds (default: 65 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
-| `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Excluded from Recorder history to keep DB size predictable. |
+| `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Like `location_status`, it holds the value of the last observation and changes only with the next one, that is whenever anything else the tracker publishes changes: a new fix, a recomputed fix with the same `last_seen` (for example a new position or accuracy), the change to `stale`, an availability change, or a new device name from Google. So a tracker without a new fix does not look fresher than another one. The live age is on the "Last Seen" sensor of each device, the live status on its "Location status" sensor. Excluded from Recorder history to keep DB size predictable. |
 | `speed_gate_enabled` | true | toggle | Discards a far jump that would require an implausible speed, so a single stray crowd report cannot teleport a tracker. |
 | `roundtrip_confirm_enabled` | true | toggle | Requires a second, independent report before a device that returned to a previous position is moved back there. |
-| `accuracy_gate_enabled` | true | toggle | Discards a coarse fix (200 m or more, and at least 4x worse than the cached one) when a better, still-fresh position is already known. The coarse position stays visible as `coarse_*` attributes; turning the gate off restores the previous behaviour. |
+| `accuracy_gate_enabled` | true | toggle | Discards a coarse fix (200 m or more, and at least 4x worse than the cached one) when a better, still-fresh position is already known. The coarse position is shown live by the per-device "Discarded coarse fix" diagnostic sensor (the time of the coarse fix as its state, `coarse_accuracy`, `coarse_latitude` and `coarse_longitude` as attributes, no map marker); that sensor shows `unknown` most of the time, see [Supported devices and functions](#supported-devices-and-functions). The main tracker holds the `coarse_*` attributes of its last observation; the Last Location tracker has none. Turning the gate off restores the previous behaviour. |
 
 ### Map View link expiry (`map_view_token_expiration`)
 
@@ -293,7 +296,7 @@ The service hub subentry, identified by `SERVICE_SUBENTRY_KEY`, represents the a
 
 The tracker subentry, keyed by `TRACKER_SUBENTRY_KEY`, represents the phones, tablets, and tags imported from Google Find My Device.
 
-- Each tracker entry backs per-device entities such as `device_tracker`, “last seen” timestamp sensors, and control buttons for actions like ring / play sound / locate.
+- Each tracker entry backs per-device entities such as `device_tracker`, “last seen” timestamp sensors, location status and coarse-fix sensors, and control buttons for actions like ring / play sound / locate.
 - Trackers register as individual device entries in the Home Assistant device registry with their own unique IDs and `DeviceInfo`. They remain standalone devices—Home Assistant automatically associates them with the correct config-entry subentry without manual `via_device` or `via_device_id` pointers.[1]
 - Trackers never appear in the service hub’s `visible_device_ids` list and are never assigned to the service hub subentry; they stay within the tracker subentry so repairs and options target the correct devices.
 
@@ -332,7 +335,7 @@ The integration provides a couple of Home Assistant Actions for use with automat
 ## Supported devices and functions
 
 - **Device coverage:** Phones, tablets, Wear OS devices, earbuds, and compatible Bluetooth trackers surfaced in the Google Find My Device network.  Any device that appears in the official Google Find My interface is eligible to be imported.
-- **Entities created:** Each tracked device exposes a `device_tracker` entity for live location, a binary sensor for connection state, a "last seen" timestamp sensor, and a Plus Code (Open Location Code) sensor. Optional helper entities (statistics, sound trigger button) are added depending on options and device capabilities, and a BLE battery sensor is added when the device is matched to a local Bermuda BLE tracker that reports battery.
+- **Entities created:** Each tracked device exposes a `device_tracker` entity for live location, a binary sensor for connection state, a "Last Seen" timestamp sensor, a "Location status" sensor (`current`, `aging` or `stale` against the stale threshold; right after a Home Assistant restart it can show `unknown` until the restored location is loaded, so an automation on `stale` should also name the previous state), a "Discarded coarse fix" diagnostic sensor (the time of a newer, imprecise fix the accuracy gate discarded), and a Plus Code (Open Location Code) sensor. The "Discarded coarse fix" sensor shows `unknown` most of the time, and that is normal: it has a value only while a discarded fix is newer than the position the tracker shows. The value disappears when a fix that is as new or newer is accepted, when the discarded fix becomes older than `stale_threshold` (default 3900 seconds; the sensor follows at its next update, within about a minute), and when the integration is reloaded, as on a Home Assistant restart, because the discarded fix is kept in memory only. Being a diagnostic entity, it is listed under "Diagnostic" on the device page and is not shown on the auto-generated dashboard. In an automation, a state later than the "Last Seen" sensor means that a newer, but imprecise sighting exists. Entity IDs are derived from the entity name when an entity is created: in the system language for most Latin-script languages, otherwise from the English name. An existing entity keeps its entity ID when the name changes; an entity created for the first time (a new installation or a device that was never added before) gets one from the current name, in English `sensor.*_discarded_coarse_fix`, so one installation can hold both forms. A German installation has neither of them. Look the sensors up by name on the device page. Optional helper entities (statistics, sound trigger button) are added depending on options and device capabilities, and a BLE battery sensor is added when the device is matched to a local Bermuda BLE tracker that reports battery.
 - **Action support:** Sound playback is available on hardware that exposes the native "Play sound" action within Google's ecosystem.  The integration hides the button on devices that do not advertise support, aligning with [Home Assistant action documentation](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-functions/).
 
 ## Data updates and background behavior
@@ -650,6 +653,76 @@ see also "Foreign-report readings" in
 5. **Never post keys, EIDs, coordinates or IDs.** The log lines and the block
    are built to contain none of these.
 6. **Where:** <https://github.com/BSkando/GoogleFindMy-HA/issues/223>
+
+### Reporting unwanted tracking protection mode changes (#210, #211, #222)
+
+Trackers in the Find Hub network can enter *unwanted tracking protection
+mode*. The integration reads the mode from each advertisement of your own
+trackers (frame type and hashed-flags bit) and shows it as the protection mode
+binary sensor. What makes Google's service turn the mode on for a tracker is
+not published. To narrow it down, the integration records each change of the
+mode it sees in an advertisement of one of your trackers, per device, together
+with how long before the change it last tried to request the device's location
+from Google.
+
+1. **Search the log for `FMDN_UWT_TRANSITION`.** One line is written per
+   change, for example:
+   ```text
+   FMDN_UWT_TRANSITION kind=change device=<id> canonical=<id> old=off new=on source=flags_bit flags=framed frame=0x41 decoded=0x01 payload_len=29 poll_age_s=66 prev_seen_age_s=60 observed=2027-01-15T08:01:10Z seq=2 suppressed=0
+   ```
+   - `old`/`new`: the mode before and after. The first known mode of a device
+     is written with `old=unknown`: after a restart, after the entry was
+     reloaded, and after a single refresh in which the device's identity was
+     not available, for example because its key could not be decrypted once.
+   - `source`: whether the hashed-flags bit (`flags_bit`) or the frame type
+     (`frame_type`) showed the mode.
+   - `poll_age_s`: seconds between the last location request this integration
+     sent for the device and the advertisement that showed the change. The
+     clock starts immediately before the request is sent, after the push
+     registration and the token fetch (together a minute or more on a
+     reconnect). An attempt that stopped before that does not count, whatever
+     the reason: no push token, a failed push registration, a configuration
+     error, a failure while building the request or fetching a token, or a
+     time limit or cancellation before the request was sent. A request that
+     was sent counts even if it failed afterwards, for example with a network
+     or server error.
+     `none` if there was no such request since the start, or if it came after
+     the advertisement.
+   - `prev_seen_age_s`: seconds since the old mode was last seen.
+   - At most 12 lines per device and hour are written at INFO, counted per
+     account: a tracker shared between two accounts can write 24. Further
+     ones go to DEBUG. Once the limit has freed up, the next advertisement of
+     the device writes a line with `kind=resync` that repeats the current
+     mode, and `suppressed=<n>` says how many lines went to DEBUG.
+2. **Make INFO visible.** The line is logged at INFO and is hidden at the
+   default level. Call the `logger.set_level` action (no restart needed; it
+   lasts until the next restart):
+   ```yaml
+   action: logger.set_level
+   data:
+     custom_components.googlefindmy.eid_resolver: info
+   ```
+   or add the same line under `logger:` → `logs:` in your `configuration.yaml`
+   and restart Home Assistant (one `logger:` section only, as described for
+   #223 above). The log view under **Settings → System → Logs** lists warnings
+   and errors only; the line appears in the full log. It is written with the
+   next change after INFO was enabled.
+3. **Diagnostics.** Without any logging configuration, the same changes are
+   kept in the diagnostics: open **Settings → Devices & services → Google Find
+   My Device**, choose **Download diagnostics** in the menu of the entry, and
+   copy **only** the `uwt_transitions` block. It names each device by a
+   position (`device_index`) and holds the last 200 events of the entry
+   (changes and `resync` lines) since Home Assistant started or the entry was
+   last reloaded.
+4. **What to post:** the `FMDN_UWT_TRANSITION` lines and/or the
+   `uwt_transitions` block, your integration version, and your
+   `location_poll_interval` setting. `device=` and `canonical=` are
+   identifiers of your own Home Assistant instance and your own Google account
+   (class (b) in `AGENTS.md`), they carry no meaning outside it, so posting
+   them is harmless; device names never appear in this line.
+5. **Never post keys, EIDs, coordinates, device names or e-mail addresses.**
+   The line and the block are built to contain none of these.
+6. **Where:** <https://github.com/BSkando/GoogleFindMy-HA/issues/210>
 
 ## Privacy and Security
 

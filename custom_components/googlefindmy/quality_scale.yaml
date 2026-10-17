@@ -134,6 +134,7 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/coordinator/polling.py:PollingOperations._note_fcm_deferral"
+        - "custom_components/googlefindmy/coordinator/polling.py:PollingOperations._note_empty_location_result"
     - id: parallel-updates
       status: done
       evidence:
@@ -170,7 +171,7 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/diagnostics.py:async_get_config_entry_diagnostics"
-        - "tests/test_diagnostics_buffer_summary.py:test_as_dict_limits_items"
+        - "tests/test_diagnostics_buffer_summary.py:test_async_get_config_entry_diagnostics_includes_buffer"
     - id: discovery-update-info
       status: done
       evidence:
@@ -219,18 +220,30 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/binary_sensor.py:GoogleFindMyPollingSensor._attr_entity_category"
+        - "custom_components/googlefindmy/sensor.py:COARSE_FIX_DESCRIPTION.entity_category"
     - id: entity-device-class
       status: done
       evidence:
         - "custom_components/googlefindmy/binary_sensor.py:AUTH_STATUS_DESC.device_class"
+        - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
+        - "tests/test_sensor_coarse_fix.py:test_entity_contract"
     - id: entity-disabled-by-default
       status: done
       evidence:
         - "custom_components/googlefindmy/button.py:GoogleFindMyButtonEntity._attr_entity_registry_enabled_default"
+        # Pins a deliberate exception: location_status is enabled by default
+        # because it replaces a visible attribute and changes at most three
+        # times per fix cycle (not noisy).
+        - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
+        # Same exception for coarse_fix: the only live carrier of a discarded
+        # coarse fix, about two state changes per coarse fix.
+        - "tests/test_sensor_coarse_fix.py:test_entity_contract"
     - id: entity-translations
       status: done
       evidence:
         - "custom_components/googlefindmy/translations/en.json:entity"
+        - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
+        - "tests/test_sensor_coarse_fix.py:test_entity_contract"
     - id: exception-translations
       status: done
       evidence:
@@ -240,6 +253,7 @@ rules:
       evidence:
         - "custom_components/googlefindmy/icons.json"
         - "tests/test_icons_translation_map.py:test_icons_file_covers_entity_translation_keys"
+        - "tests/test_sensor_location_status.py:test_sensor_entity_contract"
     - id: reconfiguration-flow
       status: done
       evidence:
@@ -251,6 +265,7 @@ rules:
         - "README.md#subentries-and-feature-groups"
         - "tests/test_options_flow_subentries.py::test_repairs_move_assigns_devices_to_selected_subentry"
         - "tests/test_options_flow_subentries.py::test_repairs_delete_moves_devices_and_removes_subentry"
+        - "tests/test_device_tracker_tick_writes.py::test_repair_issue_one_per_entry_kept_over_an_unload"
     - id: stale-devices
       status: done
       evidence:

@@ -16,7 +16,7 @@ child directory overrides it.
 
 BLE FHNA service data places the frame type at octet 7 with the EID starting at octet 8. Resolver updates must keep these offsets authoritative and only fall back to the 1-byte header layout when the service-data pattern does not apply.
 
-The frame byte does not carry the EID length. Per the [Find Hub Network Accessory Specification](https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn) (retrieved 2026-08-05) it tracks unwanted tracking protection mode: `0x41` while the mode is active, `0x40` otherwise. `0x40` therefore correlates with 20-byte legacy EIDs and `0x41` with 32-byte P-256 ones only as a field observation, never as a rule — a legacy beacon in tracking-protection mode and a modern beacon outside it are both conformant. Derive the slice length primarily from the payload length (`_framed_eid_lengths`, shared by both framed geometries), and probe the 32-byte reading first: the first 20 bytes of a 32-byte EID are a precomputed lookup entry of their own (`MODERN_P256_X20_TRUNC_*`), so the shorter reading otherwise matches first and puts the hashed-flags byte on EID material. The frame byte still decides exactly two documented asymmetries, both spelled out in that function's docstring; read it before changing a band.
+The frame byte does not carry the EID length. Per the [Find Hub Network Accessory Specification](https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn) (retrieved 2026-08-05) it tracks unwanted tracking protection mode: `0x41` while the mode is active, `0x40` otherwise. Field data in [`docs/UWT_FIELD_DATA.md`](../../docs/UWT_FIELD_DATA.md) show frame byte and hashed-flags bit 7 agreeing on every logged probe line (only 20-byte EIDs have been observed so far; no 32-byte EID observed), so never read the frame byte as a curve or length selector: a legacy beacon in tracking-protection mode and a modern beacon outside it are both conformant. Derive the slice length primarily from the payload length (`_framed_eid_lengths`, shared by both framed geometries), and probe the 32-byte reading first: the first 20 bytes of a 32-byte EID are a precomputed lookup entry of their own (`SPEC_P256_X20_TRUNC_BE`, `MODERN_P256_X20_TRUNC_*`), so the shorter reading otherwise matches first and puts the hashed-flags byte on EID material. The frame byte still decides exactly two documented asymmetries, both spelled out in that function's docstring; read it before changing a band.
 
 "Does not apply" is decided by the lookup result, not by byte 7 alone: byte 7 of a raw-header payload is EID material and matches 0x40/0x41 once in 256 rotation windows. Probe both geometries and let the successful candidate define the geometry, including the position of the optional hashed-flags byte (`EidCandidate.offset + len(eid)`). Do not re-derive that position from the payload afterwards — the match already answered it, and re-deriving it guesses a second time. `EidCandidate.layout` is the discriminator for whether the position is known at all: `"framed"` and `"bare"` know it (for `"bare"` the answer is "there is no flags byte"), `"window"` does not, because a sliding-window offset is a find position rather than a parsed layout.
 
@@ -280,7 +280,8 @@ through `get_coarse_fix`. Nothing removes a retained fix when time merely passes
 store is pruned when a newer fix commits - so a rejection never followed by a better fix
 stays in the store indefinitely. `get_coarse_fix` is the raw window that producers and
 tests need; the freshness rule (same `stale_threshold`, negative age counts as corrupt)
-lives in the reader. The device tracker keeps its own check as a second line. Identity is the report timestamp where there is one; a
+lives in the reader. The main device tracker keeps its own check as a second line (the `_last_location` tracker reads no
+coarse fix); the coarse-fix sensor relies on the accessor alone, because it never publishes the fix as a position. Identity is the report timestamp where there is one; a
 payload with no parseable `last_seen` is keyed on its position and radius instead, because
 such a report is rejected by the gate, retained nowhere and therefore delivered again on
 every poll - counting it each time would make the persisted distribution measure retry
@@ -312,14 +313,17 @@ deliberate and load-bearing: the age of the cached row is the gate's release con
 gate would keep the cached fix permanently fresh and the gate would never release. Do not "fix" an aging row that way. Boundary
 pinned by `tests/test_cache_accuracy_gate.py::test_gate_stops_rejecting_once_the_cached_fix_goes_stale`.
 
-**A refusal is not silence.** The refused fix is retained as side information and the tracker publishes it as its `coarse_*`
-attributes, so every one of the three callers has to notify the listeners even when nothing was committed - and all three already
+**A refusal is not silence.** The refused fix is retained as side information and published live by the coarse-fix sensor
+(unique_id suffix `_coarse_fix`); the main tracker holds its `coarse_*` attributes with the observation and takes a new coarse fix only with
+the next observation, and the `_last_location` tracker carries none. So every one of the three callers has to notify the listeners
+even when nothing was committed - and all three already
 do, from a place far enough from the rejection that a reader looking only at the branch will miss it. The poll cycle publishes
 `end_snapshot` from the `finally` of `_async_start_poll_cycle`; `async_locate_device` calls `async_set_updated_data(self.data)`
 from the `finally` that closes its whole body, roughly 350 lines below the `return {}`; and the push fan-out reaches
 `_notify_coordinator` because `_write_coordinator_payload` reports success whenever `update_device_cache` was callable, which it
-was, refusal or not. In Home Assistant `async_set_updated_data` ends in `async_update_listeners`, and every branch of the
-tracker's `_handle_coordinator_update` ends in `async_write_ha_state` after re-reading `get_fresh_coarse_fix`.
+was, refusal or not. In Home Assistant `async_set_updated_data` ends in `async_update_listeners`; every branch of the
+tracker's `_handle_coordinator_update` ends in one `async_write_ha_state`, and the coarse-fix sensor writes on every update after
+re-reading `get_fresh_coarse_fix`.
 
 So do NOT add a notification next to the rejection: it would fire a second, identical entity update, and at a worse moment, since
 the device is still in `_locate_inflight` there and the locate button would be written unavailable and available one statement
@@ -644,6 +648,22 @@ sentence above and checked both its number and its names. What was loose until n
 ("Three tests pin the current state"), one-off citations outside any list, the class names this file leans on, and the
 other contracts under this component. A name may therefore not be written into any of them before the test exists.
 Citations of a FILE (`tests/foo.py`) stay unchecked by design, so renaming a test module still dangles silently.
+
+### Location request clock (`poll_age_s`)
+
+Every site that awaits `api.async_get_device_location` for a locate wraps the await in `stamp_on_dispatch`
+(`coordinator/helpers/locate_clock.py`). The stamp is written by the transport, not by the send site:
+`NovaApi/nova_request.py` calls the observer of the current context immediately before each `session.post`. A new
+send site that skips the wrapper leaves its requests out of `poll_age_s`. Never stamp before the await: a reader
+logs the value at once, so a stamp for an attempt that later stops in its push or token phase cannot be taken back.
+`test_dispatch_observer_fires_once_per_post` counts observer calls against POSTs, and
+`test_reader_sees_no_stamp_while_the_attempt_is_in_its_push_phase` pins the second rule.
+
+### Map View reminders
+
+* Decide whether Map View is on only through `_is_map_view_enabled_for_entry` (in `map_view.py`; `__init__.py` reaches it lazily through `_is_map_view_enabled_for_entry_fn`). Registration, the device-URL refresh, the refresh service and every view must agree on the option and its default. Code that handles the stored options as data reads and writes the value without deciding anything: the flows in `config_flow.py` (prefill, carry over and save their forms), the options migrations and `_effective_config` in `__init__.py`, which go through `OPTION_KEYS`, and the diagnostics export. That is not a decision about Map View.
+* Values that arrive through a public route (`requires_auth = False`, for example a device id from the URL) go into log messages with `%r`, never `%s`, so a CR, LF, U+2028 or NEL in the value cannot start a forged log line (CWE-117).
+* Share tokens are compared only through `_token_matches`, which runs `hmac.compare_digest` on UTF-8 bytes against every accepted token; `_resolve_entry_by_token` likewise compares against every entry before it returns. Never compare a token with `==`, `in` or an early `return`.
 
 ### Import deferral reminder
 

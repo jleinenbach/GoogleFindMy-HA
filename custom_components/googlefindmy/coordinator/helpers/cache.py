@@ -181,6 +181,11 @@ def determine_location_status(age: float, poll_interval: float) -> str:
     Returns:
         One of: "Location data current", "Location data aging",
         or "Location data stale".
+
+    This labels the coordinator snapshot row against the poll interval and is
+    not the entity-facing location status; that one is
+    ``classify_location_status`` in ``helpers/geo.py`` (stale-threshold based,
+    shared by the device_tracker and the ``location_status`` sensor).
     """
     if age < poll_interval:
         return STATUS_CURRENT

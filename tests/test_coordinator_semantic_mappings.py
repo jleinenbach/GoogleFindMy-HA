@@ -1,7 +1,9 @@
+# tests/test_coordinator_semantic_mappings.py
 from __future__ import annotations
 
 import ast
 import asyncio
+import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -295,6 +297,51 @@ async def test_poll_cycle_preserves_coordinates_and_updates_semantic_name() -> N
     assert cached["longitude"] == pytest.approx(10.0)
     assert cached["semantic_name"] == "Unknown Room"
     assert cached["last_seen"] == pytest.approx(200)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_home_substitution_names_the_device_only_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The unattended poll path names the device by id at INFO.
+
+    The display name and the Google Home label are user labels; they appear
+    only in the DEBUG companion record (AGENTS.md section 5 (b)).
+    """
+
+    google_filter = _TrackingFilter(
+        should_filter=False, replacement={"latitude": 1.0, "longitude": 2.0}
+    )
+    coordinator = _polling_coordinator(
+        {}, google_filter, {"semantic_name": "Kitchen Display Sentinel"}
+    )
+
+    with caplog.at_level(
+        logging.DEBUG, logger="custom_components.googlefindmy.coordinator.polling"
+    ):
+        await coordinator._async_start_poll_cycle(
+            [{"id": "dev-home", "name": "Hall Tag Sentinel"}]
+        )
+
+    sentinels = ("Hall Tag Sentinel", "Kitchen Display Sentinel")
+    info = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and "substituting with Home coordinates" in record.getMessage()
+    ]
+    assert len(info) == 1
+    assert "dev-home" in info[0]
+    assert not any(sentinel in info[0] for sentinel in sentinels)
+
+    debug = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG and "substituting" in record.getMessage()
+    ]
+    assert len(debug) == 1
+    assert "dev-home" in debug[0]
+    assert all(sentinel in debug[0] for sentinel in sentinels)
 
 
 def test_push_cache_applies_semantic_mapping() -> None:

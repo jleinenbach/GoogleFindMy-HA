@@ -34,7 +34,7 @@ CONFIG_ENTRY_VERSION: int = 2
 # NOTE: no ": str" annotation on purpose -- semantic-release's version_variables
 # regex only matches `NAME = "x"`, not `NAME: str = "x"`. Re-adding the annotation
 # would silently skip this file on the automated version bump.
-INTEGRATION_VERSION = "1.7.15.19"
+INTEGRATION_VERSION = "1.15.23"
 
 # --------------------------------------------------------------------------------------
 # Sound dispatch outcome (API -> coordinator boundary)
@@ -572,6 +572,7 @@ OPT_ENABLE_STATS_ENTITIES: str = "enable_stats_entities"
 OPT_GOOGLE_HOME_FILTER_ENABLED: str = "google_home_filter_enabled"
 OPT_GOOGLE_HOME_FILTER_KEYWORDS: str = "google_home_filter_keywords"
 OPT_MAP_VIEW_TOKEN_EXPIRATION: str = "map_view_token_expiration"
+OPT_MAP_VIEW_ENABLED: str = "map_view_enabled"
 OPT_SEMANTIC_LOCATIONS: str = "semantic_locations"
 OPT_CONTRIBUTOR_MODE: str = "contributor_mode"
 OPT_IGNORED_DEVICES: str = "ignored_devices"
@@ -595,6 +596,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MAP_VIEW_ENABLED,
     OPT_SEMANTIC_LOCATIONS,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE,
@@ -685,6 +687,8 @@ GOOGLE_HOME_SPAM_THRESHOLD_MINUTES: int = 15  # debounce for repeated detections
 # Map View token behavior
 # Default remains "no expiration" for backwards compatibility.
 DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
+# Map View feature switch. Defaults to enabled, preserving existing behavior.
+DEFAULT_MAP_VIEW_ENABLED: bool = True
 
 DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 
@@ -781,6 +785,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_GOOGLE_HOME_FILTER_KEYWORDS: DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MAP_VIEW_ENABLED: DEFAULT_MAP_VIEW_ENABLED,
     OPT_SEMANTIC_LOCATIONS: {},
     OPT_DELETE_CACHES_ON_REMOVE: DEFAULT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE: DEFAULT_CONTRIBUTOR_MODE,
@@ -962,6 +967,9 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
     OPT_MAP_VIEW_TOKEN_EXPIRATION: {
         "type": "bool",
     },
+    OPT_MAP_VIEW_ENABLED: {
+        "type": "bool",
+    },
     OPT_STALE_THRESHOLD: {
         "type": "int",
         "min": 300,  # 5 minutes - allows ~2-3 typical FMDN update cycles
@@ -1127,6 +1135,32 @@ TRANSLATION_KEY_DUPLICATE_ACCOUNT: str = "duplicate_account_entries"
 ISSUE_RESTART_REQUIRED_KEY: str = "restart_required"
 TRANSLATION_KEY_RESTART_REQUIRED: str = "restart_required"
 
+# Repairs issue per config entry: the device_tracker attributes location_age,
+# location_status and (main tracker) coarse_* keep the value of the last
+# observation and will be removed. Two translation keys, with and without the
+# list of automations and scripts that reference a tracker of the entry.
+ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY: str = "tracker_attributes_frozen"
+TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN: str = "tracker_attributes_frozen"
+TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS: str = (
+    "tracker_attributes_frozen_no_automations"
+)
+
+# Integration-owned deprecation (AGENTS.md, "Integration-owned deprecations"):
+# the frozen tracker attributes are removed in the first integration release
+# on or after this Home Assistant version. Set as an assumption when the
+# repair issue was introduced (that month plus eight months, a buffer for the
+# upstream release) and checked again before that release. It may be raised
+# with a reason in the PR description, never lowered.
+TRACKER_ATTRS_BREAKS_IN_HA_VERSION: str = "2027.6.0"
+
+
+def frozen_attributes_issue_id(entry_id: str) -> str:
+    """Return the Repairs issue id announcing the held tracker attributes.
+
+    Pattern: 'tracker_attributes_frozen_<entry_id>'
+    """
+    return f"{ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY}_{entry_id}"
+
 
 def issue_id_for(entry_id: str) -> str:
     """Return a stable Repairs issue_id for a given config entry.
@@ -1229,6 +1263,7 @@ __all__ = [
     "OPT_GOOGLE_HOME_FILTER_ENABLED",
     "OPT_GOOGLE_HOME_FILTER_KEYWORDS",
     "OPT_MAP_VIEW_TOKEN_EXPIRATION",
+    "OPT_MAP_VIEW_ENABLED",
     "OPTION_KEYS",
     "OPT_DELETE_CACHES_ON_REMOVE",
     "OPT_STALE_THRESHOLD",
@@ -1255,6 +1290,7 @@ __all__ = [
     "DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS",
     "GOOGLE_HOME_SPAM_THRESHOLD_MINUTES",
     "DEFAULT_MAP_VIEW_TOKEN_EXPIRATION",
+    "DEFAULT_MAP_VIEW_ENABLED",
     "DEFAULT_DELETE_CACHES_ON_REMOVE",
     "DEFAULT_STALE_THRESHOLD",
     "DEFAULT_SHOW_LOCATION_AGE",
@@ -1299,6 +1335,11 @@ __all__ = [
     "TRANSLATION_KEY_UNIQUE_ID_COLLISION",
     "TRANSLATION_KEY_DUPLICATE_ACCOUNT",
     "ISSUE_RESTART_REQUIRED_KEY",
+    "ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY",
+    "frozen_attributes_issue_id",
+    "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN",
+    "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS",
+    "TRACKER_ATTRS_BREAKS_IN_HA_VERSION",
     "TRANSLATION_KEY_RESTART_REQUIRED",
     "issue_id_for",
     "STORAGE_KEY",

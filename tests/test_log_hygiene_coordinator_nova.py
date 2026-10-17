@@ -2,8 +2,9 @@
 """Log hygiene for the coordinator and Nova modules.
 
 Covers ``coordinator/identity.py``, ``coordinator/locate.py``,
-``NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py`` and
-``NovaApi/ListDevices/nbe_list_devices.py``.
+``NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py``,
+``NovaApi/ExecuteAction/LocateTracker/location_request.py``,
+``NovaApi/ListDevices/nbe_list_devices.py`` and ``NovaApi/nova_request.py``.
 
 Static checks walk every logger call in these modules:
 
@@ -39,7 +40,9 @@ Not covered: values that reach a logger through a helper or a variable with an
 unrelated name, a subscript or ``.get`` with a variable key, other reading
 forms (``.pop``, ``.setdefault``, ``.__getitem__``, ``operator.itemgetter``,
 ``builtins.getattr``, a key passed through ``*args``), ``extra`` built before the call, logger methods bound to an
-alias, and ``print`` calls outside ``nbe_list_devices.py``.
+alias, and ``print`` calls outside ``nbe_list_devices.py``. The Semgrep mirror
+is stricter than the rule: it treats ``self.log`` as a logger, which the real
+Semgrep rule does not.
 """
 
 from __future__ import annotations
@@ -52,8 +55,10 @@ from pathlib import Path
 import pytest
 
 from custom_components.googlefindmy.coordinator import identity, locate
+from custom_components.googlefindmy.NovaApi import nova_request
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     decrypt_locations,
+    location_request,
 )
 from custom_components.googlefindmy.NovaApi.ListDevices import nbe_list_devices
 from tests.helpers.config_entries_stub import make_config_entry
@@ -61,7 +66,14 @@ from tests.helpers.locate_mixin_stub import LocateStub
 
 _MODULES = tuple(
     Path(module.__file__)
-    for module in (identity, locate, decrypt_locations, nbe_list_devices)
+    for module in (
+        identity,
+        locate,
+        decrypt_locations,
+        location_request,
+        nbe_list_devices,
+        nova_request,
+    )
 )
 _LOGGER_OBJECT = re.compile(r"(?i)(_logger|logger|self.logger|log)")
 _LOG_METHODS = frozenset(

@@ -53,7 +53,8 @@
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
-          "map_view_token_expiration": "Enable map view token expiration"
+          "map_view_token_expiration": "Enable map view token expiration",
+          "map_view_enabled": "Enable map view"
         }
       },
       "select_hub_for_visibility": {
@@ -284,18 +285,20 @@
           "enable_stats_entities": "Create statistics entities",
           "delete_caches_on_remove": "Delete caches when removing entry",
           "map_view_token_expiration": "Enable map view token expiration",
+          "map_view_enabled": "Enable map view",
           "contributor_mode": "Location contributor mode",
           "subentry": "Feature group",
           "secrets_extra_watch_paths": "Additional secrets.json watch paths (one per line)"
         },
         "data_description": {
-          "stale_threshold": "After this many seconds without a location update, the tracker state becomes unknown. Use the 'Last Location' entity to always see the last known position. Default: 1800 (30 minutes).",
-          "show_location_age": "When enabled (default), a 'location_age' attribute (rounded to 1 minute) is added to each tracker entity. Disable to eliminate all database writes for stationary devices. The absolute 'last_seen' attribute and sensor.*_last_seen entities are always available.",
+          "stale_threshold": "After this many seconds without a location update, the tracker state becomes unknown. Use the 'Last Location' entity to always see the last known position. Default: 3900 (65 minutes).",
+          "show_location_age": "When enabled (default), a 'location_age' attribute (rounded to 1 minute) is added to each tracker entity. It keeps the age of the last observation and changes only with the next one (for example a new fix, the change to stale, or an availability change). The live age is on the 'Last Seen' sensor of each device, the live status on its 'Location status' sensor.",
           "speed_gate_enabled": "When enabled (default), a location fix that would require physically impossible speed (for example a crowd-sourced report placing the tracker hundreds of km away within seconds) is rejected instead of teleporting the tracker. Own GPS reports always pass. Disable only if legitimate fast movements are being dropped.",
           "roundtrip_confirm_enabled": "When enabled (default), a crowd fix that the speed gate would reject as a teleport is accepted instead if it lands back near the position from just before an earlier accepted long jump, within about 15 minutes. This recovers a legitimate return trip rather than leaving the tracker stranded at the far position. It only ever applies where the speed gate would otherwise reject. Disable if you see the tracker flapping between two places.",
-          "accuracy_gate_enabled": "When enabled (default), an incoming location fix is discarded if it lies clearly outside the uncertainty circle of the cached position, is at least four times less accurate than it, at least 200 m coarse, and that cached position is both reliable and still fresh. Nothing is ever discarded without a better alternative: a coarse fix is always accepted on a cold start, or when the cached position is unreliable or stale. This stops a wide crowd-sourced report from moving the tracker and - because Home Assistant uses the accuracy radius as the zone tolerance - from falsely reporting it as home. Disable only if you suspect this gate itself is causing a problem.",
+          "accuracy_gate_enabled": "When enabled (default), an incoming location fix is discarded if it lies clearly outside the uncertainty circle of the cached position, is at least four times less accurate than it, at least 200 m coarse, and that cached position is both reliable and still fresh. Nothing is ever discarded without a better alternative: a coarse fix is always accepted on a cold start, or when the cached position is unreliable or stale. This stops a wide crowd-sourced report from moving the tracker and - because Home Assistant uses the accuracy radius as the zone tolerance - from falsely reporting it as home. Disable only if you suspect this gate itself is causing a problem. A discarded fix is shown by the device's 'Discarded coarse fix' sensor until a fix that is as new or newer is accepted, the discarded fix is older than the stale threshold, or the integration is reloaded (as on a Home Assistant restart); the rest of the time that sensor shows unknown, which is normal.",
           "delete_caches_on_remove": "Remove cached tokens and device metadata when this entry is deleted.",
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
+          "map_view_enabled": "Enabled by default. When disabled, Map View requests are refused like an invalid token and device links are cleared. Does not rotate existing share links; if one may have leaked, use \"Enable map view token expiration\" (allow up to two weeks if it was already on).",
           "contributor_mode": "Choose how your device contributes to Google's network (All areas by default for crowdsourced reporting, or High-traffic areas only).",
           "subentry": "Store these options on the selected feature group. See [Subentries and feature groups]({subentries_docs_url}) for examples.",
           "secrets_extra_watch_paths": "Optional. Extra absolute paths to secrets.json files the integration should watch for automatic pickup, one per line. Leave empty to watch only the default locations."
@@ -662,6 +665,28 @@
           }
         }
       },
+      "location_status": {
+        "name": "Location status",
+        "state": {
+          "current": "Current",
+          "aging": "Aging",
+          "stale": "Stale"
+        }
+      },
+      "coarse_fix": {
+        "name": "Discarded coarse fix",
+        "state_attributes": {
+          "coarse_latitude": {
+            "name": "Coarse latitude"
+          },
+          "coarse_longitude": {
+            "name": "Coarse longitude"
+          },
+          "coarse_accuracy": {
+            "name": "Coarse accuracy (m)"
+          }
+        }
+      },
       "last_seen": {
         "name": "Last Seen",
         "state_attributes": {
@@ -790,6 +815,14 @@
     "restart_required": {
       "title": "Restart Home Assistant to finish the update",
       "description": "Google Find My Hub was updated on disk to version {installed_version}, but Home Assistant is still running version {running_version}. Restart Home Assistant to activate the installed version.\n\nReloading the integration is not enough: a full Home Assistant restart is required."
+    },
+    "tracker_attributes_frozen": {
+      "title": "Tracker attributes now keep the value of the last observation",
+      "description": "The device trackers of **{entry_title}** no longer update the attributes `location_age` and `location_status` between observations: they keep the value of the last observation and change only with the next one (for example a new fix, the change to stale, or an availability change). The main tracker keeps the `coarse_*` attributes the same way, and the Last Location tracker no longer has them. A tracker without a new fix therefore no longer looks fresher than another one, for example to a person.\n\nFor the live values, use these entities:\n{replacement_sensors}\n\nThese attributes will be removed, at the latest with the first integration release from Home Assistant {breaks_version} on.\n\nAutomations and scripts that use these trackers (please check them for `location_status`, `location_age` and `coarse_*`):\n{automations}"
+    },
+    "tracker_attributes_frozen_no_automations": {
+      "title": "Tracker attributes now keep the value of the last observation",
+      "description": "The device trackers of **{entry_title}** no longer update the attributes `location_age` and `location_status` between observations: they keep the value of the last observation and change only with the next one (for example a new fix, the change to stale, or an availability change). The main tracker keeps the `coarse_*` attributes the same way, and the Last Location tracker no longer has them. A tracker without a new fix therefore no longer looks fresher than another one, for example to a person.\n\nFor the live values, use these entities:\n{replacement_sensors}\n\nThese attributes will be removed, at the latest with the first integration release from Home Assistant {breaks_version} on."
     }
   },
   "exceptions": {

@@ -27,16 +27,25 @@ from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+# ``automation`` and ``script`` are no dependencies (hassfest allows these two
+# imports, ALLOWED_USED_COMPONENTS). Imported at module level because Home
+# Assistant imports this platform in the executor; a lazy import inside the
+# start callback would load the modules on the event loop.
+from homeassistant.components.automation import automations_with_entity
+from homeassistant.components.script import scripts_with_entity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.start import async_at_started
 
 from . import (
     EntityRecoveryManager,
@@ -51,11 +60,16 @@ from .const import (
     DEFAULT_SHOW_LOCATION_AGE,
     DOMAIN,
     OPT_SHOW_LOCATION_AGE,
+    TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
     TRACKER_SUBENTRY_KEY,
+    TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN,
+    TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS,
+    frozen_attributes_issue_id,
 )
 from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
+    classify_location_status,
     encode_plus_code_for_row,
     is_reliable_fix,
     location_age_seconds,
@@ -87,6 +101,26 @@ _ROW_UNSET: Any = object()
 
 # Read-only mirror of coordinator state; no I/O performed per-entity.
 PARALLEL_UPDATES = 0
+
+# Attributes that age with the clock rather than with a new fix. The tracker
+# publishes them as of the last observation (see
+# GoogleFindMyDeviceTracker._hold_observation_attributes); the live age is
+# on sensor.*_last_seen, the live status on sensor.*_location_status.
+_HELD_ATTRIBUTES: tuple[str, ...] = ("location_age", "location_status")
+
+# Side information about a coarse fix the accuracy gate discarded (#216). It can
+# appear (the gate rejects a fix, the published position stays) and expire (the
+# clock passes the stale threshold) without a new published observation, so the
+# main tracker holds it with the observation too: it changes only together with
+# a new observation. The live value is on the coarse-fix sensor. Unlike
+# _HELD_ATTRIBUTES, an absent key does not drop the held value, because absence
+# here means "expired", not "switched off by an option".
+_COARSE_ATTRIBUTES: tuple[str, ...] = (
+    "coarse_latitude",
+    "coarse_longitude",
+    "coarse_accuracy",
+    "coarse_last_seen",
+)
 
 # Wall-clock grace before a fresh entity addition is judged against the entity
 # registry.
@@ -155,6 +189,109 @@ def _normalize_identifier_set(candidate: Iterable[Any] | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# Unique-id suffixes of the per-device sensors that carry the live values of the
+# held tracker attributes. The issue lists their registered entity ids: Home
+# Assistant derives the object id from the translated entity name for most
+# languages, so a literal such as ``sensor.*_coarse_fix`` would not exist there.
+_FROZEN_ATTRIBUTES_REPLACEMENT_SUFFIXES = (
+    "_location_status",
+    "_last_seen",
+    "_coarse_fix",
+)
+
+
+@callback
+def _async_track_frozen_attributes_issue(
+    hass: HomeAssistant, config_entry: ConfigEntry
+) -> None:
+    """Show the held-attributes issue in Repairs while this entry is loaded.
+
+    The list of automations and scripts is computed once Home Assistant has
+    started: ``automation`` and ``script`` need not be loaded while this
+    platform sets up (they would report no references), and neither is a
+    dependency of the integration. The tracker and replacement sensor entity
+    ids come from the entity registry, not from runtime entities. On a
+    running Home Assistant (an entry added from the UI) the start callback
+    runs at once, before any entity of the entry is registered; such an entry
+    has no tracker of its own yet and gets no issue until the next start.
+    Unloading the entry cancels a pending start callback but keeps the issue,
+    so a reload does not undo the user's
+    "ignore"; disabling the entry deletes it, ``async_remove_entry`` deletes
+    it, and a non-persistent issue of an entry that is no longer set up turns
+    inactive with the next start.
+    """
+    issue_id = frozen_attributes_issue_id(config_entry.entry_id)
+
+    @callback
+    def _create_issue(_hass: HomeAssistant) -> None:
+        registered = er.async_entries_for_config_entry(
+            er.async_get(hass), config_entry.entry_id
+        )
+        trackers = [
+            entry.entity_id for entry in registered if entry.domain == "device_tracker"
+        ]
+        if not trackers:
+            _LOGGER.debug(
+                "Held-attributes repair issue skipped: no tracker registered yet"
+            )
+            return
+        replacements = sorted(
+            entry.entity_id
+            for entry in registered
+            if entry.domain == "sensor"
+            and entry.unique_id.endswith(_FROZEN_ATTRIBUTES_REPLACEMENT_SUFFIXES)
+        )
+        users = sorted(
+            {
+                reference
+                for tracker in trackers
+                for reference in (
+                    *automations_with_entity(hass, tracker),
+                    *scripts_with_entity(hass, tracker),
+                )
+            }
+        )
+        placeholders = {
+            "entry_title": config_entry.title or config_entry.entry_id,
+            "replacement_sensors": "\n".join(f"- {ref}" for ref in replacements)
+            # Not "-": under the sentence it would turn it into a heading.
+            or "\u2026",
+            "breaks_version": TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
+        }
+        translation_key = TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS
+        if users:
+            translation_key = TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN
+            placeholders["automations"] = "\n".join(f"- {ref}" for ref in users)
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            issue_id,
+            breaks_in_ha_version=TRACKER_ATTRS_BREAKS_IN_HA_VERSION,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=translation_key,
+            translation_placeholders=placeholders,
+        )
+
+    if not hasattr(hass, "state") or not hasattr(hass, "bus"):
+        # A hass double without the start surface (fast test stubs): the issue
+        # is advisory, so skip it rather than fail the platform setup. No
+        # exception is caught here, so a failure while creating the issue on
+        # a running Home Assistant still surfaces.
+        _LOGGER.debug("Held-attributes repair issue not scheduled: no start state")
+        return
+    config_entry.async_on_unload(async_at_started(hass, _create_issue))
+
+    @callback
+    def _delete_issue_if_disabled() -> None:
+        # Home Assistant sets ``disabled_by`` before it unloads the entry.
+        if getattr(config_entry, "disabled_by", None) is not None:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+    config_entry.async_on_unload(_delete_issue_if_disabled)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -177,6 +314,7 @@ async def async_setup_entry(
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = config_entry
+    _async_track_frozen_attributes_issue(hass, config_entry)
 
     def _known_subentry_ids() -> set[str]:
         return known_config_subentry_ids(config_entry)
@@ -1037,11 +1175,16 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     _attr_entity_registry_enabled_default = True
     _attr_translation_key = "device"
     _attr_attribution: str | None = None  # Set in __init__ with account email
-    # location_age changes on every fix; keep it out of recorder history
-    # (HA developer guidance, 2023-09 / Entity docs). Stationary devices still
-    # benefit from the show_location_age toggle and 60s rounding, but even
-    # mobile devices should not bloat the state_attributes table here.
+    # location_age is held between observations (see
+    # _hold_observation_attributes) but still takes a new value with every
+    # observation; keep it out of recorder history (HA developer guidance,
+    # 2023-09 / Entity docs). The show_location_age toggle and the 60 s rounding
+    # stay, but even mobile devices should not bloat the state_attributes table
+    # here.
     _unrecorded_attributes = frozenset({"location_age"})
+    # The main tracker carries the held coarse-fix side information; the
+    # _last_location tracker never goes stale and carries none.
+    _publishes_coarse_fix = True
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod
@@ -1095,23 +1238,28 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # Persist a "last good" fix to keep map position usable when current accuracy is filtered
         self._last_good_accuracy_data: dict[str, Any] | None = None
         self._logged_visibility_block = False
+        # Observation signature of the last published fix and the values of
+        # _HELD_ATTRIBUTES published with it; see _hold_observation_attributes().
+        self._observation_sig: tuple[Any, ...] | None = None
+        self._held_attributes: dict[str, Any] = {}
 
     async def async_added_to_hass(self) -> None:
-        """Restore last known location and seed the coordinator cache.
+        """Restore the last known location, then seed the coordinator cache.
 
-        On cold boots where the coordinator hasn't polled yet, we restore the last
-        coordinates from the state machine to provide a better initial UX. We also
-        prime the coordinator's cache via its public priming API (no private access).
+        On cold boots where the coordinator hasn't polled yet, this restores the
+        last coordinates to give a better initial UX and primes the coordinator's
+        cache via its public priming API. It runs *before*
+        ``super().async_added_to_hass()`` so the single state publish that call
+        triggers already reflects the restored fix.
         """
-        await super().async_added_to_hass()
-
         try:
             last_state = await self.async_get_last_state()
         except (RuntimeError, AttributeError) as err:
             _LOGGER.debug("Failed to get last state for %s: %s", self.entity_id, err)
-            return
+            last_state = None
 
         if not last_state:
+            await super().async_added_to_hass()
             return
 
         # Standard device_tracker attributes. Fresh states expose the position via
@@ -1166,41 +1314,40 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             _LOGGER.debug("Invalid restored coordinates for %s: %s", self.entity_id, ex)
             restored = {}
 
-        if restored:
-            # Restore last_seen so the recovered fix carries its true age.
-            # _get_location_age() reads ``last_seen`` as an epoch float; without
-            # it the age is unknown and _is_location_stale() assumes "not stale",
-            # so a position that predates the restart would look fresh until the
-            # next poll. The recorded value is an ISO string (or last_seen_utc);
-            # parse_last_seen_timestamp() normalizes both back to epoch seconds.
+        if not restored:
+            await super().async_added_to_hass()
+            return
+
+        # Restore last_seen so the recovered fix carries its true age; without
+        # it _is_location_stale() assumes "not stale" and a stale restored
+        # position would look fresh until the next poll.
+        last_seen = parse_last_seen_timestamp(last_state.attributes.get("last_seen"))
+        if last_seen is None:
             last_seen = parse_last_seen_timestamp(
-                last_state.attributes.get("last_seen")
+                last_state.attributes.get("last_seen_utc")
             )
-            if last_seen is None:
-                last_seen = parse_last_seen_timestamp(
-                    last_state.attributes.get("last_seen_utc")
-                )
-            if last_seen is not None:
-                restored["last_seen"] = last_seen
+        if last_seen is not None:
+            restored["last_seen"] = last_seen
 
-            # Same retention gate as the operational path and the coordinator
-            # prime below (is_reliable_fix + bootstrap): a restored estimated
-            # fix seeds the still-empty cache (``is None``) but must not overwrite
-            # a reliable fix once one exists, so the tracker's private last-good
-            # and the coordinator's stay in sync by construction (#1179).
-            if is_reliable_fix(restored) or self._last_good_accuracy_data is None:
-                self._last_good_accuracy_data = {**restored}
-            # Prime coordinator cache using its public API (no private access).
-            dev_id = self.device_id
-            try:
-                self.coordinator.prime_device_location_cache(dev_id, restored)
-            except (AttributeError, TypeError) as err:
-                _LOGGER.debug(
-                    "Failed to seed coordinator cache for %s: %s", self.entity_id, err
-                )
+        # Same retention gate as the operational path and the coordinator
+        # prime below (is_reliable_fix + bootstrap): a restored estimated
+        # fix seeds the still-empty cache (``is None``) but must not overwrite
+        # a reliable fix once one exists, so the tracker's private last-good
+        # and the coordinator's stay in sync by construction.
+        if is_reliable_fix(restored) or self._last_good_accuracy_data is None:
+            self._last_good_accuracy_data = {**restored}
+        # Prime coordinator cache using its public API (no private access).
+        dev_id = self.device_id
+        try:
+            self.coordinator.prime_device_location_cache(dev_id, restored)
+        except (AttributeError, TypeError) as err:
+            _LOGGER.debug(
+                "Failed to seed coordinator cache for %s: %s", self.entity_id, err
+            )
 
-            self._sync_location_attrs()
-            self.async_write_ha_state()
+        # Delegate to super() now that the cache is primed: its one state
+        # publish reflects the restored fix.
+        await super().async_added_to_hass()
 
     # ---------------- Device Info + Map Link ----------------
     @property
@@ -1335,16 +1482,9 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         Accepts an explicit ``row`` so the published status describes the age of
         the same row that produced the coordinates (Codex #202).
         """
-        age = self._get_location_age(row)
-        if age is None:
-            return "unknown"
-        threshold = self._get_stale_threshold()
-        if age > threshold:
-            return "stale"
-        elif age > threshold / 2:
-            return "aging"
-        else:
-            return "current"
+        return classify_location_status(
+            self._get_location_age(row), self._get_stale_threshold()
+        )
 
     # ------------------------------------------------------------------
     # Location attribute synchronisation (HA CachedProperties pattern)
@@ -1363,7 +1503,10 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """Recompute and publish every TrackerEntity attribute via _attr_*.
 
         Must be called before *every* ``async_write_ha_state()`` so that
-        HA's ``CachedProperties`` mechanism picks up fresh values.
+        HA's ``CachedProperties`` mechanism picks up fresh values. The values
+        that change with the clock rather than with a new fix
+        (``_HELD_ATTRIBUTES`` and ``_COARSE_ATTRIBUTES``) are published as of
+        the last observation; see ``_hold_observation_attributes``.
         """
         stale = self._is_location_stale()
 
@@ -1508,7 +1651,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # entity a second owner of that policy, and two owners of one rule drift.
         coarse = None
         get_coarse = getattr(self.coordinator, "get_fresh_coarse_fix", None)
-        if callable(get_coarse):
+        if self._publishes_coarse_fix and callable(get_coarse):
             coarse = get_coarse(self.device_id)
         if coarse:
             # The SECOND LINE, not the rule. The accessor above already applies the
@@ -1540,6 +1683,94 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             attributes["coarse_last_seen"] = coarse["last_seen"]
 
         self._attr_extra_state_attributes = attributes
+        self._hold_observation_attributes(attributes)
+
+    @property
+    def force_update(self) -> bool:
+        """Report a write with unchanged state and attributes, don't change it.
+
+        ``TrackerEntity`` returns ``not self.should_poll`` here, i.e. ``True``
+        for this push entity, and Core then treats every write as a change: a
+        new ``last_updated`` on every coordinator tick. HA's ``person``
+        integration picks the tracker with the newest ``last_updated`` (not
+        ``last_seen``), so that let a tracker without a new fix outrank a
+        genuinely fresher one. With ``False`` an identical write only advances
+        ``last_reported`` (``state_reported``); a changed attribute or a zone
+        change of the unchanged position is still a ``state_changed``.
+        """
+        return False
+
+    def _state_signature(self) -> tuple[Any, ...]:
+        """Return the values that identify the *observation* being published.
+
+        Derived from ``_attr_extra_state_attributes`` (the exact dict
+        ``_sync_location_attrs()`` publishes) rather than a hand-maintained
+        attribute list, so a future attribute is automatically covered.
+
+        ``_HELD_ATTRIBUTES`` and ``_COARSE_ATTRIBUTES`` are excluded: they
+        change with the clock or the coarse-fix window, not with a new
+        published fix, so they must not make a tick look like a new
+        observation.
+        """
+        # No class-level default for this attr in HA core, so a bare read can
+        # raise AttributeError before the first _sync_location_attrs() write;
+        # mirror core's own hasattr() guard.
+        attrs = getattr(self, "_attr_extra_state_attributes", None) or {}
+        extra_items = tuple(
+            sorted(
+                (key, value)
+                for key, value in attrs.items()
+                if key not in _HELD_ATTRIBUTES and key not in _COARSE_ATTRIBUTES
+            )
+        )
+        return (
+            self._attr_latitude,
+            self._attr_longitude,
+            self._attr_location_accuracy,
+            self._attr_location_name,
+            self.available,
+            self._device.get("name"),
+            extra_items,
+        )
+
+    def _hold_observation_attributes(self, attributes: dict[str, Any]) -> None:
+        """Publish the clock-driven values of the last observation until a new one.
+
+        While the observation signature is unchanged, ``location_age``,
+        ``location_status`` and the ``coarse_*`` side information keep the
+        values published with that observation, so a coordinator tick writes
+        identical attributes and Core only reports it (see ``force_update``). A
+        new fix, a stale transition (it withholds the coordinates) or a change
+        of availability changes the signature and publishes fresh values. The
+        live age belongs to ``sensor.*_last_seen``, the live status to
+        ``sensor.*_location_status``, the live coarse fix to the coarse-fix
+        sensor; ``attributes`` is updated in place.
+        """
+        signature = self._state_signature()
+        if signature != self._observation_sig:
+            self._observation_sig = signature
+            self._held_attributes = {
+                key: attributes[key]
+                for key in (*_HELD_ATTRIBUTES, *_COARSE_ATTRIBUTES)
+                if key in attributes
+            }
+            return
+        # A coarse fix that appeared or expired since the observation waits for
+        # the next one: drop the live keys and republish the held ones.
+        for key in _COARSE_ATTRIBUTES:
+            attributes.pop(key, None)
+            if key in self._held_attributes:
+                attributes[key] = self._held_attributes[key]
+        for key in _HELD_ATTRIBUTES:
+            if key not in attributes:
+                # Omitted on purpose (``show_location_age`` switched off): never
+                # republish a held value the current options withhold.
+                self._held_attributes.pop(key, None)
+            elif key in self._held_attributes:
+                attributes[key] = self._held_attributes[key]
+            else:
+                # Newly published (option switched on): hold from now on.
+                self._held_attributes[key] = attributes[key]
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -1599,6 +1830,9 @@ class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
 
     _attr_translation_key = "last_location"
     _attr_entity_registry_enabled_default = True
+    # Never stale, so an expiring coarse fix would be a timestamp move on a
+    # tracker that otherwise holds still; the coarse-fix sensor carries it.
+    _publishes_coarse_fix = False
 
     def __init__(
         self,
@@ -1643,13 +1877,5 @@ class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
         Mirrors the parent's ``row`` parameter so the published status describes
         the same row that produced the coordinates (Codex #202).
         """
-        age = self._get_location_age(row)
-        if age is None:
-            return "unknown"
-        threshold = self._get_stale_threshold()
-        if age > threshold:
-            return "last_known"
-        elif age > threshold / 2:
-            return "aging"
-        else:
-            return "current"
+        status = super()._get_location_status(row)
+        return "last_known" if status == "stale" else status

@@ -79,6 +79,7 @@ from .helpers.cache import (
     substitute_zone_accuracy,
 )
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
+from .helpers.locate_clock import ensure_locate_stamps, stamp_on_dispatch
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 from .helpers.update import (
@@ -145,6 +146,17 @@ _COOLDOWN_MIN_HIGH_TRAFFIC_S = 5 * 60  # 5 minutes
 
 # Accept an empty device list only on the 2nd consecutive result (defers once)
 _EMPTY_LIST_QUORUM = 2
+
+# A device counts as silent once this many consecutive polls returned no
+# location data; only then is it reported at INFO, once, together with a single
+# INFO record when it answers again (Home Assistant quality-scale rule
+# ``log-when-unavailable``). A lower value floods the log for BLE tags at the
+# edge of reporter coverage: measured on a live instance over three days, one
+# tag alternated between empty results and locations 688 times, and only two of
+# those empty runs reached a length of three (568 had length one, 118 length
+# two). With a quorum of one, that tag alone would have produced about 1,375
+# INFO records instead of four.
+_EMPTY_LOCATION_QUORUM = 3
 
 # Maximum number of transient auth failures before triggering re-auth
 _MAX_TRANSIENT_AUTH_FAILURES = 3
@@ -282,6 +294,49 @@ class PollingOperations(_MixinBase):
     def is_fcm_connected(self) -> bool:
         """Convenience boolean for entities relying on push transport availability."""
         return self._fcm_status_state == FcmStatus.CONNECTED
+
+    def _note_empty_location_result(self, dev_id: str, dev_name: str) -> None:
+        """Log an empty location result and report a silent device once.
+
+        Every empty result logs at DEBUG with the device name. The poll that
+        completes ``_EMPTY_LOCATION_QUORUM`` consecutive empty results adds one
+        INFO record that names the device by its id only: the poll loop repeats
+        unattended, so the display name stays at DEBUG (AGENTS.md section 5 (b)).
+        Only logging state lives here; the auth and cycle bookkeeping of the
+        caller is untouched.
+        """
+        _LOGGER.debug("No location data returned for %s", dev_name)
+        streaks = getattr(self, "_empty_location_streak", None)
+        if streaks is None:
+            # Coordinators built via __new__ in tests skip __init__.
+            streaks = self._empty_location_streak = {}
+        streak = streaks.get(dev_id, 0) + 1
+        streaks[dev_id] = streak
+        if streak == _EMPTY_LOCATION_QUORUM:
+            _LOGGER.info(
+                "Device %s returned no location data in %d consecutive polls",
+                dev_id,
+                streak,
+            )
+
+    def _note_location_content(self, dev_id: str, dev_name: str) -> None:
+        """Clear the silence streak and report the recovery of a silent device.
+
+        Logs one INFO record (id only) when the device had been reported silent
+        by ``_note_empty_location_result``; a streak below the quorum is cleared
+        without any record at INFO.
+        """
+        streaks = getattr(self, "_empty_location_streak", None)
+        if not streaks:
+            return
+        streak = streaks.pop(dev_id, 0)
+        if streak >= _EMPTY_LOCATION_QUORUM:
+            _LOGGER.info(
+                "Device %s is returning location data again after %d empty polls",
+                dev_id,
+                streak,
+            )
+            _LOGGER.debug("Location data is back for %s", dev_name)
 
     def _log_idle_poll_diagnostics(
         self, dev_id: str, dev_name: str, *, source: str
@@ -1915,17 +1970,29 @@ class PollingOperations(_MixinBase):
                         # make this outer guard win the race and raise a spurious
                         # TimeoutError before the inner request can return its
                         # clean empty result (Nygard: stagger nested timeouts).
-                        location = await asyncio.wait_for(
-                            self.api.async_get_device_location(dev_id, dev_name),
-                            timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
+                        # The transport stamps the device immediately before it
+                        # POSTs the request (helpers/locate_clock.py): an attempt
+                        # cut off or failing in its push or token phase leaves
+                        # no stamp. The observer is a context variable, and
+                        # ``wait_for`` awaits the call in this task (Python 3.12
+                        # and later), so it reaches the request. Created lazily
+                        # for coordinators built without __init__.
+                        self._locate_requested_mono = ensure_locate_stamps(
+                            getattr(self, "_locate_requested_mono", None)
                         )
+                        with stamp_on_dispatch(self._locate_requested_mono, dev_id):
+                            location = await asyncio.wait_for(
+                                self.api.async_get_device_location(dev_id, dev_name),
+                                timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
+                            )
 
                         if not location:
                             # Expected for BLE tags with no reporter nearby: the
                             # inner FCM wait returns an empty result rather than
-                            # raising. This is a healthy idle outcome, not a fault
-                            # (kept at INFO, symmetric with the timeout branch).
-                            _LOGGER.info("No location data returned for %s", dev_name)
+                            # raising. This is a healthy idle outcome, not a fault:
+                            # DEBUG per poll, INFO once for a device that stays
+                            # silent (see _note_empty_location_result).
+                            self._note_empty_location_result(dev_id, dev_name)
                             self._log_idle_poll_diagnostics(
                                 dev_id, dev_name, source="empty-result"
                             )
@@ -1936,6 +2003,8 @@ class PollingOperations(_MixinBase):
                             # state, and it does not zero the counter here.
                             cycle_accepted_requests += 1
                             continue
+
+                        self._note_location_content(dev_id, dev_name)
 
                         # A location WITH content, and only that, proves on this
                         # path that the credentials worked -- the same rule the
@@ -2120,9 +2189,18 @@ class PollingOperations(_MixinBase):
                                         # is not reclassified as a real measurement.
                                         carry_reused_accuracy(location, prev_location)
                                     else:
+                                        # Unattended poll path: this record names
+                                        # the device by its id; the display name
+                                        # and the Google Home label go to the DEBUG
+                                        # record below (AGENTS.md section 5 (b)).
                                         _LOGGER.info(
-                                            "Google Home filter: %s detected at '%s', substituting with Home coordinates",
+                                            "Google Home filter: device %s detected at a Google Home location, substituting with Home coordinates",
+                                            dev_id,
+                                        )
+                                        _LOGGER.debug(
+                                            "Google Home filter: %s (device %s) detected at '%s', substituting with Home coordinates",
                                             dev_name,
+                                            dev_id,
                                             semantic_name,
                                         )
                                         if (
@@ -2202,14 +2280,17 @@ class PollingOperations(_MixinBase):
                         # Skip redundant fusion inside update_device_cache when reusing this payload.
                         location["_fusion_preapplied"] = True
 
-                        # Age diagnostics (informational) - use Phase 11 helpers
+                        # Age diagnostics - use Phase 11 helpers. Both age
+                        # categories log at DEBUG: a stale location repeats on
+                        # every poll and the record carries the device name, so
+                        # it may not appear at INFO (AGENTS.md section 5 (b)).
                         wall_now = time.time()
                         last_seen = location.get("last_seen", 0)
                         age_hours = calculate_location_age_hours(last_seen, wall_now)
                         if age_hours is not None:
                             log_level, should_log = get_age_log_level(age_hours)
                             if should_log and log_level == "info":
-                                _LOGGER.info(
+                                _LOGGER.debug(
                                     "Using old location data for %s (age=%.1fh)",
                                     dev_name,
                                     age_hours,
@@ -2259,9 +2340,13 @@ class PollingOperations(_MixinBase):
 
                     except TimeoutError as terr:
                         if self.is_fcm_connected:
+                            # The outer guard repeats unattended, so the INFO
+                            # record names the device by its id; the idle
+                            # diagnostics below carry the name at DEBUG
+                            # (AGENTS.md section 5 (b)).
                             _LOGGER.info(
-                                "Poll timed out for %s (FCM connected); ignoring error to keep status healthy.",
-                                dev_name,
+                                "Poll timed out for device %s (FCM connected); ignoring error to keep status healthy",
+                                dev_id,
                             )
                             self._log_idle_poll_diagnostics(
                                 dev_id, dev_name, source="outer-timeout"
@@ -2269,9 +2354,14 @@ class PollingOperations(_MixinBase):
                             self.increment_stat("timeouts")
                         else:
                             _LOGGER.info(
-                                "Location request timed out for %s after %s seconds",
-                                dev_name,
+                                "Location request timed out for device %s after %s seconds",
+                                dev_id,
                                 POLL_DEVICE_OUTER_TIMEOUT_S,
+                            )
+                            _LOGGER.debug(
+                                "Location request timeout for %s (device %s)",
+                                dev_name,
+                                dev_id,
                             )
                             self.increment_stat("timeouts")
                             self._consecutive_timeouts += 1
@@ -2302,7 +2392,7 @@ class PollingOperations(_MixinBase):
                             # must not displace anything.
                             if last_exception is None:
                                 last_exception = UpdateFailed(
-                                    f"Location request timed out for {dev_name}"
+                                    f"Location request timed out for device {dev_id}"
                                 )
                                 last_exception.__cause__ = terr
                             # INVARIANT, not a live condition: mutating
@@ -2319,7 +2409,7 @@ class PollingOperations(_MixinBase):
                                 and independent_error is None
                             ):
                                 independent_error = UpdateFailed(
-                                    f"Location request timed out for {dev_name}"
+                                    f"Location request timed out for device {dev_id}"
                                 )
                                 independent_error.__cause__ = terr
                     except SpotAuthPermanentError:

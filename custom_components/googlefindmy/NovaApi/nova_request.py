@@ -31,7 +31,8 @@ import contextvars
 import logging
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from importlib import import_module
@@ -592,6 +593,50 @@ def resolve_cache_from_provider() -> TokenCache | None:
         return None
 
 
+# Who wants to know when a request leaves this host. A caller sets it around its
+# await (``observe_request_dispatch``), and the POST loop below calls it
+# immediately before each ``session.post``, the same point at which a request
+# can first reach the wire (``reached_wire``). The coordinator stamps
+# ``poll_age_s`` from it (``coordinator/helpers/locate_clock.py``), so anything
+# that stops earlier leaves no stamp: no push token, a failed push registration,
+# a failure while the payload is built, a failed token fetch, a wait for another
+# request's token refresh, a time limit or a cancellation during any of these.
+# A ``ContextVar`` rather than a parameter: a locate reaches this function
+# through ``api.async_get_device_location`` and its fallbacks to older
+# signatures of the request layer, which would drop a new keyword argument
+# without a trace. Every request that runs in the setting context, including
+# tasks created there, reaches the same observer; ``stamp_on_dispatch`` closes
+# its observer when its block ends.
+_REQUEST_DISPATCH_OBSERVER: contextvars.ContextVar[Callable[[], None] | None] = (
+    contextvars.ContextVar("_request_dispatch_observer", default=None)
+)
+
+
+@contextmanager
+def observe_request_dispatch(callback: Callable[[], None]) -> Iterator[None]:
+    """Call ``callback`` each time a request awaited inside is about to be POSTed."""
+    token = _REQUEST_DISPATCH_OBSERVER.set(callback)
+    try:
+        yield
+    finally:
+        _REQUEST_DISPATCH_OBSERVER.reset(token)
+
+
+def _notify_request_dispatch() -> None:
+    """Tell the observer of this context that a POST is about to go out.
+
+    A failing observer must not cost the request: it only feeds a measurement.
+    The failure is logged at DEBUG with its type name, not its message.
+    """
+    callback = _REQUEST_DISPATCH_OBSERVER.get()
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception as err:  # noqa: BLE001 - a measurement hook must not break the request
+        _LOGGER.debug("Request dispatch observer failed: %s", type(err).__name__)
+
+
 def _get_cache_provider() -> TokenCache | None:
     """Get the registered cache provider for the current context or None.
 
@@ -660,9 +705,8 @@ async def _get_initial_token_async(
                 await resolved_cache.set(cache_key, fallback)
             except Exception as err:  # pragma: no cover - defensive logging
                 logger.debug(
-                    "Failed to mirror ADM token to namespaced key",
-                    extra={"cache_key": cache_key},
-                    exc_info=err,
+                    "Failed to mirror the ADM entry to the namespaced cache slot (%s)",
+                    type(err).__name__,
                 )
             return fallback
 
@@ -673,9 +717,8 @@ async def _get_initial_token_async(
             await resolved_cache.set(cache_key, token)
         except Exception as err:  # pragma: no cover - defensive logging
             logger.debug(
-                "Failed to persist ADM token to namespaced key",
-                extra={"cache_key": cache_key},
-                exc_info=err,
+                "Failed to persist the ADM entry to the namespaced cache slot (%s)",
+                type(err).__name__,
             )
 
     return token
@@ -861,8 +904,8 @@ class TTLPolicy:
                 threshold = max(0.0, float(best_ttl) - self.TTL_MARGIN_SEC)
                 threshold = self._jitter_sec(threshold, self.JITTER_SEC)
                 if age >= threshold:
-                    self.log.info(
-                        "ADM token reached measured threshold – proactively refreshing..."
+                    self.log.debug(
+                        "ADM token reached measured threshold, proactively refreshing"
                     )
                     self._do_refresh(now)
             except (ValueError, TypeError) as e:
@@ -1005,8 +1048,7 @@ class AsyncTTLPolicy(TTLPolicy):
             observed_ttl = now - issued_at
             observed_ttl_hours = observed_ttl / 3600
             self.log.info(
-                "AAS token for %s lived %.1f hours before invalidation.",
-                self.username,
+                "AAS lifetime before invalidation: %.1f hours.",
                 observed_ttl_hours,
             )
             # Skip TTL learning for very short lifetimes - these typically indicate
@@ -1029,8 +1071,7 @@ class AsyncTTLPolicy(TTLPolicy):
                     except Exception:  # noqa: BLE001 - defensive cache write
                         pass
                 self.log.info(
-                    "Updated AAS best TTL for %s to %.1f hours (with 5%% margin).",
-                    self.username,
+                    "Updated learned AAS lifetime to %.1f hours (with 5%% margin).",
                     safe_ttl / 3600,
                 )
         except (TypeError, ValueError) as e:
@@ -1050,8 +1091,7 @@ class AsyncTTLPolicy(TTLPolicy):
         await self._learn_aas_ttl(now)
 
         self.log.warning(
-            "Invalidating cached AAS token for %s due to persistent 401 errors.",
-            self.username,
+            "Invalidating the cached AAS entry due to persistent 401 errors."
         )
         for key in self._key_variants(DATA_AAS_TOKEN):
             try:
@@ -1100,9 +1140,8 @@ class AsyncTTLPolicy(TTLPolicy):
                 # let gpsoauth validate the AAS on the next ADM refresh: if it's
                 # truly expired, InvalidAasTokenError propagates correctly.
                 self.log.info(
-                    "AAS token for %s past learned threshold (%.1f hours); "
+                    "AAS age past learned threshold (%.1f hours); "
                     "will validate on next ADM refresh.",
-                    self.username,
                     best_ttl / 3600,
                 )
                 return False
@@ -1209,8 +1248,8 @@ class AsyncTTLPolicy(TTLPolicy):
                 threshold = max(0.0, float(best_ttl) - self.TTL_MARGIN_SEC)
                 threshold = self._jitter_sec(threshold, self.JITTER_SEC)
                 if age >= threshold:
-                    self.log.info(
-                        "ADM token reached measured threshold – proactively refreshing (async)…"
+                    self.log.debug(
+                        "ADM token reached measured threshold, proactively refreshing (async)"
                     )
                     await self._do_refresh_async(now)
             except (ValueError, TypeError) as e:
@@ -1245,7 +1284,8 @@ class AsyncTTLPolicy(TTLPolicy):
                         candidate = await self._aget(key)
                     except Exception as err:  # noqa: BLE001 - defensive cache read
                         self.log.debug(
-                            "Failed to read cached token from key '%s': %s", key, err
+                            "Cache read failed for one ADM key variant (%s).",
+                            type(err).__name__,
                         )
                         continue
                     if isinstance(candidate, bytes):
@@ -1478,7 +1518,8 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                 if fresh_token:
                     headers["Authorization"] = f"Bearer {fresh_token}"
                     _LOGGER.debug(
-                        "Nova API: using refreshed token for request to %s.", api_scope
+                        "Nova API: using the refreshed authorization for the request to %s.",
+                        api_scope,
                     )
         except (ValueError, TypeError):
             pass  # Invalid deadline, proceed normally
@@ -1524,6 +1565,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                 timeout = aiohttp.ClientTimeout(
                     total=NOVA_REQUEST_TOTAL_TIMEOUT_S, connect=10, sock_read=30
                 )
+                _notify_request_dispatch()
                 async with session.post(
                     url,
                     headers=headers,

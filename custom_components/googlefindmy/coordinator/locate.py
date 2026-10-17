@@ -56,6 +56,7 @@ from .helpers.cache import (
     substitute_zone_accuracy,
 )
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
+from .helpers.locate_clock import ensure_locate_stamps, stamp_on_dispatch
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -371,11 +372,31 @@ class LocateOperations(_MixinBase):
             google_home_filter = self._get_google_home_filter()
 
             try:
-                location_data = await self.api.async_get_device_location(
-                    device_id, name
+                # The transport stamps the device immediately before it POSTs
+                # the request, not here: an attempt that stops in its push or
+                # token phase leaves no stamp a reader could log in the meantime
+                # (helpers/locate_clock.py). Created lazily for coordinators
+                # built without __init__.
+                self._locate_requested_mono = ensure_locate_stamps(
+                    getattr(self, "_locate_requested_mono", None)
                 )
+                with stamp_on_dispatch(self._locate_requested_mono, device_id):
+                    location_data = await self.api.async_get_device_location(
+                        device_id, name
+                    )
 
                 if not location_data:
+                    # The inner FCM-wait timeout logs at DEBUG only, so without
+                    # this record a locate that got no answer leaves nothing at
+                    # INFO (the error branches in api.py log their own WARNING or
+                    # ERROR before returning empty). An automation can repeat the
+                    # invocation, so the INFO record carries the canonical id and
+                    # the display name stays at DEBUG (AGENTS.md section 5 (b)).
+                    _LOGGER.info(
+                        "Manual locate for device %s returned no location data",
+                        device_id,
+                    )
+                    _LOGGER.debug("Manual locate without location data for %s", name)
                     return {}
 
                 # A result WITH content, and only that, proves on this path that

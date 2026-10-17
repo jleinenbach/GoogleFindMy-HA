@@ -115,6 +115,8 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
     entity_id: str,
     google_device_id: str | None = None,
     coordinator: Any | None = None,
+    report_time: int | None = None,
+    unwanted_tracking_mode: bool | None,
 ) -> bool:
     """Process FMDN beacon detection and upload location report.
 
@@ -133,11 +135,23 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         entity_id: Bermuda entity ID for logging
         google_device_id: Google device ID for semantic_name update
         coordinator: GoogleFindMy coordinator for semantic_name update
+        report_time: Wall-clock second the EID was seen, sent as the report's
+            time; None means now
+        unwanted_tracking_mode: Protection mode the sighting showed, from
+            ``eid_resolver._effective_uwt_mode``. ``None`` means unknown, and
+            nothing is uploaded: the report field cannot say "unknown", and a
+            ``0`` would tell the network that protection is off.
 
     Returns:
         True if upload succeeded, False otherwise
     """
     eid_hex = eid.hex()
+    if unwanted_tracking_mode is None:
+        _LOGGER.debug(
+            "Upload skipped for EID %s...: uwt_state_unknown",
+            eid_hex[:EID_LOG_PREFIX_LENGTH],
+        )
+        return False
     _LOGGER.debug(
         "Processing FMDN beacon: EID=%s..., area=%s, RSSI=%s",
         eid_hex[:EID_LOG_PREFIX_LENGTH],
@@ -204,7 +218,14 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
 
     # 4. Encrypt and upload
     try:
-        success = await _encrypt_and_upload_location(hass, eid, location, area)
+        success = await _encrypt_and_upload_location(
+            hass,
+            eid,
+            location,
+            area,
+            report_time=report_time,
+            unwanted_tracking_mode=unwanted_tracking_mode,
+        )
 
         if success:
             # Update cache on successful upload (including semantic area for throttling)
@@ -533,11 +554,14 @@ def _update_semantic_name(coordinator: Any, google_device_id: str, area: str) ->
         asyncio.create_task(coordinator.async_request_refresh())
 
 
-async def _encrypt_and_upload_location(
+async def _encrypt_and_upload_location(  # noqa: PLR0913
     hass: HomeAssistant,
     eid: bytes,
     location: LocationData,
     semantic_area: str | None = None,
+    *,
+    report_time: int | None = None,
+    unwanted_tracking_mode: bool,
 ) -> bool:
     """Encrypt location and upload to Google FMDN backend.
 
@@ -557,6 +581,11 @@ async def _encrypt_and_upload_location(
         eid: Ephemeral Identity Key (20 or 32 bytes)
         location: Location to upload
         semantic_area: Optional semantic location name (e.g., "Büro", "Wohnzimmer")
+        report_time: Wall-clock second the EID was seen, sent as the report's
+            time; None means now
+        unwanted_tracking_mode: Protection mode the sighting showed (see
+            ``eid_resolver._effective_uwt_mode``), sent as
+            ``unwantedTrackingModeEnabled``
 
     Returns:
         True if upload succeeded, False otherwise
@@ -649,8 +678,8 @@ async def _encrypt_and_upload_location(
 
     report = upload.reports.add()
     report.advertisement.identifier.truncatedEid = eid[:10]
-    report.advertisement.unwantedTrackingModeEnabled = 0
-    report.time.seconds = int(time.time())
+    report.advertisement.unwantedTrackingModeEnabled = int(unwanted_tracking_mode)
+    report.time.seconds = report_time if report_time is not None else int(time.time())
     report.location.CopyFrom(location_report)
 
     upload_bytes = upload.SerializeToString()

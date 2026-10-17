@@ -653,6 +653,9 @@ def issue_registry_capture(
             "issue_id": issue_id,
             "domain": domain,
             "translation_placeholders": dict(translation_placeholders or {}),
+            # Every other keyword (severity, breaks_in_ha_version,
+            # translation_key, is_fixable, is_persistent, ...) as passed.
+            **kwargs,
         }
         capture.created.append(payload)
         capture.registry.issues[issue_id] = payload
@@ -1222,7 +1225,11 @@ def _stub_homeassistant() -> None:
     setattr(helpers_pkg, "restore_state", restore_state_module)
 
     issue_registry_module = sys.modules["homeassistant.helpers.issue_registry"]
-    issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error", INFO="info")
+    # Every member of Core's IssueSeverity, so a WARNING issue does not fail on
+    # the stub with an AttributeError.
+    issue_registry_module.IssueSeverity = SimpleNamespace(
+        CRITICAL="critical", ERROR="error", WARNING="warning", INFO="info"
+    )
 
     if not hasattr(issue_registry_module, "IssueRegistryStore"):
 

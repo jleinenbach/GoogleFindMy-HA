@@ -64,6 +64,13 @@ if TYPE_CHECKING:
 
         def async_write_ha_state(self) -> None: ...
 
+        # Every state write path ends here on the Core lines CI tests; from 2026.5 the
+        # docstring of ``Entity.async_write_ha_state`` names it as the override point.
+        def _async_write_ha_state(self) -> None: ...
+
+        @property
+        def available(self) -> bool: ...
+
     class CoordinatorEntity(_EntityBase, Generic[_CoordinatorT]):
         """Structural type for coordinator-backed entities."""
 

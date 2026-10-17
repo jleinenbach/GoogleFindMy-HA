@@ -1003,6 +1003,128 @@ async def test_restore_falls_back_to_recorder_only_coordinates(
     assert seeded["last_seen"] == pytest.approx(old_epoch, abs=1.0)
 
 
+def _record_parent_added(
+    entity: Any, monkeypatch: pytest.MonkeyPatch, coordinator: Any
+) -> list[dict[str, Any]]:
+    """Record each call of the parent ``async_added_to_hass`` of the tracker.
+
+    The parent call publishes the entity's first state, so the tracker must
+    make it exactly once on every restore path, and after priming the cache
+    when there is something to prime. Each record holds what was primed at the
+    moment of the call.
+    """
+
+    # Home Assistant assigns the entity_id before async_added_to_hass; the
+    # stub base does not, and the fallback paths log it.
+    entity.entity_id = "device_tracker.tracker"
+    calls: list[dict[str, Any]] = []
+    parent = type(entity).__mro__[1]
+
+    async def _parent_added(self: Any) -> None:
+        calls.append(dict(coordinator.primed))
+
+    monkeypatch.setattr(parent, "async_added_to_hass", _parent_added)
+    return calls
+
+
+@pytest.mark.parametrize("error", [RuntimeError, AttributeError])
+@pytest.mark.asyncio
+async def test_restore_survives_a_failing_last_state_lookup(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """A failing restore-state lookup still adds the entity, without a seed."""
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(coordinator, monkeypatch, {})
+    monkeypatch.setattr(
+        entity, "async_get_last_state", AsyncMock(side_effect=error("boom"))
+    )
+    calls = _record_parent_added(entity, monkeypatch, coordinator)
+
+    await entity.async_added_to_hass()
+
+    assert calls == [{}]
+    assert coordinator.primed == {}
+    assert entity._last_good_accuracy_data is None
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        pytest.param({"friendly_name": "Tracker"}, id="no_position_no_accuracy"),
+        pytest.param(
+            {"latitude": "north", "longitude": 20.0}, id="unparsable_coordinates"
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_restore_without_usable_values_primes_nothing(
+    monkeypatch: pytest.MonkeyPatch, attributes: dict[str, Any]
+) -> None:
+    """A last state without usable values adds the entity and seeds nothing."""
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(coordinator, monkeypatch, attributes)
+    calls = _record_parent_added(entity, monkeypatch, coordinator)
+
+    await entity.async_added_to_hass()
+
+    assert calls == [{}]
+    assert coordinator.primed == {}
+    assert entity._last_good_accuracy_data is None
+
+
+@pytest.mark.parametrize("error", [AttributeError, TypeError])
+@pytest.mark.asyncio
+async def test_restore_survives_a_failing_cache_prime(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """A failing cache prime keeps the tracker's own seed and adds the entity."""
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {"latitude": 10.0, "longitude": 20.0, "gps_accuracy": 15},
+    )
+
+    def _failing_prime(device_id: str, data: dict[str, Any]) -> None:
+        raise error("cache API changed")
+
+    monkeypatch.setattr(coordinator, "prime_device_location_cache", _failing_prime)
+    calls = _record_parent_added(entity, monkeypatch, coordinator)
+
+    await entity.async_added_to_hass()
+
+    assert calls == [{}]
+    assert entity._last_good_accuracy_data == {
+        "latitude": 10.0,
+        "longitude": 20.0,
+        "accuracy": 15,
+    }
+
+
+@pytest.mark.asyncio
+async def test_restore_primes_the_cache_before_the_first_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent call, which publishes the first state, sees the primed cache."""
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {"latitude": 10.0, "longitude": 20.0, "gps_accuracy": 15},
+    )
+    calls = _record_parent_added(entity, monkeypatch, coordinator)
+
+    await entity.async_added_to_hass()
+
+    assert len(calls) == 1
+    assert calls[0]["device_id"] == "device-restore"
+    assert calls[0]["data"]["latitude"] == 10.0
+
+
 # ---------------------------------------------------------------------------
 # Regression tests for the stale-threshold retune (spurious "unknown" flapping)
 # and the latent accuracy-less-fallback bug B1 (PR #201 follow-up audit).
@@ -1037,7 +1159,7 @@ def _make_stale_probe_tracker(coordinator: _ShowAgeCoordinatorStub) -> Any:
 
 def test_home_cadence_report_not_stale_under_default_threshold() -> None:
     """A ~35 min old fix (typical home reporting cadence) must NOT be stale
-    under the retuned default. Under the previous 1800 s default the very same
+    under the re-tuned default. Under the previous 1800 s default the very same
     age would have flipped to "stale" and blanked the coordinates."""
 
     coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=None)
@@ -1046,7 +1168,7 @@ def test_home_cadence_report_not_stale_under_default_threshold() -> None:
     entity._get_location_age = lambda *a, **k: 2100.0  # type: ignore[method-assign]
 
     assert entity._get_stale_threshold() == DEFAULT_STALE_THRESHOLD
-    assert DEFAULT_STALE_THRESHOLD > 1800, "default must be retuned above 1800 s"
+    assert DEFAULT_STALE_THRESHOLD > 1800, "default must be re-tuned above 1800 s"
     assert entity._is_location_stale() is False, (
         "a 35 min old home report must not be treated as stale"
     )

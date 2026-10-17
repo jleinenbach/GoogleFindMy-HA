@@ -31,6 +31,7 @@ _TESTS_DIR = _REPO_ROOT / "tests"
 # re-deriving the rule - which is what happened here: review had to point the
 # omission out on the module below before it was added to this set.
 NEW_PRODUCTION_MODULES: set[str] = {
+    "custom_components/googlefindmy/coordinator/helpers/locate_clock.py",
     "custom_components/googlefindmy/location_row_markers.py",
 }
 
@@ -62,7 +63,6 @@ LEGACY_ALLOWLIST: set[str] = {
     "tests/test_coordinator_priority.py",
     "tests/test_coordinator_registry.py",
     "tests/test_coordinator_registry_entity.py",
-    "tests/test_coordinator_semantic_mappings.py",
     "tests/test_coordinator_stats.py",
     "tests/test_coordinator_subentry.py",
     "tests/test_coordinator_subentry_index.py",
@@ -77,7 +77,6 @@ LEGACY_ALLOWLIST: set[str] = {
     "tests/test_fcm_receiver_canonic_id.py",
     "tests/test_fcm_receiver_guard.py",
     "tests/test_fcm_receiver_thread_safety.py",
-    "tests/test_fmdn_finder_bermuda_listener.py",
     "tests/test_fmdn_finder_location_uploader.py",
     "tests/test_homeassistant_callback_stub_helper.py",
     "tests/test_import_smoke.py",

@@ -85,6 +85,7 @@ class _MixinBase:
     _push_cooldown_until: float
     _locate_inflight: set[str]
     _locate_cooldown_until: dict[str, float]
+    _locate_requested_mono: dict[str, float]
     _device_action_locks: dict[str, asyncio.Lock]
     _sound_request_uuids: dict[str, str]
     _device_poll_cooldown_until: dict[str, float]
@@ -103,6 +104,7 @@ class _MixinBase:
     # Polling state
     _consecutive_timeouts: int
     _last_poll_result: str | None
+    _empty_location_streak: dict[str, int]
     _last_device_list: list[dict[str, Any]]
     _empty_list_streak: int
     _last_list_poll_mono: float

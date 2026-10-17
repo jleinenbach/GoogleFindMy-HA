@@ -1389,7 +1389,7 @@ class GoogleFindMyAPI:
         nova_request.register_cache_provider(_cache_provider)
 
         try:
-            _LOGGER.info(
+            _LOGGER.debug(
                 "API v3.0 Async: Requesting location for %s (%s)",
                 device_name,
                 device_id,
@@ -1430,7 +1430,7 @@ class GoogleFindMyAPI:
                         )
             best = self._select_best_location(records)
             if best:
-                _LOGGER.info(
+                _LOGGER.debug(
                     "API v3.0 Async: Selected location record for %s (have %d total)",
                     device_name,
                     len(records),

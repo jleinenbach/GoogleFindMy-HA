@@ -827,6 +827,16 @@ class GoogleFindMyCoordinator(
         # Manual locate gating (UX + server protection)
         self._locate_inflight: set[str] = set()  # device_id -> in-flight flag
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
+        # When the integration last sent a location request for a device, on
+        # the ``time.monotonic`` clock. Written by the transport immediately
+        # before the POST, for both send sites (poll cycle and manual locate),
+        # so an attempt that stops in its push or token phase leaves no value;
+        # a request that fails after the POST still counts. See
+        # ``coordinator/helpers/locate_clock.py``. ``_last_poll_mono`` cannot
+        # serve here: it is a scheduling base, back-dated by the poll interval.
+        # Read by the EID resolver for the ``poll_age_s`` field of
+        # ``FMDN_UWT_TRANSITION`` through ``locate_requested_mono``.
+        self._locate_requested_mono: dict[str, float] = {}
 
         # Per-device action locks to prevent race conditions on concurrent requests
         self._device_action_locks: dict[str, asyncio.Lock] = {}
@@ -913,6 +923,9 @@ class GoogleFindMyCoordinator(
 
         self._consecutive_timeouts: int = 0
         self._last_poll_result: str | None = None
+        # Consecutive empty location results per device id; drives the
+        # once-only INFO record for a silent device (log-when-unavailable).
+        self._empty_location_streak: dict[str, int] = {}
 
         # Granular status tracking (API polling vs. push transport)
         self._api_status_state: str = ApiStatus.UNKNOWN
@@ -2507,6 +2520,20 @@ class GoogleFindMyCoordinator(
             ]
         )
 
+    def locate_requested_mono(self, device_id: str) -> float | None:
+        """Return when a location request for ``device_id`` was last sent.
+
+        The value is on the ``time.monotonic`` clock and is ``None`` when this
+        process has not sent a request for the device yet. It marks the moment
+        before the POST, after push registration and token fetch; an attempt
+        that stopped earlier left no value, and a request that was sent may
+        still have failed afterwards (see ``helpers/locate_clock.py``). Read
+        defensively so a coordinator built without ``__init__`` answers
+        ``None`` instead of raising.
+        """
+        stamps: dict[str, float] = getattr(self, "_locate_requested_mono", {})
+        return stamps.get(device_id)
+
     def purge_device(self, device_id: str) -> None:
         """Remove all cached data and cooldown state for a device (thread-safe publish).
 
@@ -2534,6 +2561,10 @@ class GoogleFindMyCoordinator(
         coarse_store = getattr(self, "_device_coarse_fix", None)
         if coarse_store is not None:
             coarse_store.pop(device_id, None)
+        # A device re-added under the same id must not inherit a silence streak.
+        silence_streaks = getattr(self, "_empty_location_streak", None)
+        if silence_streaks is not None:
+            silence_streaks.pop(device_id, None)
         # The tally claim is keyed by device id and is PERSISTED, so it outlives the
         # purge unless it is dropped here: a deleted device would keep an entry in the
         # store indefinitely, and one re-added under the same id would have its first
@@ -2574,6 +2605,9 @@ class GoogleFindMyCoordinator(
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
+        request_stamps = getattr(self, "_locate_requested_mono", None)
+        if request_stamps is not None:
+            request_stamps.pop(device_id, None)
         removed_uuid = self._sound_request_uuids.pop(device_id, None)
         self._sound_request_timestamps.pop(device_id, None)
         self._device_poll_cooldown_until.pop(device_id, None)

@@ -99,7 +99,7 @@ This is consistent with the general principle that the EIK remains within the ow
 
 **Verified in production + measured:** Standard BLE advertising includes:
 
-* **Frame Type / UT byte** (`0x40` for legacy 160-bit advertising; `0x41` appears on some modern variants)
+* **Frame Type / UT byte** (`0x40` in normal operation; `0x41` while unwanted tracking protection mode is active, independent of EID length and curve; see S7)
 * **EID (20 bytes)** in standard advertising (legacy, secp160r1 x-coordinate width)
 * **Hashed flags** (status bits, obfuscated)
   (Böttger et al., 2025; confirmed by `eid_resolver.py` logs using 0x40 frames). ([Pet Symposium][1])
@@ -211,7 +211,7 @@ This is consistent with the general principle that the EIK remains within the ow
 
 **Resolved (specification, retrieved 2026-08-05):** the frame type is set to `0x41` while unwanted tracking protection mode is active and back to `0x40` when it is deactivated; hashed-flags spec bit 7 carries the same state redundantly. The specification also fixes the remaining bits of that byte (bits 0-4 reserved and zero, bits 5-6 battery level) and permits omitting the byte entirely only when the beacon does not support battery level indication *and* is not currently in unwanted tracking protection mode (a capability and a state, not two capabilities). ([Find Hub Network Accessory Specification][fhna-spec])
 
-**Still open:** field observations in this repository associate `0x41` with 32-byte P-256 EIDs regardless of tracking state (see [`docs/BLE_BATTERY_SENSOR.md`](BLE_BATTERY_SENSOR.md)). The specification does not couple frame type and EID length, so the two readings cannot both be complete. `FMDN_FLAGS_CONFLICT` log entries are the evidence channel that decides it; `FMDN_FLAGS_PROBE ... CANNOT_DECODE` covers the complementary case of a `0x41` frame arriving without a decodable flags byte, which the specification permits only while a beacon is not in unwanted tracking protection mode -- so a `0x41` frame arriving without one is either a beacon breaking that rule or a payload shape sliced wrongly.
+**Field measurement (2026-10-11):** an older reading in this repository tied `0x41` to 32-byte P-256 EIDs regardless of tracking state. It goes back at least to `588b0e02` (the resolver API doc listed `0x41` as the 256-bit frame); `ed340df5` and `f26d6cd4` carried it into the battery decoder docs. None of these commits records an observation behind that tie; `f26d6cd4` even notes `0x41` frames carrying 20-byte legacy EIDs. The specification has tied the frame type to the mode since v1.1 (changelog: "Added a cleartext indication of unwanted tracking protection mode."). Logging both signals side by side on real installations showed frame type and bit 7 agreeing on every probe line, with no `FMDN_FLAGS_CONFLICT` entry ([`docs/UWT_FIELD_DATA.md`](UWT_FIELD_DATA.md)). Coverage limit: only 20-byte EIDs have been observed so far; no 32-byte EID observed; for 32-byte EIDs the equivalence rests on the specification. `FMDN_FLAGS_CONFLICT` log entries remain the evidence channel for a disagreement; `FMDN_FLAGS_PROBE ... CANNOT_DECODE` covers the complementary case of a `0x41` frame arriving without a decodable flags byte, which the specification permits only while a beacon is not in unwanted tracking protection mode -- so a `0x41` frame arriving without one is either a beacon breaking that rule or a payload shape sliced wrongly.
 
 [fhna-spec]: https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn
 

@@ -15,10 +15,11 @@ import logging
 import math
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -38,7 +39,7 @@ from .Auth.username_provider import username_string
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
 from .FMDNCrypto._lazy_crypto import get_aesgcm_class, get_invalid_tag_exception
-from .FMDNCrypto.curve_profile import SECP160R1, SECP256R1
+from .FMDNCrypto.curve_profile import SECP160R1, SECP256R1, ScalarDerivation
 from .FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     LEGACY_EID_LENGTH,
@@ -47,6 +48,7 @@ from .FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     ROTATION_PERIOD_900,
     ROTATION_PERIOD_3600,
+    VARIANT_DERIVATIONS,
     EidVariant,
     HeuristicBasis,
     HeuristicEidResult,
@@ -98,14 +100,14 @@ FMDN_HASHED_FLAGS_BATTERY_MASK = 0x03  # 2-bit field after right-shift
 FMDN_HASHED_FLAGS_BATTERY_SHIFT = 1
 FMDN_HASHED_FLAGS_UWT_MODE_MASK = 0x01  # 1-bit field, standard LSB
 
-# Curve parameters for compute_flags_xor_mask(), keyed by EidVariant.
-# (curve_byte_len, curve_order): Legacy uses secp160r1 (None=default), P256 uses P256_ORDER.
-_VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
-    EidVariant.LEGACY_SECP160R1_X20_BE: (LEGACY_EID_LENGTH, None),
-    EidVariant.MODERN_P256_X32_BE: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X20_TRUNC_BE: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X32_LE_SCALAR: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X20_TRUNC_LE: (MODERN_EID_LENGTH, P256_ORDER),
+# Parameters for compute_flags_xor_mask(), keyed by EidVariant:
+# (curve_byte_len, curve_order, derivation). Derived from VARIANT_DERIVATIONS,
+# so the mask uses the same scalar as the EID of its variant; truncated
+# variants keep the full coordinate length of their curve. A plain dict so a
+# test can remove a row and observe the loud failure in locked_curve_name.
+_VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int, ScalarDerivation]] = {
+    variant: (curve.coord_len, curve.order, derivation)
+    for variant, (curve, derivation) in VARIANT_DERIVATIONS.items()
 }
 
 # Per-variant crypto memoization (AP-A).
@@ -119,12 +121,54 @@ _VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
 # ``self`` (and pins it), leaking the resolver and preventing per-instance caches.
 # The minimal OrderedDict+Lock helper below keys only on the crypto inputs.
 #
-# _EID_MEMO_MAXSIZE = 512: 13 devices x 5 variants x 4 concurrently live
-# time_counter windows ~= 260, x ~2 headroom -> 512 (next power of two).
-_EID_MEMO_MAXSIZE = 512
-# _EID_MASK_MEMO_MAXSIZE = 512: same dimensioning; mask key cardinality is
-# <= devices x windows x 2 curves < 512 (no per-variant fan-out for the mask).
-_EID_MASK_MEMO_MAXSIZE = 512
+# Both bounds are sized so that one lookup build of 13 unlocked devices fits,
+# with headroom, rounded up to the next power of two. The sizing case is an
+# unlocked device with a single time anchor that is younger than about 237
+# days: it spans 13 time windows per build, giving 13 x 7 variants = 91 EID
+# keys and 13 x 4 mask keys = 52 mask keys (the mask key carries curve and
+# scalar derivation, and the seven variants use four distinct pairs). 13 such
+# devices need 1183 EID keys and 676 mask keys.
+# Older devices span more windows (two more per further ~237 days of drift
+# allowance, see _compute_relative_windows), and a device with both pair_date
+# and secrets_creation_date gets a window set per anchor. For them these bounds
+# are only the floor: each build sizes both memos to its own key count (see
+# _MEMO_HEADROOM below). tests/test_eid_resolver_memoization.py measures the
+# per-device key counts of the sizing case and fails if a new variant or
+# derivation outgrows these floors.
+_EID_MEMO_MAXSIZE = 2048
+_EID_MASK_MEMO_MAXSIZE = 1024
+
+# Per-build sizing. The key count grows with device age and anchors: one device
+# with pair_date and secrets_creation_date five years back spans 54 windows per
+# build (378 EID keys, 216 mask keys), ten years back 86 (602 and 344). For the
+# relative bases the window count is only capped by max_window (85 per side and
+# basis), reached after decades; the absolute Unix basis, off by default, spans
+# at least MIN_UNIX_WINDOW_SIZE windows per side without that cap. Fixed bounds
+# for the cap would size the memos for devices decades old, so
+# _build_lookup_sync counts the exact keys of the build and sets each memo to
+# _MEMO_HEADROOM times that count, never below the bounds above and never above
+# the hard caps below. It grows a memo before generating and shrinks it only
+# afterwards, when the least recently used entries are the ones this build did
+# not touch; shrinking first would evict by the order of the previous build and
+# drop keys a smaller build still needs. The headroom leaves room for the keys
+# of the previous build next to those of the current one. For windows moving on
+# by one an exact bound would do as well (measured for 13 such devices: 182 new
+# EID and 104 new mask keys, exactly those recomputed). Measured with
+# tracemalloc, the two memos of a build of 13 such devices (4914 EID and 2808
+# mask entries) hold about 1.5 MB; the lookup table comes on top. Extrapolated,
+# the hard caps bound both memos together to about 10 MB. A build that needs
+# more than a cap recomputes all of its entries on every build (no entry of one
+# build survives to the next); the values stay correct.
+_MEMO_HEADROOM = 2
+_EID_MEMO_HARD_CAP = 32768
+_EID_MASK_MEMO_HARD_CAP = 16384
+
+
+def _memo_capacity(needed: int, *, floor: int, cap: int) -> int:
+    """Return the memo bound for a build that uses ``needed`` distinct keys."""
+
+    return min(cap, max(floor, _MEMO_HEADROOM * needed))
+
 
 # Heuristic phone-discovery memoization (AP-SWEEP).
 # ``generate_heuristic_eid`` is the on-loop sibling of the build-side crypto: it
@@ -183,6 +227,20 @@ class _BoundedLRUCache:
         with self._lock:
             self._store[key] = value
             self._store.move_to_end(key)
+            while len(self._store) > self._maxsize:
+                self._store.popitem(last=False)
+
+    @property
+    def maxsize(self) -> int:
+        """Return the current bound."""
+
+        return self._maxsize
+
+    def resize(self, maxsize: int) -> None:
+        """Set a new bound, evicting least-recently-used entries past it."""
+
+        with self._lock:
+            self._maxsize = maxsize
             while len(self._store) > self._maxsize:
                 self._store.popitem(last=False)
 
@@ -500,7 +558,8 @@ def _framed_eid_lengths(
 
     * The 32-byte reading is probed first wherever it fits, including in
       ``0x40`` frames. The first 20 bytes of a 32-byte EID are a precomputed
-      lookup entry in their own right (``MODERN_P256_X20_TRUNC_*``), so the
+      lookup entry in their own right (``SPEC_P256_X20_TRUNC_BE``,
+      ``MODERN_P256_X20_TRUNC_*``), so the
       shorter reading would otherwise match first and put the hashed-flags
       byte at octet 28 instead of 40 -- on EID material, which decodes into a
       stable but fabricated battery level and UWT bit.
@@ -550,6 +609,13 @@ class _IdentityProvider(Protocol):
     """Protocol implemented by coordinators that can provide device identities."""
 
     def get_active_device_identities(self) -> list[DeviceIdentity]: ...
+
+
+@runtime_checkable
+class _LocateRequestClock(Protocol):
+    """Protocol implemented by coordinators that stamp sent location requests."""
+
+    def locate_requested_mono(self, device_id: str) -> float | None: ...
 
 
 @runtime_checkable
@@ -774,7 +840,7 @@ class CacheBuilder:
     lookup: dict[bytes, list[EIDMatch]] = field(default_factory=dict)
     metadata: dict[bytes, dict[str, Any]] = field(default_factory=dict)
 
-    def register_eid(  # noqa: PLR0913
+    def register_eid(  # noqa: PLR0912, PLR0913
         self,
         eid_bytes: bytes,
         *,
@@ -783,6 +849,7 @@ class CacheBuilder:
         window: WindowCandidate,
         advertisement_reversed: bool,
         flags_xor_mask: int | None = None,
+        key_fingerprint: bytes | None = None,
     ) -> None:
         """Register an EID and metadata, supporting multiple matches per EID.
 
@@ -844,6 +911,13 @@ class CacheBuilder:
             }
             if flags_xor_mask is not None:
                 meta["flags_xor_mask"] = flags_xor_mask
+            # Shared devices: the metadata of an EID comes from its best match
+            # only, so it carries that device's fingerprint. Equal EIDs come
+            # from equal identity keys (the EID is derived from the key), so
+            # the fingerprint holds for every device sharing it; were that
+            # wrong, the finder would report nothing rather than a wrong EID.
+            if key_fingerprint is not None:
+                meta["key_fingerprint"] = key_fingerprint
             self.metadata[eid_bytes] = meta
         elif existing_metadata is not None and existing_bases is not None:
             existing_metadata["timestamp_bases"] = existing_bases
@@ -933,6 +1007,235 @@ def _normalize_encrypted_blob(value: object) -> bytes | None:
         except ValueError:
             return None
     return None
+
+
+_KEY_FINGERPRINT_SIZE = 32
+_KEY_FINGERPRINT_DOMAIN = b"gfmy-finder-eik\x00"
+
+
+def identity_key_fingerprint(key: object) -> bytes | None:
+    """Return a one-way fingerprint of an identity key, or ``None``.
+
+    The finder may report a sighting only under the identity key the sighting
+    was matched under. The resolver records this fingerprint with each
+    sighting and the finder compares it with the fingerprints of the
+    candidate keys it holds now, so the sighting never stores a second copy
+    of the key.
+
+    The key is normalized as for the lookup (bytes or a hex string), so both
+    sides derive the same value from the same key. The hash is SHA3-256 over
+    a domain prefix and the key (BSI TR-02102-1, table 4.1), not SHA-256 of
+    the key: SHA-256 of the identity key is the AES key of the device's own
+    location reports, so it must not be kept anywhere else. The prefix
+    separates this use from any other hash of the key.
+    """
+    key_bytes = _normalize_encrypted_blob(key)
+    if key_bytes is None:
+        return None
+    return hashlib.sha3_256(_KEY_FINGERPRINT_DOMAIN + key_bytes).digest()
+
+
+class UwtSource(StrEnum):
+    """Where the unwanted-tracking protection mode of a sighting came from."""
+
+    FLAGS_BIT = "flags_bit"
+    FRAME_TYPE = "frame_type"
+    CONFLICT = "conflict"
+    UNKNOWN = "unknown"
+
+
+FlagsOrigin = Literal["framed", "guessed", "absent"]
+
+
+class _FlagsReading(NamedTuple):
+    """What the hashed-flags decoder saw for one matched advertisement.
+
+    ``uwt_bit`` is the decoded spec bit 7, or ``None`` when nothing was
+    decoded. ``origin`` says how the byte was located: ``"framed"`` at the
+    position the matched geometry defines, ``"guessed"`` by
+    ``_guess_flags_byte``, ``"absent"`` when no byte was found. ``decoded``
+    is the whole XOR-decoded flags byte, ``None`` when nothing was decoded;
+    the measurement channel logs it next to the mode.
+    """
+
+    uwt_bit: bool | None
+    origin: FlagsOrigin
+    decoded: int | None = None
+
+
+def _effective_uwt_mode(
+    flags_bit: bool | None,
+    flags_origin: FlagsOrigin,
+    frame_type: int | None,
+) -> tuple[bool | None, UwtSource]:
+    """Return the protection mode a sighting shows, and where it came from.
+
+    The Find Hub Network Accessory Specification carries the mode twice: in
+    the frame type (``0x41`` while unwanted tracking protection mode is
+    active, ``0x40`` otherwise) and in spec bit 7 of the hashed flags. The
+    decoded bit counts when it was read at a known position (``"framed"``); a
+    byte found by ``_guess_flags_byte`` may be EID material and counts like no
+    byte at all. When a usable bit and a ``0x40``/``0x41`` frame type
+    disagree, the advertisement contradicts itself: the mode is ``None`` with
+    source ``CONFLICT``, so no caller reports either value. Without a usable
+    bit the frame type decides. Without either the mode is unknown, and
+    callers must not report it as "off".
+    """
+    frame_mode: bool | None = None
+    if frame_type == MODERN_FRAME_TYPE:
+        frame_mode = True
+    elif frame_type == FMDN_FRAME_TYPE:
+        frame_mode = False
+    if flags_origin == "framed" and flags_bit is not None:
+        if frame_mode is not None and frame_mode != flags_bit:
+            return None, UwtSource.CONFLICT
+        return flags_bit, UwtSource.FLAGS_BIT
+    if frame_mode is not None:
+        return frame_mode, UwtSource.FRAME_TYPE
+    return None, UwtSource.UNKNOWN
+
+
+# Measurement channel for protection-mode changes (FMDN_UWT_TRANSITION and the
+# ``uwt_transitions`` diagnostics block). Both sizes are derived from the
+# field data in docs/UWT_FIELD_DATA.md and the public report BSkando#210:
+#
+# - 12 INFO lines per device and rolling hour. The highest rate measured for
+#   one device is 24 changes in 11 days (about 2.2 a day); 12 an hour are 288
+#   a day, more than a hundred times that, so the rates measured so far stay
+#   far below the limit and only a tracker that flaps continuously reaches
+#   it; the shortest reported
+#   episode is 38 s, so changes a minute apart do occur.
+# - 200 events per config entry. At the #210 rate (32 changes in 11 days,
+#   about 2.9 a day) that is about 69 days of history, at the rate seen on the
+#   maintainer's instance (about 2.6 a day) about 77 days. Memory stays fixed
+#   per entry instead of growing with the number of devices.
+_UWT_TRANSITION_INFO_PER_HOUR = 12
+_UWT_TRANSITION_RING_SIZE = 200
+_UWT_TRANSITION_WINDOW_SECONDS = 3600.0
+# One line per recorded event; every field is a fixed label, a number, the
+# UTC time of the observation or a class (b) identifier (AGENTS.md section 5):
+# no name, entity id, address, coordinate or key material. ``suppressed`` counts the lines of this device
+# written at DEBUG since its last INFO line.
+_UWT_TRANSITION_FORMAT = (
+    "FMDN_UWT_TRANSITION kind=%s device=%s canonical=%s old=%s new=%s "
+    "source=%s flags=%s frame=%s decoded=%s payload_len=%d poll_age_s=%s "
+    "prev_seen_age_s=%s observed=%s seq=%d suppressed=%d"
+)
+
+
+class UwtTransitionEvent(NamedTuple):
+    """One recorded change of a device's unwanted-tracking protection mode.
+
+    ``canonical_id`` is written to the log line as ``canonical=`` (a class (b)
+    identifier, AGENTS.md section 5); the diagnostics export replaces it by
+    the device's position in the entry (``device_index``).
+    ``old`` is ``"unknown"`` for the first known mode of a device in this
+    process. ``poll_age_s`` is the age, at the observation, of the last
+    location request the integration sent for the device (attempts that
+    stopped before the POST leave no stamp, see
+    ``coordinator/helpers/locate_clock.py``); ``prev_seen_age_s``
+    the age of the last observation of the old mode. Both are ``None`` when
+    there is nothing to measure them against.
+    """
+
+    canonical_id: str
+    kind: Literal["change", "resync"]
+    old: Literal["on", "off", "unknown"]
+    new: Literal["on", "off"]
+    source: str
+    flags: FlagsOrigin
+    frame: str
+    payload_len: int
+    poll_age_s: int | None
+    prev_seen_age_s: int | None
+    observed: str
+    seq: int
+
+
+class UwtTransitionSnapshot(NamedTuple):
+    """Recorded protection-mode changes of one config entry, oldest first."""
+
+    capacity: int
+    dropped: int
+    info_lines_per_device_hour: int
+    events: tuple[UwtTransitionEvent, ...]
+
+
+@dataclass(slots=True)
+class _UwtTrack:
+    """Protection-mode state of one device in one config entry.
+
+    ``state`` is the last known mode (``None`` before the first one);
+    ``last_mono`` the newest observation on the monotonic clock, known or
+    not, which orders later observations; ``last_seen_mono_by_state`` the
+    newest observation of each mode. ``seq`` numbers the recorded events.
+    ``info_times`` and ``suppressed`` belong to the INFO budget of the log
+    line; ``skipped_source`` remembers why the last observation carried no
+    mode, so the DEBUG line for it is written once per reason, not once per
+    advertisement.
+    """
+
+    state: bool | None = None
+    last_mono: float | None = None
+    last_seen_mono_by_state: dict[bool, float] = field(default_factory=dict)
+    seq: int = 0
+    info_times: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_UWT_TRANSITION_INFO_PER_HOUR)
+    )
+    suppressed: int = 0
+    skipped_source: UwtSource | None = None
+
+
+@dataclass(slots=True)
+class _UwtEventRing:
+    """Fixed-size event history of one config entry."""
+
+    events: deque[UwtTransitionEvent] = field(
+        default_factory=lambda: deque(maxlen=_UWT_TRANSITION_RING_SIZE)
+    )
+    dropped: int = 0
+
+
+def _uwt_label(mode: bool | None) -> Literal["on", "off", "unknown"]:
+    """Return the log label of a protection mode."""
+    if mode is None:
+        return "unknown"
+    return "on" if mode else "off"
+
+
+def _uwt_frame_label(frame_type: int | None) -> str:
+    """Return ``0x40``/``0x41`` for an FMDN frame type, else ``none``."""
+    if frame_type in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE):
+        return f"0x{frame_type:02x}"
+    return "none"
+
+
+@dataclass(slots=True, frozen=True)
+class ConfirmedSighting:
+    """The last sighting of a device the resolver confirmed by a lookup match.
+
+    It is an observation, not a prediction: ``variant`` and ``window_counter``
+    are those of the EID the device advertised, ``window_counter`` aligned to
+    the rotation window, and ``observed_at`` is the wall-clock second of the
+    sighting. Callers judge its age themselves.
+
+    ``uwt_mode`` is the unwanted-tracking protection mode the advertisement
+    showed, ``None`` when it showed none that can be trusted; ``uwt_source``
+    says where it came from (see ``_effective_uwt_mode``).
+
+    ``key_fingerprint`` binds the sighting to the identity key it was matched
+    under (``identity_key_fingerprint``). The window counter belongs to that
+    key: an EID computed from another key with this counter was never
+    advertised. ``None`` means the binding is unknown, and the finder then
+    reports nothing.
+    """
+
+    variant: EidVariant
+    window_counter: int
+    observed_at: int
+    uwt_mode: bool | None = None
+    uwt_source: UwtSource = UwtSource.UNKNOWN
+    key_fingerprint: bytes | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -1064,6 +1367,21 @@ class GoogleFindMyEIDResolver:
     _lock_last_seen_monotonic: dict[str, float] = field(
         init=False, default_factory=dict
     )
+    # Last confirmed sighting per device, in memory only: the variant and
+    # window counter of the EID the device advertised and when it was seen.
+    # The finder reports this observation; see last_confirmed_sighting().
+    _confirmed_sightings: dict[str, ConfirmedSighting] = field(
+        init=False, default_factory=dict
+    )
+    # Protection-mode measurement channel, in memory only: the state per
+    # (config entry, device) and the event history per config entry behind
+    # FMDN_UWT_TRANSITION and the ``uwt_transitions`` diagnostics block. Keyed
+    # by entry as well as device so that a tracker shared between two
+    # accounts keeps one history per account, and no entry sees another's.
+    _uwt_track: dict[tuple[str, str], _UwtTrack] = field(
+        init=False, default_factory=dict
+    )
+    _uwt_events: dict[str, _UwtEventRing] = field(init=False, default_factory=dict)
     _known_advertisement_reversed: dict[str, bool] = field(
         init=False, default_factory=dict
     )
@@ -1090,6 +1408,7 @@ class GoogleFindMyEIDResolver:
     )
     _heuristic_miss_log_at: dict[str, float] = field(init=False, default_factory=dict)
     _flags_logged_devices: set[str] = field(init=False, default_factory=set)
+    _decode_failure_types_logged: set[str] = field(init=False, default_factory=set)
     _frame_conflict_logged_devices: set[str] = field(init=False, default_factory=set)
     _frame_conflict_log_at: dict[tuple[str, int], float] = field(
         init=False, default_factory=dict
@@ -1140,7 +1459,7 @@ class GoogleFindMyEIDResolver:
             self._load_task = None
         self._start_alignment_timer()
 
-    def _ensure_cache_defaults(self) -> None:  # noqa: PLR0912
+    def _ensure_cache_defaults(self) -> None:  # noqa: PLR0912, PLR0915
         """Initialize optional caches when stubs bypass __init__."""
 
         if not hasattr(self, "_known_offsets"):
@@ -1157,6 +1476,12 @@ class GoogleFindMyEIDResolver:
             self._last_lock_confirmation = {}
         if not hasattr(self, "_lock_last_seen_monotonic"):
             self._lock_last_seen_monotonic = {}
+        if not hasattr(self, "_confirmed_sightings"):
+            self._confirmed_sightings = {}
+        if not hasattr(self, "_uwt_track"):
+            self._uwt_track = {}
+        if not hasattr(self, "_uwt_events"):
+            self._uwt_events = {}
         if not hasattr(self, "_provisioning_warn_at"):
             self._provisioning_warn_at = {}
         if not hasattr(self, "_locks"):
@@ -1174,6 +1499,8 @@ class GoogleFindMyEIDResolver:
             self._heuristic_miss_log_at = {}
         if not hasattr(self, "_flags_logged_devices"):
             self._flags_logged_devices = set()
+        if not hasattr(self, "_decode_failure_types_logged"):
+            self._decode_failure_types_logged = set()
         if not hasattr(self, "_ble_battery_state"):
             self._ble_battery_state = {}
         if not hasattr(self, "_ble_scan_info"):
@@ -1209,6 +1536,7 @@ class GoogleFindMyEIDResolver:
             "_known_timebases",
             "_last_lock_confirmation",
             "_lock_last_seen_monotonic",
+            "_confirmed_sightings",
         ):
             mapping = getattr(self, attr, None)
             if isinstance(mapping, dict) and device_id in mapping:
@@ -1393,6 +1721,39 @@ class GoogleFindMyEIDResolver:
             while self._pending_refresh:
                 self._pending_refresh = False
                 await self._refresh_cache()
+            # Unloading an entry also runs a refresh (or stop() for the last
+            # one), so this drops the history of unloaded entries as well.
+            self._purge_uwt_state()
+
+    def _purge_uwt_state(self) -> None:
+        """Drop measurement-channel state of devices and entries now gone.
+
+        An entry keeps its event history while it is loaded
+        (``hass.data[DOMAIN]["entries"]``), even when none of its identities
+        could be prepared in this refresh (a key that does not decrypt for a
+        moment must not erase the history). A device keeps its track only
+        while its entry is loaded and an identity of that entry still names
+        it, by canonical id (as ``EIDMatch.canonical_id`` carries it, without
+        an entry prefix) or by registry id; a device that returns later starts
+        again with ``old=unknown``.
+        """
+        self._ensure_cache_defaults()
+        bucket = self.hass.data.get(DOMAIN)
+        entries = bucket.get("entries") if isinstance(bucket, dict) else None
+        loaded: set[str] = set(entries) if isinstance(entries, dict) else set()
+        known_pairs: set[tuple[str, str]] = set()
+        for identity in self._cached_identities:
+            entry_id = identity.config_entry_id
+            if not entry_id or entry_id not in loaded:
+                continue
+            if identity.canonical_id:
+                known_pairs.add((entry_id, identity.canonical_id.split(":")[-1]))
+            if identity.registry_id:
+                known_pairs.add((entry_id, identity.registry_id))
+        for key in [key for key in self._uwt_track if key not in known_pairs]:
+            del self._uwt_track[key]
+        for entry_id in [e for e in self._uwt_events if e not in loaded]:
+            del self._uwt_events[entry_id]
 
     def reset_device_offset(self, registry_id: str) -> None:
         """Forget cached offsets/locks for a given device registry ID."""
@@ -1876,8 +2237,11 @@ class GoogleFindMyEIDResolver:
                 variant=variant,
                 window=window_candidate,
             )
+            # Specification variants before the heuristic MODERN_P256_* ones.
             for variant in (
                 EidVariant.LEGACY_SECP160R1_X20_BE,
+                EidVariant.SPEC_P256_X32_BE,
+                EidVariant.SPEC_P256_X20_TRUNC_BE,
                 EidVariant.MODERN_P256_X32_BE,
                 EidVariant.MODERN_P256_X20_TRUNC_BE,
                 EidVariant.MODERN_P256_X32_LE_SCALAR,
@@ -2124,6 +2488,12 @@ class GoogleFindMyEIDResolver:
         builder = CacheBuilder()
         invalid_hint_ids: list[str] = []
 
+        # Pass one: the variant specs of the whole build, and the exact memo
+        # keys they will use (same tuples as _generate_variant and
+        # _compute_flags_xor_mask build), so both memos can be sized first.
+        planned: list[tuple[WorkItem, list[VariantSpec]]] = []
+        eid_keys: set[tuple[bytes, int, EidVariant]] = set()
+        mask_keys: set[tuple[bytes, int, int, int, ScalarDerivation]] = set()
         for work_item in work_items:
             windows, invalid_hint = self._compute_time_windows(
                 work_item, now_unix=now_unix, params=rotation_params
@@ -2135,19 +2505,45 @@ class GoogleFindMyEIDResolver:
                 work_item.registry_id,
                 len(windows),
             )
-            for window in windows:
-                variants = self._compute_variants(work_item, window)
-                for variant_spec in variants:
+            specs = [
+                spec
+                for window in windows
+                for spec in self._compute_variants(work_item, window)
+            ]
+            for spec in specs:
+                timestamp = spec.window.timestamp
+                eid_keys.add((spec.key_bytes, timestamp, spec.variant))
+                curve_params = _VARIANT_CURVE_PARAMS.get(spec.variant)
+                if curve_params is not None:
+                    mask_keys.add((spec.key_bytes, timestamp, *curve_params))
+            planned.append((work_item, specs))
+
+        eid_bound = _memo_capacity(
+            len(eid_keys), floor=_EID_MEMO_MAXSIZE, cap=_EID_MEMO_HARD_CAP
+        )
+        mask_bound = _memo_capacity(
+            len(mask_keys), floor=_EID_MASK_MEMO_MAXSIZE, cap=_EID_MASK_MEMO_HARD_CAP
+        )
+        # Grow now, shrink after pass two (see _MEMO_HEADROOM).
+        self._eid_memo.resize(max(eid_bound, self._eid_memo.maxsize))
+        self._flags_mask_memo.resize(max(mask_bound, self._flags_mask_memo.maxsize))
+
+        try:
+            # Pass two: generate and register.
+            for work_item, specs in planned:
+                fingerprint = identity_key_fingerprint(work_item.key_bytes)
+                for variant_spec in specs:
                     xor_mask: int | None = None
-                    curve_len, curve_ord = _VARIANT_CURVE_PARAMS.get(
-                        variant_spec.variant, (LEGACY_EID_LENGTH, None)
-                    )
                     try:
+                        curve_len, curve_ord, derivation = _VARIANT_CURVE_PARAMS[
+                            variant_spec.variant
+                        ]
                         xor_mask = self._compute_flags_xor_mask(
                             variant_spec.key_bytes,
                             variant_spec.window.timestamp,
                             curve_byte_len=curve_len,
                             curve_order=curve_ord,
+                            derivation=derivation,
                         )
                     except Exception:  # noqa: BLE001
                         pass
@@ -2166,7 +2562,13 @@ class GoogleFindMyEIDResolver:
                             window=generated.window,
                             advertisement_reversed=generated.is_reversed,
                             flags_xor_mask=xor_mask,
+                            key_fingerprint=fingerprint,
                         )
+        finally:
+            # Shrink even when pass two raised, so a failed build does not
+            # leave the grown bound in place until the next one.
+            self._eid_memo.resize(eid_bound)
+            self._flags_mask_memo.resize(mask_bound)
 
         lookup, lookup_metadata = builder.finalize()
         return lookup, lookup_metadata, invalid_hint_ids
@@ -2251,17 +2653,20 @@ class GoogleFindMyEIDResolver:
         *,
         curve_byte_len: int,
         curve_order: int | None,
+        derivation: ScalarDerivation,
     ) -> int:
         """Memoized wrapper around ``compute_flags_xor_mask``.
 
         Keyed per resolver instance on ``(key_bytes, time_counter,
-        curve_byte_len, curve_order)``. The mask is a pure function of these
-        inputs, so a hit returns the identical integer without recomputation.
+        curve_byte_len, curve_order, derivation)``. The mask is a pure function
+        of these inputs, so a hit returns the identical integer without
+        recomputation. ``derivation`` belongs in the key: two variants on the
+        same curve with different derivations have different masks.
         Invalidation is implicit via key rotation, identical to
         ``_generate_variant``.
         """
 
-        cache_key = (key_bytes, time_counter, curve_byte_len, curve_order)
+        cache_key = (key_bytes, time_counter, curve_byte_len, curve_order, derivation)
         cached = self._flags_mask_memo.get(cache_key)
         if cached is not None:
             return cast(int, cached)
@@ -2273,6 +2678,7 @@ class GoogleFindMyEIDResolver:
             time_counter,
             curve_byte_len=curve_byte_len,
             curve_order=curve_order,
+            derivation=derivation,
         )
         self._flags_mask_memo.put(cache_key, mask)
         return mask
@@ -2883,6 +3289,94 @@ class GoogleFindMyEIDResolver:
         if previous is None or now > previous:
             self._last_lock_confirmation[device_id] = now
 
+    def _note_confirmed_sighting(
+        self,
+        device_id: str,
+        metadata: Mapping[str, Any],
+        *,
+        observed_at: int,
+        uwt_mode: bool | None = None,
+        uwt_source: UwtSource = UwtSource.UNKNOWN,
+    ) -> None:
+        """Record the sighting of a lookup match for the finder.
+
+        The caller passes only sightings that are not older than the newest
+        one on the monotonic clock. What is left are advertisements that
+        Bermuda delivers late without a scanner timestamp and that are
+        therefore dated "now": such a sighting carries an older window, and it
+        must not replace a newer window seen at most one rotation period
+        earlier. A smaller counter seen more than one period later on the wall
+        clock is taken as a device that restarted its counter and replaces; a
+        wall clock stepped forward by more than one period looks the same.
+        After any step back of the wall clock, a smaller counter is either such
+        a late window or a restarted device, and the two cannot be told apart:
+        the entry is dropped, so nothing is reported until the next sighting
+        records the window the device shows. A step back smaller than the time
+        since the previous sighting leaves a positive gap and is not detected.
+        The same counter replaces: the sighting is newer on the monotonic
+        clock, also after such a step. A sighting matched under another
+        identity key (by ``key_fingerprint``) always replaces, before any of
+        these comparisons: its counter is not comparable with the previous
+        one, and after the device is paired again it starts anew.
+
+        Every sighting carries only the protection mode it showed itself,
+        also within the same window: nothing is carried over from the
+        sighting it replaces. The mode can change within one rotation window,
+        and a mode taken from an earlier sighting would be reported with the
+        later sighting's time. A bare EID therefore records an unknown mode
+        (the finder then sends nothing), and a later reading of the frame
+        type alone decides for itself, also after a ``CONFLICT``.
+
+        Never raises: a variant this version does not know, or a window
+        timestamp that is not an int in ``[0, FHNA_COUNTER_MASK]``, records
+        nothing; a key fingerprint that is not exactly ``bytes`` of the
+        fingerprint length is recorded as ``None``.
+        """
+        window_ts = metadata.get("rotation_timestamp")
+        if (
+            not isinstance(window_ts, int)
+            or isinstance(window_ts, bool)
+            or not 0 <= window_ts <= FHNA_COUNTER_MASK
+        ):
+            return
+        raw_variant = metadata.get("variant")
+        if not isinstance(raw_variant, str):
+            return
+        try:
+            variant = EidVariant(raw_variant)
+        except ValueError:
+            return
+        window_counter = window_ts - window_ts % ROTATION_PERIOD
+        raw_fingerprint = metadata.get("key_fingerprint")
+        # The exact type, not isinstance: a bytes subclass could raise from
+        # len() or ==, and this method never raises.
+        key_fingerprint = (
+            raw_fingerprint
+            if type(raw_fingerprint) is bytes
+            and len(raw_fingerprint) == _KEY_FINGERPRINT_SIZE
+            else None
+        )
+        previous = self._confirmed_sightings.get(device_id)
+        if (
+            previous is not None
+            and previous.key_fingerprint == key_fingerprint
+            and window_counter < previous.window_counter
+        ):
+            wall_gap = observed_at - previous.observed_at
+            if wall_gap < 0:
+                del self._confirmed_sightings[device_id]
+                return
+            if wall_gap <= ROTATION_PERIOD:
+                return
+        self._confirmed_sightings[device_id] = ConfirmedSighting(
+            variant=variant,
+            window_counter=window_counter,
+            observed_at=observed_at,
+            uwt_mode=uwt_mode,
+            uwt_source=uwt_source,
+            key_fingerprint=key_fingerprint,
+        )
+
     def _sighting_is_older_than_the_lock(
         self,
         device_id: str,
@@ -2926,6 +3420,8 @@ class GoogleFindMyEIDResolver:
         raw_prefix: str,
         now: int,
         now_monotonic: float | None = None,
+        uwt_mode: bool | None = None,
+        uwt_source: UwtSource = UwtSource.UNKNOWN,
     ) -> None:
         """Update internal state (locks, offsets, etc.) for a single match.
 
@@ -2995,6 +3491,18 @@ class GoogleFindMyEIDResolver:
 
         if not stale and now_monotonic is not None:
             self._lock_last_seen_monotonic[match.device_id] = now_monotonic
+
+        # Same ordering rule as drift_offset and last_seen_at: an older,
+        # replayed sighting is ``stale`` (monotonic clock within this process)
+        # and must not replace a newer one.
+        if not stale:
+            self._note_confirmed_sighting(
+                match.device_id,
+                metadata,
+                observed_at=now,
+                uwt_mode=uwt_mode,
+                uwt_source=uwt_source,
+            )
 
         self._known_advertisement_reversed[match.device_id] = match.is_reversed
 
@@ -3096,6 +3604,15 @@ class GoogleFindMyEIDResolver:
             # refreshes (persisted), which is where the sighting belongs.
             now = int(clock.wall)
 
+            # ---------------------------------------------------------
+            # FMDN BLE battery: decode flags + store per device
+            # ---------------------------------------------------------
+            # Runs before the match state is updated: the sighting recorded
+            # there carries the protection mode decoded here.
+            uwt_mode, uwt_source = self._observe_uwt_mode(
+                raw, candidate, metadata, matches, clock=clock
+            )
+
             # Update state for ALL matches (shared devices)
             for match in matches:
                 # Intended, and worth naming because the value is persisted
@@ -3113,25 +3630,9 @@ class GoogleFindMyEIDResolver:
                     raw_prefix=raw_prefix,
                     now=now,
                     now_monotonic=clock.monotonic,
+                    uwt_mode=uwt_mode,
+                    uwt_source=uwt_source,
                 )
-
-            # ---------------------------------------------------------
-            # FMDN BLE battery: decode flags + store per device
-            # ---------------------------------------------------------
-            # The match itself locates the payload: the optional hashed-flags
-            # byte, when present, is the byte right after the matched EID.
-            # The candidate is passed WHOLE, not pre-reduced to an offset: the
-            # callee must be able to tell "no geometry supplied" (direct test
-            # call) from "geometry known, no flags byte present" (production).
-            # An `int | None` cannot carry that distinction.
-            self._update_ble_battery(
-                raw,
-                candidate.frame_type,
-                metadata,
-                matches,
-                geometry=candidate,
-                clock=clock,
-            )
 
             return matches, candidate.eid, candidate.frame_type
 
@@ -3176,6 +3677,317 @@ class GoogleFindMyEIDResolver:
     # ------------------------------------------------------------------
     # FMDN BLE battery decode + store
     # ------------------------------------------------------------------
+    def _observe_uwt_mode(
+        self,
+        raw: bytes,
+        candidate: EidCandidate,
+        metadata: dict[str, Any],
+        matches: list[EIDMatch],
+        *,
+        clock: ObservationClock,
+    ) -> tuple[bool | None, UwtSource]:
+        """Decode the flags of a matched advertisement and return its mode.
+
+        The match itself locates the payload: the optional hashed-flags byte,
+        when present, is the byte right after the matched EID. The candidate
+        is passed WHOLE, not pre-reduced to an offset: the callee must be able
+        to tell "no geometry supplied" (direct test call) from "geometry
+        known, no flags byte present" (production). An `int | None` cannot
+        carry that distinction.
+
+        The match path must never fail on the decoder: the caller updates the
+        lock after this call, so an exception is caught and the mode falls
+        back to what the frame type shows. The first failure of each exception
+        type is logged at WARNING, later ones at DEBUG: before the decoder was
+        guarded, a failure surfaced as an ERROR from the Bluetooth callback,
+        and it must not become invisible now. Only the type name is logged,
+        never the exception text, which could carry payload bytes.
+        """
+        try:
+            reading = self._update_ble_battery(
+                raw,
+                candidate.frame_type,
+                metadata,
+                matches,
+                geometry=candidate,
+                clock=clock,
+            )
+        except Exception as err:  # noqa: BLE001 - see docstring
+            error_type = type(err).__name__
+            if error_type in self._decode_failure_types_logged:
+                _LOGGER.debug("ble_battery_decode_failed error_type=%s", error_type)
+            else:
+                self._decode_failure_types_logged.add(error_type)
+                _LOGGER.warning(
+                    "ble_battery_decode_failed error_type=%s (battery and "
+                    "protection-mode sensors keep their last value; further "
+                    "failures of this type are logged at DEBUG)",
+                    error_type,
+                )
+            reading = _FlagsReading(None, "absent")
+        mode, source = _effective_uwt_mode(
+            reading.uwt_bit, reading.origin, candidate.frame_type
+        )
+        try:
+            self._note_uwt_observation(
+                matches,
+                mode=mode,
+                source=source,
+                reading=reading,
+                frame_type=candidate.frame_type,
+                payload_len=len(raw),
+                clock=clock,
+            )
+        except Exception as err:  # noqa: BLE001 - the match path must not fail
+            _LOGGER.debug("uwt_transition_failed error_type=%s", type(err).__name__)
+        return mode, source
+
+    def _note_uwt_observation(  # noqa: PLR0913
+        self,
+        matches: list[EIDMatch],
+        *,
+        mode: bool | None,
+        source: UwtSource,
+        reading: _FlagsReading,
+        frame_type: int | None,
+        payload_len: int,
+        clock: ObservationClock,
+    ) -> None:
+        """Record a protection-mode change per (config entry, device).
+
+        A change is recorded when a device shows a mode other than its last
+        known one, including its first known mode in this process (``old`` is
+        then ``unknown``). An observation older than the newest one of the
+        track changes nothing: history replay may deliver sightings out of
+        order. An observation without a trustworthy mode (unknown, or frame
+        type and flags bit in conflict) is no change either; why it carried
+        none is logged at DEBUG once per reason. Only matches from the EID
+        cache arrive here; a heuristic phone match (``_heuristic_resolve``)
+        records nothing.
+        """
+        self._ensure_cache_defaults()
+        for match in matches:
+            device_key = match.canonical_id or match.device_id
+            key = (match.config_entry_id, device_key)
+            track = self._uwt_track.get(key)
+            if track is None:
+                track = _UwtTrack()
+                self._uwt_track[key] = track
+            if track.last_mono is not None and track.last_mono > clock.monotonic:
+                continue
+            track.last_mono = clock.monotonic
+            if mode is None:
+                if track.skipped_source is not source:
+                    track.skipped_source = source
+                    _LOGGER.debug(
+                        "uwt_observation_skipped device=%s canonical=%s source=%s",
+                        match.device_id,
+                        match.canonical_id,
+                        source.value,
+                    )
+                continue
+            track.skipped_source = None
+            old = track.state
+            old_seen = (
+                track.last_seen_mono_by_state.get(old) if old is not None else None
+            )
+            track.last_seen_mono_by_state[mode] = clock.monotonic
+            if old == mode:
+                # No change. If lines were held back at DEBUG and the budget
+                # is free again, write the current mode at INFO, so that a
+                # throttled stretch ends in the log with its end state as soon
+                # as the device is seen again.
+                if track.suppressed and self._uwt_budget_free(track, clock.monotonic):
+                    event = self._record_uwt_event(
+                        match,
+                        track,
+                        kind="resync",
+                        old=mode,
+                        new=mode,
+                        source=source,
+                        reading=reading,
+                        frame_type=frame_type,
+                        payload_len=payload_len,
+                        clock=clock,
+                        old_seen_mono=None,
+                    )
+                    self._log_uwt_event(
+                        match, track, event, decoded=reading.decoded, clock=clock
+                    )
+                continue
+            # The state moves only after the event was built and stored: if
+            # building it fails, the next sighting of this mode is still a
+            # change and is recorded then.
+            event = self._record_uwt_event(
+                match,
+                track,
+                kind="change",
+                old=old,
+                new=mode,
+                source=source,
+                reading=reading,
+                frame_type=frame_type,
+                payload_len=payload_len,
+                clock=clock,
+                old_seen_mono=old_seen,
+            )
+            track.state = mode
+            self._log_uwt_event(
+                match, track, event, decoded=reading.decoded, clock=clock
+            )
+
+    @staticmethod
+    def _uwt_budget_free(track: _UwtTrack, now: float) -> bool:
+        """Return whether the device may write another INFO line now.
+
+        The budget is ``_UWT_TRANSITION_INFO_PER_HOUR`` lines per rolling hour
+        on the observation clock; times older than the hour are dropped first.
+        """
+        times = track.info_times
+        while times and now - times[0] >= _UWT_TRANSITION_WINDOW_SECONDS:
+            times.popleft()
+        return len(times) < _UWT_TRANSITION_INFO_PER_HOUR
+
+    def _log_uwt_event(
+        self,
+        match: EIDMatch,
+        track: _UwtTrack,
+        event: UwtTransitionEvent,
+        *,
+        decoded: int | None,
+        clock: ObservationClock,
+    ) -> None:
+        """Write ``FMDN_UWT_TRANSITION`` at INFO within the budget, else DEBUG.
+
+        Every event is written; the budget only decides the level. The event
+        history keeps all of them either way.
+        """
+        if self._uwt_budget_free(track, clock.monotonic):
+            level = logging.INFO
+            track.info_times.append(clock.monotonic)
+            suppressed = track.suppressed
+            track.suppressed = 0
+        else:
+            level = logging.DEBUG
+            track.suppressed += 1
+            suppressed = track.suppressed
+        _LOGGER.log(
+            level,
+            _UWT_TRANSITION_FORMAT,
+            event.kind,
+            match.device_id,
+            match.canonical_id,
+            event.old,
+            event.new,
+            event.source,
+            event.flags,
+            event.frame,
+            f"0x{decoded:02x}" if decoded is not None else "none",
+            event.payload_len,
+            event.poll_age_s if event.poll_age_s is not None else "none",
+            event.prev_seen_age_s if event.prev_seen_age_s is not None else "none",
+            event.observed,
+            event.seq,
+            suppressed,
+        )
+
+    def _record_uwt_event(  # noqa: PLR0913
+        self,
+        match: EIDMatch,
+        track: _UwtTrack,
+        *,
+        kind: Literal["change", "resync"],
+        old: bool | None,
+        new: bool,
+        source: UwtSource,
+        reading: _FlagsReading,
+        frame_type: int | None,
+        payload_len: int,
+        clock: ObservationClock,
+        old_seen_mono: float | None,
+    ) -> UwtTransitionEvent:
+        """Append one event to the history of the match's config entry.
+
+        ``track.seq`` advances only once the event is stored, so a failure
+        while building it leaves the track as it was.
+        """
+        seq = track.seq + 1
+        prev_seen_age_s: int | None = None
+        if old_seen_mono is not None:
+            prev_seen_age_s = int(max(0.0, clock.monotonic - old_seen_mono))
+        event = UwtTransitionEvent(
+            canonical_id=match.canonical_id or match.device_id,
+            kind=kind,
+            old=_uwt_label(old),
+            new="on" if new else "off",
+            source=source.value,
+            flags=reading.origin,
+            frame=_uwt_frame_label(frame_type),
+            payload_len=payload_len,
+            poll_age_s=self._uwt_poll_age_s(match, clock.monotonic),
+            prev_seen_age_s=prev_seen_age_s,
+            observed=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock.wall)),
+            seq=seq,
+        )
+        ring = self._uwt_events.get(match.config_entry_id)
+        if ring is None:
+            ring = _UwtEventRing()
+            self._uwt_events[match.config_entry_id] = ring
+        if len(ring.events) == ring.events.maxlen:
+            ring.dropped += 1
+        ring.events.append(event)
+        track.seq = seq
+        return event
+
+    def _uwt_poll_age_s(self, match: EIDMatch, observed_mono: float) -> int | None:
+        """Return seconds from the last sent location request to the sighting.
+
+        Only the coordinator of the match's own config entry is asked, by the
+        match's canonical id (the coordinator's ``device["id"]``); there is no
+        fallback to another entry. ``None`` when that coordinator has sent no
+        request for the device, or when the request was sent after the
+        observation (the advertisement clock may lag ``time.monotonic``).
+        """
+        bucket = self.hass.data.get(DOMAIN)
+        entries = bucket.get("entries") if isinstance(bucket, dict) else None
+        if not isinstance(entries, dict):
+            return None
+        runtime = entries.get(match.config_entry_id)
+        provider: _LocateRequestClock | None = None
+        candidate = getattr(runtime, "coordinator", None)
+        if isinstance(candidate, _LocateRequestClock):
+            provider = candidate
+        elif isinstance(runtime, _LocateRequestClock):
+            provider = runtime
+        if provider is None:
+            return None
+        stamp = provider.locate_requested_mono(match.canonical_id)
+        if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+            return None
+        age = observed_mono - stamp
+        if age < 0:
+            _LOGGER.debug(
+                "uwt_poll_age_unavailable device=%s reason=poll_after_observation",
+                match.device_id,
+            )
+            return None
+        return int(age)
+
+    def uwt_transition_snapshot(self, entry_id: str) -> UwtTransitionSnapshot:
+        """Return the recorded protection-mode changes of one config entry.
+
+        Only events of ``entry_id`` are returned; an entry without history
+        yields an empty snapshot.
+        """
+        rings: dict[str, _UwtEventRing] = getattr(self, "_uwt_events", {})
+        ring = rings.get(entry_id)
+        return UwtTransitionSnapshot(
+            capacity=_UWT_TRANSITION_RING_SIZE,
+            dropped=ring.dropped if ring is not None else 0,
+            info_lines_per_device_hour=_UWT_TRANSITION_INFO_PER_HOUR,
+            events=tuple(ring.events) if ring is not None else (),
+        )
+
     def _update_ble_battery(  # noqa: PLR0912, PLR0913
         self,
         raw: bytes,
@@ -3185,7 +3997,7 @@ class GoogleFindMyEIDResolver:
         *,
         geometry: EidCandidate | None = None,
         clock: ObservationClock | None = None,
-    ) -> None:
+    ) -> _FlagsReading:
         """Decode the FMDN hashed-flags byte and store battery state.
 
         Extracts the optional flags byte from the BLE payload, XOR-decodes
@@ -3200,9 +4012,12 @@ class GoogleFindMyEIDResolver:
         On first successful decode per device an INFO-level
         ``FMDN_FLAGS_PROBE`` log is emitted; subsequent updates log at
         DEBUG level only when the battery level changes.
+
+        Returns the decoded protection-mode bit and how the flags byte was
+        located, for the sighting the caller records.
         """
         if not matches:
-            return
+            return _FlagsReading(None, "absent")
 
         length = len(raw)
         xor_mask: int | None = metadata.get("flags_xor_mask")
@@ -3236,11 +4051,16 @@ class GoogleFindMyEIDResolver:
         # guessing, never into the authoritative branch. Failing open into
         # "geometry is authoritative" would turn an arbitrary payload byte into
         # the flags byte -- the very class this removes.
+        flags_origin: FlagsOrigin
         if geometry is not None and geometry.layout in ("framed", "bare"):
             flags_offset = geometry.offset + len(geometry.eid)
             flags_byte = raw[flags_offset] if flags_offset < length else None
+            flags_origin = "framed" if flags_byte is not None else "absent"
         else:
             flags_byte = _guess_flags_byte(raw)
+            flags_origin = "guessed" if flags_byte is not None else "absent"
+        uwt_bit: bool | None = None
+        decoded_flags: int | None = None
 
         # ---- Decode and store ----
         # CANONICAL SPEC ANCHOR for FMDN hashed_flags decoding.
@@ -3271,12 +4091,14 @@ class GoogleFindMyEIDResolver:
         # See also docs/BLE_BATTERY_SENSOR.md L45.
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
+            decoded_flags = decoded
             # Mask/shift centralized in FMDN_HASHED_FLAGS_* constants
             # (top of module, FMDN frame-type cluster).
             battery_raw = (
                 decoded >> FMDN_HASHED_FLAGS_BATTERY_SHIFT
             ) & FMDN_HASHED_FLAGS_BATTERY_MASK
             uwt_mode = bool(decoded & FMDN_HASHED_FLAGS_UWT_MODE_MASK)
+            uwt_bit = uwt_mode
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             # Observation time, not processing time (see ObservationClock);
             # direct callers without a clock get the old "now" behaviour.
@@ -3285,27 +4107,31 @@ class GoogleFindMyEIDResolver:
 
             # Observe -- do not arbitrate -- the two redundant channels.
             #
-            # SPEC (Find Hub Network Accessory Specification, retrieved
-            # 2026-08-05): the frame type is set to 0x41 while unwanted
-            # tracking protection mode is active and back to 0x40 when it is
-            # deactivated; hashed-flags spec bit 7 carries the same state. The
-            # two should therefore always agree.
+            # SPEC (Find Hub Network Accessory Specification,
+            # retrieved 2026-10-11), on entering unwanted tracking protection
+            # mode: "The frame type should be set to 0x41. The state is also
+            # reflected in the hashed flags section." On leaving it: "The
+            # frame type should be set back to 0x40." The changelog entry for
+            # the frame type reads "Added a cleartext indication of unwanted
+            # tracking protection mode." Frame type and hashed-flags spec
+            # bit 7 should therefore always agree.
             #
-            # This repository's own documentation has long described 0x41 as
-            # "typically" the modern 32-byte-EID frame, i.e. as a property of
-            # the accessory generation rather than of the tracking state
-            # (docs/BLE_BATTERY_SENSOR.md). That reading and the specification
-            # cannot both be complete, but no primary observation is on record
-            # here either way -- which is the whole reason for this channel.
-            # Until it produces data, the question is open, so this code
-            # does NOT resolve it: the decoded bit is passed through unchanged
-            # in both directions. Forcing the bit to False on a 0x40/bit-1
-            # disagreement would suppress precisely the signal the sensor
-            # exists for; deriving True from a 0x41 frame would mark every
-            # modern tracker as permanently "unwanted tracking".
+            # An older reading in this repository tied 0x41 to the accessory
+            # generation (32-byte P-256 EIDs) instead of the mode. It goes back
+            # at least to 588b0e02 (2025-12-15, resolver API doc: "0x41: Modern
+            # / 256-bit frame."); ed340df5 (2026-03-06) carried it into the
+            # battery decoder docs. Neither commit records an observation.
+            # Field data now exist in docs/UWT_FIELD_DATA.md: frame and bit
+            # agreed on every logged probe line (0x40 with bit 0, 0x41 with
+            # bit 1), and no conflict line was logged. They cover 20-byte EIDs
+            # only; for 32-byte EIDs the equivalence rests on the specification.
             #
-            # This log is the measurement channel that will decide the
-            # question. Revisit once field data exists.
+            # This code still passes the decoded bit through unchanged and
+            # only logs a disagreement: a conflict points at a decoding or
+            # firmware fault and should stay visible, not be smoothed over.
+            # The finder's upload takes the mode from _effective_uwt_mode(),
+            # which uses the bit read at a known position, falls back to the
+            # frame type, and reports no mode at all when the two disagree.
             if observed_frame is not None:
                 self._log_frame_conflict(
                     matches=matches,
@@ -3411,6 +4237,7 @@ class GoogleFindMyEIDResolver:
                         raw_hex,
                     )
                     self._flags_logged_devices.add(storage_key)
+        return _FlagsReading(uwt_bit, flags_origin, decoded_flags)
 
     # ------------------------------------------------------------------
     # Public BLE battery API
@@ -3708,10 +4535,14 @@ class GoogleFindMyEIDResolver:
         """Record a disagreement between the frame type and the UWT flag bit.
 
         Two-stage on purpose. The first disagreement per device is INFO, the
-        same visibility as ``FMDN_FLAGS_PROBE``, so a reporter running a stock
-        build can contribute the observation without turning on debug logging;
-        everything after that is DEBUG and throttled, because a disagreeing
-        beacon disagrees on every single advertisement.
+        same level as ``FMDN_FLAGS_PROBE``, so a reporter can contribute the
+        observation without turning on debug logging. INFO is still hidden at
+        Home Assistant's default level (WARNING without ``--verbose``): the
+        reporter raises this module's logger to ``info`` with the
+        ``logger.set_level`` action first (README, "Reporting unwanted
+        tracking protection mode changes"). Everything after the first line is
+        DEBUG and throttled, because a disagreeing beacon disagrees on every
+        single advertisement.
 
         The emitted fields mirror ``FMDN_FLAGS_PROBE`` exactly -- both the
         ``device``/``canonical`` pair and the throttle key. Emitting only the
@@ -3735,7 +4566,7 @@ class GoogleFindMyEIDResolver:
                 _LOGGER.info(
                     "FMDN_FLAGS_CONFLICT device=%s canonical=%s frame=0x%02x "
                     "uwt_bit=%s decoded=0x%02x payload_len=%d; frame type and "
-                    "flags bit disagree, value passed through unchanged",
+                    "flags bit disagree, sensor value passed through unchanged",
                     match.device_id,
                     match.canonical_id,
                     observed_frame,
@@ -3757,7 +4588,7 @@ class GoogleFindMyEIDResolver:
             _LOGGER.debug(
                 "FMDN_FLAGS_CONFLICT device=%s canonical=%s frame=0x%02x "
                 "uwt_bit=%s decoded=0x%02x payload_len=%d; frame type and "
-                "flags bit disagree, value passed through unchanged",
+                "flags bit disagree, sensor value passed through unchanged",
                 match.device_id,
                 match.canonical_id,
                 observed_frame,
@@ -3836,6 +4667,26 @@ class GoogleFindMyEIDResolver:
             curves.add(SECP256R1.name if order == P256_ORDER else SECP160R1.name)
         return curves.pop() if len(curves) == 1 else None
 
+    def last_confirmed_sighting(self, registry_id: str) -> ConfirmedSighting | None:
+        """Return the last sighting of a device that a lookup match confirmed.
+
+        The finder encrypts a report to the EID of this sighting. It is an
+        observation, not a prediction of the EID the device advertises now:
+        the owner resolves a report against the recent past and near future,
+        and the report carries the time of the sighting. The caller judges
+        the age. Matches of the heuristic phone path record no sighting, and
+        the value lives in memory only, so it is gone after a restart until
+        the device is seen again.
+
+        Args:
+            registry_id: Home Assistant device registry ID of the device.
+
+        Returns:
+            The sighting, or ``None`` if the device was not matched since
+            start or its lock state was cleared.
+        """
+        return self._confirmed_sightings.get(registry_id)
+
     def stop(self) -> None:
         """Cancel background timers and clear cached state."""
 
@@ -3856,3 +4707,11 @@ class GoogleFindMyEIDResolver:
         self._lookup_metadata.clear()
         self._locks.clear()
         self._persisted_locks.clear()
+        # Stubs that bypass __init__ may lack the field.
+        confirmed_sightings = getattr(self, "_confirmed_sightings", None)
+        if isinstance(confirmed_sightings, dict):
+            confirmed_sightings.clear()
+        for attr in ("_uwt_track", "_uwt_events"):
+            mapping = getattr(self, attr, None)
+            if isinstance(mapping, dict):
+                mapping.clear()

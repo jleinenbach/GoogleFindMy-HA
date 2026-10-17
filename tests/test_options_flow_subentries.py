@@ -18,6 +18,7 @@ from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
     OPT_CONTRIBUTOR_MODE,
     OPT_IGNORED_DEVICES,
+    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_HUB,
@@ -2358,3 +2359,39 @@ async def test_the_shown_form_preselects_the_group_the_helper_chose(
         "whichever group sorts first"
     )
     assert rendered != offered_in_order[0]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [({}, False), ({OPT_MAP_VIEW_ENABLED: True}, True)],
+    ids=["key-absent-keeps-stored-flag", "key-present-overwrites"],
+)
+async def test_feature_group_update_writes_map_view_only_when_in_the_payload(
+    payload: dict[str, Any], expected: bool
+) -> None:
+    """A payload without ``map_view_enabled`` leaves the stored flag alone.
+
+    The settings step always passes every option, so only the helper's own
+    contract covers the absent key; it follows the same rule as the other
+    feature flags.
+    """
+
+    entry = _EntryStub()
+    subentry = entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Trackers",
+        feature_flags={OPT_MAP_VIEW_ENABLED: False},
+    )
+    flow = await _build_flow(entry)
+    option = config_flow._SubentryOption(
+        key=TRACKER_SUBENTRY_KEY,
+        label="Trackers",
+        subentry=subentry,
+        visible_device_ids=(),
+    )
+
+    await flow._async_update_feature_group_subentry(entry, option, payload)
+
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    stored = manager.updated[-1][1]["feature_flags"]
+    assert stored[OPT_MAP_VIEW_ENABLED] is expected

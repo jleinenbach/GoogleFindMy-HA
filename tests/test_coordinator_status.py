@@ -1743,7 +1743,9 @@ def test_without_content_the_rejection_keeps_the_report_it_booked(
     diagnosis (the credential rejection driving the running escalation) for the
     less specific one ("nobody answered"). Measured: the report was
     ``UpdateFailed('Location request timed out for Slow')`` where it should name
-    the rejection.
+    the rejection. That was the wording at the time of the measurement;
+    the timeout text now reads
+    ``'Location request timed out for device dev-slow'``.
     """
 
     devices = [
@@ -1771,6 +1773,57 @@ def test_without_content_the_rejection_keeps_the_report_it_booked(
     assert isinstance(reported[0].args[0], NovaAuthError), (
         f"the rejection was swapped for the later failure: {reported}"
     )
+
+
+@pytest.mark.parametrize(
+    "order",
+    [("dev-slow", "dev-bad", "dev-good"), ("dev-bad", "dev-slow", "dev-good")],
+    ids=["first-slot", "second-slot"],
+)
+def test_timeout_report_names_the_device_by_id(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+    order: tuple[str, str, str],
+) -> None:
+    """The timeout report names the device by its id, not by its name.
+
+    Home Assistant logs the ``UpdateFailed`` text at ERROR through
+    ``async_set_update_error`` on the unattended poll path, where AGENTS.md
+    section 5 (b) allows a device name only at DEBUG. Both slots are covered:
+    with the timeout first it lands in ``last_exception``; behind a rejection
+    that a sibling's content later withdraws it lands in ``independent_error``.
+    """
+
+    names = {"dev-slow": "Slow", "dev-bad": "Bad", "dev-good": "Good"}
+    devices = [{"id": device_id, "name": names[device_id]} for device_id in order]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-slow":
+            raise TimeoutError
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    del coordinator._async_start_poll_cycle
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+    coordinator.async_set_update_error = Mock()
+    coordinator.device_poll_delay = 0
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, f"expected exactly one report, got {reported}"
+    surfaced = reported[0].args[0]
+    assert str(surfaced) == "Location request timed out for device dev-slow"
+    assert "Slow" not in str(surfaced)
+    assert isinstance(surfaced.__cause__, TimeoutError)
 
 
 def test_only_the_provisional_rejection_gives_way_not_an_earlier_diagnosis(

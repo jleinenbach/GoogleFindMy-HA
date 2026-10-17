@@ -53,7 +53,8 @@
           "google_home_filter_enabled": "Filtruj urządzenia Google Home",
           "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
           "enable_stats_entities": "Twórz encje statystyczne",
-          "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy"
+          "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy",
+          "map_view_enabled": "Włącz widok mapy"
         }
       },
       "select_hub_for_visibility": {
@@ -284,18 +285,20 @@
           "enable_stats_entities": "Twórz encje statystyczne",
           "delete_caches_on_remove": "Usuń pamięć podręczną podczas usuwania wpisu",
           "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy",
+          "map_view_enabled": "Włącz widok mapy",
           "contributor_mode": "Tryb raportowania lokalizacji",
           "subentry": "Grupa funkcji",
           "secrets_extra_watch_paths": "Dodatkowe ścieżki obserwowania secrets.json (po jednej w wierszu)"
         },
         "data_description": {
-          "stale_threshold": "Po upływie tej liczby sekund bez aktualizacji lokalizacji, status trackera zmienia się na nieznany. Użyj encji 'Ostatnia lokalizacja', aby zawsze widzieć ostatnią znaną pozycję. Domyślnie: 1800 (30 minut).",
-          "show_location_age": "Gdy jest włączony (domyślnie), atrybut 'location_age' (zaokrąglony do 1 minuty) jest dodawany do każdej encji lokalizatora. Wyłącz, aby wyeliminować wszystkie zapisy do bazy danych dla urządzeń stacjonarnych. Atrybut bezwzględny 'last_seen' i encje sensor.*_last_seen są zawsze dostępne.",
+          "stale_threshold": "Po upływie tej liczby sekund bez aktualizacji lokalizacji, status trackera zmienia się na nieznany. Użyj encji 'Ostatnia lokalizacja', aby zawsze widzieć ostatnią znaną pozycję. Domyślnie: 3900 (65 minut).",
+          "show_location_age": "Gdy jest włączony (domyślnie), atrybut 'location_age' (zaokrąglony do 1 minuty) jest dodawany do każdej encji lokalizatora. Zachowuje on wiek ostatniej obserwacji i zmienia się dopiero przy następnej (na przykład nowa lokalizacja, przejście do stanu 'Nieaktualna' lub zmiana dostępności). Bieżący wiek pokazuje czujnik 'Ostatnio widziany' każdego urządzenia, a bieżący status jego czujnik 'Status lokalizacji'.",
           "speed_gate_enabled": "Gdy jest włączone (domyślnie), ustalenie lokalizacji, które wymagałoby fizycznie niemożliwej prędkości (na przykład zgłoszenie społecznościowe umieszczające lokalizator setki km dalej w ciągu kilku sekund), jest odrzucane zamiast teleportować lokalizator. Zgłoszenia z własnego GPS zawsze przechodzą. Wyłącz tylko wtedy, gdy prawidłowe szybkie ruchy są pomijane.",
           "roundtrip_confirm_enabled": "Gdy jest włączone (domyślnie), zgłoszenie społecznościowe, które filtr prędkości odrzuciłby jako teleportację, jest mimo to akceptowane, jeśli w ciągu około 15 minut wraca w pobliże pozycji sprzed wcześniej zaakceptowanego długiego skoku. Odzyskuje to prawidłową podróż powrotną, zamiast pozostawiać lokalizator uwięziony w odległej pozycji. Działa tylko tam, gdzie filtr prędkości i tak by odrzucił. Wyłącz, jeśli widzisz, że lokalizator przeskakuje między dwoma miejscami.",
-          "accuracy_gate_enabled": "Gdy opcja jest włączona (domyślnie), przychodząca lokalizacja jest odrzucana, jeśli leży wyraźnie poza okręgiem niepewności pozycji w pamięci podręcznej, jest co najmniej czterokrotnie mniej dokładna niż ona, ma dokładność gorszą niż 200 m, a ta zapisana pozycja jest jednocześnie wiarygodna i wciąż świeża. Nic nie jest odrzucane bez lepszej alternatywy: niedokładna lokalizacja jest zawsze przyjmowana przy zimnym starcie oraz wtedy, gdy zapisana pozycja jest niewiarygodna lub przestarzała. Dzięki temu szeroki raport z sieci nie przesuwa lokalizatora i nie powoduje, że Home Assistant błędnie zgłasza go jako w domu, ponieważ traktuje promień dokładności jako tolerancję strefy. Wyłącz tę opcję tylko wtedy, gdy podejrzewasz, że to ona powoduje problem.",
+          "accuracy_gate_enabled": "Gdy opcja jest włączona (domyślnie), przychodząca lokalizacja jest odrzucana, jeśli leży wyraźnie poza okręgiem niepewności pozycji w pamięci podręcznej, jest co najmniej czterokrotnie mniej dokładna niż ona, ma dokładność gorszą niż 200 m, a ta zapisana pozycja jest jednocześnie wiarygodna i wciąż świeża. Nic nie jest odrzucane bez lepszej alternatywy: niedokładna lokalizacja jest zawsze przyjmowana przy zimnym starcie oraz wtedy, gdy zapisana pozycja jest niewiarygodna lub przestarzała. Dzięki temu szeroki raport z sieci nie przesuwa lokalizatora i nie powoduje, że Home Assistant błędnie zgłasza go jako w domu, ponieważ traktuje promień dokładności jako tolerancję strefy. Wyłącz tę opcję tylko wtedy, gdy podejrzewasz, że to ona powoduje problem. Czujnik 'Odrzucona niedokładna lokalizacja' urządzenia pokazuje odrzuconą lokalizację, dopóki nie zostanie zaakceptowana równie nowa lub nowsza lokalizacja, odrzucona lokalizacja nie przekroczy progu nieaktualności albo integracja nie zostanie ponownie załadowana (jak przy ponownym uruchomieniu Home Assistant); przez resztę czasu czujnik pokazuje stan nieznany, co jest normalne.",
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
+          "map_view_enabled": "Domyślnie włączone. Po wyłączeniu żądania widoku mapy są odrzucane jak przy nieprawidłowym tokenie, a linki urządzeń są usuwane. Nie unieważnia istniejących linków; jeśli link mógł wyciec, użyj 'Włącz wygasanie tokenu widoku mapy' (do dwóch tygodni, jeśli było już włączone).",
           "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie Wszystkie obszary w trybie crowdsourcingu lub tylko obszary o dużym ruchu).",
           "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Podpozycje i grupy funkcji]({subentries_docs_url}), aby poznać przykłady.",
           "secrets_extra_watch_paths": "Opcjonalne. Dodatkowe bezwzględne ścieżki do plików secrets.json, które integracja powinna obserwować w celu automatycznego wczytywania, po jednej w wierszu. Pozostaw puste, aby obserwować tylko domyślne lokalizacje."
@@ -662,6 +665,28 @@
           }
         }
       },
+      "location_status": {
+        "name": "Status lokalizacji",
+        "state": {
+          "current": "Aktualna",
+          "aging": "Starzejąca się",
+          "stale": "Nieaktualna"
+        }
+      },
+      "coarse_fix": {
+        "name": "Odrzucona niedokładna lokalizacja",
+        "state_attributes": {
+          "coarse_latitude": {
+            "name": "Szerokość geograficzna niedokładnej lokalizacji"
+          },
+          "coarse_longitude": {
+            "name": "Długość geograficzna niedokładnej lokalizacji"
+          },
+          "coarse_accuracy": {
+            "name": "Dokładność niedokładnej lokalizacji (m)"
+          }
+        }
+      },
       "last_seen": {
         "name": "Ostatnio widziany",
         "state_attributes": {
@@ -790,6 +815,14 @@
     "restart_required": {
       "title": "Uruchom ponownie Home Assistant, aby zakończyć aktualizację",
       "description": "Google Find My Hub został zaktualizowany na dysku do wersji {installed_version}, ale Home Assistant nadal działa w wersji {running_version}. Uruchom ponownie Home Assistant, aby aktywować zainstalowaną wersję.\n\nPrzeładowanie integracji nie wystarczy: wymagane jest pełne ponowne uruchomienie Home Assistant."
+    },
+    "tracker_attributes_frozen": {
+      "title": "Atrybuty lokalizatora zachowują teraz wartość ostatniej obserwacji",
+      "description": "Lokalizatory urządzeń w **{entry_title}** nie aktualizują już atrybutów `location_age` i `location_status` między dwiema obserwacjami: zachowują wartość ostatniej obserwacji i zmieniają się dopiero przy następnej (na przykład nowa lokalizacja, przejście do stanu „Nieaktualna” lub zmiana dostępności). Główny lokalizator zachowuje w ten sam sposób atrybuty `coarse_*`, a lokalizator „Ostatnia lokalizacja” już ich nie ma. Dzięki temu lokalizator bez nowej lokalizacji nie wydaje się już bardziej aktualny niż inny, na przykład dla osoby.\n\nAby zobaczyć bieżące wartości, użyj tych encji:\n{replacement_sensors}\n\nTe atrybuty zostaną usunięte, najpóźniej w pierwszym wydaniu integracji od Home Assistant {breaks_version}.\n\nAutomatyzacje i skrypty, które używają tych lokalizatorów (sprawdź w nich `location_status`, `location_age` i `coarse_*`):\n{automations}"
+    },
+    "tracker_attributes_frozen_no_automations": {
+      "title": "Atrybuty lokalizatora zachowują teraz wartość ostatniej obserwacji",
+      "description": "Lokalizatory urządzeń w **{entry_title}** nie aktualizują już atrybutów `location_age` i `location_status` między dwiema obserwacjami: zachowują wartość ostatniej obserwacji i zmieniają się dopiero przy następnej (na przykład nowa lokalizacja, przejście do stanu „Nieaktualna” lub zmiana dostępności). Główny lokalizator zachowuje w ten sam sposób atrybuty `coarse_*`, a lokalizator „Ostatnia lokalizacja” już ich nie ma. Dzięki temu lokalizator bez nowej lokalizacji nie wydaje się już bardziej aktualny niż inny, na przykład dla osoby.\n\nAby zobaczyć bieżące wartości, użyj tych encji:\n{replacement_sensors}\n\nTe atrybuty zostaną usunięte, najpóźniej w pierwszym wydaniu integracji od Home Assistant {breaks_version}."
     }
   },
   "exceptions": {

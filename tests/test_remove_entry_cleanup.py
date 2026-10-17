@@ -229,6 +229,12 @@ def test_async_remove_entry_purges_store_and_creates_issue(
     assert f"fcm_reauth_required_{entry.entry_id}" in deleted_ids
     assert f"fcm_stuck_{entry.entry_id}" in deleted_ids
     assert f"fcm_short_run_crash_loop_{entry.entry_id}" in deleted_ids
+    # The held-attributes issue survives a plain unload or reload; disabling
+    # or removing the entry retires it, in this integration's domain.
+    assert (
+        DOMAIN,
+        f"tracker_attributes_frozen_{entry.entry_id}",
+    ) in issue_registry_capture.deleted
 
 
 def test_async_remove_entry_respects_retention_option(
