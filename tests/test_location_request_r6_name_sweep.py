@@ -20,6 +20,11 @@ Two groups are covered:
 * ``_make_location_callback`` -- the parse failure, the per-device decrypt
   failure (warning and error severities), and the empty-after-decrypt path.
 
+The cancellation of a locate request is logged at INFO, below the WARNING line
+this sweep is about. An outer poll timeout can cancel the request, so the record
+can recur on an unattended path; its INFO record names the device by the
+canonical id, and the display name appears only in a DEBUG companion record.
+
 The flows are exercised through the same stubbing style the sibling suites use
 (no ``asyncio.run`` in tests).
 """
@@ -117,11 +122,14 @@ def _assert_name_only_at_debug(caplog: pytest.LogCaptureFixture) -> None:
 # ---------------------------------------------------------------------------
 # Group 1: get_location_data_for_device
 # ---------------------------------------------------------------------------
-def _wire_nova_raises(monkeypatch: pytest.MonkeyPatch, *, nova_exc: Exception) -> None:
+def _wire_nova_raises(
+    monkeypatch: pytest.MonkeyPatch, *, nova_exc: BaseException
+) -> None:
     """Stub the flow so ``async_nova_request`` raises ``nova_exc``.
 
     Registration and request build succeed, so control reaches the Nova-request
-    exception ladder; the FCM callback is never fired.
+    exception ladder; the FCM callback is never fired. ``nova_exc`` is typed
+    ``BaseException`` so that ``asyncio.CancelledError`` can be injected.
     """
     receiver = _TokenReceiver()
     monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda *_a: receiver)
@@ -228,6 +236,44 @@ async def test_a_client_error_is_not_logged_as_an_authentication_error(
     assert "Client error (HTTP 404) while requesting location" in caplog.text
     assert "Authentication error" not in caplog.text
     _assert_name_only_at_debug(caplog)
+
+
+async def test_cancelled_request_names_the_device_only_at_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cancelled request names the device by id at INFO, by name at DEBUG."""
+    _wire_nova_raises(monkeypatch, nova_exc=asyncio.CancelledError())
+    caplog.set_level(logging.DEBUG, logger=location_request.__name__)
+
+    with pytest.raises(asyncio.CancelledError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id=_CANONIC,
+            name=_SENTINEL_NAME,
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
+
+    info = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and record.getMessage().startswith("Location request cancelled for device")
+    ]
+    assert len(info) == 1
+    assert _CANONIC in info[0]
+    assert _SENTINEL_NAME not in info[0]
+
+    debug = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+        and "cancelled" in record.getMessage()
+        and _CANONIC in record.getMessage()
+    ]
+    assert len(debug) == 1
+    assert _SENTINEL_NAME in debug[0]
 
 
 async def test_fcm_registration_failure_redacts_name(

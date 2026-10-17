@@ -2189,9 +2189,18 @@ class PollingOperations(_MixinBase):
                                         # is not reclassified as a real measurement.
                                         carry_reused_accuracy(location, prev_location)
                                     else:
+                                        # Unattended poll path: this record names
+                                        # the device by its id; the display name
+                                        # and the Google Home label go to the DEBUG
+                                        # record below (AGENTS.md section 5 (b)).
                                         _LOGGER.info(
-                                            "Google Home filter: %s detected at '%s', substituting with Home coordinates",
+                                            "Google Home filter: device %s detected at a Google Home location, substituting with Home coordinates",
+                                            dev_id,
+                                        )
+                                        _LOGGER.debug(
+                                            "Google Home filter: %s (device %s) detected at '%s', substituting with Home coordinates",
                                             dev_name,
+                                            dev_id,
                                             semantic_name,
                                         )
                                         if (
@@ -2383,7 +2392,7 @@ class PollingOperations(_MixinBase):
                             # must not displace anything.
                             if last_exception is None:
                                 last_exception = UpdateFailed(
-                                    f"Location request timed out for {dev_name}"
+                                    f"Location request timed out for device {dev_id}"
                                 )
                                 last_exception.__cause__ = terr
                             # INVARIANT, not a live condition: mutating
@@ -2400,7 +2409,7 @@ class PollingOperations(_MixinBase):
                                 and independent_error is None
                             ):
                                 independent_error = UpdateFailed(
-                                    f"Location request timed out for {dev_name}"
+                                    f"Location request timed out for device {dev_id}"
                                 )
                                 independent_error.__cause__ = terr
                     except SpotAuthPermanentError:
