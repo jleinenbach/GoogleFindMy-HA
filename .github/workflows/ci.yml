@@ -19,12 +19,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Fork-specific: pull request runs wait for a manual approval in the
-  # environment "ci-freigabe" before any job of this workflow starts, so its
-  # Home Assistant test load only happens when it is wanted. Other pull
-  # request workflows are not gated (AGENTS.md). Pushes to main run without
-  # the gate. Guarded by tests/test_ci_approval_gate.py.
-  # Do not upstream this job: BSkando/GoogleFindMy-HA has no such environment.
+  # Pull request runs pass the job approval_gate, bound to the environment
+  # "ci-freigabe", before any other job of this workflow starts. Where that
+  # environment has a required reviewer (jleinenbach/GoogleFindMy-HA), the
+  # run waits for a manual approval, so the Home Assistant test load only
+  # happens when it is wanted. Where it has no protection rules (GitHub
+  # creates a missing environment without rules when a job references it, as
+  # in BSkando/GoogleFindMy-HA), the gate passes without waiting for
+  # approval. Other pull request workflows are not gated (AGENTS.md). Pushes
+  # to main run without the gate. Guarded by tests/test_ci_approval_gate.py.
   approval_gate:
     name: CI approval gate
     if: github.event_name == 'pull_request'
