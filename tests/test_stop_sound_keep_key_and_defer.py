@@ -284,3 +284,26 @@ async def test_a_suppressed_stop_does_not_wait_first() -> None:
 
     assert result is StopSoundOutcome.SUPPRESSED
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_the_delay_follows_the_correlation_predicate_when_it_says_no() -> None:
+    """Only a stop ``_stop_would_be_correlated`` vouches for is held back.
+
+    The stamp alone matches here (same key, three seconds old), so a delay that
+    read the stamp without asking the predicate would wait. The predicate is
+    the single definition behind the cooldown gate, the CANCELLED outcome and
+    this delay; the counterpart in test_coordinator_locate_basics.py pins the
+    "yes" direction.
+    """
+
+    coordinator, events = _coordinator(
+        uuids={"device-1": "uuid-1"},
+        accepted_at={"device-1": ("uuid-1", time.monotonic() - 3.0)},
+    )
+    coordinator._stop_would_be_correlated = lambda _d, _u: False  # type: ignore[method-assign]
+
+    result = await coordinator.async_stop_sound("device-1")
+
+    assert result is StopSoundOutcome.UNCORRELATED
+    assert events == [("send", "uuid-1")]
