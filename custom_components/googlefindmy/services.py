@@ -52,6 +52,7 @@ from .const import (
     TRACKER_SUBENTRY_KEY,
     PlaySoundOutcome,
     StopSoundOutcome,
+    StopSoundUncorrelatedReason,
     map_token_hex_digest,
     map_token_secret_seed,
     service_device_identifier,
@@ -69,6 +70,29 @@ from .coordinator.helpers.registry import (
 from .map_view import _is_map_view_enabled_for_entry
 
 _LOGGER = logging.getLogger(__name__)
+
+# K10: one message per reason a stop is UNCORRELATED. English fallback text and
+# translation key; the translated texts live in strings.json / translations.
+_STOP_UNCORRELATED_MESSAGES: dict[
+    StopSoundUncorrelatedReason | None, tuple[str, str]
+] = {
+    StopSoundUncorrelatedReason.NO_KEY: (
+        "Stop sound for '{device_id}' was submitted, but this instance holds no "
+        "key for a ring on this device; it may keep playing.",
+        "stop_sound_no_cancel_key",
+    ),
+    StopSoundUncorrelatedReason.AGED_KEY: (
+        "Stop sound for '{device_id}' was submitted with a key older than 30 "
+        "minutes; it may keep playing.",
+        "stop_sound_cancel_key_aged",
+    ),
+    StopSoundUncorrelatedReason.FOREIGN_KEY: (
+        "Stop sound for '{device_id}' was submitted with a request UUID that "
+        "does not belong to a ring started by this instance; it may keep "
+        "playing.",
+        "stop_sound_cancel_key_foreign",
+    ),
+}
 
 # Service field name of ``rebuild_registry`` (see ``services.yaml``); Home
 # Assistant core has no ``ATTR_ENTRY_ID`` constant in ``homeassistant.const``.
@@ -1172,6 +1196,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         request_uuid: str | None = request_uuid_raw
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
+            # Read the case BEFORE the stop and with nothing awaited in
+            # between, so it describes the same cache state the stop decides
+            # on. Only used if the outcome is UNCORRELATED (K10).
+            uncorrelated_reason = runtime.coordinator.classify_stop_correlation(
+                canonical_id, request_uuid
+            )
             outcome = await runtime.coordinator.async_stop_sound(
                 canonical_id, request_uuid
             )
@@ -1201,11 +1231,21 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 )
             if outcome is StopSoundOutcome.UNCORRELATED:
                 # Submitted, but nothing proves an effect: reporting plain
-                # success here would be misinformation (BSkando#195).
+                # success here would be misinformation (BSkando#195). It stays
+                # an error in every case; only the text says which case it is,
+                # because each one has a different remedy (K10). A reason the
+                # table does not know falls back to the generic text.
+                message, translation_key = _STOP_UNCORRELATED_MESSAGES.get(
+                    uncorrelated_reason,
+                    (
+                        "Stop sound for '{device_id}' could not be matched to a "
+                        "running ring; it may keep playing.",
+                        "stop_sound_uncorrelated",
+                    ),
+                )
                 raise _service_validation_error(
-                    "Stop sound for '{device_id}' could not be matched to a "
-                    "running ring; it may keep playing.".format(**placeholders),
-                    translation_key="stop_sound_uncorrelated",
+                    message.format(**placeholders),
+                    translation_key=translation_key,
                     translation_placeholders=placeholders,
                 )
             if outcome is not StopSoundOutcome.CANCELLED:

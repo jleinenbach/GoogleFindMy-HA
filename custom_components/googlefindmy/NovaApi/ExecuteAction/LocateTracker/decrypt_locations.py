@@ -1204,7 +1204,10 @@ def any_real_location_record(records: list[dict[str, Any]] | None) -> bool:
 
 # ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
-    device_update_protobuf: DeviceUpdateProto, *, cache: TokenCache
+    device_update_protobuf: DeviceUpdateProto,
+    *,
+    cache: TokenCache,
+    action_feedback: bool = False,
 ) -> list[dict[str, Any]]:
     """Decrypt and normalize location reports into HA-friendly dicts (async).
 
@@ -1224,6 +1227,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     Args:
         device_update_protobuf: Raw protobuf payload containing encrypted locations.
         cache: Entry-scoped TokenCache forwarded to key/EID helpers.
+        action_feedback: True when the caller recognised the payload as the
+            acknowledgement of a Play/Stop Sound (its ``requestUuid`` is one of
+            our own Play Sound keys). Such a push carries key material but no
+            location report by design, so "No locations found" is expected and
+            logged at DEBUG instead of INFO. Decryption itself is unchanged:
+            the metadata-only record is still returned.
 
     POPETS'25 reference (Böttger et al., 2025):
       - Integer-scaled coordinates and validation: §4
@@ -2145,7 +2154,16 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             )
 
     if not wrapped:
-        _LOGGER.info("[DecryptLocations] No locations found.")
+        if action_feedback:
+            # Expected for a Play/Stop Sound acknowledgement; at INFO it read
+            # like a failed locate after every ring and every stop.
+            _LOGGER.debug(
+                "[DecryptLocations] Play/Stop Sound acknowledgement push: no "
+                "location reports expected."
+            )
+            _LOGGER.debug("[DecryptLocations] No locations found.")
+        else:
+            _LOGGER.info("[DecryptLocations] No locations found.")
         # FIX: Merge metadata_update into the returned payload even when no locations.
         # This ensures encrypted_identity_key, secrets_creation_date, owner_key_version,
         # identity_key, etc. are returned for devices (like phones) that have these

@@ -367,6 +367,18 @@ inside the field are not decoded, and the series covers one tracker model, so
 the lengths are an observation, not a protocol contract; nothing in the code
 relies on them.
 
+Two consequences are wired in. The receiver recognises such a push as a Play/Stop
+Sound acknowledgement when its `requestUuid` is one of the coordinator's own
+Play Sound keys (`is_own_sound_request_uuid`); a set `requestUuid` alone is not
+the criterion, because locate requests set one too. The push still runs through
+the decryptor, since its secrets bundle feeds the device cache as a
+metadata-only record; only `No locations found` drops from INFO to DEBUG, next
+to a DEBUG line naming the acknowledgement. An empty locate answer keeps its
+INFO line. And an uncorrelated stop now names its case to the user
+(`StopSoundUncorrelatedReason`: no key, aged key, foreign key) instead of one
+message listing every cause; the outcome itself stays `UNCORRELATED` and stays
+an error for the caller (BSkando#195).
+
 Closing it on the local path means speaking GATT directly (`0x05` with ring
 operation `0x00`), which additionally yields a stop that is independent of who
 started the ring. That is a separate design with its own plan; see the BLE

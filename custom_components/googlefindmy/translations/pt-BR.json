@@ -859,6 +859,15 @@
     "stop_sound_uncorrelated": {
       "message": "O Stop Sound para {device_id} foi enviado, mas não foi possível associá-lo ao toque em andamento: ele foi iniciado em outro lugar, ou a chave que esta instância possui é antiga demais para servir de garantia. O Google pode não conseguir associar a parada ao toque, então o dispositivo pode continuar tocando. Pressione o botão no rastreador ou aguarde o toque terminar."
     },
+    "stop_sound_no_cancel_key": {
+      "message": "O Stop Sound para {device_id} foi enviado, mas esta instância não tem nenhuma chave de um toque neste dispositivo. O toque provavelmente foi iniciado em outro lugar, por exemplo no app Find Hub, então o Google pode não conseguir associar a parada e o dispositivo pode continuar tocando. Pare-o onde foi iniciado, pressione o botão no rastreador ou aguarde o toque terminar."
+    },
+    "stop_sound_cancel_key_aged": {
+      "message": "O Stop Sound para {device_id} foi enviado com a chave do último toque iniciado por esta instância, mas essa chave tem mais de 30 minutos e não pode garantir o toque atual, então o dispositivo pode continuar tocando. Pressione o botão no rastreador ou aguarde o toque terminar."
+    },
+    "stop_sound_cancel_key_foreign": {
+      "message": "O Stop Sound para {device_id} foi enviado com o request UUID informado, mas ele não pertence a nenhum toque iniciado por esta instância, então nada garante que a parada corresponda ao toque em andamento e o dispositivo pode continuar tocando. Deixe o request UUID vazio para usar a chave desta instância, pressione o botão no rastreador ou aguarde o toque terminar."
+    },
     "missing_token_cache": {
       "message": "Cache de token ausente. "
     },

@@ -255,6 +255,40 @@ class StopSoundOutcome(StrEnum):
     """
 
 
+class StopSoundUncorrelatedReason(StrEnum):
+    """Why a stop is ``StopSoundOutcome.UNCORRELATED``; selects the user message.
+
+    The outcome stays ONE state on purpose: every member below means "submitted,
+    effect unproven", and the service layer reports each of them as an error,
+    never as success (BSkando#195). What differs is what the user can do about
+    it, so each member has its own message instead of one text that lists every
+    cause and fits none.
+
+    Decided by ``classify_stop_correlation`` on the coordinator, from the same
+    state ``async_stop_sound`` reads before anything is sent. A key that this
+    integration sent earlier is NOT a member: since IRR-CA-STOP-KEEPS-CANCEL-KEY
+    a stop does not spend the key, so a repeated stop with our own fresh key is
+    ``CANCELLED`` again.
+    """
+
+    NO_KEY = "no_key"
+    """No key was supplied and this instance holds none for the device.
+
+    The ring was started elsewhere (the Find Hub app, another installation), or
+    by this instance so long ago that a reload dropped its key.
+    """
+
+    AGED_KEY = "aged_key"
+    """The key at hand is this instance's own, but older than SOUND_UUID_MAX_AGE_S.
+
+    It is still sent (it may be the handle on the audible ring), but it cannot
+    vouch for that ring.
+    """
+
+    FOREIGN_KEY = "foreign_key"
+    """The caller supplied a key that is not this instance's cached key."""
+
+
 # --------------------------------------------------------------------------------------
 # Play Sound outcome (coordinator -> service boundary)
 # --------------------------------------------------------------------------------------

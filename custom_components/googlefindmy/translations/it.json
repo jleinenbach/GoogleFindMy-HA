@@ -859,6 +859,15 @@
     "stop_sound_uncorrelated": {
       "message": "Stop Sound per {device_id} è stato inviato, ma non è stato possibile associarlo alla suoneria in corso: è stata avviata altrove, oppure la chiave di cui dispone questa istanza è troppo vecchia per garantirla. Google potrebbe non riuscire ad associare l'arresto alla suoneria, quindi il dispositivo potrebbe continuare a suonare. Premi il pulsante sul tracker o attendi che la suoneria termini."
     },
+    "stop_sound_no_cancel_key": {
+      "message": "Stop Sound per {device_id} è stato inviato, ma questa istanza non ha alcuna chiave per una suoneria su questo dispositivo. Probabilmente la suoneria è stata avviata altrove, ad esempio nell'app Find Hub, quindi Google potrebbe non riuscire ad associare l'arresto e il dispositivo potrebbe continuare a suonare. Fermala dove è stata avviata, premi il pulsante sul tracker o attendi che la suoneria termini."
+    },
+    "stop_sound_cancel_key_aged": {
+      "message": "Stop Sound per {device_id} è stato inviato con la chiave dell'ultima suoneria avviata da questa istanza, ma la chiave ha più di 30 minuti e non può garantire la suoneria attuale, quindi il dispositivo potrebbe continuare a suonare. Premi il pulsante sul tracker o attendi che la suoneria termini."
+    },
+    "stop_sound_cancel_key_foreign": {
+      "message": "Stop Sound per {device_id} è stato inviato con il request UUID indicato, ma non appartiene a nessuna suoneria avviata da questa istanza, quindi nulla garantisce che l'arresto corrisponda alla suoneria in corso e il dispositivo potrebbe continuare a suonare. Lascia vuoto il request UUID per usare la chiave di questa istanza, premi il pulsante sul tracker o attendi che la suoneria termini."
+    },
     "missing_token_cache": {
       "message": "Cache del token mancante. Fornisci il TokenCache specifico della voce (ad esempio entry.runtime_data.token_cache)."
     },

@@ -2804,6 +2804,30 @@ class FcmReceiverHA:
                 pass
         return res
 
+    def _is_sound_acknowledgement(self, entry_id: str, device_update: Any) -> bool:
+        """Return True if the push acknowledges a Play/Stop Sound of this entry.
+
+        The criterion is ``fcmMetadata.requestUuid`` being one of the entry's own
+        Play Sound keys, never a set ``requestUuid`` alone (locate requests set
+        one too). Only selects a log level; any error answers False, so the
+        push path behaves exactly as before.
+        """
+        try:
+            request_uuid = device_update.fcmMetadata.requestUuid
+            if not isinstance(request_uuid, str) or not request_uuid:
+                return False
+            return any(
+                coordinator.is_own_sound_request_uuid(request_uuid)
+                for coordinator in self._coordinators_for_entries({entry_id})
+            )
+        except Exception as err:  # noqa: BLE001 - never break the push path
+            _LOGGER.debug(
+                "Sound acknowledgement check failed for entry %s: %s",
+                entry_id,
+                describe_exception(err),
+            )
+            return False
+
     def _prepare_coordinator_payload(
         self, coordinator: Any, key: tuple[str, str], payload: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -3296,7 +3320,11 @@ class FcmReceiverHA:
             with self._scoped_cache_provider(lambda: cache):
                 try:
                     raw_locations = await async_decrypt_location_response_locations(
-                        device_update, cache=cache
+                        device_update,
+                        cache=cache,
+                        action_feedback=self._is_sound_acknowledgement(
+                            entry_id, device_update
+                        ),
                     )
                 except StaleOwnerKeyError as stale_err:
                     _LOGGER.info(

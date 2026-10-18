@@ -859,6 +859,15 @@
     "stop_sound_uncorrelated": {
       "message": "Stop Sound voor {device_id} is verzonden, maar kon niet aan het lopende belsignaal worden gekoppeld: het is elders gestart, of de sleutel die deze installatie heeft is te oud om voor in te staan. Google kan de stop mogelijk niet koppelen, dus het apparaat kan blijven afspelen. Druk op de knop op de tracker of wacht tot het belsignaal vanzelf stopt."
     },
+    "stop_sound_no_cancel_key": {
+      "message": "Stop Sound voor {device_id} is verzonden, maar deze installatie heeft geen sleutel voor een belsignaal op dit apparaat. Het belsignaal is waarschijnlijk elders gestart, bijvoorbeeld in de app Find Hub, dus Google kan de stop mogelijk niet koppelen en het apparaat kan blijven afspelen. Stop het waar het gestart is, druk op de knop op de tracker of wacht tot het belsignaal vanzelf stopt."
+    },
+    "stop_sound_cancel_key_aged": {
+      "message": "Stop Sound voor {device_id} is verzonden met de sleutel van het laatste belsignaal dat deze installatie startte, maar die sleutel is ouder dan 30 minuten en kan niet instaan voor het huidige belsignaal, dus het apparaat kan blijven afspelen. Druk op de knop op de tracker of wacht tot het belsignaal vanzelf stopt."
+    },
+    "stop_sound_cancel_key_foreign": {
+      "message": "Stop Sound voor {device_id} is verzonden met de opgegeven request-UUID, maar die hoort bij geen enkel belsignaal dat deze installatie startte. Niets bewijst dat de stop bij het lopende belsignaal hoort, dus het apparaat kan blijven afspelen. Laat de request-UUID leeg om de eigen sleutel van deze installatie te gebruiken, druk op de knop op de tracker of wacht tot het belsignaal vanzelf stopt."
+    },
     "missing_token_cache": {
       "message": "Tokencache ontbreekt. Geef de item-specifieke TokenCache op (bijvoorbeeld entry.runtime_data.token_cache)."
     },

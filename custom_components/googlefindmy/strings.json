@@ -859,6 +859,15 @@
     "stop_sound_uncorrelated": {
       "message": "Stop Sound for {device_id} was submitted, but it could not be matched to the running ring: the ring was started elsewhere, or the key this instance holds is too old to vouch for. Google may not be able to match the stop to the ring, so the device may keep playing. Press the button on the tracker, or wait for the ring to time out."
     },
+    "stop_sound_no_cancel_key": {
+      "message": "Stop Sound for {device_id} was submitted, but this instance holds no key for a ring on this device. The ring was probably started elsewhere, for example in the Find Hub app, so Google may not be able to match the stop to it and the device may keep playing. Stop it where it was started, press the button on the tracker, or wait for the ring to time out."
+    },
+    "stop_sound_cancel_key_aged": {
+      "message": "Stop Sound for {device_id} was submitted with the key of the last ring this instance started, but that key is older than 30 minutes and cannot vouch for the ring playing now, so the device may keep playing. Press the button on the tracker, or wait for the ring to time out."
+    },
+    "stop_sound_cancel_key_foreign": {
+      "message": "Stop Sound for {device_id} was submitted with the supplied request UUID, but it does not belong to a ring this instance started, so nothing proves the stop matches the running ring and the device may keep playing. Leave the request UUID empty to use this instance's own key, press the button on the tracker, or wait for the ring to time out."
+    },
     "missing_token_cache": {
       "message": "Token cache missing. Provide the entry-specific TokenCache (for example, entry.runtime_data.token_cache)."
     },

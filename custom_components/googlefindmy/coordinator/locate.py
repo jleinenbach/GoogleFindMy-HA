@@ -31,6 +31,7 @@ from ..const import (
     PlaySoundOutcome,
     SoundDispatchOutcome,
     StopSoundOutcome,
+    StopSoundUncorrelatedReason,
 )
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
@@ -1016,6 +1017,50 @@ class LocateOperations(_MixinBase):
             return False
         return not self._cached_sound_uuid_is_stale(device_id)
 
+    def is_own_sound_request_uuid(self, request_uuid: str) -> bool:
+        """Return True if ``request_uuid`` is a Play Sound key this instance holds.
+
+        Read-only. Used by the push receiver to recognise the acknowledgement
+        pushes Nova sends after a Play or Stop Sound: they carry the play's
+        request UUID in ``fcmMetadata.requestUuid`` (measured 2026-10-17/18,
+        ten rings, H5) and no location report. A set ``requestUuid`` alone is
+        NOT the criterion, because locate requests set one too
+        (``nbe_execute_action``); only a key from this cache is. Aged keys stay
+        cached (IRR-CA-STOP-KEEPS-CANCEL-KEY) and count, so the acknowledgement
+        of a stop sent with an aged key is recognised as well.
+        """
+        if not request_uuid:
+            return False
+        return request_uuid in self._sound_request_uuids.values()
+
+    @staticmethod
+    def _normalize_cancel_key(request_uuid: str | None) -> str | None:
+        """Collapse a blank cancel key to ``None``; see ``async_stop_sound``."""
+        return (request_uuid or "").strip() or None
+
+    def classify_stop_correlation(
+        self, device_id: str, request_uuid: str | None
+    ) -> StopSoundUncorrelatedReason | None:
+        """Return why a stop for ``device_id`` would be UNCORRELATED, or ``None``.
+
+        Read-only, no side effects. ``None`` means the stop would carry a proven
+        key (``_stop_would_be_correlated``). It exists so the service layer can
+        tell the user WHICH case it is (K10), and it is built on the same
+        predicate rather than beside it, so the message can never claim a case
+        the outcome did not come from. Callers must invoke it immediately before
+        ``async_stop_sound`` with nothing awaited in between: both then read the
+        same cache state.
+        """
+        key = self._normalize_cancel_key(request_uuid)
+        if self._stop_would_be_correlated(device_id, key):
+            return None
+        cached_uuid = self._sound_request_uuids.get(device_id)
+        if key is not None and key != cached_uuid:
+            return StopSoundUncorrelatedReason.FOREIGN_KEY
+        if cached_uuid is None:
+            return StopSoundUncorrelatedReason.NO_KEY
+        return StopSoundUncorrelatedReason.AGED_KEY
+
     async def _async_wait_before_stop(self, delay: float) -> None:
         """Sleep for ``delay`` seconds; a separate method so tests can replace it."""
         await asyncio.sleep(delay)
@@ -1276,7 +1321,7 @@ class LocateOperations(_MixinBase):
         # anything below the cache is too late to restore the fallback.
         # Post-condition: request_uuid_to_use is None or non-blank, which is
         # what every `is not None` check below relies on.
-        request_uuid_to_use = (request_uuid or "").strip() or None
+        request_uuid_to_use = self._normalize_cancel_key(request_uuid)
         # True only when the key about to be sent came from our own cache AND
         # was still fresh. An explicitly passed foreign UUID does NOT qualify:
         # popping our cache entry on its behalf would drop the handle of a
