@@ -1451,11 +1451,18 @@ class GoogleFindMyAPI:
 
         except NovaAuthPermanentError as err:
             # Permanent auth failure (AAS token invalid) - immediate reauth required
+            # This path also runs on every poll cycle, so records at INFO and above
+            # name the device by id and the display name goes to a DEBUG companion
+            # (AGENTS.md section 5 (b)).
             _LOGGER.error(
-                "Permanent authentication failure for %s (%s): %s. Re-authentication required.",
-                device_name,
+                "Permanent authentication failure for device %s: %s. Re-authentication required.",
                 device_id,
                 _short_err(err),
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             exc = ConfigEntryAuthFailed(_short_err(err))
             exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
@@ -1517,20 +1524,28 @@ class GoogleFindMyAPI:
             # Re-raise so coordinator can track consecutive failures before triggering reauth.
             if err.is_permanent:
                 _LOGGER.error(
-                    "Permanent authentication failure for %s (%s): %s",
-                    device_name,
+                    "Permanent authentication failure for device %s: %s",
                     device_id,
                     _short_err(err),
+                )
+                _LOGGER.debug(
+                    "Location lookup failure for device %s concerns %s",
+                    device_id,
+                    device_name,
                 )
                 exc = ConfigEntryAuthFailed(_short_err(err))
                 exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
                 raise exc from err
 
             _LOGGER.warning(
-                "Transient authentication error for %s (%s): %s. May resolve in next poll cycle.",
-                device_name,
+                "Transient authentication error for device %s: %s. May resolve in next poll cycle.",
                 device_id,
                 _short_err(err),
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             # Re-raise to let coordinator track consecutive failures
             raise
@@ -1539,60 +1554,84 @@ class GoogleFindMyAPI:
             # Map 401/403 to ConfigEntryAuthFailed; other HTTP errors are transient here.
             if getattr(err, "status", None) in (401, 403):
                 _LOGGER.error(
-                    "Authentication failed (HTTP %s) while getting location for %s (%s): %s",
+                    "Authentication failed (HTTP %s) while getting location for device %s: %s",
                     err.status,
-                    device_name,
                     device_id,
                     _short_err(err),
+                )
+                _LOGGER.debug(
+                    "Location lookup failure for device %s concerns %s",
+                    device_id,
+                    device_name,
                 )
                 exc = ConfigEntryAuthFailed(_short_err(err))
                 exc.reauth_code = ReauthReasonCode.HTTP_401_AFTER_REFRESH
                 raise exc from err
             _LOGGER.warning(
-                "Server error (%s) while getting location for %s (%s): %s",
+                "Server error (%s) while getting location for device %s: %s",
                 err.status,
-                device_name,
                 device_id,
                 _short_err(err),
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             return {}
 
         except NovaRateLimitError as err:
             _LOGGER.warning(
-                "Location request rate-limited for %s (%s): %s",
-                device_name,
+                "Location request rate-limited for device %s: %s",
                 device_id,
                 _short_err(err),
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             return {}
 
         except NovaProtobufDecodeError as err:
             # Protobuf decode failures indicate corrupted response or protocol mismatch
             _LOGGER.error(
-                "Failed to decode location response for %s (%s): %s",
-                device_name,
+                "Failed to decode location response for device %s: %s",
                 device_id,
                 _short_err(err),
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             return {}
 
         except NovaLogicError as err:
             # Logic errors from Google (e.g., invalid device ID, permission denied)
             _LOGGER.error(
-                "Nova API Logic Error for %s (%s): Code %s - %s",
-                device_name,
+                "Nova API Logic Error for device %s: Code %s - %s",
                 device_id,
                 err.code,
                 err.message or "Unknown",
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             return {}
 
         except ClientError as err:
             _LOGGER.error(
-                "Network error while getting async location for %s (%s): %s",
-                device_name,
+                "Network error while getting async location for device %s: %s",
                 device_id,
                 _short_err(err),
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             return {}
 
@@ -1656,19 +1695,27 @@ class GoogleFindMyAPI:
                 )
                 return {}
             _LOGGER.error(
-                "Runtime error while getting async location for %s (%s): %s",
-                device_name,
+                "Runtime error while getting async location for device %s: %s",
                 device_id,
                 _short_err(err),
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             return {}
 
         except Exception as err:
             _LOGGER.error(
-                "Failed to get async location for %s (%s): %s",
-                device_name,
+                "Failed to get async location for device %s: %s",
                 device_id,
                 _short_err(err),
+            )
+            _LOGGER.debug(
+                "Location lookup failure for device %s concerns %s",
+                device_id,
+                device_name,
             )
             return {}
 
