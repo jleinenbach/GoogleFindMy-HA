@@ -153,6 +153,24 @@ class PlaySoundResult:
 # Stop Sound outcome
 # --------------------------------------------------------------------------------------
 
+# Earliest point, in seconds after Nova ACCEPTED our own play, at which a stop
+# for that play is put on the wire. An earlier stop is held back until then.
+#
+# Measured, not derived, and with a stated limit. In a live series against a
+# moto tag 2 (2026-10-17/18) a stop that reached the tracker around the moment
+# its ring was about to start left the tracker silent -- no BLE advertisements
+# until a long press on its button -- in two of two runs (stops 11.8 s and
+# 9.4 s after acceptance, ring not yet started). Stops 11.6 s or later after
+# acceptance, with the ring already running, went through in four of four. The
+# ring itself started 5.6 to 10.3 s after acceptance in the runs where it was
+# heard. Twelve seconds clears every start that was heard, but not every start:
+# in one of the failed runs the ring had still not begun 11.8 s after
+# acceptance. It is a boundary drawn from six runs on one tracker model, not a
+# protocol constant, and Nova queues commands, so a ring may start later than
+# any value here. Waiting for a confirmed start would be the stronger rule; no
+# such signal is decoded yet.
+STOP_SOUND_MIN_DELAY_AFTER_PLAY_S: Final = 12.0
+
 
 class StopSoundOutcome(StrEnum):
     """Outcome of a Stop Sound attempt.

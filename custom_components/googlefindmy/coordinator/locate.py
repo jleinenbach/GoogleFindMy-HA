@@ -27,6 +27,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from .._reauth_reason import ReauthReasonCode
 from ..const import (
     DEFAULT_MIN_POLL_INTERVAL,
+    STOP_SOUND_MIN_DELAY_AFTER_PLAY_S,
     PlaySoundOutcome,
     SoundDispatchOutcome,
     StopSoundOutcome,
@@ -999,11 +1000,14 @@ class LocateOperations(_MixinBase):
         for the ring that is audible now. Both of those end as
         ``StopSoundOutcome.UNCORRELATED``.
 
-        This exists as one predicate because two decisions depend on the same
-        answer and must never drift apart: whether the stop may break a
+        This exists as one predicate because three decisions depend on the
+        same answer and must never drift apart: whether the stop may break a
         self-inflicted push cooldown (IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN),
-        and whether an accepted stop may spend -- pop -- the cached key
-        (IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY).
+        whether an accepted stop is reported as ``CANCELLED``, and whether the
+        stop may be held back until STOP_SOUND_MIN_DELAY_AFTER_PLAY_S after the
+        play it cancels. The key itself is never spent by a stop
+        (IRR-CA-STOP-KEEPS-CANCEL-KEY); that used to be the second decision
+        (IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY, superseded).
         """
         cached_uuid = self._sound_request_uuids.get(device_id)
         if cached_uuid is None:
@@ -1011,6 +1015,43 @@ class LocateOperations(_MixinBase):
         if request_uuid is not None and request_uuid != cached_uuid:
             return False
         return not self._cached_sound_uuid_is_stale(device_id)
+
+    async def _async_wait_before_stop(self, delay: float) -> None:
+        """Sleep for ``delay`` seconds; a separate method so tests can replace it."""
+        await asyncio.sleep(delay)
+
+    async def _async_hold_stop_until_ring_started(
+        self, device_id: str, request_uuid: str
+    ) -> None:
+        """Hold a stop for our own play back until STOP_SOUND_MIN_DELAY_AFTER_PLAY_S.
+
+        A stop that reaches the tracker around the moment its ring starts can
+        leave the tracker silent until its button is pressed (measured twice,
+        see the constant). Only a stop for the play whose acceptance we stamped
+        is held: the stamp must carry the key that is about to be sent.
+        Everything else -- no key, an aged key, a foreign key, an ambiguous
+        play -- has no known start and goes out at once.
+
+        Called after the readiness gate, so a stop that is going to be
+        SUPPRESSED is declined at once instead of after the wait.
+        """
+        accepted_stamps = getattr(self, "_sound_play_accepted_at", None)
+        if not accepted_stamps:
+            return
+        stamp = accepted_stamps.get(device_id)
+        if stamp is None or stamp[0] != request_uuid:
+            return
+        remaining = STOP_SOUND_MIN_DELAY_AFTER_PLAY_S - (time.monotonic() - stamp[1])
+        if remaining <= 0:
+            return
+        # INFO, because the user notices it: the ring goes on for this long
+        # after the press. No device identifier, as in the can_ring warning.
+        _LOGGER.info(
+            "Stop Sound deferred by %.1f s: a stop that reaches the tracker "
+            "while its ring is starting can leave the tracker unresponsive",
+            remaining,
+        )
+        await self._async_wait_before_stop(remaining)
 
     async def async_play_sound(self, device_id: str) -> PlaySoundOutcome:
         """Play sound on a device using the native async API (no executor).
@@ -1078,6 +1119,9 @@ class LocateOperations(_MixinBase):
             return PlaySoundOutcome.SUPPRESSED
         try:
             play = await self.api.async_play_sound(device_id)
+            # Taken before any further await, so the stamp stays as close to
+            # Nova's acceptance as this process can observe it.
+            answered_at = time.monotonic()
             # api.async_play_sound carries two independent facts. ``accepted``
             # answers "did Nova take the command", ``cancel_key`` answers "may
             # the device be ringing", and ``outcome`` names WHO refused. The
@@ -1104,11 +1148,9 @@ class LocateOperations(_MixinBase):
             # stored, since it may be the only handle on a current ring. See
             # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
             #
-            # Since the three-valued Stop outcome landed, the drop branch in
-            # async_stop_sound is additionally bound to "the key we sent was
-            # our own AND was fresh": an explicitly passed foreign key must not
-            # evict our handle. That narrows the invariant in the direction of
-            # its own purpose; the wording above is unchanged.
+            # A stop no longer drops the key at all, not even a correlated one
+            # (IRR-CA-STOP-KEEPS-CANCEL-KEY), so the only writers left are this
+            # store, the reload filter and device removal.
             existing_uuid = self._sound_request_uuids.get(device_id)
             existing_is_stale = (
                 existing_uuid is not None
@@ -1126,6 +1168,15 @@ class LocateOperations(_MixinBase):
                     "Stored Play Sound UUID for %s: %s", device_id, request_uuid
                 )
                 await self._async_save_sound_uuids()
+            # Arm the stop delay (STOP_SOUND_MIN_DELAY_AFTER_PLAY_S) for THIS
+            # play only, and only once Nova accepted it: an ambiguous play
+            # proves no start time, so a stop for it is never held back. The
+            # stamp carries the key it belongs to, so a stamp left behind by an
+            # older play cannot delay the stop of a newer one.
+            if ok and request_uuid is not None:
+                accepted_stamps = getattr(self, "_sound_play_accepted_at", None)
+                if accepted_stamps is not None:
+                    accepted_stamps[device_id] = (request_uuid, answered_at)
             # Only a transport that gave us no usable answer is a push problem.
             # A server rejection (401/403/5xx), a rate limit, a missing local
             # action token and a bug of our own all reached this point as the
@@ -1312,8 +1363,9 @@ class LocateOperations(_MixinBase):
             #
             # Why not trusted: nothing proves the aged key references the
             # running ring, so the outcome stays UNCORRELATED and reaches the
-            # user as such. It is also not popped afterwards: unspent, it is
-            # still the best handle a second attempt has.
+            # user as such. It stays cached afterwards, as every key does
+            # (IRR-CA-STOP-KEEPS-CANCEL-KEY): it is still the best handle a
+            # second attempt has.
             #
             # The previous justification ("the ring it referenced auto-stopped
             # long ago") conflated two timers on two protocol layers. The FMDN
@@ -1356,8 +1408,8 @@ class LocateOperations(_MixinBase):
             # branch is to say, per case, what it means.
             cached_uuid = self._sound_request_uuids.get(device_id)
             if used_own_fresh_key:
-                # It is our own live key, so spending it later is correct and
-                # not an eviction.
+                # It is our own live key, so the stop is correlated and may be
+                # held back like an implicit one.
                 _LOGGER.debug(
                     "Cancel key supplied for %s is our own live key: %s",
                     device_id,
@@ -1380,6 +1432,11 @@ class LocateOperations(_MixinBase):
                     "stop cannot be correlated (the ring may keep playing)",
                     device_id,
                 )
+
+        if used_own_fresh_key and request_uuid_to_use is not None:
+            await self._async_hold_stop_until_ring_started(
+                device_id, request_uuid_to_use
+            )
 
         try:
             stop_outcome = await self.api.async_stop_sound(
@@ -1405,33 +1462,19 @@ class LocateOperations(_MixinBase):
             # was sent". A key we cannot vouch for falls through to
             # UNCORRELATED below, which is what reaches the user as an error.
             if used_own_fresh_key:
-                # Correlated stop accepted with OUR key: it is spent. This
-                # is the ONLY branch that drops a live key --
-                # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY is unchanged, only
-                # narrowed in the direction of its own purpose.
-                #
-                # Popped by VALUE, not by device id. The key was read before
-                # the await above, and a Play that lands during the Nova
-                # round trip stores a fresher one for the same device. Popping
-                # by id would then evict the handle of a ring that just
-                # started -- exactly the eviction used_own_fresh_key exists to
-                # prevent, only through the back door of an interleaving.
-                if self._sound_request_uuids.get(device_id) == request_uuid_to_use:
-                    removed_request_uuid = self._sound_request_uuids.pop(
-                        device_id, None
-                    )
-                    # Use getattr for test compatibility (tests may bypass __init__)
-                    timestamps = getattr(self, "_sound_request_timestamps", None)
-                    if timestamps is not None:
-                        timestamps.pop(device_id, None)
-                    if removed_request_uuid is not None:
-                        await self._async_save_sound_uuids()
+                # Correlated stop accepted with OUR key. The key is KEPT
+                # (IRR-CA-STOP-KEEPS-CANCEL-KEY): HTTP 200 means Nova took the
+                # stop, not that the tracker executed it, so the key may still
+                # be the only handle on a ring that is audible right now. Until
+                # it was kept, a second press sent no key at all and was
+                # reported as "could not be matched" for a ring this
+                # integration had started itself. It leaves the cache the same
+                # ways every key does: a newer play replaces it, it ages past
+                # SOUND_UUID_MAX_AGE_S and the reload filter drops it, or the
+                # device is removed.
                 return StopSoundOutcome.CANCELLED
-            # IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY: only a stop we can vouch
-            # for spends the key. An aged key was sent unproven, so it survives
-            # -- it remains the best handle a retry has, and the reload filter
-            # clears it at the next restart anyway. Popping it here would leave
-            # a second attempt with nothing at all.
+            # An aged key was sent unproven, so it is not trusted -- and, like
+            # every key, not spent: it remains the best handle a retry has.
             return StopSoundOutcome.UNCORRELATED
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
