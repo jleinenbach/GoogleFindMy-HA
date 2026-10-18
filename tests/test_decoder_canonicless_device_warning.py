@@ -606,21 +606,31 @@ def test_missing_key_diagnostics_emitted_on_main_pass(
 
     The companion to T5: gating the dump must not silence it on the main poll
     (emit_canonicless_diagnostics=True), where the tracker-shaped keyless device is a real
-    signal worth surfacing.
+    signal worth surfacing. The WARNING names the device by its canonical IDs only; the
+    display name goes to a DEBUG companion, because this path runs on every poll cycle
+    (AGENTS.md section 5 (b)).
     """
     device_list = SimpleNamespace(
         deviceMetadata=[_make_tracker_device(name="Keyless Tracker")]
     )
     cache = SimpleNamespace(entry_id="entry-A")
 
-    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+    with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
         decoder.get_devices_with_location(
             device_list, cache=cache, emit_canonicless_diagnostics=True
         )
 
     warnings = _missing_key_warnings(caplog)
     assert len(warnings) == 1
-    assert "Keyless Tracker" in warnings[0]
+    assert "Keyless Tracker" not in warnings[0]
+    companions = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno == logging.DEBUG
+        and rec.getMessage().startswith("Missing-key device above is")
+    ]
+    assert len(companions) == 1
+    assert "Keyless Tracker" in companions[0]
 
 
 # ----------------------------------------------------------------------------------------
