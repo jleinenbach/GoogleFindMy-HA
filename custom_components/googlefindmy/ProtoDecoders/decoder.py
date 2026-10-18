@@ -1105,9 +1105,10 @@ def get_devices_with_location(
             except Exception as err:
                 # Defensive: decryption issues must not break the whole list, but log
                 # the root cause so users can debug key or parsing mismatches.
-                # The device list is fetched on every poll cycle, so records at INFO
-                # and above name the device by its canonical IDs and the display
-                # name goes to a DEBUG companion (AGENTS.md section 5 (b)).
+                # The device list is refreshed without a user action (every
+                # DEVICE_LIST_POLL_INTERVAL), so records at INFO and above name the
+                # device by its canonical IDs and the display name goes to a DEBUG
+                # companion (AGENTS.md section 5 (b)).
                 ids_text = (
                     ", ".join(
                         str(getattr(canonic_id, "id", "")) for canonic_id in canonic_ids
@@ -1249,9 +1250,9 @@ def get_devices_with_location(
                 )
             else:
                 # For tracker devices that should have keys but don't, log at WARNING.
-                # This runs on every poll cycle, so the WARNING names the device by
-                # its canonical IDs and the display name goes to a DEBUG companion
-                # (AGENTS.md section 5 (b)).
+                # This runs on every unattended device list refresh, so the WARNING
+                # names the device by its canonical IDs and the display name goes to
+                # a DEBUG companion (AGENTS.md section 5 (b)).
                 _LOGGER.warning(
                     "DEBUG STRUCTURE: Missing Key for device (IDs: %s)",
                     ids_str or "<none>",

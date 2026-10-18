@@ -607,8 +607,8 @@ def test_missing_key_diagnostics_emitted_on_main_pass(
     The companion to T5: gating the dump must not silence it on the main poll
     (emit_canonicless_diagnostics=True), where the tracker-shaped keyless device is a real
     signal worth surfacing. The WARNING names the device by its canonical IDs only; the
-    display name goes to a DEBUG companion, because this path runs on every poll cycle
-    (AGENTS.md section 5 (b)).
+    display name goes to a DEBUG companion, because this path runs on every unattended
+    device list refresh (AGENTS.md section 5 (b)).
     """
     device_list = SimpleNamespace(
         deviceMetadata=[_make_tracker_device(name="Keyless Tracker")]

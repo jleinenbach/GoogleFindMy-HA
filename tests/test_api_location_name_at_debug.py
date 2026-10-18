@@ -47,7 +47,7 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaProtobufDecodeError,
     NovaRateLimitError,
 )
-from tests.helpers.api_stub import StubCache, run_coro
+from tests.helpers.api_stub import StubCache
 
 DEVICE_ID = "dev-sentinel-1"
 DEVICE_NAME = "Sentinel Hall Tag"
@@ -89,7 +89,8 @@ def _record_text(record: logging.LogRecord) -> str:
     ("exc", "level", "outcome"),
     [pytest.param(exc, level, outcome, id=case) for case, exc, level, outcome in CASES],
 )
-def test_failure_records_name_the_device_by_id(
+@pytest.mark.asyncio
+async def test_failure_records_name_the_device_by_id(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     exc: BaseException,
@@ -104,10 +105,10 @@ def test_failure_records_name_the_device_by_id(
 
     with caplog.at_level(logging.DEBUG):
         if outcome is None:
-            assert run_coro(api.async_get_device_location(DEVICE_ID, DEVICE_NAME)) == {}
+            assert await api.async_get_device_location(DEVICE_ID, DEVICE_NAME) == {}
         else:
             with pytest.raises(outcome):
-                run_coro(api.async_get_device_location(DEVICE_ID, DEVICE_NAME))
+                await api.async_get_device_location(DEVICE_ID, DEVICE_NAME)
 
     loud = [r for r in caplog.records if r.levelno >= logging.INFO]
     assert [r for r in loud if DEVICE_NAME in _record_text(r)] == []

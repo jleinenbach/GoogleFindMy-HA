@@ -3,22 +3,25 @@
 
 `AGENTS.md` section 5 (b): a record that can repeat unattended keeps the
 user-chosen device name out of the record at INFO and above and carries it
-only at DEBUG. This guard pins that for three functions that run on every
-poll cycle and used to log the display name at WARNING or ERROR:
+only at DEBUG. This guard pins that for three functions that run without a
+user action and used to log the display name at WARNING or ERROR:
 
 * `api.py` `GoogleFindMyAPI.async_get_device_location` (the location
-  lookup shared by the poll loop and the manual locate);
+  lookup shared by every poll cycle and the manual locate);
 * `ProtoDecoders/decoder.py` `get_devices_with_location` (the device list
-  decoder, called twice per poll);
+  decoder, run on each unattended device list refresh);
 * `coordinator/registry.py` `_heal_tracker_device_subentry`, nested in
-  `RegistryOperations._ensure_registry_for_devices` (the registry sync).
+  `RegistryOperations._ensure_registry_for_devices` (the registry sync of
+  every poll cycle).
 
 Inside each function, every log call whose level is INFO or above is
 checked: all positional arguments, including the format argument with an
 f-string or the right side of a `%` format, and all keyword values. An
 offender is any leaf below them that is a name, an attribute (other than
-`__name__`) or a subscript with a string key whose spelling contains `name`
-or `label`, in any case. The three field-name records of the missing-key
+`__name__`), a subscript with a string key, or a string constant passed to a
+nested call (`getattr(device, "userDefinedDeviceName", "")`,
+`device.get("name")`), whose spelling contains `name` or `label`, in any
+case. The three field-name records of the missing-key
 dump in the decoder log protobuf field names (`f.name`), not device names;
 they are listed in `_FIELD_NAME_ROWS` with path, leaf and format prefix, and
 each entry must match exactly one call so that a copied line does not
@@ -30,9 +33,11 @@ services, the manual locate) that may name the device by section 5 (b), and
 a package-wide name predicate would need an exception list longer than the
 rule.
 
-Blind spots, declared: a value copied into a variable whose name has neither
-`name` nor `label` (`fields = ...` in the decoder is such a case and is
-correct), a device object rendered through `str()`, a logger method bound to
+Blind spots, declared: a value copied into a variable, an attribute or a
+subscript whose spelling has neither `name` nor `label` (`fields = ...` in
+the decoder is such a case and is correct; `self._last = device_name`
+followed by a record with `self._last` would be a miss), a device object
+rendered through `str()`, a logger method bound to
 a local name (the receiver rule needs `LOG` in the receiver), an exception
 whose own text carries the name, and records in helpers these functions
 call. The caplog tests in `tests/test_api_location_name_at_debug.py` and
@@ -53,7 +58,7 @@ from custom_components import googlefindmy
 _PACKAGE_ROOT = Path(googlefindmy.__file__).resolve().parent
 
 _LEVELS_ABOVE_DEBUG = frozenset(
-    {"info", "warning", "warn", "error", "exception", "critical", "log"}
+    {"info", "warning", "warn", "error", "exception", "critical", "fatal", "log"}
 )
 
 # (path relative to the package, qualified name, minimum number of log calls
@@ -132,6 +137,16 @@ def _name_leaves(node: ast.AST) -> set[str]:
             and _spells_a_name(child.attr)
         ):
             found.add(ast.unparse(child))
+        elif isinstance(child, ast.Call):
+            # A string key passed to a nested call reads the value by name:
+            # ``getattr(device, "userDefinedDeviceName", "")``, ``d.get("name")``.
+            for argument in child.args:
+                if (
+                    isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                    and _spells_a_name(argument.value)
+                ):
+                    found.add(ast.unparse(child))
         elif (
             isinstance(child, ast.Subscript)
             and isinstance(child.slice, ast.Constant)

@@ -1,7 +1,8 @@
 # tests/test_decoder_registry_name_at_debug.py
 """Device names stay at DEBUG in the decoder's WARNING records.
 
-``ProtoDecoders.decoder.get_devices_with_location`` runs on every poll cycle.
+``ProtoDecoders.decoder.get_devices_with_location`` runs on every device list
+refresh, without a user action.
 AGENTS.md section 5 (b) therefore wants its records at INFO and above to name
 the device by its canonical IDs, with the user-chosen display name in a DEBUG
 companion record. This module pins that for the two WARNING records that used
