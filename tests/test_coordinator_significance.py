@@ -398,10 +398,10 @@ def test_update_cache_preserves_last_seen_when_timestamp_missing() -> None:
 # the position the cache already held, and the cache already held the average of
 # that very report. Every delivery halved the remaining distance to the raw fix,
 # so the published position crept without a new location and every step was a
-# fresh state write. The cached row in these tests starts with an OLDER fix that
-# overlaps the report, so the first delivery fuses and any further fusion of the
-# same report would move the position again - which is what makes the defect
-# visible at all.
+# fresh state write. Unless a test says otherwise (no timestamp, or a fix far
+# away for the gate), the cached row starts with an OLDER fix that overlaps the
+# report, so the first delivery fuses and any further fusion of the same report
+# would move the position again - which is what makes the defect visible at all.
 
 _PRIOR_FIX: dict[str, Any] = {
     "latitude": 40.7128,

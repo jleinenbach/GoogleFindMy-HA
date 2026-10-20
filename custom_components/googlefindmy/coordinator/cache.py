@@ -502,10 +502,9 @@ def _is_fused_report(coord: Any, device_id: str, identity: str | None) -> bool:
     A module function, not a method, for the reason ``_accuracy_gate_rejects`` gives:
     the fusion suites build their coordinator as ``MagicMock(spec=CacheOperations)``,
     where a method would be auto-mocked into a truthy ``Mock`` and every report would
-    look fused. The store is read with ``getattr`` because it is created lazily.
+    look fused. The store is read with ``getattr`` because it is created lazily. A
+    ``None`` identity is never booked, so it is never found either.
     """
-    if identity is None:
-        return False
     fused = getattr(coord, "_fused_report_ids", None) or {}
     return identity in (fused.get(device_id) or ())
 

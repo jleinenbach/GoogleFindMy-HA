@@ -12,10 +12,11 @@ the tracker as freshly updated.
 These tests drive the three real entry points into the fusion (poll cycle,
 manual locate, ``update_device_cache`` for push), the propagation to shared
 devices and the purge, without stubbing ``_apply_weighted_location_fusion``.
-Every scenario starts from a cached fix that is OLDER than the report, overlaps
-it and carries the same source rank: with an equal timestamp a higher cached
-rank would block the merge, and without a cached timestamp the merge would
-judge by distance, and either would hide the defect.
+Unless a test says otherwise (the clear jump does not overlap on purpose), a
+scenario starts from a cached fix that is OLDER than the report, overlaps it and
+carries the same source rank: with an equal timestamp a higher cached rank
+would block the merge, and without a cached timestamp the merge would judge by
+distance, and either would hide the defect.
 """
 
 from __future__ import annotations
