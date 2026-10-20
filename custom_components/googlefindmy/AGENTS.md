@@ -341,6 +341,28 @@ upstream in September 2025) froze trackers for the opposite reason - it discarde
 reference at all. Both refresh paths stop as soon as the device really leaves, because neither fires without an overlap; the
 anchor then ages out and the coarse fix wins.
 
+**Duplicate reports are not fused again.** The fusion averages an incoming fix with the cached position, and the cached
+position already contains every report that was committed. The same report delivered again (the next poll returns it
+unchanged, a manual locate gets it once more, the push channel brings what a poll already brought) would be averaged in a
+second time and move the published position towards the raw fix without a new location, each step a new state write that
+`person` reads as a fresh tracker. `coordinator/cache.py::_fusion_report_identity` is the SSOT of what makes two deliveries the
+same report: the normalised `last_seen`, the raw latitude and longitude and the accuracy if it is valid, as an 8-byte digest. It
+is not `_tally_identity`, which keys on the timestamp alone and would merge two different reports of one second. The identity is
+formed at the entry of `_apply_weighted_location_fusion`, before any branch rewrites the coordinates, travels as the transient
+marker `_fusion_report_id` (popped in `update_device_cache` before sanitize, stripped by prefix in the fallbacks) and is booked
+into a per-device ring of `_FUSED_REPORT_MEMORY` identities only AFTER the row is committed - for every committed row, fused or
+taken over as a clear jump, and only when it is not in the ring yet, so the repeats of one report cannot evict another report of
+the same second. A delivery whose identity is in the ring keeps the cached geometry (`_DUPLICATE_GEOMETRY_KEYS`), returns `True`
+and commits the rest of the report (battery, height, metadata); it sets no `_fused_applied`, so `fused_updates` does not count it.
+The check sits before the trusted and gate branches, because a remembered report has passed them already, and a report the gate
+rejects is never committed, so it is never remembered and stays rejected on every repeat. Shared devices remember the identity
+of the row they adopt in `_propagate_location_to_shared_devices`; `purge_device` forgets the ring. The ring is not persisted:
+after a restart the first repeat of a report is fused once per device, then the rule holds again. Pinned by
+`tests/test_coordinator_significance.py` (the `same_report`, `two_reports`, `repeated_report`, `same_position`, `new_accuracy`,
+`gate_rejected` and `duplicate_*` cases), `tests/test_cache_fusion_duplicate_paths.py` (the three real entry points, a clear jump,
+markers, purge, shared devices) and `tests/test_device_tracker_tick_writes.py::test_redelivered_report_is_reported_not_changed`
+(the repeat is a `state_reported`, not a `state_changed`, through the real state machine).
+
 The drop path taken when `_normalize_coords` fails (no usable coordinate pair and nothing cached to preserve) strips
 `_report_hint` before returning; mirror that hint-stripping step in any new helpers that short-circuit low-quality updates so
 internal metadata never leaks into entity state.
