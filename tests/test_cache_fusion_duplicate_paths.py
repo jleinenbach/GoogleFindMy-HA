@@ -264,6 +264,30 @@ async def test_clear_jump_is_booked_like_a_fusion(
 
 
 @pytest.mark.asyncio
+async def test_report_from_before_a_jump_does_not_pull_the_position_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clear jump keeps the ring, so an earlier report stays a repeat.
+
+    A report without a timestamp cannot be ordered against the jump, so nothing
+    but the ring stops it from taking the position back to where it was before.
+    """
+
+    now = time.time()
+    stampless = _report(now, last_seen=None)
+    jump = _report(now, latitude=49.876, last_seen=now - 100.0)
+    coordinator, _counts = _coordinator(monkeypatch, jump)
+    coordinator.update_device_cache(_DEVICE, _prior_fix(now))
+    coordinator.update_device_cache(_DEVICE, dict(stampless))
+    coordinator.update_device_cache(_DEVICE, dict(jump))
+    assert _position(coordinator, _DEVICE)[0] == pytest.approx(49.876, abs=1e-9)
+
+    coordinator.update_device_cache(_DEVICE, dict(stampless))
+
+    assert _position(coordinator, _DEVICE)[0] == pytest.approx(49.876, abs=1e-9)
+
+
+@pytest.mark.asyncio
 async def test_no_transient_marker_reaches_the_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -433,7 +457,94 @@ _ROW_WRITERS = {
     ("Auth/fcm_receiver_ha.py", "_write_coordinator_payload"): (
         "fallback for coordinator doubles without update_device_cache"
     ),
+    ("coordinator/main.py", "purge_device"): "removes the row and forgets the ring",
+    ("fmdn_finder/location_uploader.py", "_update_semantic_name"): (
+        "writes the semantic name only"
+    ),
 }
+
+_CACHE_ATTR = "_device_location_data"
+_MUTATING_METHODS = frozenset(
+    {"pop", "popitem", "update", "setdefault", "clear", "__setitem__", "__delitem__"}
+)
+
+
+def _is_cache_ref(node: ast.AST, cache_names: set[str]) -> bool:
+    """``x._device_location_data``, ``getattr(x, "_device_location_data", ...)``,
+    ``... or {}`` around either, or a local name bound to one of them."""
+
+    if isinstance(node, ast.Attribute):
+        return node.attr == _CACHE_ATTR
+    if isinstance(node, ast.Name):
+        return node.id in cache_names
+    if isinstance(node, ast.BoolOp):
+        return any(_is_cache_ref(value, cache_names) for value in node.values)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == _CACHE_ATTR
+    )
+
+
+def _is_row_ref(node: ast.AST, cache_names: set[str]) -> bool:
+    """A row taken out of the cache: ``<cache>[...]`` or ``<cache>.get(...)``."""
+
+    if isinstance(node, ast.Subscript):
+        return _is_cache_ref(node.value, cache_names)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and _is_cache_ref(node.func.value, cache_names)
+    )
+
+
+def _writes_cache_row(func: ast.AST) -> bool:
+    cache_names: set[str] = set()
+    row_names: set[str] = set()
+    # Two passes, so a name is known as an alias wherever it is used in the function.
+    for _ in range(2):
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name):
+                    if _is_cache_ref(node.value, cache_names):
+                        cache_names.add(target.id)
+                    elif _is_row_ref(node.value, cache_names):
+                        row_names.add(target.id)
+    for node in ast.walk(func):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        elif isinstance(node, ast.Delete):
+            targets = node.targets
+        for target in targets:
+            if isinstance(target, ast.Subscript) and (
+                _is_cache_ref(target.value, cache_names)
+                or _is_row_ref(target.value, cache_names)
+                or (isinstance(target.value, ast.Name) and target.value.id in row_names)
+            ):
+                return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _MUTATING_METHODS
+            and (
+                _is_cache_ref(node.func.value, cache_names)
+                or _is_row_ref(node.func.value, cache_names)
+                or (
+                    isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in row_names
+                )
+            )
+        ):
+            return True
+    return False
 
 
 def _row_writers() -> set[tuple[str, str]]:
@@ -442,32 +553,30 @@ def _row_writers() -> set[tuple[str, str]]:
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for func in ast.walk(tree):
-            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for node in ast.walk(func):
-                if isinstance(node, ast.Assign):
-                    targets = node.targets
-                elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-                    targets = [node.target]
-                else:
-                    continue
-                for target in targets:
-                    if (
-                        isinstance(target, ast.Subscript)
-                        and isinstance(target.value, ast.Attribute)
-                        and target.value.attr == "_device_location_data"
-                    ):
-                        found.add((path.relative_to(root).as_posix(), func.name))
+            if isinstance(
+                func, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ) and _writes_cache_row(func):
+                found.add((path.relative_to(root).as_posix(), func.name))
     return found
 
 
 def test_every_cache_row_writer_handles_the_fused_report_ring() -> None:
-    """A writer of ``_device_location_data[...]`` must say what it does to the ring.
+    """A function that changes ``_device_location_data`` must say what it does to the ring.
 
     ``prime_device_location_cache`` overwrote committed geometry without
     forgetting the remembered reports, and every repeat then kept the primed
     position. This pins the list of writers so the next one is decided, not
     missed.
+
+    Seen, per function: item assignment and ``del`` on the cache, reached as an
+    attribute, through ``getattr(..., "_device_location_data")`` or through a
+    local name bound to either; the mutating dict methods on it; and the same
+    writes on a row taken out of it with ``[...]`` or ``.get(...)``, directly or
+    through a local name. Not seen: a row or the cache handed to another
+    function that writes it, an alias kept on an attribute or bound by tuple
+    unpacking, a loop or comprehension target, and anything outside a function.
+    A local name that is rebound to a copy still counts as an alias, which only
+    reports a writer too many.
     """
 
     assert _row_writers() == set(_ROW_WRITERS)

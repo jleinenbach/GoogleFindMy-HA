@@ -346,7 +346,7 @@ The drop path taken when `_normalize_coords` fails (no usable coordinate pair an
 internal metadata never leaks into entity state.
 
 **Duplicate reports are not fused again.** The fusion averages an incoming fix with the cached position, and the cached
-position already contains every report that was committed. The same report delivered again (the next poll returns it
+position already contains the report that was last committed. The same report delivered again (the next poll returns it
 unchanged, a manual locate gets it once more, the push channel brings what a poll already brought) would be averaged in a
 second time and move the published position towards the raw fix without a new location, each step a new state write that
 `person` reads as a fresh tracker. `coordinator/cache.py::_fusion_report_identity` is the SSOT of what makes two deliveries the
@@ -363,7 +363,11 @@ The check sits before the trusted and gate branches, because a remembered report
 rejects is never committed, so it is never remembered and stays rejected on every repeat. Shared devices remember the identity
 of the row they adopt in `_propagate_location_to_shared_devices`; `purge_device` forgets the ring,
 and so does `prime_device_location_cache` when it replaces the geometry (a restored state can overwrite a row committed by
-the first refresh after a restart; the remembered reports are then no longer contained in it). The ring is not persisted:
+the first refresh after a restart; the remembered reports are then no longer contained in it). A clear jump or a trusted
+takeover replaces the geometry but keeps the ring: an older report in it is then refused instead of being used again, so a
+repeat of a report without a timestamp cannot pull the position back to where it was before the jump. Every function that writes `_device_location_data` or a row taken
+out of it is listed with what it does to the ring in `_ROW_WRITERS` (`tests/test_cache_fusion_duplicate_paths.py`); a new
+writer is added there with its reason. The ring is not persisted:
 after a restart the first repeat of a report is fused once per device, then the rule holds again. Pinned by
 `tests/test_coordinator_significance.py` (the `same_report`, `two_reports`, `repeated_report`, `same_position`, `new_accuracy`,
 `gate_rejected` and `duplicate_*` cases), `tests/test_cache_fusion_duplicate_paths.py` (the three real entry points, a clear jump,
