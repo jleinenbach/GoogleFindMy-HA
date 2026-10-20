@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator.cache import (
+    MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
+)
 from tests.helpers.config_entries_stub import make_config_entry
+
+if TYPE_CHECKING:
+    from freezegun.api import FrozenDateTimeFactory
 
 
 def _make_coordinator(existing: dict[str, Any]) -> GoogleFindMyCoordinator:
@@ -600,3 +606,43 @@ def test_duplicate_lets_new_altitude_through() -> None:
     assert cached["altitude"] == pytest.approx(126.5)
     assert _position(coordinator)[:2] == after_first[:2]
     assert counts.get("fused_updates") == 1
+
+
+def test_duplicate_at_trusted_anchor_keeps_anchor_height() -> None:
+    """A repeat must not undo the height a trusted anchor snapped to."""
+
+    coordinator, _counts = _fusing_coordinator(
+        _PRIOR_FIX | {"location_type": "trusted", "altitude": 100.0}
+    )
+
+    coordinator.update_device_cache("device-1", _report(altitude=200.0))
+    coordinator.update_device_cache("device-1", _report(altitude=200.0))
+
+    cached = coordinator._device_location_data["device-1"]
+    assert cached["status"] == "Stationary (at Anchor)"
+    assert cached["altitude"] == 100.0
+
+
+def test_report_dropped_as_future_is_fused_once_it_is_due(
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Only a committed report is remembered.
+
+    A report stamped beyond the accepted clock drift is dropped by the
+    significance check after the fusion ran. Remembering it there would refuse
+    the same report once its stamp is no longer in the future.
+    """
+
+    now = time.time()
+    coordinator, counts = _fusing_coordinator(_PRIOR_FIX | {"last_seen": now - 600.0})
+    early = _report(last_seen=now + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S + 60.0)
+
+    coordinator.update_device_cache("device-1", dict(early))
+    assert coordinator._device_location_data["device-1"]["last_seen"] == now - 600.0
+    freezer.tick(MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S + 120.0)
+    coordinator.update_device_cache("device-1", dict(early))
+
+    cached = coordinator._device_location_data["device-1"]
+    assert cached["status"] == "Fused (Weighted)"
+    assert cached["last_seen"] == int(early["last_seen"])
+    assert _position(coordinator)[0] == pytest.approx(40.71295, abs=1e-9)

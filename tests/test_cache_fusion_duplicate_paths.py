@@ -329,3 +329,36 @@ async def test_shared_sibling_does_not_refuse_propagated_report(
 
     assert propagated[0] == pytest.approx(49.86615, abs=1e-9)
     assert _position(coordinator, _SIBLING) == propagated
+
+
+@pytest.mark.asyncio
+async def test_sibling_that_skipped_propagation_still_fuses_the_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared device that did not adopt the row has not received the report.
+
+    The sibling already holds its own fix of the same second, so the
+    propagation skips it. When the report then reaches the sibling directly,
+    it is new there and is fused with the sibling's own fix.
+    """
+
+    now = time.time()
+    coordinator, _counts = _coordinator(monkeypatch, _report(now))
+    for device_id in (_DEVICE, _SIBLING):
+        coordinator.update_device_cache(
+            device_id, _prior_fix(now) | {"identity_key": _SHARED_KEY}
+        )
+    own_fix = _report(now, latitude=49.866, longitude=10.8394)
+    coordinator.update_device_cache(_SIBLING, own_fix | {"identity_key": _SHARED_KEY})
+    sibling_before = _position(coordinator, _SIBLING)
+
+    coordinator.update_device_cache(
+        _DEVICE, _report(now) | {"identity_key": _SHARED_KEY}
+    )
+    assert _position(coordinator, _SIBLING) == sibling_before
+    coordinator.update_device_cache(
+        _SIBLING, _report(now) | {"identity_key": _SHARED_KEY}
+    )
+
+    assert _position(coordinator, _SIBLING) != sibling_before
+    assert coordinator._device_location_data[_SIBLING]["status"] == "Fused (Weighted)"

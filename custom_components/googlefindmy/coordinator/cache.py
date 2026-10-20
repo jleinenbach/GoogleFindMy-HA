@@ -1753,6 +1753,13 @@ class CacheOperations(_MixinBase):
                     new_data[key] = existing[key]
                 else:
                     new_data.pop(key, None)
+            # Against a trusted anchor the first delivery was snapped back, height
+            # included (branch below); the repeat keeps that height as well, or it
+            # would undo half of the snap without a new location.
+            if existing.get("location_type") == "trusted" and (
+                existing.get("altitude") is not None
+            ):
+                new_data["altitude"] = existing["altitude"]
             _LOGGER.debug("Skipping re-fusion for %s: report already fused", device_id)
             return True
 
