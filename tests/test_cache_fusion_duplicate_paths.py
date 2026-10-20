@@ -21,9 +21,11 @@ distance, and either would hide the defect.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -390,3 +392,63 @@ async def test_primed_position_forgets_fused_reports(
     cached = coordinator._device_location_data[_DEVICE]
     assert (cached["latitude"], cached["longitude"]) != (49.8657, 10.839)
     assert cached["status"] == "Fused (Weighted)"
+
+
+# Every place that writes a cache row, and what it does about the remembered
+# reports. The ring is only valid while the row still contains every report in
+# it, so a writer either books what it commits, forgets the ring when it
+# replaces the geometry, or writes something that is not geometry. A new
+# writer must be added here with its reason.
+_ROW_WRITERS = {
+    ("coordinator/cache.py", "update_device_cache"): "books after the commit",
+    ("coordinator/cache.py", "_propagate_location_to_shared_devices"): (
+        "books for each adopting target"
+    ),
+    ("coordinator/cache.py", "prime_device_location_cache"): (
+        "forgets the ring when it primes a position"
+    ),
+    ("coordinator/cache.py", "_persist_anchor_metadata"): "writes metadata only",
+    ("coordinator/polling.py", "_async_start_poll_cycle"): (
+        "fallback for coordinator doubles without update_device_cache"
+    ),
+    ("Auth/fcm_receiver_ha.py", "_write_coordinator_payload"): (
+        "fallback for coordinator doubles without update_device_cache"
+    ),
+}
+
+
+def _row_writers() -> set[tuple[str, str]]:
+    root = Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
+    found: set[tuple[str, str]] = set()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                    targets = [node.target]
+                else:
+                    continue
+                for target in targets:
+                    if (
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Attribute)
+                        and target.value.attr == "_device_location_data"
+                    ):
+                        found.add((path.relative_to(root).as_posix(), func.name))
+    return found
+
+
+def test_every_cache_row_writer_handles_the_fused_report_ring() -> None:
+    """A writer of ``_device_location_data[...]`` must say what it does to the ring.
+
+    ``prime_device_location_cache`` overwrote committed geometry without
+    forgetting the remembered reports, and every repeat then kept the primed
+    position. This pins the list of writers so the next one is decided, not
+    missed.
+    """
+
+    assert _row_writers() == set(_ROW_WRITERS)
