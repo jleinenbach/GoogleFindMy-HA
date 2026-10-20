@@ -177,7 +177,7 @@ async def test_poll_path_repeat_is_fused_once(monkeypatch: pytest.MonkeyPatch) -
     await _poll(coordinator)
 
     assert _position(coordinator, _DEVICE) == after_first
-    assert after_first[0] == pytest.approx(49.86615)
+    assert after_first[0] == pytest.approx(49.86615, abs=1e-9)
     assert counts.get("fused_updates") == 1
 
 
@@ -196,7 +196,7 @@ async def test_locate_path_repeat_is_fused_once(
     await _locate(coordinator)
 
     assert _position(coordinator, _DEVICE) == after_first
-    assert after_first[0] == pytest.approx(49.86615)
+    assert after_first[0] == pytest.approx(49.86615, abs=1e-9)
     assert counts.get("fused_updates") == 1
 
 
@@ -256,7 +256,7 @@ async def test_clear_jump_is_booked_like_a_fusion(
 
     cached = coordinator._device_location_data[_DEVICE]
     assert cached["status"] == "coordinate"
-    assert cached["latitude"] == pytest.approx(49.876)
+    assert cached["latitude"] == pytest.approx(49.876, abs=1e-9)
     assert counts.get("fused_updates", 0) == 0
 
 
@@ -326,5 +326,5 @@ async def test_shared_sibling_does_not_refuse_propagated_report(
         _SIBLING, _report(now) | {"identity_key": _SHARED_KEY}
     )
 
-    assert propagated[0] == pytest.approx(49.86615)
+    assert propagated[0] == pytest.approx(49.86615, abs=1e-9)
     assert _position(coordinator, _SIBLING) == propagated

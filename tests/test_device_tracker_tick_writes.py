@@ -1451,7 +1451,12 @@ async def test_redelivered_report_is_reported_not_changed(
     cache._device_update_history = {}
     cache.increment_stat = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     cache._is_on_hass_loop = lambda: True  # type: ignore[method-assign]
-    report = {"latitude": 48.1003, "longitude": 11.5, "accuracy": 10.0}
+    report = {
+        "latitude": 48.1003,
+        "longitude": 11.5,
+        "accuracy": 10.0,
+        "status": "coordinate",
+    }
     cache.update_device_cache(
         "dev-1", {**report, "latitude": 48.1, "last_seen": now - 60}
     )

@@ -451,7 +451,7 @@ def test_same_report_three_times_is_fused_once() -> None:
     coordinator.update_device_cache("device-1", _report())
 
     assert _position(coordinator) == after_first
-    assert after_first[0] == pytest.approx(40.71295)
+    assert after_first[0] == pytest.approx(40.71295, abs=1e-9)
     assert counts.get("fused_updates") == 1
 
 
@@ -498,7 +498,7 @@ def test_same_position_one_second_later_is_fused() -> None:
 
     cached = coordinator._device_location_data["device-1"]
     assert cached["status"] == "Fused (Weighted)"
-    assert cached["last_seen"] == pytest.approx(1_700_000_061.0)
+    assert cached["last_seen"] == 1_700_000_061
     assert counts.get("fused_updates") == 2
 
 
@@ -531,7 +531,7 @@ def test_repeated_report_without_last_seen_is_fused_once() -> None:
     coordinator.update_device_cache("device-1", dict(report))
     coordinator.update_device_cache("device-1", dict(report))
 
-    assert after_first[0] == pytest.approx(40.71295)
+    assert after_first[0] == pytest.approx(40.71295, abs=1e-9)
     assert _position(coordinator) == after_first
     assert counts.get("fused_updates") == 1
 
@@ -564,7 +564,8 @@ def test_gate_rejected_report_stays_rejected_on_repeat(with_last_seen: bool) -> 
     coordinator.update_device_cache("device-1", dict(coarse))
 
     cached = coordinator._device_location_data["device-1"]
-    assert cached["last_seen"] == pytest.approx(now - 300.0)
+    # Exact: a relative tolerance at epoch scale would hide minutes.
+    assert cached["last_seen"] == now - 300.0
     assert (cached["latitude"], cached["longitude"]) == (49.866, 10.839)
     if not with_last_seen:
         assert counts.get("accuracy_gate_rejects") == 2
