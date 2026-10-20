@@ -1454,7 +1454,8 @@ async def test_redelivered_report_is_reported_not_changed(
     report = {
         "latitude": 48.1003,
         "longitude": 11.5,
-        "accuracy": 10.0,
+        # 50 m on both sides overlaps the ~33 m step, so the report is fused.
+        "accuracy": 50.0,
         "status": "coordinate",
     }
     cache.update_device_cache(
@@ -1462,6 +1463,7 @@ async def test_redelivered_report_is_reported_not_changed(
     )
     cache.update_device_cache("dev-1", {**report, "last_seen": now - 30})
     fused = dict(cache._device_location_data["dev-1"])
+    assert fused["status"] == "Fused (Weighted)"
     cache.update_device_cache("dev-1", {**report, "last_seen": now - 30})
     redelivered = dict(cache._device_location_data["dev-1"])
 
