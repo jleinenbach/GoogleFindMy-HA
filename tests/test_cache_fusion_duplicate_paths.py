@@ -394,6 +394,25 @@ async def test_primed_position_forgets_fused_reports(
     assert cached["status"] == "Fused (Weighted)"
 
 
+@pytest.mark.asyncio
+async def test_primed_metadata_keeps_fused_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Priming without a position leaves the cached geometry, and the ring, alone."""
+
+    now = time.time()
+    coordinator, counts = _coordinator(monkeypatch, _report(now))
+    coordinator.update_device_cache(_DEVICE, _prior_fix(now))
+    coordinator.update_device_cache(_DEVICE, _report(now))
+    after_first = _position(coordinator, _DEVICE)
+
+    coordinator.prime_device_location_cache(_DEVICE, {"battery_level": 0.5})
+    coordinator.update_device_cache(_DEVICE, _report(now))
+
+    assert _position(coordinator, _DEVICE) == after_first
+    assert counts.get("fused_updates") == 1
+
+
 # Every place that writes a cache row, and what it does about the remembered
 # reports. The ring is only valid while the row still contains every report in
 # it, so a writer either books what it commits, forgets the ring when it
