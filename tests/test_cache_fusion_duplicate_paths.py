@@ -362,3 +362,31 @@ async def test_sibling_that_skipped_propagation_still_fuses_the_report(
 
     assert _position(coordinator, _SIBLING) != sibling_before
     assert coordinator._device_location_data[_SIBLING]["status"] == "Fused (Weighted)"
+
+
+@pytest.mark.asyncio
+async def test_primed_position_forgets_fused_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restored position no longer contains the reports fused before it.
+
+    On a restart the first refresh can commit the current report before the
+    tracker restores an older state over it. The current report arriving again
+    must then be fused with the restored position, not refused as a repeat
+    that keeps the restored position under the newer timestamp.
+    """
+
+    now = time.time()
+    coordinator, _counts = _coordinator(monkeypatch, _report(now))
+    coordinator.update_device_cache(_DEVICE, _prior_fix(now))
+    coordinator.update_device_cache(_DEVICE, _report(now))
+
+    restored = {"latitude": 49.8657, "longitude": 10.839, "accuracy": 50.0}
+    coordinator.prime_device_location_cache(
+        _DEVICE, restored | {"last_seen": now - 900.0}
+    )
+    coordinator.update_device_cache(_DEVICE, _report(now))
+
+    cached = coordinator._device_location_data[_DEVICE]
+    assert (cached["latitude"], cached["longitude"]) != (49.8657, 10.839)
+    assert cached["status"] == "Fused (Weighted)"

@@ -361,7 +361,9 @@ and commits the rest of the report (battery, height, metadata), except that agai
 height as the snap-back did; it sets no `_fused_applied`, so `fused_updates` does not count it.
 The check sits before the trusted and gate branches, because a remembered report has passed them already, and a report the gate
 rejects is never committed, so it is never remembered and stays rejected on every repeat. Shared devices remember the identity
-of the row they adopt in `_propagate_location_to_shared_devices`; `purge_device` forgets the ring. The ring is not persisted:
+of the row they adopt in `_propagate_location_to_shared_devices`; `purge_device` forgets the ring,
+and so does `prime_device_location_cache` when it replaces the geometry (a restored state can overwrite a row committed by
+the first refresh after a restart; the remembered reports are then no longer contained in it). The ring is not persisted:
 after a restart the first repeat of a report is fused once per device, then the rule holds again. Pinned by
 `tests/test_coordinator_significance.py` (the `same_report`, `two_reports`, `repeated_report`, `same_position`, `new_accuracy`,
 `gate_rejected` and `duplicate_*` cases), `tests/test_cache_fusion_duplicate_paths.py` (the three real entry points, a clear jump,
