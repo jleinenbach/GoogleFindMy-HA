@@ -20,23 +20,24 @@ concurrency:
 
 jobs:
   # Pull request runs pass the job approval_gate, bound to the environment
-  # "ci-freigabe", before any other job of this workflow starts. Where that
-  # environment has a required reviewer (jleinenbach/GoogleFindMy-HA), the
-  # run waits for a manual approval, so the Home Assistant test load only
-  # happens when it is wanted. Where it has no protection rules (GitHub
-  # creates a missing environment without rules when a job references it, as
-  # in BSkando/GoogleFindMy-HA), the gate passes without waiting for
-  # approval. Other pull request workflows are not gated (AGENTS.md). Pushes
-  # to main run without the gate. Guarded by tests/test_ci_approval_gate.py.
+  # "home-assistant-tests", before any other job of this workflow starts.
+  # Where that environment has a required reviewer
+  # (jleinenbach/GoogleFindMy-HA), the run waits for a manual approval, so
+  # the Home Assistant test load only happens when it is wanted. Where it has
+  # no protection rules (GitHub creates a missing environment without rules
+  # on the first run that references it), the gate passes without waiting
+  # for approval. Other pull request workflows are not gated (AGENTS.md).
+  # Pushes to main run without the gate. Guarded by
+  # tests/test_ci_approval_gate.py.
   approval_gate:
     name: CI approval gate
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    environment: ci-freigabe
+    environment: home-assistant-tests
     permissions: {}
     steps:
       - name: Record approval
-        run: echo "CI run approved in environment ci-freigabe."
+        run: echo "CI run approved in environment home-assistant-tests."
 
   hassfest:
     name: Hassfest validation
