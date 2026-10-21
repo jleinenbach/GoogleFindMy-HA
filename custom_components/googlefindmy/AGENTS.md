@@ -364,14 +364,17 @@ rejects is never committed, so it is never remembered and stays rejected on ever
 of the row they adopt in `_propagate_location_to_shared_devices`; `purge_device` forgets the ring,
 and so does `prime_device_location_cache` when it replaces the geometry (a restored state can overwrite a row committed by
 the first refresh after a restart; the remembered reports are then no longer contained in it). A clear jump or a trusted
-takeover replaces the geometry but keeps the ring: an older report in it is then refused instead of being used again, so a
-repeat of a report without a timestamp cannot pull the position back to where it was before the jump. Every function that writes `_device_location_data` or a row taken
-out of it is listed with what it does to the ring in `_ROW_WRITERS` (`tests/test_cache_fusion_duplicate_paths.py`); a new
-writer is added there with its reason. The ring is not persisted:
+takeover replaces the geometry with a newer report but keeps the ring: an older report in it is then refused instead of being
+used again, so a repeat of a report without a timestamp cannot pull the position back to where it was before the jump, as long
+as that report is still among the last `_FUSED_REPORT_MEMORY` remembered ones and no restart or priming came in between (priming
+forgets the ring because a restored state can be older than the reports in it). The functions that write `_device_location_data`
+or a row taken out of it, in the forms `tests/test_cache_fusion_duplicate_paths.py::test_every_cache_row_writer_handles_the_fused_report_ring`
+detects, are listed with what they do to the ring in `_ROW_WRITERS` there; a new writer is added with its reason. Its docstring
+lists the forms measured as undetected; that list is not exhaustive, so a writer in another form is still a review question. The ring is not persisted:
 after a restart the first repeat of a report is fused once per device, then the rule holds again. Pinned by
 `tests/test_coordinator_significance.py` (the `same_report`, `two_reports`, `repeated_report`, `same_position`, `new_accuracy`,
 `gate_rejected` and `duplicate_*` cases), `tests/test_cache_fusion_duplicate_paths.py` (the three real entry points, a clear jump,
-markers, purge, shared devices) and `tests/test_device_tracker_tick_writes.py::test_redelivered_report_is_reported_not_changed`
+a trusted takeover, markers, purge, priming, shared devices) and `tests/test_device_tracker_tick_writes.py::test_redelivered_report_is_reported_not_changed`
 (the repeat is a `state_reported`, not a `state_changed`, through the real state machine).
 
 ### Authentication failure propagation

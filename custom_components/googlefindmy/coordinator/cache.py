@@ -886,9 +886,10 @@ class CacheOperations(_MixinBase):
             self._device_location_data[device_id] = dict(data)
         # A primed position replaces the geometry the remembered reports were
         # fused into (on a restart the first refresh can commit before the
-        # tracker restores an older state over it). Those reports are then no
-        # longer contained in the cached row, so forget them; otherwise every
-        # repeat of the current report would keep the primed, older position.
+        # tracker restores an older state over it). Unlike a clear jump, which
+        # puts a newer report in place, the primed row can be older than the
+        # reports in the ring, so forget them; otherwise every repeat of the
+        # current report would keep the primed, older position.
         if "latitude" in data or "longitude" in data:
             fused_reports = getattr(self, "_fused_report_ids", None)
             if fused_reports is not None:

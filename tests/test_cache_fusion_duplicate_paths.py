@@ -288,6 +288,34 @@ async def test_report_from_before_a_jump_does_not_pull_the_position_back(
 
 
 @pytest.mark.asyncio
+async def test_report_from_before_a_trusted_takeover_stays_a_repeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trusted takeover keeps the ring, like a clear jump.
+
+    The trusted report is about 1.1 km away, so without the ring the earlier
+    report would not be snapped back to the anchor but would pass the gate as
+    a clear jump of its own and take the position back.
+    """
+
+    now = time.time()
+    stampless = _report(now, last_seen=None)
+    anchor = _report(
+        now, latitude=49.876, last_seen=now - 100.0, location_type="trusted"
+    )
+    coordinator, _counts = _coordinator(monkeypatch, anchor)
+    coordinator.update_device_cache(_DEVICE, _prior_fix(now))
+    coordinator.update_device_cache(_DEVICE, dict(stampless))
+    coordinator.update_device_cache(_DEVICE, dict(anchor))
+    assert _position(coordinator, _DEVICE)[0] == pytest.approx(49.876, abs=1e-9)
+    assert coordinator._device_location_data[_DEVICE]["location_type"] == "trusted"
+
+    coordinator.update_device_cache(_DEVICE, dict(stampless))
+
+    assert _position(coordinator, _DEVICE)[0] == pytest.approx(49.876, abs=1e-9)
+
+
+@pytest.mark.asyncio
 async def test_no_transient_marker_reaches_the_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -437,11 +465,14 @@ async def test_primed_metadata_keeps_fused_reports(
     assert counts.get("fused_updates") == 1
 
 
-# Every place that writes a cache row, and what it does about the remembered
-# reports. The ring is only valid while the row still contains every report in
-# it, so a writer either books what it commits, forgets the ring when it
-# replaces the geometry, or writes something that is not geometry. A new
-# writer must be added here with its reason.
+# Every function the guard below finds writing a cache row, and what it does
+# about the remembered reports. A remembered report must not be fused again into
+# a row that already contains it, and must not be refused against a row older
+# than it. So a writer books what it commits; keeps the ring when it replaces the
+# geometry with a newer report (a clear jump or a trusted takeover, where the
+# older reports in the ring are then refused); forgets the ring when it can put
+# an older position in place (priming a restored state); or writes no geometry.
+# A new writer is added here with its reason.
 _ROW_WRITERS = {
     ("coordinator/cache.py", "update_device_cache"): "books after the commit",
     ("coordinator/cache.py", "_propagate_location_to_shared_devices"): (
@@ -456,6 +487,9 @@ _ROW_WRITERS = {
     ),
     ("Auth/fcm_receiver_ha.py", "_write_coordinator_payload"): (
         "fallback for coordinator doubles without update_device_cache"
+    ),
+    ("coordinator/main.py", "__init__"): (
+        "creates the empty cache, before the ring exists"
     ),
     ("coordinator/main.py", "purge_device"): "removes the row and forgets the ring",
     ("fmdn_finder/location_uploader.py", "_update_semantic_name"): (
@@ -524,6 +558,8 @@ def _writes_cache_row(func: ast.AST) -> bool:
         elif isinstance(node, ast.Delete):
             targets = node.targets
         for target in targets:
+            if isinstance(target, ast.Attribute) and target.attr == _CACHE_ATTR:
+                return True
             if isinstance(target, ast.Subscript) and (
                 _is_cache_ref(target.value, cache_names)
                 or _is_row_ref(target.value, cache_names)
@@ -568,15 +604,28 @@ def test_every_cache_row_writer_handles_the_fused_report_ring() -> None:
     position. This pins the list of writers so the next one is decided, not
     missed.
 
-    Seen, per function: item assignment and ``del`` on the cache, reached as an
-    attribute, through ``getattr(..., "_device_location_data")`` or through a
-    local name bound to either; the mutating dict methods on it; and the same
-    writes on a row taken out of it with ``[...]`` or ``.get(...)``, directly or
-    through a local name. Not seen: a row or the cache handed to another
-    function that writes it, an alias kept on an attribute or bound by tuple
-    unpacking, a loop or comprehension target, and anything outside a function.
-    A local name that is rebound to a copy still counts as an alias, which only
-    reports a writer too many.
+    The guard is a syntax check with a stated reach, not a proof that no other
+    writer exists; a writer in a form it does not see is still a review question.
+
+    Seen, per function: assignment to the attribute itself; item assignment and
+    ``del`` on the cache, reached as an attribute, through
+    ``getattr(..., "_device_location_data")`` (also inside ``... or {}``) or
+    through a local name bound to either by a plain single-target assignment; the
+    methods in ``_MUTATING_METHODS`` called on it; and the same writes on a row
+    taken out of it with ``[...]`` or ``.get(...)``, directly or through such a
+    local name.
+
+    Measured as not seen (not an exhaustive list): a row or the cache handed to another function that writes it
+    (``dict.update(row, ...)``, ``operator.setitem``, any helper); the cache
+    handed in from outside, such as the keyword ``_device_location_data=`` of the
+    standalone stub in ``googlefindmy/main.py``; a local name bound by an
+    annotated assignment, a walrus, tuple unpacking, several targets, a
+    conditional expression or a loop or comprehension target; a row reached
+    through ``.get(...) or {}``; a write more than one subscript below a row
+    (``<cache>[d]["k"]["j"] = ...``); an alias kept on an attribute; and anything
+    outside a function. The check is per function name, so a further write inside a
+    function already listed stays unseen. A local name that is rebound to a copy
+    still counts as an alias, which only reports a writer too many.
     """
 
     assert _row_writers() == set(_ROW_WRITERS)
