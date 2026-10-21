@@ -2553,6 +2553,12 @@ class GoogleFindMyCoordinator(
         self._device_last_good_location.pop(device_id, None)
         # Round-trip anchor shares the same lifecycle as the location caches above.
         self._round_trip_anchors.pop(device_id, None)
+        # The identities of fused reports belong to the cached row they describe: a
+        # device re-added under the same id must fuse its first report, not refuse it
+        # as a repeat. Read defensively because the store is created lazily.
+        fused_reports = getattr(self, "_fused_report_ids", None)
+        if fused_reports is not None:
+            fused_reports.pop(device_id, None)
         # The accuracy gate's coarse fix (#216) is a position too, so it follows the
         # same lifecycle: without this a deleted device would keep leaking its last
         # coarse position through ``coarse_latitude``/``coarse_longitude``, and a
