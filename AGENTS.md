@@ -956,13 +956,14 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   behaviour):
   * **PR CI passes an approval gate.** In
     `.github/workflows/ci.yml` the first job, `approval_gate`, runs only on
-    `pull_request` and is bound to the environment `ci-freigabe`; `hassfest`
-    needs it, and every other job needs `hassfest`. Where `ci-freigabe` has a
-    required reviewer (in `jleinenbach/GoogleFindMy-HA`), that reviewer must
-    approve the run before any job starts; where it has no protection rules
-    (in `BSkando/GoogleFindMy-HA`), the gate passes without waiting for
-    approval. Pushes to `main` skip the gate and run all jobs (each job
-    states an explicit `if:` so the skipped
+    `pull_request` and is bound to the environment `home-assistant-tests`;
+    `hassfest` needs it, and every other job needs `hassfest`. Where
+    `home-assistant-tests` has a required reviewer (in
+    `jleinenbach/GoogleFindMy-HA`), that reviewer must approve the run before
+    any job starts; where it has no protection rules (GitHub creates a missing
+    environment without rules on the first run that references it), the gate
+    passes without waiting for approval. Pushes to `main` skip the gate and
+    run all jobs (each job states an explicit `if:` so the skipped
     gate does not skip them). A run that is not approved, is rejected or
     expires never turns `CI Success` green: `CI Success` depends on the gate
     and fails a pull request run whose gate result is not `success`. Workflow
@@ -972,7 +973,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     run for the current head). The gate is only as strong as the environment: GitHub
     creates a missing environment without protection rules when a job
     references it, so the approval is enforced only while
-    `gh api repos/<owner>/<repo>/environments/ci-freigabe --jq '.protection_rules[].type'`
+    `gh api repos/<owner>/<repo>/environments/home-assistant-tests --jq '.protection_rules[].type'`
     prints `required_reviewers` for that repository. Name it explicitly:
     without `GH_REPO`, gh resolves the `{owner}/{repo}` placeholders from the
     checkout's git remotes, and in a fork checkout with an `upstream` remote
@@ -991,7 +992,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     (`.github/workflows/ha-dependency-check.yml`, which installs
     `homeassistant` on every pull request). `tests/test_ci_approval_gate.py`
     locks the shape of `ci.yml`. Gate, guard test and this bullet are
-    repository-neutral and may go upstream: where `ci-freigabe` has no
+    repository-neutral and may go upstream: where `home-assistant-tests` has no
     protection rules, the gate passes without approval, and nothing has to be
     configured there.
   * **`pip-audit` on PRs is report-only.** `.github/workflows/pip-audit.yml`
