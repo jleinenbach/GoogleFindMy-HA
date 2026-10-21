@@ -480,6 +480,11 @@ def _fusion_report_identity(row: Mapping[str, Any]) -> str | None:
     nothing to recognise it by. A digest rather than the values, so no coordinate is
     kept beside the cache; blake2s with 8 bytes, because this guards against
     repetition, not against an adversary.
+
+    Whether the report arrives as a trusted anchor is part of the identity: a
+    semantic mapping writes the configured position and radius into the report, so
+    an ordinary report of the same second can carry the same geometry. Treating the
+    anchor as its repeat would skip the promotion of the row to ``trusted``.
     """
     latitude = _finite_or_none(row.get("latitude"))
     longitude = _finite_or_none(row.get("longitude"))
@@ -492,6 +497,7 @@ def _fusion_report_identity(row: Mapping[str, Any]) -> str | None:
         latitude,
         longitude,
         accuracy,
+        row.get("location_type") == "trusted",
     )
     return hashlib.blake2s(repr(fix).encode("utf-8"), digest_size=8).hexdigest()
 

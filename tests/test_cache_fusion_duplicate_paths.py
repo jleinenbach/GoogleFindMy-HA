@@ -316,6 +316,39 @@ async def test_report_from_before_a_trusted_takeover_stays_a_repeat(
 
 
 @pytest.mark.asyncio
+async def test_trusted_anchor_with_the_same_geometry_is_not_a_repeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A semantic anchor promotes the row even if it matches an ordinary report.
+
+    The semantic mapping writes the configured position and radius into the
+    report, so an ordinary report of the same second can carry the same
+    geometry. Taken as its repeat, the anchor would never promote the row to
+    ``trusted``, and a later overlapping fix would be fused instead of snapping
+    back to the anchor.
+    """
+
+    now = time.time()
+    plain = _report(now, accuracy=20.0)
+    anchor = dict(plain, location_type="trusted")
+    coordinator, _counts = _coordinator(monkeypatch, plain)
+    coordinator.update_device_cache(_DEVICE, _prior_fix(now))
+    coordinator.update_device_cache(_DEVICE, dict(plain))
+
+    coordinator.update_device_cache(_DEVICE, dict(anchor))
+
+    cached = coordinator._device_location_data[_DEVICE]
+    assert cached["location_type"] == "trusted"
+    assert _position(coordinator, _DEVICE)[0] == pytest.approx(49.8663, abs=1e-9)
+
+    coordinator.update_device_cache(
+        _DEVICE, _report(now, latitude=49.8666, last_seen=now - 60.0)
+    )
+
+    assert _position(coordinator, _DEVICE)[0] == pytest.approx(49.8663, abs=1e-9)
+
+
+@pytest.mark.asyncio
 async def test_no_transient_marker_reaches_the_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
