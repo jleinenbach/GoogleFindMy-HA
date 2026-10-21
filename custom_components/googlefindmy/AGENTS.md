@@ -350,8 +350,8 @@ position already contains the report that was last committed. The same report de
 unchanged, a manual locate gets it once more, the push channel brings what a poll already brought) would be averaged in a
 second time and move the published position towards the raw fix without a new location, each step a new state write that
 `person` reads as a fresh tracker. `coordinator/cache.py::_fusion_report_identity` is the SSOT of what makes two deliveries the
-same report: the normalised `last_seen`, the raw latitude and longitude, the accuracy if it is valid and whether the report arrives
-as a trusted anchor (a semantic mapping writes the configured geometry, so an ordinary report of the same second can match it), as an 8-byte digest. It
+same report: the normalised `last_seen`, the raw latitude and longitude, the accuracy if it is valid, whether that accuracy is only the fallback estimate and whether the
+report arrives as a trusted anchor (a semantic mapping writes the configured geometry, so an ordinary stampless report can match it), as an 8-byte digest. It
 is not `_tally_identity`, which keys on the timestamp alone and would merge two different reports of one second. The identity is
 formed at the entry of `_apply_weighted_location_fusion`, before any branch rewrites the coordinates, travels as the transient
 marker `_fusion_report_id` (popped in `update_device_cache` before sanitize, stripped by prefix in the fallbacks) and is booked

@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from custom_components.googlefindmy.const import OPT_SEMANTIC_LOCATIONS
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_entries_stub import make_config_entry
 
@@ -322,20 +323,32 @@ async def test_trusted_anchor_with_the_same_geometry_is_not_a_repeat(
     """A semantic anchor promotes the row even if it matches an ordinary report.
 
     The semantic mapping writes the configured position and radius into the
-    report, so an ordinary report of the same second can carry the same
-    geometry. Taken as its repeat, the anchor would never promote the row to
-    ``trusted``, and a later overlapping fix would be fused instead of snapping
-    back to the anchor.
+    report, so an ordinary report can carry the same geometry. Both arrive
+    without a stamp here: with the cached stamp the semantic report would be a
+    replay and skip the mapping. Taken as the ordinary report's repeat, the
+    anchor would never promote the row to ``trusted``, and a later overlapping
+    fix would be fused instead of snapping back to the anchor.
     """
 
     now = time.time()
+    coordinator, _counts = _coordinator(monkeypatch, _report(now))
+    coordinator.config_entry = make_config_entry(
+        entry_id="entry-id",
+        options={
+            OPT_SEMANTIC_LOCATIONS: {
+                "Home": {"latitude": 49.8663, "longitude": 10.839, "accuracy": 20.0}
+            }
+        },
+        data={},
+        title="Test Entry",
+    )
     plain = _report(now, accuracy=20.0)
-    anchor = dict(plain, location_type="trusted")
-    coordinator, _counts = _coordinator(monkeypatch, plain)
-    coordinator.update_device_cache(_DEVICE, _prior_fix(now))
-    coordinator.update_device_cache(_DEVICE, dict(plain))
+    del plain["last_seen"]
+    coordinator.update_device_cache(_DEVICE, plain)
 
-    coordinator.update_device_cache(_DEVICE, dict(anchor))
+    coordinator.update_device_cache(
+        _DEVICE, {"semantic_name": "Home", "status": "semantic"}
+    )
 
     cached = coordinator._device_location_data[_DEVICE]
     assert cached["location_type"] == "trusted"
@@ -346,6 +359,32 @@ async def test_trusted_anchor_with_the_same_geometry_is_not_a_repeat(
     )
 
     assert _position(coordinator, _DEVICE)[0] == pytest.approx(49.8663, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_measured_report_is_not_a_repeat_of_an_estimated_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real 200 m fix clears the estimate a fallback 200 m radius left behind.
+
+    The fallback radius is the same number as a real fix of that size, so the
+    two reports below differ only in the flag. Taken as a repeat, the measured
+    report would keep the row marked estimated and the accuracy gate would go
+    on treating the position as unreliable.
+    """
+
+    now = time.time()
+    coordinator, _counts = _coordinator(monkeypatch, _report(now))
+    coordinator.update_device_cache(
+        _DEVICE, _report(now, accuracy=200.0, accuracy_estimated=True)
+    )
+    assert coordinator._device_location_data[_DEVICE]["accuracy_estimated"] is True
+
+    coordinator.update_device_cache(
+        _DEVICE, _report(now, accuracy=200.0, accuracy_estimated=False)
+    )
+
+    assert coordinator._device_location_data[_DEVICE]["accuracy_estimated"] is False
 
 
 @pytest.mark.asyncio

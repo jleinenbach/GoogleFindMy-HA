@@ -483,8 +483,16 @@ def _fusion_report_identity(row: Mapping[str, Any]) -> str | None:
 
     Whether the report arrives as a trusted anchor is part of the identity: a
     semantic mapping writes the configured position and radius into the report, so
-    an ordinary report of the same second can carry the same geometry. Treating the
-    anchor as its repeat would skip the promotion of the row to ``trusted``.
+    an ordinary report can carry the same geometry. Treating the anchor as its repeat
+    would skip the promotion of the row to ``trusted``. A semantic report with the
+    cached stamp is a replay and skips the mapping, so the case the tests pin is one
+    of reports without a stamp.
+
+    Whether a valid accuracy is only the fallback estimate is part of it as well: the
+    fallback radius is the same number as a real fix of that size, and taking the
+    measured report as the repeat of the estimated one would keep the row marked
+    estimated. Compared with ``is True``, so a row that never carried the flag and
+    one that carries ``False`` stay the same report.
     """
     latitude = _finite_or_none(row.get("latitude"))
     longitude = _finite_or_none(row.get("longitude"))
@@ -497,6 +505,7 @@ def _fusion_report_identity(row: Mapping[str, Any]) -> str | None:
         latitude,
         longitude,
         accuracy,
+        row.get("accuracy_estimated") is True,
         row.get("location_type") == "trusted",
     )
     return hashlib.blake2s(repr(fix).encode("utf-8"), digest_size=8).hexdigest()
