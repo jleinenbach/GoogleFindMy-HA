@@ -33,7 +33,7 @@ rules:
     - id: brands
       status: done
       evidence:
-        - "custom_components/googlefindmy/icon.png"
+        - "custom_components/googlefindmy/brand/icon.png"
         - "custom_components/googlefindmy/icons.json"
     - id: common-modules
       status: done
