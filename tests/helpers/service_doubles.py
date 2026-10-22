@@ -17,6 +17,14 @@ Two Home Assistant shapes are rebuilt here and pinned by
 * ``homeassistant.exceptions.Unauthorized`` and ``UnknownUser`` take the
   keyword arguments ``context``, ``user_id``, ``entity_id``,
   ``config_entry_id``, ``perm_category`` and ``permission``.
+
+In the stub world ``homeassistant.helpers.service`` is the real module (the
+pytest plugin imports it before ``tests/conftest.py`` installs its stubs), so
+the admin wrapper stored in ``FakeServiceRegistry.raw_handlers`` raises the
+real ``Unauthorized``, not the stub class in ``sys.modules``. Test the admin
+rejection itself under real Home Assistant modules, as
+``tests/test_services_permissions.py`` does; ``handlers`` holds the unwrapped
+handler bodies for everything else.
 """
 
 from __future__ import annotations
@@ -66,15 +74,22 @@ def unwrap_admin_handler(handler: Any) -> Any:
 
     A plain handler is returned unchanged. The admin wrapper is a
     ``functools.partial`` of ``_async_admin_handler`` with ``hass`` and a
-    ``HassJob`` bound; its ``target`` is the original handler. Any other
-    ``partial`` fails loudly, because silently passing it through would let
+    ``HassJob`` bound and no keyword arguments; the job's ``target`` is the
+    original handler. Any other ``partial`` fails loudly (another function, a
+    different number of bound arguments, bound keyword arguments, or a second
+    argument without ``target``), because silently passing it through would let
     tests call a wrapper they did not mean to call.
     """
 
     if not isinstance(handler, functools.partial):
         return handler
     func_name = getattr(handler.func, "__name__", "")
-    if func_name != _ADMIN_HANDLER_NAME or len(handler.args) != 2:
+    if (
+        func_name != _ADMIN_HANDLER_NAME
+        or len(handler.args) != 2
+        or handler.keywords
+        or not hasattr(handler.args[1], "target")
+    ):
         raise AssertionError(
             "Unexpected partial handler; expected Home Assistant's admin wrapper "
             f"partial({_ADMIN_HANDLER_NAME}, hass, HassJob), got {handler!r}"
@@ -141,7 +156,7 @@ def install_service_auth_stubs(
             super().__init__(self.__class__.__name__)
             self.context = context
             if user_id is None and context is not None:
-                user_id = getattr(context, "user_id", None)
+                user_id = context.user_id
             self.user_id = user_id
             self.entity_id = entity_id
             self.config_entry_id = config_entry_id

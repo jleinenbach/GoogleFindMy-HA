@@ -609,10 +609,13 @@ closely enough for regression coverage.
 
 ### Service registry, service call and authorization stubs
 
-Service registries and service calls come only from
+Service registries that integration handlers are registered on, and service
+calls they are invoked with, come only from
 [`tests.helpers.service_doubles`](helpers/service_doubles.py); do not define a
 local class with `async_register` or a local service call double in a test
-module. `FakeServiceRegistry.async_register` accepts the full Home Assistant
+module. The one exception is a deliberately incompatible registry that shows a
+rejected signature, such as the three-argument registry in
+`tests/test_service_doubles.py`. `FakeServiceRegistry.async_register` accepts the full Home Assistant
 signature (schema, `supports_response`, keyword arguments), stores the
 unwrapped handler in `handlers` (alias `registered`), the registered object in
 `raw_handlers`, the schema in `schemas` and admin registrations in
@@ -622,8 +625,12 @@ calls a service. `tests/conftest.py` installs both as `homeassistant.core.Servic
 and `homeassistant.core.Context`, adds the stub `Unauthorized` and
 `UnknownUser` to `homeassistant.exceptions` through
 `install_service_auth_stubs`, and gives the stub entity base a `_context`
-attribute. Import the names from `tests.helpers.service_doubles` directly; they
-are not exported through `tests.helpers`.
+attribute. Import the names from `tests.helpers.service_doubles` directly; apart
+from `FakeServiceRegistry`, which `tests.helpers` and
+`tests.helpers.homeassistant` keep exporting under its old name, they are not
+exported through `tests.helpers`. In the stub world the admin wrapper in
+`raw_handlers` raises the real `homeassistant.exceptions.Unauthorized`, not the
+stub class; test admin rejections under real Home Assistant modules.
 
 ### `ServiceValidationError` string representation contract
 

@@ -35,7 +35,7 @@ from custom_components.googlefindmy.services import (
     ServiceValidationError,
 )
 from tests.helpers.config_entries_stub import make_config_entry
-from tests.helpers.service_doubles import FakeServiceCall, unwrap_admin_handler
+from tests.helpers.service_doubles import FakeServiceCall, FakeServiceRegistry
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -49,7 +49,7 @@ def _make_hass(entries: list[Any] | None = None) -> SimpleNamespace:
     """Build a fake hass with a capturing service registry and entry list."""
     entry_list = list(entries or [])
     return SimpleNamespace(
-        services=SimpleNamespace(async_register=lambda *a, **k: None),
+        services=FakeServiceRegistry(),
         config_entries=SimpleNamespace(async_entries=lambda _domain: entry_list),
         data={},
     )
@@ -94,14 +94,8 @@ def _register(hass: SimpleNamespace, ctx: dict[str, Any]) -> dict[str, Any]:
     loop, so this works both in a plain fixture and inside a running event loop
     (``asyncio.run`` would raise there).
     """
-    handlers: dict[str, Any] = {}
-
-    def _capture(
-        domain: str, name: str, handler: Any, *args: Any, **kwargs: Any
-    ) -> None:
-        handlers[name] = unwrap_admin_handler(handler)
-
-    hass.services.async_register = _capture  # type: ignore[attr-defined]
+    registry = FakeServiceRegistry()
+    hass.services = registry
     coro = services.async_register_services(hass, ctx)
     try:
         coro.send(None)
@@ -110,7 +104,9 @@ def _register(hass: SimpleNamespace, ctx: dict[str, Any]) -> dict[str, Any]:
     else:  # pragma: no cover - registration must not await
         coro.close()
         raise RuntimeError("async_register_services unexpectedly awaited")
-    return handlers
+    return {
+        service: handler for (_domain, service), handler in registry.handlers.items()
+    }
 
 
 @pytest.fixture

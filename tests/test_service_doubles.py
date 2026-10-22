@@ -81,6 +81,35 @@ def test_foreign_partial_fails_loudly() -> None:
         unwrap_admin_handler(functools.partial(_other, object(), object()))
 
 
+def test_admin_shaped_partial_with_unexpected_binding_fails_loudly() -> None:
+    """A wrapper with keyword bindings or without a job target is not unwrapped."""
+
+    def _async_admin_handler(hass: Any, job: Any, call: Any, **kwargs: Any) -> None:
+        return None
+
+    job = SimpleNamespace(target=_handler)
+    with pytest.raises(AssertionError, match="admin wrapper"):
+        unwrap_admin_handler(
+            functools.partial(_async_admin_handler, object(), job, extra=True)
+        )
+    with pytest.raises(AssertionError, match="admin wrapper"):
+        unwrap_admin_handler(
+            functools.partial(_async_admin_handler, object(), object())
+        )
+    assert (
+        unwrap_admin_handler(functools.partial(_async_admin_handler, object(), job))
+        is _handler
+    )
+
+
+def test_stub_entity_base_carries_context() -> None:
+    """The stub entity base exposes ``_context`` like the real ``Entity``."""
+
+    from homeassistant.components.button import ButtonEntity
+
+    assert ButtonEntity._context is None  # type: ignore[attr-defined]
+
+
 def test_fake_service_call_defaults_to_no_user() -> None:
     """A call without context behaves like an automation call."""
 
@@ -90,15 +119,33 @@ def test_fake_service_call_defaults_to_no_user() -> None:
     assert FakeServiceCall(context=FakeContext(user_id="u")).context.user_id == "u"
 
 
-def test_old_three_arg_registry_rejects_admin_helper() -> None:
-    """The real admin helper needs the extended registry signature."""
+def test_reregistration_as_plain_clears_admin_flag() -> None:
+    """Registering a service again without the wrapper drops its admin flag."""
 
-    class _ThreeArgRegistry:
-        def async_register(self, domain: str, service: str, handler: Any) -> None:
-            return None
+    registry = FakeServiceRegistry()
+    hass = SimpleNamespace(services=registry)
+    _real_admin_helper()(hass, "googlefindmy", "rebuild_registry", _handler)
+    key = ("googlefindmy", "rebuild_registry")
+    assert key in registry.admin_services
+
+    registry.async_register("googlefindmy", "rebuild_registry", _handler)
+    assert key not in registry.admin_services
+    assert registry.raw_handlers[key] is _handler
+
+
+def test_old_three_arg_registry_rejects_admin_helper() -> None:
+    """The real admin helper needs the extended registry signature.
+
+    The registry here is deliberately incompatible: it accepts only the old
+    three positional arguments, which is what the local test registries did
+    before ``tests.helpers.service_doubles`` existed.
+    """
+
+    def _three_arg_register(domain: str, service: str, handler: Any) -> None:
+        return None
 
     helper = _real_admin_helper()
-    hass = SimpleNamespace(services=_ThreeArgRegistry())
+    hass = SimpleNamespace(services=SimpleNamespace(async_register=_three_arg_register))
     with pytest.raises(
         TypeError, match=r"unexpected keyword argument|positional arguments? but"
     ):
