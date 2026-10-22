@@ -534,6 +534,35 @@ violation. Its docstring lists what it does not see, for example a write inside
 a function that is called at import time, other alias forms and indirect access
 such as `getattr(sys, "modules")`. The rule above covers those as well.
 
+### Fresh import of an integration module under real Home Assistant modules
+
+`custom_components.googlefindmy.*` is imported under the stubs and stays bound
+to them; `use_real_homeassistant_modules` swaps in the real Home Assistant
+modules but does not rebind integration modules that are already imported. A
+test that needs a module bound to the real classes (real `Unauthorized`, real
+registries, the real admin helper) imports it freshly inside a fixture, after
+the swap, and hands every `custom_components.googlefindmy.*` key the import
+creates to `monkeypatch`: pop the new module and `monkeypatch.setitem` it back,
+so `monkeypatch` removes it on teardown and no module bound to the real
+modules stays in `sys.modules` for later stub-world tests. A key that existed
+before is removed through `monkeypatch.delitem` and restored on teardown. This
+follows the rule above: `sys.modules` is only touched through `monkeypatch`, in
+a fixture, never at import time. `tests/test_services_permissions.py`
+(`_fresh_import`, `services_module`) is the reference, and
+`tests/test_services_permissions_teardown.py` sorts after it and checks from the
+stub world that `services` is bound to the stubs again.
+
+The same file also builds Home Assistant itself from a freshly imported
+`pytest_homeassistant_custom_component.common` instead of using the plugin's
+`hass` fixture. The plugin's fixture builds Home Assistant from the modules the
+plugin imported when it was loaded; after the swap the test and the freshly
+imported module use other copies, so enums differ by identity
+(`RegistryEntryDisabler`, `HassJobType`). Measured: an admin action registered
+through the fresh `async_register_admin_service` is then never run, because the
+plugin's core does not recognise the job type of the fresh `HassJob`. Build the
+instance from the same copy (`ha_common` and `hass` fixtures there) when a test
+crosses that boundary.
+
 ## No full-command-line process kills
 
 `pkill -f <pattern>` selects by matching the **full command line** of every

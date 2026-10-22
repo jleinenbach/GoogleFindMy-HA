@@ -761,3 +761,122 @@ class TestSoundTranslationPlaceholders:
             f"{translation_key} would render with a stray literal: "
             f"missing {sorted(required - supplied)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Admin registration and the target set of the permission check
+# ---------------------------------------------------------------------------
+
+
+class TestAdminRegistration:
+    """Exactly the three maintenance actions go through the admin wrapper."""
+
+    def test_maintenance_services_are_admin_with_passthrough_schema(
+        self, full_ctx: dict[str, Any]
+    ) -> None:
+        registry = FakeServiceRegistry()
+        hass = _make_hass()
+        hass.services = registry
+        coro = services.async_register_services(hass, full_ctx)
+        with pytest.raises(StopIteration):
+            coro.send(None)
+
+        domain = services.DOMAIN
+        admin = {
+            (domain, services.SERVICE_REFRESH_DEVICE_URLS),
+            (domain, services.SERVICE_REBUILD_DEVICE_REGISTRY),
+            (domain, services.SERVICE_REBUILD_REGISTRY),
+        }
+        assert registry.admin_services == admin
+        payload = {"mode": "migrate", "entry_id": ["a"], "device_ids": ["d"]}
+        for key in admin:
+            schema = registry.schemas[key]
+            assert schema is not None
+            assert schema(dict(payload)) == payload
+        for key in set(registry.handlers) - admin:
+            assert registry.schemas[key] is None
+
+
+class TestControlTargetSet:
+    """Target set of the permission check with the integration's real resolver.
+
+    ``_control_entity_ids_for_target`` is fed the real
+    ``_resolve_canonical_from_any`` (the resolver the buttons use), so the
+    reverse lookup over canonical ids runs against the production
+    normalisation, which the real-Home-Assistant tests cannot reach.
+    """
+
+    CANON1_ENTITIES = {"button.canon1_play", "button.canon1_locate"}
+
+    @pytest.fixture
+    def resolver_ctx(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        import custom_components.googlefindmy as integration
+
+        domain = services.DOMAIN
+        devices = {
+            "dev-canon1": SimpleNamespace(
+                id="dev-canon1",
+                identifiers={(domain, "entry1:sub1:CANON1")},
+                name="Keys",
+                name_by_user=None,
+                config_entry_id="entry1",
+            ),
+            "dev-canon2": SimpleNamespace(
+                id="dev-canon2",
+                identifiers={(domain, "entry1:sub1:CANON2")},
+                name="Bag",
+                name_by_user=None,
+                config_entry_id="entry1",
+            ),
+        }
+
+        def _entity(entity_id: str, device_id: str, **kw: Any) -> SimpleNamespace:
+            return SimpleNamespace(
+                entity_id=entity_id,
+                platform=kw.get("platform", domain),
+                device_id=device_id,
+                disabled=kw.get("disabled", False),
+            )
+
+        entities = {
+            "button.canon1_play": _entity("button.canon1_play", "dev-canon1"),
+            "button.canon1_locate": _entity("button.canon1_locate", "dev-canon1"),
+            "button.canon1_off": _entity(
+                "button.canon1_off", "dev-canon1", disabled=True
+            ),
+            "sensor.canon1_other": _entity(
+                "sensor.canon1_other", "dev-canon1", platform="other"
+            ),
+            "button.canon2_play": _entity("button.canon2_play", "dev-canon2"),
+        }
+        dev_reg = SimpleNamespace(async_get=devices.get)
+        ent_reg = SimpleNamespace(entities=entities, async_get=entities.get)
+        monkeypatch.setattr(services.dr, "async_get", lambda _h: dev_reg)
+        monkeypatch.setattr(services.er, "async_get", lambda _h: ent_reg)
+        assert integration.dr is services.dr
+        assert integration.er is services.er
+        return {"resolve_canonical": integration._resolve_canonical_from_any}
+
+    @pytest.mark.parametrize("value", ["dev-canon1", "button.canon1_play", "CANON1"])
+    def test_canon1_target_set_for_every_input_form(
+        self, resolver_ctx: dict[str, Any], value: str
+    ) -> None:
+        result = services._control_entity_ids_for_target(object(), value, resolver_ctx)
+        assert result == {"button.canon1_play", "button.canon1_locate"}
+        assert "button.canon2_play" not in result
+
+    @pytest.mark.parametrize("value", ["dev-canon2", "button.canon2_play", "CANON2"])
+    def test_canon2_target_set_for_every_input_form(
+        self, resolver_ctx: dict[str, Any], value: str
+    ) -> None:
+        result = services._control_entity_ids_for_target(object(), value, resolver_ctx)
+        assert result == {"button.canon2_play"}
+
+    @pytest.mark.parametrize("value", ["", None, ["dev-canon1"], "UNKNOWN"])
+    def test_no_target_yields_empty_set(
+        self, resolver_ctx: dict[str, Any], value: Any
+    ) -> None:
+        assert (
+            services._control_entity_ids_for_target(object(), value, resolver_ctx)
+            == set()
+        )
