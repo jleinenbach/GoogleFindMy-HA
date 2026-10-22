@@ -371,7 +371,7 @@
   "services": {
     "locate_device": {
       "name": "Locate Device",
-      "description": "Get the current location of a Google Find My device.",
+      "description": "Get the current location of a Google Find My device. When called by a user, this action requires control permission on the device's entities; automations and scripts without a user context are not affected.",
       "fields": {
         "device_id": {
           "name": "Device",
@@ -381,7 +381,7 @@
     },
     "play_sound": {
       "name": "Play Sound",
-      "description": "Play a sound on a Google Find My device.",
+      "description": "Play a sound on a Google Find My device. When called by a user, this action requires control permission on the device's entities; automations and scripts without a user context are not affected.",
       "fields": {
         "device_id": {
           "name": "Device",
@@ -391,7 +391,7 @@
     },
     "stop_sound": {
       "name": "Stop Sound",
-      "description": "Stop the sound on a Google Find My device.",
+      "description": "Stop the sound on a Google Find My device. When called by a user, this action requires control permission on the device's entities; automations and scripts without a user context are not affected.",
       "fields": {
         "device_id": {
           "name": "Device",
@@ -401,17 +401,17 @@
     },
     "refresh_device_urls": {
       "name": "Refresh Device URLs",
-      "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
+      "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view. Administrators only when called by a user.",
       "fields": {}
     },
     "rebuild_device_registry": {
       "name": "Rebuild Device Registry",
-      "description": "Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry.",
+      "description": "Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry. Administrators only when called by a user.",
       "fields": {}
     },
     "locate_external": {
       "name": "Locate Device (External)",
-      "description": "Locate a device using the external helper; delegates to the normal locate operation.",
+      "description": "Locate a device using the external helper; delegates to the normal locate operation. When called by a user, this action requires control permission on the device's entities; automations and scripts without a user context are not affected.",
       "fields": {
         "device_id": {
           "name": "Device",
@@ -425,7 +425,7 @@
     },
     "rebuild_registry": {
       "name": "Rebuild / Migrate Registry",
-      "description": "Maintenance: Run a soft data→options migration or rebuild entities/devices for this integration.",
+      "description": "Maintenance: Run a soft data→options migration or rebuild entities/devices for this integration. Administrators only when called by a user.",
       "fields": {
         "mode": {
           "name": "Mode",

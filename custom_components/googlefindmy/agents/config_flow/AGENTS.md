@@ -88,6 +88,16 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 1. Run `pytest tests/test_hass_data_layout.py::test_service_no_active_entry_placeholders -q` to confirm placeholder usage remains stable.
 2. Add new translation-focused tests alongside updates so each fallback path has coverage.
 
+### Service permission checks
+
+* Every action that takes a `device_id` awaits `_async_authorize_device_call` in `services.py` as its first statement, before any input validation, so an unknown device and a missing permission produce the same `Unauthorized`. Calls without a user pass; admins pass; any other user needs `control` (`POLICY_CONTROL`) on every enabled entity of this integration on every device the action could run against.
+* That target set is built only in `_control_entity_ids_for_target`. It follows the same resolution as the action itself (device ID, entity ID, canonical Google ID, and every device of this integration with the same canonical ID, because the runtime lookup can fall back to another account). Do not compute "permission on a device" anywhere else.
+* Do not add an `await` that yields to the event loop between that check and the coordinator call: the check and `_resolve_runtime_for_device_id` must see the same registry state. `TestNoSuspensionBetweenCheckAndDispatch` in `tests/test_services_handler_contracts.py` enforces this.
+* Maintenance actions register through `homeassistant.helpers.service.async_register_admin_service` with an explicit schema; its default schema rejects every field. Field validation stays in the handlers.
+* Rejections log only the action name and never a device name, entity ID or user ID.
+* Viewing the map is a read operation and is not covered by this rule.
+* Tests: `tests/test_services_permissions.py` (real Home Assistant modules, for example `test_read_only_user_is_rejected` and `test_same_tracker_in_two_accounts`).
+
 ## Config entry options persistence reminder
 
 * Treat `ConfigEntry.options` as immutable during reconfigure flows. Build a new dictionary (for example, `existing_options = dict(entry.options or {})`) and pass it directly to `async_update_entry` instead of mutating `entry.options` in place. Home Assistant only persists option changes when it detects a new mapping, so keep the original object untouched until `async_update_entry` returns. See the [`async_step_reconfigure` options-copy pattern](../../config_flow.py#L2929-L2943) for a concrete implementation:

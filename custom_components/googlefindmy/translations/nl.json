@@ -371,7 +371,7 @@
   "services": {
     "locate_device": {
       "name": "Apparaat lokaliseren",
-      "description": "Verkrijg de huidige locatie van een Google Find My-apparaat.",
+      "description": "Verkrijg de huidige locatie van een Google Find My-apparaat. Wanneer een gebruiker deze actie aanroept, is toestemming voor bediening van de entiteiten van het apparaat vereist; automatiseringen en scripts zonder gebruikerscontext worden niet beïnvloed.",
       "fields": {
         "device_id": {
           "name": "Apparaat",
@@ -381,7 +381,7 @@
     },
     "play_sound": {
       "name": "Geluid afspelen",
-      "description": "Speel een geluid af op een Google Find My-apparaat.",
+      "description": "Speel een geluid af op een Google Find My-apparaat. Wanneer een gebruiker deze actie aanroept, is toestemming voor bediening van de entiteiten van het apparaat vereist; automatiseringen en scripts zonder gebruikerscontext worden niet beïnvloed.",
       "fields": {
         "device_id": {
           "name": "Apparaat",
@@ -391,7 +391,7 @@
     },
     "stop_sound": {
       "name": "Geluid stoppen",
-      "description": "Stop het geluid op een Google Find My-apparaat.",
+      "description": "Stop het geluid op een Google Find My-apparaat. Wanneer een gebruiker deze actie aanroept, is toestemming voor bediening van de entiteiten van het apparaat vereist; automatiseringen en scripts zonder gebruikerscontext worden niet beïnvloed.",
       "fields": {
         "device_id": {
           "name": "Apparaat",
@@ -401,17 +401,17 @@
     },
     "refresh_device_urls": {
       "name": "Apparaat-URL's vernieuwen",
-      "description": "Vernieuw de configuratie-URL's voor Google Find My-apparaten zodat ze naar de geïntegreerde kaartweergave verwijzen.",
+      "description": "Vernieuw de configuratie-URL's voor Google Find My-apparaten zodat ze naar de geïntegreerde kaartweergave verwijzen. Alleen voor beheerders wanneer een gebruiker deze actie aanroept.",
       "fields": {}
     },
     "rebuild_device_registry": {
       "name": "Apparaatregister opnieuw opbouwen",
-      "description": "Onderhoud: bouwt apparaatregisterkoppelingen voor Google Find My-hubs opnieuw op en verwijdert trackerapparaten die onjuist aan het bovenliggende item zijn gekoppeld.",
+      "description": "Onderhoud: bouwt apparaatregisterkoppelingen voor Google Find My-hubs opnieuw op en verwijdert trackerapparaten die onjuist aan het bovenliggende item zijn gekoppeld. Alleen voor beheerders wanneer een gebruiker deze actie aanroept.",
       "fields": {}
     },
     "locate_external": {
       "name": "Apparaat lokaliseren (extern)",
-      "description": "Lokaliseer een apparaat met de externe helper; delegeert naar de normale lokaliseeroperatie.",
+      "description": "Lokaliseer een apparaat met de externe helper; delegeert naar de normale lokaliseeroperatie. Wanneer een gebruiker deze actie aanroept, is toestemming voor bediening van de entiteiten van het apparaat vereist; automatiseringen en scripts zonder gebruikerscontext worden niet beïnvloed.",
       "fields": {
         "device_id": {
           "name": "Apparaat",
@@ -425,7 +425,7 @@
     },
     "rebuild_registry": {
       "name": "Register opnieuw opbouwen/migreren",
-      "description": "Onderhoud: Voer een zachte data→opties-migratie uit of bouw entiteiten/apparaten voor deze integratie opnieuw op.",
+      "description": "Onderhoud: Voer een zachte data→opties-migratie uit of bouw entiteiten/apparaten voor deze integratie opnieuw op. Alleen voor beheerders wanneer een gebruiker deze actie aanroept.",
       "fields": {
         "mode": {
           "name": "Modus",

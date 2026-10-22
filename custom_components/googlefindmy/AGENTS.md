@@ -8,7 +8,7 @@ child directory overrides it.
 
 | Topic | File |
 | --- | --- |
-| Config flows, reconfigure hooks, and service validation | [`agents/config_flow/AGENTS.md`](agents/config_flow/AGENTS.md) |
+| Config flows, reconfigure hooks, service validation, and service permission checks | [`agents/config_flow/AGENTS.md`](agents/config_flow/AGENTS.md) (permissions: section *Service permission checks*) |
 | Runtime lifecycle patterns, platform forwarding, and subentry helpers (**entity lifecycle requirements live here**) | [`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md) |
 | Typing reminders, stub imports, and strict mypy expectations | [`agents/typing_guidance/AGENTS.md`](agents/typing_guidance/AGENTS.md) |
 

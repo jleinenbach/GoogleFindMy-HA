@@ -371,7 +371,7 @@
   "services": {
     "locate_device": {
       "name": "Localizza dispositivo",
-      "description": "Ottieni la posizione attuale di un dispositivo Google Find My.",
+      "description": "Ottieni la posizione attuale di un dispositivo Google Find My. Se richiamata da un utente, questa azione richiede il permesso di controllo sulle entità del dispositivo; automazioni e script senza contesto utente non sono interessati.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",
@@ -381,7 +381,7 @@
     },
     "play_sound": {
       "name": "Riproduci suono",
-      "description": "Riproduce un suono su un dispositivo Google Find My.",
+      "description": "Riproduce un suono su un dispositivo Google Find My. Se richiamata da un utente, questa azione richiede il permesso di controllo sulle entità del dispositivo; automazioni e script senza contesto utente non sono interessati.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",
@@ -391,7 +391,7 @@
     },
     "stop_sound": {
       "name": "Interrompi suono",
-      "description": "Interrompe il suono su un dispositivo Google Find My.",
+      "description": "Interrompe il suono su un dispositivo Google Find My. Se richiamata da un utente, questa azione richiede il permesso di controllo sulle entità del dispositivo; automazioni e script senza contesto utente non sono interessati.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",
@@ -401,17 +401,17 @@
     },
     "refresh_device_urls": {
       "name": "Aggiorna URL dei dispositivi",
-      "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata.",
+      "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata. Solo per amministratori quando richiamata da un utente.",
       "fields": {}
     },
     "rebuild_device_registry": {
       "name": "Ricostruisci registro dispositivi",
-      "description": "Manutenzione: ricostruisce i collegamenti del registro dispositivi per gli hub Google Find My e rimuove i tracker associati in modo errato all’elemento padre.",
+      "description": "Manutenzione: ricostruisce i collegamenti del registro dispositivi per gli hub Google Find My e rimuove i tracker associati in modo errato all’elemento padre. Solo per amministratori quando richiamata da un utente.",
       "fields": {}
     },
     "locate_external": {
       "name": "Localizza dispositivo (esterno)",
-      "description": "Localizza un dispositivo utilizzando l’assistente esterno; delega alla localizzazione normale.",
+      "description": "Localizza un dispositivo utilizzando l’assistente esterno; delega alla localizzazione normale. Se richiamata da un utente, questa azione richiede il permesso di controllo sulle entità del dispositivo; automazioni e script senza contesto utente non sono interessati.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",
@@ -425,7 +425,7 @@
     },
     "rebuild_registry": {
       "name": "Ricostruisci / Migra registro",
-      "description": "Manutenzione: esegui una migrazione soft dati→opzioni oppure ricostruisci entità/dispositivi per questa integrazione.",
+      "description": "Manutenzione: esegui una migrazione soft dati→opzioni oppure ricostruisci entità/dispositivi per questa integrazione. Solo per amministratori quando richiamata da un utente.",
       "fields": {
         "mode": {
           "name": "Modalità",

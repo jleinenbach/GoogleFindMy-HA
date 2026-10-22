@@ -371,7 +371,7 @@
   "services": {
     "locate_device": {
       "name": "Localiser l’appareil",
-      "description": "Obtenir la position actuelle d’un appareil Google Find My.",
+      "description": "Obtenir la position actuelle d’un appareil Google Find My. Lorsqu’elle est appelée par un utilisateur, cette action nécessite l’autorisation de contrôle sur les entités de l’appareil ; les automatisations et les scripts sans contexte utilisateur ne sont pas concernés.",
       "fields": {
         "device_id": {
           "name": "Appareil",
@@ -381,7 +381,7 @@
     },
     "play_sound": {
       "name": "Émettre un son",
-      "description": "Jouer un son sur un appareil Google Find My.",
+      "description": "Jouer un son sur un appareil Google Find My. Lorsqu’elle est appelée par un utilisateur, cette action nécessite l’autorisation de contrôle sur les entités de l’appareil ; les automatisations et les scripts sans contexte utilisateur ne sont pas concernés.",
       "fields": {
         "device_id": {
           "name": "Appareil",
@@ -391,7 +391,7 @@
     },
     "stop_sound": {
       "name": "Arrêter le son",
-      "description": "Arrêter le son sur un appareil Google Find My.",
+      "description": "Arrêter le son sur un appareil Google Find My. Lorsqu’elle est appelée par un utilisateur, cette action nécessite l’autorisation de contrôle sur les entités de l’appareil ; les automatisations et les scripts sans contexte utilisateur ne sont pas concernés.",
       "fields": {
         "device_id": {
           "name": "Appareil",
@@ -401,17 +401,17 @@
     },
     "refresh_device_urls": {
       "name": "Actualiser les URL des appareils",
-      "description": "Actualise les URL de configuration des appareils Google Find My pour qu’elles pointent vers la vue carte intégrée.",
+      "description": "Actualise les URL de configuration des appareils Google Find My pour qu’elles pointent vers la vue carte intégrée. Réservée aux administrateurs lorsqu’elle est appelée par un utilisateur.",
       "fields": {}
     },
     "rebuild_device_registry": {
       "name": "Reconstruire le registre des appareils",
-      "description": "Maintenance : reconstruit les liens du registre des appareils pour les hubs Google Find My et supprime les traqueurs incorrectement liés à l’entrée parente.",
+      "description": "Maintenance : reconstruit les liens du registre des appareils pour les hubs Google Find My et supprime les traqueurs incorrectement liés à l’entrée parente. Réservée aux administrateurs lorsqu’elle est appelée par un utilisateur.",
       "fields": {}
     },
     "locate_external": {
       "name": "Localiser l’appareil (externe)",
-      "description": "Localiser un appareil à l’aide de l’assistant externe ; délègue à la localisation normale.",
+      "description": "Localiser un appareil à l’aide de l’assistant externe ; délègue à la localisation normale. Lorsqu’elle est appelée par un utilisateur, cette action nécessite l’autorisation de contrôle sur les entités de l’appareil ; les automatisations et les scripts sans contexte utilisateur ne sont pas concernés.",
       "fields": {
         "device_id": {
           "name": "Appareil",
@@ -425,7 +425,7 @@
     },
     "rebuild_registry": {
       "name": "Reconstruire / Migrer le registre",
-      "description": "Maintenance : exécuter une migration douce données→options ou reconstruire les entités/appareils de cette intégration.",
+      "description": "Maintenance : exécuter une migration douce données→options ou reconstruire les entités/appareils de cette intégration. Réservée aux administrateurs lorsqu’elle est appelée par un utilisateur.",
       "fields": {
         "mode": {
           "name": "Mode",

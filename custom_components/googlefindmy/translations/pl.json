@@ -371,7 +371,7 @@
   "services": {
     "locate_device": {
       "name": "Zlokalizuj urządzenie",
-      "description": "Pobierz bieżącą lokalizację urządzenia Google Find My.",
+      "description": "Pobierz bieżącą lokalizację urządzenia Google Find My. Wywołanie tej akcji przez użytkownika wymaga uprawnienia do sterowania encjami urządzenia; nie dotyczy to automatyzacji i skryptów bez kontekstu użytkownika.",
       "fields": {
         "device_id": {
           "name": "Urządzenie",
@@ -381,7 +381,7 @@
     },
     "play_sound": {
       "name": "Odtwórz dźwięk",
-      "description": "Odtwórz dźwięk na urządzeniu Google Find My.",
+      "description": "Odtwórz dźwięk na urządzeniu Google Find My. Wywołanie tej akcji przez użytkownika wymaga uprawnienia do sterowania encjami urządzenia; nie dotyczy to automatyzacji i skryptów bez kontekstu użytkownika.",
       "fields": {
         "device_id": {
           "name": "Urządzenie",
@@ -391,7 +391,7 @@
     },
     "stop_sound": {
       "name": "Zatrzymaj dźwięk",
-      "description": "Zatrzymuje dźwięk na urządzeniu Google Find My.",
+      "description": "Zatrzymuje dźwięk na urządzeniu Google Find My. Wywołanie tej akcji przez użytkownika wymaga uprawnienia do sterowania encjami urządzenia; nie dotyczy to automatyzacji i skryptów bez kontekstu użytkownika.",
       "fields": {
         "device_id": {
           "name": "Urządzenie",
@@ -401,17 +401,17 @@
     },
     "refresh_device_urls": {
       "name": "Odśwież adresy URL urządzeń",
-      "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy.",
+      "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy. Tylko dla administratorów, gdy wywołuje ją użytkownik.",
       "fields": {}
     },
     "rebuild_device_registry": {
       "name": "Odbuduj rejestr urządzeń",
-      "description": "Konserwacja: odbudowuje powiązania rejestru urządzeń dla hubów Google Find My i usuwa trackery błędnie powiązane z wpisem nadrzędnym.",
+      "description": "Konserwacja: odbudowuje powiązania rejestru urządzeń dla hubów Google Find My i usuwa trackery błędnie powiązane z wpisem nadrzędnym. Tylko dla administratorów, gdy wywołuje ją użytkownik.",
       "fields": {}
     },
     "locate_external": {
       "name": "Zlokalizuj urządzenie (zewnętrznie)",
-      "description": "Zlokalizuj urządzenie przy użyciu zewnętrznego pomocnika; deleguje do zwykłej lokalizacji.",
+      "description": "Zlokalizuj urządzenie przy użyciu zewnętrznego pomocnika; deleguje do zwykłej lokalizacji. Wywołanie tej akcji przez użytkownika wymaga uprawnienia do sterowania encjami urządzenia; nie dotyczy to automatyzacji i skryptów bez kontekstu użytkownika.",
       "fields": {
         "device_id": {
           "name": "Urządzenie",
@@ -425,7 +425,7 @@
     },
     "rebuild_registry": {
       "name": "Odbuduj / Migruj rejestr",
-      "description": "Konserwacja: wykonaj miękką migrację dane→opcje lub odbuduj encje/urządzenia dla tej integracji.",
+      "description": "Konserwacja: wykonaj miękką migrację dane→opcje lub odbuduj encje/urządzenia dla tej integracji. Tylko dla administratorów, gdy wywołuje ją użytkownik.",
       "fields": {
         "mode": {
           "name": "Tryb",

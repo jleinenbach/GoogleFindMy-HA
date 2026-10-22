@@ -371,7 +371,7 @@
   "services": {
     "locate_device": {
       "name": "Gerät orten",
-      "description": "Ermittelt die aktuelle Position eines Google-Find-My-Geräts.",
+      "description": "Ermittelt die aktuelle Position eines Google-Find-My-Geräts. Ruft eine Person die Aktion auf, braucht sie die Berechtigung zum Steuern der Entitäten des Geräts; Automationen und Skripte ohne Benutzerkontext sind nicht betroffen.",
       "fields": {
         "device_id": {
           "name": "Gerät",
@@ -381,7 +381,7 @@
     },
     "play_sound": {
       "name": "Ton abspielen",
-      "description": "Spielt einen Ton auf einem Google-Find-My-Gerät ab.",
+      "description": "Spielt einen Ton auf einem Google-Find-My-Gerät ab. Ruft eine Person die Aktion auf, braucht sie die Berechtigung zum Steuern der Entitäten des Geräts; Automationen und Skripte ohne Benutzerkontext sind nicht betroffen.",
       "fields": {
         "device_id": {
           "name": "Gerät",
@@ -391,7 +391,7 @@
     },
     "stop_sound": {
       "name": "Ton stoppen",
-      "description": "Stoppt den Ton auf einem Google-Find-My-Gerät.",
+      "description": "Stoppt den Ton auf einem Google-Find-My-Gerät. Ruft eine Person die Aktion auf, braucht sie die Berechtigung zum Steuern der Entitäten des Geräts; Automationen und Skripte ohne Benutzerkontext sind nicht betroffen.",
       "fields": {
         "device_id": {
           "name": "Gerät",
@@ -401,17 +401,17 @@
     },
     "refresh_device_urls": {
       "name": "Geräte-URLs aktualisieren",
-      "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
+      "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen. Bei Aufruf durch eine Person nur für Administratoren.",
       "fields": {}
     },
     "rebuild_device_registry": {
       "name": "Geräteregistrierung neu aufbauen",
-      "description": "Wartung: baut die Geräteregistrierung für Google Find My Hubs neu auf und entfernt Tracker-Geräte, die fälschlicherweise dem übergeordneten Eintrag zugeordnet sind.",
+      "description": "Wartung: baut die Geräteregistrierung für Google Find My Hubs neu auf und entfernt Tracker-Geräte, die fälschlicherweise dem übergeordneten Eintrag zugeordnet sind. Bei Aufruf durch eine Person nur für Administratoren.",
       "fields": {}
     },
     "locate_external": {
       "name": "Gerät orten (extern)",
-      "description": "Ortung über den externen Helfer; delegiert an die normale Ortung.",
+      "description": "Ortung über den externen Helfer; delegiert an die normale Ortung. Ruft eine Person die Aktion auf, braucht sie die Berechtigung zum Steuern der Entitäten des Geräts; Automationen und Skripte ohne Benutzerkontext sind nicht betroffen.",
       "fields": {
         "device_id": {
           "name": "Gerät",
@@ -425,7 +425,7 @@
     },
     "rebuild_registry": {
       "name": "Registrierung migrieren/neu aufbauen",
-      "description": "Wartung: Führt eine Migration der Einstellungen durch oder baut die Entitäten/Geräte dieser Integration neu auf.",
+      "description": "Wartung: Führt eine Migration der Einstellungen durch oder baut die Entitäten/Geräte dieser Integration neu auf. Bei Aufruf durch eine Person nur für Administratoren.",
       "fields": {
         "mode": {
           "name": "Modus",

@@ -25,6 +25,8 @@ rules:
       status: done
       evidence:
         - "custom_components/googlefindmy/__init__.py:async_setup_entry"
+        - "custom_components/googlefindmy/services.py:_async_authorize_device_call"
+        - "tests/test_services_permissions.py:test_read_only_user_is_rejected"
     - id: appropriate-polling
       status: done
       evidence:
