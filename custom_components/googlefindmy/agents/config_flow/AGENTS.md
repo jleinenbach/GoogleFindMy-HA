@@ -220,4 +220,3 @@ def config_entry(self) -> ConfigEntry:
 Tests must verify:
 1. `async_get_supported_subentry_types` returns empty dict `{}`
 2. `async_step_hub` creates entries successfully (via direct handler instantiation)
-
