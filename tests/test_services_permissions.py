@@ -346,12 +346,12 @@ def _unauthorized() -> type[Exception]:
 
 
 # ---------------------------------------------------------------------------
-# D-1 to D-3: read-only rejected, normal users and admins pass, no user passes
+# Read-only users are rejected, normal users and admins pass, no user passes
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("service", DEVICE_SERVICES)
-async def test_d1_read_only_rejected(
+async def test_read_only_user_is_rejected(
     hass: HomeAssistant,
     services_module: ModuleType,
     hass_read_only_user: Any,
@@ -369,7 +369,7 @@ async def test_d1_read_only_rejected(
 
 @pytest.mark.parametrize("service", DEVICE_SERVICES)
 @pytest.mark.parametrize("who", ["admin", "user"])
-async def test_d2_admin_and_user_reach_coordinator(
+async def test_admin_and_user_reach_coordinator(
     hass: HomeAssistant,
     services_module: ModuleType,
     hass_admin_user: Any,
@@ -386,7 +386,7 @@ async def test_d2_admin_and_user_reach_coordinator(
 
 
 @pytest.mark.parametrize("service", DEVICE_SERVICES)
-async def test_d3_call_without_user_reaches_coordinator(
+async def test_call_without_user_reaches_coordinator(
     hass: HomeAssistant, services_module: ModuleType, service: str
 ) -> None:
     """Automations and scripts without a user context are not checked."""
@@ -412,7 +412,7 @@ async def test_unknown_user_raises_unknown_user(
 
 
 # ---------------------------------------------------------------------------
-# D-6 / D-10: input forms, target set, disabled and foreign entities
+# Input forms, target set, disabled and foreign entities
 # ---------------------------------------------------------------------------
 
 
@@ -425,7 +425,7 @@ def _form(device: _Device, form: str) -> str:
 
 
 @pytest.mark.parametrize("form", ["device_id", "entity_id", "canonical_id"])
-async def test_d6_read_only_rejected_for_every_input_form(
+async def test_read_only_rejected_for_every_input_form(
     hass: HomeAssistant,
     services_module: ModuleType,
     hass_read_only_user: Any,
@@ -445,7 +445,7 @@ async def test_d6_read_only_rejected_for_every_input_form(
 
 
 @pytest.mark.parametrize("form", ["device_id", "entity_id", "canonical_id"])
-async def test_d6_d10_device_assignment_per_input_form(
+async def test_device_assignment_per_input_form(
     hass: HomeAssistant, services_module: ModuleType, form: str
 ) -> None:
     """Control on CANON1 passes for CANON1 and is rejected for CANON2."""
@@ -464,7 +464,7 @@ async def test_d6_d10_device_assignment_per_input_form(
     assert world.coordinator.async_play_sound.await_count == 1
 
 
-async def test_d6_unknown_device_user_rejected_admin_gets_not_found(
+async def test_unknown_device_user_rejected_admin_gets_not_found(
     hass: HomeAssistant,
     services_module: ModuleType,
     hass_admin_user: Any,
@@ -483,7 +483,7 @@ async def test_d6_unknown_device_user_rejected_admin_gets_not_found(
     assert world.coordinator.async_locate_device.await_count == 0
 
 
-async def test_d6_stop_sound_rejection_precedes_request_uuid_check(
+async def test_stop_sound_rejection_precedes_request_uuid_check(
     hass: HomeAssistant, services_module: ModuleType, hass_read_only_user: Any
 ) -> None:
     """A malformed ``request_uuid`` is not echoed to an unauthorized caller."""
@@ -499,7 +499,7 @@ async def test_d6_stop_sound_rejection_precedes_request_uuid_check(
     assert type(excinfo.value) is _unauthorized()
 
 
-async def test_d6_a2_device_without_enabled_entity(
+async def test_device_without_enabled_entity(
     hass: HomeAssistant,
     services_module: ModuleType,
     hass_admin_user: Any,
@@ -519,10 +519,11 @@ async def test_d6_a2_device_without_enabled_entity(
     assert world.coordinator.async_locate_device.await_count == 1
 
 
-async def test_d6_a5_same_tracker_in_two_accounts(
-    hass: HomeAssistant, services_module: ModuleType
+@pytest.mark.parametrize("form", ["device_id", "entity_id", "canonical_id"])
+async def test_same_tracker_in_two_accounts(
+    hass: HomeAssistant, services_module: ModuleType, form: str
 ) -> None:
-    """A tracker in two accounts needs control on both devices."""
+    """A tracker in two accounts needs control on both devices, for every form."""
 
     world = await _build_world(hass, services_module, second_account=True)
     assert world.second_canon1 is not None and world.second_coordinator is not None
@@ -534,7 +535,7 @@ async def test_d6_a5_same_tracker_in_two_accounts(
         await _call(
             hass,
             "locate_device",
-            {"device_id": world.canon1.enabled_entities[0]},
+            {"device_id": _form(world.canon1, form)},
             user.id,
         )
     assert world.coordinator.async_locate_device.await_count == 0
@@ -543,7 +544,7 @@ async def test_d6_a5_same_tracker_in_two_accounts(
     both = world.canon1.enabled_entities + world.second_canon1.enabled_entities
     user.mock_policy({"entities": {"entity_ids": dict.fromkeys(both, True)}})
     await _call(
-        hass, "locate_device", {"device_id": world.canon1.enabled_entities[0]}, user.id
+        hass, "locate_device", {"device_id": _form(world.canon1, form)}, user.id
     )
     reached = (
         world.coordinator.async_locate_device.await_count
@@ -552,7 +553,7 @@ async def test_d6_a5_same_tracker_in_two_accounts(
     assert reached == 1
 
 
-async def test_d10_missing_control_on_one_enabled_entity_rejects(
+async def test_missing_control_on_one_enabled_entity_rejects(
     hass: HomeAssistant, services_module: ModuleType
 ) -> None:
     """Every enabled entity of this integration at the device must carry control."""
@@ -570,7 +571,7 @@ async def test_d10_missing_control_on_one_enabled_entity_rejects(
     assert world.coordinator.async_locate_device.await_count == 0
 
 
-async def test_d10_disabled_and_foreign_entities_do_not_count(
+async def test_disabled_and_foreign_entities_do_not_count(
     hass: HomeAssistant, services_module: ModuleType
 ) -> None:
     """Disabled entities and entities of other integrations are not checked."""
@@ -586,12 +587,12 @@ async def test_d10_disabled_and_foreign_entities_do_not_count(
 
 
 # ---------------------------------------------------------------------------
-# D-7 / D-11: the rejection is a bare ``Unauthorized``, identical for all cases
+# The rejection is a bare ``Unauthorized``, identical for all cases
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("service", DEVICE_SERVICES)
-async def test_d7_rejection_is_unauthorized_not_a_failure(
+async def test_rejection_is_unauthorized_not_a_failure(
     hass: HomeAssistant,
     services_module: ModuleType,
     hass_read_only_user: Any,
@@ -617,7 +618,7 @@ async def _rejection(
 
 @pytest.mark.parametrize("case", ["unknown", "empty", "list"])
 @pytest.mark.parametrize("service", DEVICE_SERVICES)
-async def test_d11_uniform_rejection(
+async def test_uniform_rejection(
     hass: HomeAssistant,
     services_module: ModuleType,
     hass_read_only_user: Any,
@@ -647,7 +648,7 @@ async def test_d11_uniform_rejection(
 
 
 # ---------------------------------------------------------------------------
-# D-5: maintenance actions are admin actions
+# Maintenance actions are admin actions
 # ---------------------------------------------------------------------------
 
 
@@ -684,7 +685,7 @@ def _spy_maintenance(
 
 @pytest.mark.parametrize("service", ADMIN_SERVICES)
 @pytest.mark.parametrize("who", ["read_only", "user"])
-async def test_d5_maintenance_rejects_non_admins(
+async def test_maintenance_rejects_non_admins(
     hass: HomeAssistant,
     services_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
@@ -705,7 +706,7 @@ async def test_d5_maintenance_rejects_non_admins(
 
 @pytest.mark.parametrize("service", ADMIN_SERVICES)
 @pytest.mark.parametrize("who", ["admin", "none"])
-async def test_d5_maintenance_runs_for_admin_and_without_user(
+async def test_maintenance_runs_for_admin_and_without_user(
     hass: HomeAssistant,
     services_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,

@@ -245,7 +245,7 @@ async def test_buttons_forward_the_press_context_to_the_service() -> None:
         assert recorded[0]["context"] is sentinel, cls_name
         assert recorded[0]["context"].user_id == "user-1", cls_name
         if cls_name == "GoogleFindMyLocateButton":
-            # Pinned by decision V-D3: the locate button stays fire-and-forget.
+            # The locate button stays fire-and-forget for a responsive UI.
             assert recorded[0]["blocking"] is False
 
 

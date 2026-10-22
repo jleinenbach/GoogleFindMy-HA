@@ -7,6 +7,10 @@ import creates to ``monkeypatch``, so the session continues with modules bound
 to the stubs. This file sorts after the permission tests and checks that state
 from the stub world: a ``services`` module imported here must use the stubbed
 device registry, not the real one.
+
+The probe only measures something when it runs after the permission tests in
+the same session (the default file order, without ``pytest-xdist``). Run on
+its own it passes trivially.
 """
 
 from __future__ import annotations

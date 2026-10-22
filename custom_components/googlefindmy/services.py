@@ -734,6 +734,11 @@ def _control_entity_ids_for_target(
     (``platform == DOMAIN``) only; device entries are not inspected for their
     config entries. An empty set means "no entity to check against" and is
     rejected by the caller.
+
+    Limit: a device with the same canonical id but without an enabled entity of
+    this integration (or known only to a coordinator) adds nothing to the set,
+    although the fallback may still run against it. It is the same physical
+    tracker, so the caller already holds ``control`` on that tracker elsewhere.
     """
 
     if not isinstance(raw_device_id, str) or not raw_device_id:

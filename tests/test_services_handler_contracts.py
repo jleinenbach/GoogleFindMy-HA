@@ -960,3 +960,27 @@ class TestNoSuspensionBetweenCheckAndDispatch:
             anchor, "        await asyncio.sleep(0)\n" + anchor, 1
         )
         assert _suspension_violations(mutated) == ["_resolve_runtime_for_device_id"]
+
+    def test_probe_detects_an_await_in_a_handler_span(self) -> None:
+        anchor = (
+            "        await _async_authorize_device_call(hass, call, "
+            'call.data.get("device_id"), ctx)\n'
+            '        raw_device_id = call.data.get("device_id")\n'
+        )
+        assert self._SOURCE.count(anchor) == 4
+        mutated = self._SOURCE.replace(
+            anchor, anchor + "        await asyncio.sleep(0)\n", 1
+        )
+        violations = _suspension_violations(mutated)
+        assert len(violations) == 1
+        assert violations[0].startswith("async_locate_device_service:")
+
+    def test_probe_detects_an_await_after_the_target_set(self) -> None:
+        anchor = "    entity_ids = _control_entity_ids_for_target(hass, raw_device_id, ctx)\n"
+        assert self._SOURCE.count(anchor) == 1
+        mutated = self._SOURCE.replace(
+            anchor, anchor + "    await asyncio.sleep(0)\n", 1
+        )
+        violations = _suspension_violations(mutated)
+        assert len(violations) == 1
+        assert violations[0].startswith("_async_authorize_device_call:")
