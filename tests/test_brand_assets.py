@@ -9,8 +9,9 @@ to the brands CDN when a file is missing there. HACS validates the same path
 Nothing reports a broken local image: Home Assistant ignores an unknown file
 name, and a wrongly sized image is served as is. These tests pin what the
 brands repository requires
-(https://github.com/home-assistant/brands#image-specification) and that the
-release ZIP carries the directory to users.
+(https://github.com/home-assistant/brands#image-specification), require the
+transparency it only prefers, and check that the release ZIP carries the
+directory to users.
 
 Not covered: the visual content of the images, and whether a ``dark_*``
 variant is needed for legibility on dark themes. Both are review decisions.
@@ -49,7 +50,8 @@ ALLOWED_IMAGES = frozenset(
 REQUIRED_IMAGES = ("icon.png", "icon@2x.png")
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-_PNG_COLOR_TYPE_RGBA = 6
+#: PNG colour types with an alpha channel: grey + alpha (4), RGBA (6).
+_PNG_ALPHA_COLOR_TYPES = frozenset({4, 6})
 
 
 def _png_header(path: Path) -> tuple[int, int, int, int]:
@@ -64,6 +66,29 @@ def _png_header(path: Path) -> tuple[int, int, int, int]:
     assert chunk_type == b"IHDR" and length == 13, f"{path} has no leading IHDR chunk"
     width, height, bit_depth, color_type = struct.unpack(">IIBB", data[16:26])
     return width, height, bit_depth, color_type
+
+
+def _png_has_transparency(path: Path) -> bool:
+    """Return whether the PNG carries transparency in any standard form.
+
+    Either the colour type has an alpha channel (any bit depth), or a
+    ``tRNS`` chunk precedes the image data, as in palette images written
+    by optimisers such as pngquant.
+    """
+
+    data = path.read_bytes()
+    _, _, _, color_type = _png_header(path)
+    if color_type in _PNG_ALPHA_COLOR_TYPES:
+        return True
+    offset = len(_PNG_SIGNATURE)
+    while offset + 8 <= len(data):
+        length, chunk_type = struct.unpack(">I4s", data[offset : offset + 8])
+        if chunk_type == b"tRNS":
+            return True
+        if chunk_type == b"IDAT":
+            return False
+        offset += 12 + length
+    return False
 
 
 def _brand_files() -> list[Path]:
@@ -135,12 +160,15 @@ def test_allowed_names_match_core() -> None:
 
 @pytest.mark.parametrize("path", _brand_files(), ids=lambda p: p.name)
 def test_brand_image_geometry(path: Path) -> None:
-    """Sizes and transparency as required by the brands image specification."""
+    """Sizes as required by the brands image specification, plus transparency.
 
-    width, height, bit_depth, color_type = _png_header(path)
-    assert color_type == _PNG_COLOR_TYPE_RGBA and bit_depth == 8, (
-        f"{path.name}: expected 8-bit RGBA (transparency is preferred), "
-        f"got color type {color_type} at bit depth {bit_depth}"
+    The specification only prefers transparency; this repository requires it
+    so the icon does not show a solid box on dark Home Assistant themes.
+    """
+
+    width, height, _, _ = _png_header(path)
+    assert _png_has_transparency(path), (
+        f"{path.name}: expected a PNG with transparency (alpha channel or tRNS)"
     )
 
     hidpi = path.name.endswith("@2x.png")
