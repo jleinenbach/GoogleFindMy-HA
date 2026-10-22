@@ -1,3 +1,4 @@
+# tests/test_coordinator_predictive_polling.py
 import asyncio
 import time
 from collections import deque
@@ -48,6 +49,15 @@ class _DummyHass:
         task = self.loop.create_task(coro, name=name)
         self.created.append((task, name))
         return task
+
+    def async_create_background_task(
+        self,
+        coro: Coroutine[object, object, object],
+        *,
+        name: str,
+    ) -> asyncio.Task:
+        """Record background polls alongside other tasks for cadence assertions."""
+        return self.async_create_task(coro, name=name)
 
 
 class _DummyAPI:
