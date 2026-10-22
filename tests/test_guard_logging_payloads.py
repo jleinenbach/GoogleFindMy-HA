@@ -109,6 +109,14 @@ assigned, annotated or not, from `task.exception()` (the done callback of
 `_track_task`), so a callee that
 logs a caught exception it did not catch itself is a sink too (found in
 `fcm_receiver_ha._classify_registration_exception`, 2026-09-18), and so does
+a parameter of a module-local helper that a call of the same module passes a
+bound name or its text to (`describe(err)`, `describe(cause=err)`,
+`self.classify(entry_id, err)`; positional-only, keyword-only, `*args` and
+`**kwargs` included, whatever the parameter's annotation; a bare name reaches
+a function, `self.` or `cls.` a method of that name in any class; followed
+over any number of hops, recursion and cycles to a module-wide fixpoint, and
+past 64 rounds every parameter of every module-local callee is bound,
+fail-closed), and so does
 a name the function derives from one of those by data flow inside the
 same function, followed to a fixpoint: an alias, attribute or subscript
 target (`detail = exc`, `self.last = err`, `self.errs["k"] = err`), its
@@ -153,9 +161,10 @@ scope), a binding
 in one method read in another (`self.last = err` in `m`, logged in `n`:
 the flow stays inside one function), `with cm as err` (what `__enter__`
 returns is the manager's business, not the name's),
-a value forwarded to a helper whose parameter is unannotated
-(`describe(err)`, `describe(cause=err)`: a parameter binds through its
-annotation only, the caller is not followed into the callee), an alias
+a helper reached otherwise than by its bare name or through `self.`/`cls.`
+(another receiver `self._client.h(err)`, an imported helper: this guard
+parses one file, `functools.partial`, an alias of a function `g = h; g(err)`,
+a lambda, a `getattr` dispatch), an alias
 resolved to a symbol without a suffix in a module that cannot be imported
 (`from mylib import Result as ClientError`: the symbol's name decides, not
 the alias's, and `mylib` cannot be asked),
@@ -2076,23 +2085,168 @@ def _flow_bound_names(
             return tuple(sorted(bound - set(seed)))
 
 
+# Rounds of the module-wide fixpoint over helper calls; past it every parameter
+# of every module-local callee is bound (fail-closed). A chain needs one round
+# per hop plus one to confirm; measured on 2026-10-22, every `Auth/` module
+# settles within two rounds (one hop, five modules, nine parameters).
+_FORWARD_ROUND_LIMIT = 64
+_RECEIVERS = frozenset({"self", "cls"})
+
+
+def _module_local_callees(
+    tree: ast.AST,
+) -> dict[str, list[tuple[ast.AST, int]]]:
+    """Every `def` of the module by name, with the receiver slots it skips.
+
+    A method (a `def` directly in a class body) skips its first parameter when
+    called through `self.` or `cls.`, a `@staticmethod` skips none; a function
+    defined anywhere else, nested ones included, is a callee by its bare name.
+    The skip is `-1` for a function: a bare name never reaches a method.
+    """
+    methods: dict[int, int] = {}
+    for klass in ast.walk(tree):
+        if isinstance(klass, ast.ClassDef):
+            for item in klass.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    static = any(
+                        _chain(d) == ["staticmethod"] for d in item.decorator_list
+                    )
+                    methods[id(item)] = 0 if static else 1
+    callees: dict[str, list[tuple[ast.AST, int]]] = {}
+    for function in ast.walk(tree):
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            callees.setdefault(function.name, []).append(
+                (function, methods.get(id(function), -1))
+            )
+    return callees
+
+
+def _resolved_callees(
+    call: ast.Call, callees: dict[str, list[tuple[ast.AST, int]]]
+) -> list[tuple[ast.AST, int]]:
+    """The module-local `def`s a call may reach, with the receiver slots to skip.
+
+    `h(err)` reaches every function named `h` that is not a method;
+    `self.h(err)` and `cls.h(err)` reach every method named `h` in any class of
+    the module (two classes with the same method name: both, fail-closed).
+    Not followed: another receiver (`self._client.h(err)`), an imported
+    helper, `functools.partial`, an alias of a function (`g = h; g(err)`), a
+    lambda and a dispatch through `getattr`.
+    """
+    func = call.func
+    if isinstance(func, ast.Name):
+        return [(f, 0) for f, skip in callees.get(func.id, []) if skip < 0]
+    if (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id in _RECEIVERS
+    ):
+        return [(f, skip) for f, skip in callees.get(func.attr, []) if skip >= 0]
+    return []
+
+
+def _forwarded_parameter_seeds(
+    tree: ast.AST,
+    names: dict[int, tuple[str, ...]],
+    callees: dict[str, list[tuple[ast.AST, int]]],
+) -> dict[int, tuple[str, ...]]:
+    """Parameters of module-local helpers that receive a bound exception.
+
+    Every call whose argument carries a name bound at the call
+    (`_carries_exception`: `describe(err)`, `describe(cause=err)`,
+    `h(str(err))`, `h(*errors)`, `h(**{"cause": err})`; not
+    `h(describe_exception(err))`) binds the parameter the argument lands in:
+    by position (positional-only and normal parameters, the rest in
+    `*args`), by keyword (normal and keyword-only parameters, the rest in
+    `**kwargs`). A starred argument binds its slot and every positional slot
+    after it, `**mapping` every parameter that takes a keyword; which slot
+    the value reaches is not knowable from the call. Every parameter counts,
+    whatever its annotation (`v: object`, `v: str`): the caller decides what
+    it holds (decision V-4, 2026-10-22).
+    """
+    seeds: dict[int, set[str]] = {}
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        targets = _resolved_callees(call, callees)
+        if not targets:
+            continue
+        bound = frozenset(names.get(id(call), ()))
+        for callee, skip in targets:
+            args = callee.args
+            positional = [*args.posonlyargs, *args.args][skip:]
+            variadic = [args.vararg.arg] if args.vararg else []
+            keyword = {p.arg for p in [*args.args[skip:], *args.kwonlyargs]}
+            spread = False
+            hit: set[str] = set()
+            for index, argument in enumerate(call.args):
+                spread = spread or isinstance(argument, ast.Starred)
+                if not _carries_exception(argument, bound):
+                    continue
+                if spread:
+                    hit.update(p.arg for p in positional[index:])
+                    hit.update(variadic)
+                elif index < len(positional):
+                    hit.add(positional[index].arg)
+                else:
+                    hit.update(variadic)
+            for kw in call.keywords:
+                if not _carries_exception(kw.value, bound):
+                    continue
+                if kw.arg is None:
+                    hit.update(keyword)
+                    hit.update([args.kwarg.arg] if args.kwarg else [])
+                elif kw.arg in keyword:
+                    hit.add(kw.arg)
+                elif args.kwarg:
+                    hit.add(args.kwarg.arg)
+            if hit:
+                seeds.setdefault(id(callee), set()).update(hit)
+    return {key: tuple(sorted(value)) for key, value in seeds.items()}
+
+
+def _all_callee_parameters(
+    tree: ast.AST, callees: dict[str, list[tuple[ast.AST, int]]]
+) -> dict[int, tuple[str, ...]]:
+    """Every parameter of every module-local `def` some call of the module reaches."""
+    seeds: dict[int, tuple[str, ...]] = {}
+    for call in ast.walk(tree):
+        if isinstance(call, ast.Call):
+            for callee, _skip in _resolved_callees(call, callees):
+                args = callee.args
+                seeds[id(callee)] = tuple(
+                    p.arg
+                    for p in [
+                        *args.posonlyargs,
+                        *args.args,
+                        *args.kwonlyargs,
+                        *([args.vararg] if args.vararg else []),
+                        *([args.kwarg] if args.kwarg else []),
+                    ]
+                )
+    return seeds
+
+
 def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
     """Map each call to every foreign exception name in scope, `()` if none.
 
-    Four bindings, accumulated rather than replaced: every parameter annotated
+    Five bindings, accumulated rather than replaced: every parameter annotated
     with a foreign exception type (whole function body, all of them, not the
     first: `def f(first: BaseException, second: OSError)` logs `second`), a
-    name that receives such a parameter or `<task>.exception()` through data
-    flow (`_flow_bound_names`: assignment, unpacking, `for`, `match`, whole
+    parameter of a module-local helper that a call passes a bound name to
+    (`_forwarded_parameter_seeds`, followed to a module-wide fixpoint over
+    any number of hops, recursion and cycles included), a name that receives
+    such a parameter or `<task>.exception()` through data flow
+    (`_flow_bound_names`: assignment, unpacking, `for`, `match`, whole
     function body), and a foreign `except … as NAME` handler (handler body,
     with the same data flow bounded to that body).
     A call inside a foreign handler without `as` keeps the names the
     enclosing function bound (`def f(err: BaseException): … except
     Exception: log(err)` keeps `err`); the implicit traceback of such a
     handler (`logger.exception`, `exc_info=True`) is reported positionally,
-    not through this map.
+    not through this map. Past `_FORWARD_ROUND_LIMIT` rounds every parameter
+    of every module-local callee is bound (fail-closed).
     """
-    names: dict[int, tuple[str, ...]] = {}
     own = _own_type_names(tree)
     aliases = _import_aliases(tree)
     # One pass per file, before any annotation is classified: an alias may be
@@ -2101,6 +2255,26 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
     scopes = _type_param_scopes(tree, local)
     imported = _imported_exception_types(tree)
     modules = _module_bindings(tree)
+    callees = _module_local_callees(tree)
+    context = (own, aliases, local, scopes, imported, modules)
+    forwarded: dict[int, tuple[str, ...]] = {}
+    for _round in range(_FORWARD_ROUND_LIMIT):
+        names = _names_for_seeds(tree, forwarded, context)
+        seeds = _forwarded_parameter_seeds(tree, names, callees)
+        if seeds == forwarded:
+            return names
+        forwarded = seeds
+    return _names_for_seeds(tree, _all_callee_parameters(tree, callees), context)
+
+
+def _names_for_seeds(
+    tree: ast.AST,
+    forwarded: dict[int, tuple[str, ...]],
+    context: tuple,
+) -> dict[int, tuple[str, ...]]:
+    """One round of `_exception_names_by_call` for the given forwarded parameters."""
+    own, aliases, local, scopes, imported, modules = context
+    names: dict[int, tuple[str, ...]] = {}
     for function in ast.walk(tree):
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -2118,6 +2292,9 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
             if _is_foreign_exception_annotation(
                 p.annotation, own, aliases, imported, modules, local=scoped
             )
+        )
+        bound += tuple(
+            name for name in forwarded.get(id(function), ()) if name not in bound
         )
         # The data flow reads the table for `match` class patterns only, where
         # a type parameter cannot stand (`case T():` raises at runtime).
@@ -4515,6 +4692,341 @@ def test_import_helpers_survive_a_hostile_module_getattr(
     tree = ast.parse("from hostile import sub\nfrom hostile import Boom as Error\n")
     assert _module_bindings(tree) == {}
     assert _imported_exception_types(tree) == frozenset()
+
+
+_SHAPE_I_FORWARD_FIXTURE = """
+import logging
+from aiohttp import ClientError
+from .helpers import imported_helper
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def describe(value) -> None:
+    _LOGGER.error("x %s", value)
+
+
+def f01(err: ClientError) -> None:
+    describe(err)
+
+
+def f02(err: ClientError) -> None:
+    describe_kw(cause=err)
+
+
+def describe_kw(cause) -> None:
+    _LOGGER.error("x %s", cause)
+
+
+def f03(err: ClientError) -> None:
+    posonly(1, err)
+
+
+def posonly(n, v, /) -> None:
+    _LOGGER.error("x %s %s", n, v)
+
+
+def f04(err: ClientError) -> None:
+    kwonly(1, cause=err)
+
+
+def kwonly(n, *, cause) -> None:
+    _LOGGER.error("x %s %s", n, cause)
+
+
+def f05(err: ClientError) -> None:
+    star_args(1, err)
+
+
+def star_args(*args) -> None:
+    _LOGGER.error("x %s", args)
+
+
+def f06(err: ClientError) -> None:
+    star_kw(cause=err)
+
+
+def star_kw(**kw) -> None:
+    _LOGGER.error("x %s", kw["cause"])
+
+
+def f07(err: ClientError) -> None:
+    def inner(v) -> None:
+        _LOGGER.error("x %s", v)
+
+    inner(err)
+
+
+class Holder:
+    def f08(self, err: ClientError) -> None:
+        self.held(err)
+        self.static_held(err)
+
+    def held(self, value) -> None:
+        _LOGGER.error("x %s", value)
+
+    @staticmethod
+    def static_held(value) -> None:
+        _LOGGER.error("x %s", value)
+
+
+def f09(err: ClientError) -> None:
+    g = lambda v: lambda_sink(v)
+    g(err)
+
+
+class Receiver:
+    async def f10(
+        self, entry_id: str, err: ClientError, generation: int | None = None
+    ) -> None:
+        await self.classify(entry_id, err, generation)
+
+    async def classify(self, entry_id, err, generation=None) -> None:
+        _LOGGER.warning("classify %s: %s", entry_id, err)
+
+    async def f11(self, entry_id) -> None:
+        try:
+            await self.connect()
+        except Exception as err:
+            await self.classify_handler(entry_id, err)
+
+    async def classify_handler(self, entry_id, problem) -> None:
+        _LOGGER.warning("x %s %s", entry_id, problem)
+
+
+def f12(err: ClientError) -> None:
+    text_helper(str(err))
+
+
+def text_helper(text) -> None:
+    _LOGGER.error("x %s", text)
+
+
+def f13(err: ClientError) -> None:
+    safe_helper(describe_exception(err))
+
+
+def safe_helper(text) -> None:
+    _LOGGER.error("x %s", text)
+
+
+def f14(errors: list[ClientError]) -> None:
+    many(*errors)
+
+
+def many(first, *rest) -> None:
+    _LOGGER.error("x %s", first)
+
+
+def f15(err: ClientError) -> None:
+    dict_kw(**{"cause": err})
+
+
+def dict_kw(cause=None) -> None:
+    _LOGGER.error("x %s", cause)
+
+
+def f16(err: ClientError) -> None:
+    hop1(err)
+
+
+def hop1(a) -> None:
+    hop2(a)
+
+
+def hop2(b) -> None:
+    _LOGGER.error("x %s", b)
+
+
+def f17(err: ClientError) -> None:
+    recurse(err, 3)
+    ping(err)
+
+
+def recurse(v, depth=0) -> None:
+    if depth:
+        recurse(v, depth - 1)
+    _LOGGER.error("x %s", v)
+
+
+def ping(v) -> None:
+    pong(v)
+
+
+def pong(w) -> None:
+    ping(w)
+    _LOGGER.error("x %s", w)
+
+
+def f18(err: ClientError) -> None:
+    with_default(1, cause=err)
+
+
+def with_default(x, cause=None) -> None:
+    _LOGGER.error("x %s %s", x, cause)
+
+
+def f19(err: ClientError) -> None:
+    quiet(err)
+
+
+def quiet(v) -> int:
+    return len(str(v))
+
+
+def f20(err: ClientError) -> None:
+    later(err)
+
+
+class First:
+    def f21(self, err: ClientError) -> None:
+        self.same(err)
+
+    def same(self, v) -> None:
+        _LOGGER.error("x %s", v)
+
+
+class Second:
+    def same(self, v) -> None:
+        _LOGGER.error("x %s", v)
+
+
+class Client:
+    def f22(self, err: ClientError) -> None:
+        self._client.remote(err)
+
+    def remote(self, v) -> None:
+        _LOGGER.error("x %s", v)
+
+
+def f23(err: ClientError) -> None:
+    imported_helper(err)
+
+
+def f24(err: ClientError) -> None:
+    as_object(err)
+    as_text(str(err))
+
+
+def as_object(v: object) -> None:
+    _LOGGER.error("x %s", v)
+
+
+def as_text(v: str) -> None:
+    _LOGGER.error("x %s", v)
+
+
+def later(v) -> None:
+    _LOGGER.error("x %s", v)
+
+
+def lambda_sink(v) -> None:
+    _LOGGER.error("x %s", v)
+
+
+def f13b(err: ClientError) -> None:
+    kind_helper(_classify(err))
+
+
+def kind_helper(kind) -> None:
+    _LOGGER.error("x %s", kind)
+"""
+
+
+def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
+    """A bound exception passed to a helper of the same module binds its parameter.
+
+    `_classify_registration_exception(self, entry_id, err, generation)` in
+    `fcm_receiver_ha.py` logged a producer's text it received from its
+    caller; with the annotation removed, only the caller knows (line 89, the
+    historical shape before `97015e1f`). Reported, each in its own helper:
+    a positional argument (line 10, the helper defined before its caller)
+    and the same helper defined after it (line 224), a keyword argument
+    (line 22), a positional-only (line 30) and a keyword-only parameter
+    (line 38, not the unrelated `n`), `*args` (line 46) and `**kwargs`
+    (line 54), a nested function (line 59), a method called through `self`,
+    with the receiver skipped (line 70), and a static method, without (line
+    74), a handler name passed on (line 98), the text of the exception (line
+    106), a starred list (line 122), a dict unpacked into keywords (line
+    130), two hops (line 142), self-recursion and a cycle, both terminating
+    (lines 153 and 162), a default parameter given by keyword (line 170),
+    a method name shared by two classes, both reported fail-closed (lines
+    190 and 195), and parameters annotated `object` or `str` (lines 216 and
+    220: the caller decides what they hold, decision V-4). Not reported: a
+    helper reached through a lambda (line 79 calls `lambda_sink`, line 228
+    stays silent; a lambda that holds the log call itself is a log alias and
+    reported at its call, shape (D)), a safe wrapper (line 114), a helper that does not log
+    (`quiet`), another receiver (line 203, `self._client.remote` is not
+    `Client.remote`), a helper given another function's result (line 236,
+    `_classify(err)`: a result is not knowable from the name) and an imported
+    helper (`imported_helper`, this guard
+    reads one file). The same fixture outside `Auth/` reports nothing.
+    """
+    tree = ast.parse(_SHAPE_I_FORWARD_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    by_line = sorted((line, leaf) for _, line, leaf, _ in offenders)
+    assert by_line == [
+        (10, "value"),
+        (22, "cause"),
+        (30, "v"),
+        (38, "cause"),
+        (46, "args"),
+        (54, "kw"),
+        (59, "v"),
+        (70, "value"),
+        (74, "value"),
+        (89, "err"),
+        (98, "problem"),
+        (106, "text"),
+        (122, "first"),
+        (130, "cause"),
+        (142, "b"),
+        (153, "v"),
+        (162, "w"),
+        (170, "cause"),
+        (190, "v"),
+        (195, "v"),
+        (216, "v"),
+        (220, "v"),
+        (224, "v"),
+    ]
+    outside, _ = _scan_tree(tree, "coordinator/fixture.py")
+    assert outside == []
+
+
+_SHAPE_I_FORWARD_LIMIT_FIXTURE = """
+from aiohttp import ClientError
+
+
+def start(err: ClientError) -> None:
+    one(err)
+
+
+def one(a) -> None:
+    two(a)
+
+
+def two(b) -> None:
+    three(b)
+
+
+def three(c) -> None:
+    _LOGGER.error("x %s", c)
+"""
+
+
+def test_shape_i_forwarding_stops_fail_closed_at_the_round_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the round limit every parameter of every module-local callee is bound.
+
+    Three hops need three rounds; with the limit at two the last helper is
+    not reached by the fixpoint, and the fail-closed branch still reports it.
+    """
+    monkeypatch.setitem(globals(), "_FORWARD_ROUND_LIMIT", 2)
+    tree = ast.parse(_SHAPE_I_FORWARD_LIMIT_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [(18, "c")]
 
 
 def test_shape_i_reports_producer_exceptions_in_broad_auth_handlers() -> None:
