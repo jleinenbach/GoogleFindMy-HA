@@ -397,6 +397,17 @@ are installed. **Review this checklist on every single change under
     outranks `default` in the rendered form. Resolve the binding
     (`cls.__mro__`, `inspect.getsourcefile`) before reasoning about which body
     runs; a stub file existing is not evidence that it is the one bound.
+11. **Service registry, service call and authorization doubles** —
+    `tests/test_service_doubles.py` pins the doubles in
+    [`tests/helpers/service_doubles.py`](helpers/service_doubles.py) against
+    the genuine core: the real `async_register_admin_service` registers
+    through `FakeServiceRegistry` (the admin wrapper is unwrapped to the
+    original handler, its schema and admin flag are recorded), a registry with
+    the old three-argument `async_register` is rejected by that helper, and the
+    stub `Unauthorized`/`UnknownUser` take the same keyword arguments as the
+    real classes. When Home Assistant changes the wrapper shape,
+    `unwrap_admin_handler` raises instead of passing a foreign `partial`
+    through; update the doubles and this test together.
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
@@ -595,6 +606,24 @@ Home Assistant modules so the integration can be imported and exercised in
 isolation. The recent additions mirror enough of the `ConfigFlow` contract to
 support discovery update tests and follow the real integration's behavior
 closely enough for regression coverage.
+
+### Service registry, service call and authorization stubs
+
+Service registries and service calls come only from
+[`tests.helpers.service_doubles`](helpers/service_doubles.py); do not define a
+local class with `async_register` or a local service call double in a test
+module. `FakeServiceRegistry.async_register` accepts the full Home Assistant
+signature (schema, `supports_response`, keyword arguments), stores the
+unwrapped handler in `handlers` (alias `registered`), the registered object in
+`raw_handlers`, the schema in `schemas` and admin registrations in
+`admin_services`. `FakeServiceCall(data=None, context=None, domain=..., service=...)`
+defaults to a `FakeContext` without `user_id`, which is how an automation
+calls a service. `tests/conftest.py` installs both as `homeassistant.core.ServiceCall`
+and `homeassistant.core.Context`, adds the stub `Unauthorized` and
+`UnknownUser` to `homeassistant.exceptions` through
+`install_service_auth_stubs`, and gives the stub entity base a `_context`
+attribute. Import the names from `tests.helpers.service_doubles` directly; they
+are not exported through `tests.helpers`.
 
 ### `ServiceValidationError` string representation contract
 

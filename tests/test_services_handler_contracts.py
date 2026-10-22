@@ -35,17 +35,14 @@ from custom_components.googlefindmy.services import (
     ServiceValidationError,
 )
 from tests.helpers.config_entries_stub import make_config_entry
+from tests.helpers.service_doubles import FakeServiceCall, unwrap_admin_handler
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
 
-class _FakeCall:
-    """Minimal ``ServiceCall`` double exposing only ``.data``."""
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        self.data = data
+_FakeCall = FakeServiceCall
 
 
 def _make_hass(entries: list[Any] | None = None) -> SimpleNamespace:
@@ -99,8 +96,10 @@ def _register(hass: SimpleNamespace, ctx: dict[str, Any]) -> dict[str, Any]:
     """
     handlers: dict[str, Any] = {}
 
-    def _capture(domain: str, name: str, handler: Any) -> None:
-        handlers[name] = handler
+    def _capture(
+        domain: str, name: str, handler: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        handlers[name] = unwrap_admin_handler(handler)
 
     hass.services.async_register = _capture  # type: ignore[attr-defined]
     coro = services.async_register_services(hass, ctx)

@@ -1109,6 +1109,11 @@ def _stub_homeassistant() -> None:
     exceptions_module.ServiceValidationError = ServiceValidationError
     exceptions_module.ConfigEntryAuthFailed = ConfigEntryAuthFailed
     sys.modules["homeassistant.exceptions"] = exceptions_module
+    from tests.helpers.service_doubles import install_service_auth_stubs
+
+    install_service_auth_stubs(
+        core_module=core_module, exceptions_module=exceptions_module
+    )
 
     helpers_pkg = sys.modules.setdefault(
         "homeassistant.helpers", ModuleType("homeassistant.helpers")
@@ -2045,6 +2050,7 @@ def _stub_homeassistant() -> None:
     def _entity_base() -> type:
         class _EntityBase:  # pragma: no cover - stub behaviour
             _attr_has_entity_name = True
+            _context = None
 
             def __init__(self, *_args, **_kwargs) -> None:
                 self.entity_id = None
