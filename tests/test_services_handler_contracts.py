@@ -19,6 +19,7 @@ handlers run without a live Home Assistant device registry / network helper.
 
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import string
@@ -880,3 +881,82 @@ class TestControlTargetSet:
             services._control_entity_ids_for_target(object(), value, resolver_ctx)
             == set()
         )
+
+
+_DEVICE_HANDLERS = (
+    "async_locate_device_service",
+    "async_play_sound_service",
+    "async_stop_sound_service",
+    "async_locate_external_service",
+)
+_SYNC_RESOLVERS = ("_resolve_runtime_for_device_id", "_iter_runtimes")
+_SUSPENDING = (ast.Await, ast.AsyncFor, ast.AsyncWith)
+
+
+def _suspension_violations(source: str) -> list[str]:
+    """Return places where control may yield between check and dispatch."""
+
+    functions = {
+        node.name: node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    violations: list[str] = []
+    for name in _SYNC_RESOLVERS:
+        if any(isinstance(n, _SUSPENDING) for n in ast.walk(functions[name])):
+            violations.append(name)
+
+    check = functions["_async_authorize_device_call"]
+    target_lines = [
+        n.lineno
+        for n in ast.walk(check)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "id", "") == "_control_entity_ids_for_target"
+    ]
+    if len(target_lines) != 1:
+        violations.append("_async_authorize_device_call: target set not found")
+    else:
+        for n in ast.walk(check):
+            if isinstance(n, _SUSPENDING) and n.lineno > target_lines[0]:
+                violations.append(f"_async_authorize_device_call:{n.lineno}")
+
+    for name in _DEVICE_HANDLERS:
+        awaits = sorted(
+            (n.lineno, ast.unparse(n))
+            for n in ast.walk(functions[name])
+            if isinstance(n, _SUSPENDING)
+        )
+        start = next(
+            (ln for ln, text in awaits if "_async_authorize_device_call" in text),
+            None,
+        )
+        end = next(
+            (ln for ln, text in awaits if "_resolve_runtime_for_device_id" in text),
+            None,
+        )
+        if start is None or end is None:
+            violations.append(f"{name}: check or resolver await not found")
+            continue
+        violations.extend(f"{name}:{ln}" for ln, _ in awaits if start < ln < end)
+    return violations
+
+
+class TestNoSuspensionBetweenCheckAndDispatch:
+    """Pin the invariant documented on ``_async_authorize_device_call``.
+
+    The permission check and the runtime resolution must see the same registry
+    state, so nothing between them may yield to the event loop.
+    """
+
+    _SOURCE = pathlib.Path(services.__file__).read_text(encoding="utf-8")
+
+    def test_source_has_no_suspension_point(self) -> None:
+        assert _suspension_violations(self._SOURCE) == []
+
+    def test_probe_detects_an_inserted_await(self) -> None:
+        anchor = "        runtimes = list(_iter_runtimes(hass))\n"
+        assert self._SOURCE.count(anchor) == 1
+        mutated = self._SOURCE.replace(
+            anchor, "        await asyncio.sleep(0)\n" + anchor, 1
+        )
+        assert _suspension_violations(mutated) == ["_resolve_runtime_for_device_id"]

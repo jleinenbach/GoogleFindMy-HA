@@ -709,9 +709,10 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
 
 # Home Assistant's admin helper validates with an empty schema that rejects
-# every field unless told otherwise. The maintenance actions keep their field
-# validation in ``services.yaml`` and in the handlers, so this schema accepts
-# any field and passes the data through unchanged.
+# every field unless told otherwise. ``services.yaml`` only describes the
+# fields for the UI and does not validate at runtime; the maintenance handlers
+# check their fields themselves, so this schema accepts any field and passes
+# the data through unchanged.
 _ADMIN_PASSTHROUGH_SCHEMA = vol.Schema({}, extra=vol.ALLOW_EXTRA)
 
 
@@ -1646,9 +1647,10 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 _LOGGER.error("Error reloading config entry %s: %s", entry_id, err)
 
     # ---- Actual service registrations (global; visible even without entries) ----
-    # NOTE: Field validation lives in services.yaml and in the handlers. The
-    # maintenance actions pass _ADMIN_PASSTHROUGH_SCHEMA only because the admin
-    # helper would otherwise reject every field.
+    # NOTE: Field validation lives in the handlers; services.yaml only
+    # describes the fields for the UI. The maintenance actions pass
+    # _ADMIN_PASSTHROUGH_SCHEMA only because the admin helper would otherwise
+    # reject every field.
     hass.services.async_register(
         DOMAIN, SERVICE_LOCATE_DEVICE, async_locate_device_service
     )
