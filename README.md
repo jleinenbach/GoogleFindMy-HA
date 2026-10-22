@@ -353,8 +353,9 @@ starts directly carries that user's context and is checked like a direct call.
 - **Buttons** forward the user who pressed them. A user with control permission on the
   button but not on every entity of the device can press it, and the action rejects the
   call. The Play Sound and Stop Sound buttons show that rejection. The Locate button
-  does not wait for the action, so the rejection only appears in the Home Assistant log
-  and the button's "last pressed" time changes anyway.
+  does not wait for the action, so the rejection only appears in the Home Assistant log.
+  As with every button, the "last pressed" time changes on every press, whether or not
+  the action accepts it.
 
 ## Supported devices and functions
 

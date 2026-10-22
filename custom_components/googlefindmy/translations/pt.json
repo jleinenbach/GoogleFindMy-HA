@@ -411,7 +411,7 @@
     },
     "locate_external": {
       "name": "Localizar dispositivo (externo)",
-      "description": "Localize um dispositivo usando o auxiliar externo;  Quando invocada por um utilizador, esta ação requer permissão de controlo sobre as entidades do dispositivo; as automatizações e os scripts sem contexto de utilizador não são afetados.",
+      "description": "Localize um dispositivo usando o auxiliar externo; delega na operação de localização normal. Quando invocada por um utilizador, esta ação requer permissão de controlo sobre as entidades do dispositivo; as automatizações e os scripts sem contexto de utilizador não são afetados.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",
