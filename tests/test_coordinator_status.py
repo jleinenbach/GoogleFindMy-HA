@@ -78,7 +78,7 @@ class _DummyConfigEntries:
 
 
 class _DummyEntry:
-    """Minimal ConfigEntry stub with async_start_reauth helper."""
+    """Minimal ConfigEntry stub with reauth and background-task helpers."""
 
     def __init__(self) -> None:
         self.entry_id = "entry-test"
@@ -90,6 +90,10 @@ class _DummyEntry:
         # ``@callback`` returning ``None`` (an async stub would mask a stray
         # ``await`` in production code).
         self.reauth_calls += 1
+
+    def async_create_background_task(self, hass, coro, *, name: str):
+        """Forward polling to the harness's existing task scheduler."""
+        return hass.async_create_task(coro, name=name)
 
 
 class _DummyHass:
