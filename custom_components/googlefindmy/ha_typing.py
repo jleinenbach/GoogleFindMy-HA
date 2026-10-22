@@ -33,7 +33,7 @@ class CloudDiscoveryRuntime:
 
 if TYPE_CHECKING:
     from aiohttp import web
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import Context, HomeAssistant
 
     from .discovery import _CloudDiscoveryResults
 
@@ -57,6 +57,9 @@ if TYPE_CHECKING:
 
         hass: HomeAssistant
         entity_id: str | None
+        # Set by Home Assistant when a user acts on the entity (for example a
+        # button press); service calls forward it so permissions apply.
+        _context: Context | None
 
         async def async_added_to_hass(self) -> None: ...
 
