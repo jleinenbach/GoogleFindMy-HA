@@ -9,9 +9,9 @@ to the brands CDN when a file is missing there. HACS validates the same path
 Nothing reports a broken local image: Home Assistant ignores an unknown file
 name, and a wrongly sized image is served as is. These tests pin what the
 brands repository requires
-(https://github.com/home-assistant/brands#image-specification), require the
-transparency it only prefers, and check that the release ZIP carries the
-directory to users.
+(https://github.com/home-assistant/brands#image-specification), require a
+PNG form that can carry the transparency it only prefers, and check that the
+release ZIP carries the directory to users.
 
 Not covered: the visual content of the images, and whether a ``dark_*``
 variant is needed for legibility on dark themes. Both are review decisions.
@@ -69,11 +69,12 @@ def _png_header(path: Path) -> tuple[int, int, int, int]:
 
 
 def _png_has_transparency(path: Path) -> bool:
-    """Return whether the PNG carries transparency in any standard form.
+    """Return whether the PNG format can carry transparency.
 
     Either the colour type has an alpha channel (any bit depth), or a
     ``tRNS`` chunk precedes the image data, as in palette images written
-    by optimisers such as pngquant.
+    by optimisers such as pngquant. Whether any pixel is actually
+    transparent is not checked; that would need the image data decoded.
     """
 
     data = path.read_bytes()
@@ -160,15 +161,17 @@ def test_allowed_names_match_core() -> None:
 
 @pytest.mark.parametrize("path", _brand_files(), ids=lambda p: p.name)
 def test_brand_image_geometry(path: Path) -> None:
-    """Sizes as required by the brands image specification, plus transparency.
+    """Sizes as required by the brands image specification, plus an alpha form.
 
-    The specification only prefers transparency; this repository requires it
-    so the icon does not show a solid box on dark Home Assistant themes.
+    The specification only prefers transparency; this repository requires a
+    PNG form that can carry it (alpha channel or tRNS). A fully opaque image
+    in such a form still passes; that remains a review decision.
     """
 
     width, height, _, _ = _png_header(path)
     assert _png_has_transparency(path), (
-        f"{path.name}: expected a PNG with transparency (alpha channel or tRNS)"
+        f"{path.name}: expected a PNG that can carry transparency "
+        "(alpha channel or tRNS)"
     )
 
     hidpi = path.name.endswith("@2x.png")
