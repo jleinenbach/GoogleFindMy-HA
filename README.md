@@ -340,6 +340,7 @@ The integration provides a couple of Home Assistant Actions for use with automat
 
 ## Data updates and background behavior
 
+- **Startup:** The initial device-list refresh runs during setup, while sequential location polling runs in the background so Home Assistant can finish startup before the first location cycle completes. See [Location polling and Home Assistant startup](docs/STARTUP_POLLING.md) when diagnosing "Wrapping up startup" delays.
 - **Snapshot merge semantics:** Push updates from the FCM listener are merged into the coordinator snapshot rather than replacing it. Devices that were not part of a push event keep their previous metadata, which prevents transient gaps in the device tracker registry between full poll cycles. The subentry-device index is rebuilt from the merged snapshot.
 - **Coordinator-driven updates:** Location and metadata are refreshed through Home Assistant's [`DataUpdateCoordinator`](https://developers.home-assistant.io/docs/integration_fetching_data/) with a default 300-second polling interval.  Staggered per-device delays keep API calls within Google's rate limits.
 - **Manual refresh:** Call the `googlefindmy.locate_device` action to request fresh data outside the scheduled polling cycle.  The integration debounces requests to avoid repeated queries that would exceed the appropriate polling guidance.
