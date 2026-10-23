@@ -408,6 +408,20 @@ are installed. **Review this checklist on every single change under
     real classes. When Home Assistant changes the wrapper shape,
     `unwrap_admin_handler` raises instead of passing a foreign `partial`
     through; update the doubles and this test together.
+12. **Exception stubs with translation metadata** —
+    `tests/test_exception_stub_translation_parity.py` builds
+    `HomeAssistantError`, `UpdateFailed` and `ConfigEntryNotReady` from the
+    `conftest` stubs and from the core and compares the stored
+    `translation_domain`, `translation_key`, `translation_placeholders` and
+    `retry_after` plus `str()`: a text argument wins, a key without text
+    renders the raw key (the core's result when no translation is cached),
+    and `ConfigEntryNotReady` without text falls back to `str(__cause__)`.
+    The stub `UpdateFailed` derives from the stub `HomeAssistantError` as in
+    the core, so `except HomeAssistantError` now also catches it in tests.
+    `ServiceValidationError` keeps its own `"domain:key"` rendering (see the
+    string representation contract below). Compare by construction, not by
+    `inspect.signature`: the translation arguments live only in
+    `HomeAssistantError.__init__`.
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
