@@ -202,6 +202,7 @@ def _coordinator(services: ModuleType) -> SimpleNamespace:
         async_locate_device=AsyncMock(return_value={}),
         async_play_sound=AsyncMock(return_value=services.PlaySoundOutcome.ACCEPTED),
         async_stop_sound=AsyncMock(return_value=services.StopSoundOutcome.CANCELLED),
+        classify_stop_correlation=lambda cid, request_uuid: None,
         get_device_display_name=lambda cid: TRACKER_NAME if cid in known else None,
         get_device_location_data=lambda cid: None,
     )
