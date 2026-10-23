@@ -15,12 +15,18 @@ user action and used to log the display name at WARNING or ERROR:
   every poll cycle).
 
 Inside each function, every log call whose level is INFO or above is
-checked: all positional arguments, including the format argument with an
+checked. A log call is a method call on a receiver that spells `LOG`
+(`_LOGGER.warning(...)`) or the same method fetched with `getattr`
+(`getattr(_LOGGER, "warning")(...)`). For `.log(level, ...)` the level
+decides: `logging.DEBUG`, `logging.NOTSET` or an integer constant up to 10
+is DEBUG and skipped; any other level, a variable included, counts as above
+DEBUG. Checked are all positional arguments, including the format argument with an
 f-string or the right side of a `%` format, and all keyword values. An
 offender is any leaf below them that is a name, an attribute (other than
 `__name__`), a subscript with a string key, or a string constant passed to a
-nested call (`getattr(device, "userDefinedDeviceName", "")`,
-`device.get("name")`), whose spelling contains `name` or `label`, in any
+nested call as a positional or keyword argument
+(`getattr(device, "userDefinedDeviceName", "")`, `device.get("name")`,
+`device.get(key="name")`), whose spelling contains `name` or `label`, in any
 case. The three field-name records of the missing-key
 dump in the decoder log protobuf field names (`f.name`), not device names;
 they are listed in `_FIELD_NAME_ROWS` with path, leaf and format prefix, and
@@ -37,10 +43,13 @@ Blind spots, declared: a value copied into a variable, an attribute or a
 subscript whose spelling has neither `name` nor `label` (`fields = ...` in
 the decoder is such a case and is correct; `self._last = device_name`
 followed by a record with `self._last` would be a miss), a device object
-rendered through `str()`, a logger method bound to
-a local name (the receiver rule needs `LOG` in the receiver), an exception
-whose own text carries the name, and records in helpers these functions
-call. The caplog tests in `tests/test_api_location_name_at_debug.py` and
+whose spelling has neither word rendered whole (`str(device)`,
+`repr(device)`, `%s` or `%r` with `device`, `{device!r}`), a logger method
+bound to a local name or wrapped in `functools.partial` (the receiver rule
+needs `LOG` in the receiver), a level held in a variable that is DEBUG at
+run time (counted as above DEBUG, so a false alarm rather than a miss), an
+exception whose own text carries the name, and records in helpers these
+functions call. The caplog tests in `tests/test_api_location_name_at_debug.py` and
 `tests/test_decoder_registry_name_at_debug.py` pin the record contents;
 this guard pins the shape of the call.
 
@@ -58,7 +67,12 @@ from custom_components import googlefindmy
 _PACKAGE_ROOT = Path(googlefindmy.__file__).resolve().parent
 
 _LEVELS_ABOVE_DEBUG = frozenset(
-    {"info", "warning", "warn", "error", "exception", "critical", "fatal", "log"}
+    {"info", "warning", "warn", "error", "exception", "critical", "fatal"}
+)
+
+# Level arguments of ``.log(level, ...)`` that are DEBUG or below.
+_DEBUG_LEVEL_SPELLINGS = frozenset(
+    {"logging.DEBUG", "DEBUG", "logging.NOTSET", "NOTSET"}
 )
 
 # (path relative to the package, qualified name, minimum number of log calls
@@ -113,11 +127,47 @@ def _find_function(
     return None
 
 
-def _is_log_call_above_debug(node: ast.Call) -> bool:
+def _log_method(node: ast.Call) -> str | None:
+    """Return the logger method a call invokes, or ``None`` for other calls.
+
+    Two spellings: ``_LOGGER.warning(...)`` and
+    ``getattr(_LOGGER, "warning")(...)``; the receiver must spell ``LOG``.
+    """
     func = node.func
-    if not isinstance(func, ast.Attribute) or func.attr not in _LEVELS_ABOVE_DEBUG:
-        return False
-    return "LOG" in ast.unparse(func.value).upper()
+    if isinstance(func, ast.Attribute):
+        receiver: ast.expr = func.value
+        method = func.attr
+    elif (
+        isinstance(func, ast.Call)
+        and isinstance(func.func, ast.Name)
+        and func.func.id == "getattr"
+        and len(func.args) >= 2
+        and isinstance(func.args[1], ast.Constant)
+        and isinstance(func.args[1].value, str)
+    ):
+        receiver = func.args[0]
+        method = func.args[1].value
+    else:
+        return None
+    if "LOG" not in ast.unparse(receiver).upper():
+        return None
+    return method
+
+
+def _is_debug_level(level: ast.expr) -> bool:
+    if isinstance(level, ast.Constant):
+        return isinstance(level.value, int) and level.value <= 10
+    return ast.unparse(level) in _DEBUG_LEVEL_SPELLINGS
+
+
+def _is_log_call_above_debug(node: ast.Call) -> bool:
+    method = _log_method(node)
+    if method in _LEVELS_ABOVE_DEBUG:
+        return True
+    if method == "log":
+        # Without a level argument the call fails at run time; count it.
+        return not node.args or not _is_debug_level(node.args[0])
+    return False
 
 
 def _spells_a_name(text: str) -> bool:
@@ -139,8 +189,9 @@ def _name_leaves(node: ast.AST) -> set[str]:
             found.add(ast.unparse(child))
         elif isinstance(child, ast.Call):
             # A string key passed to a nested call reads the value by name:
-            # ``getattr(device, "userDefinedDeviceName", "")``, ``d.get("name")``.
-            for argument in child.args:
+            # ``getattr(device, "userDefinedDeviceName", "")``, ``d.get("name")``,
+            # ``d.get(key="name")``.
+            for argument in [*child.args, *(kw.value for kw in child.keywords)]:
                 if (
                     isinstance(argument, ast.Constant)
                     and isinstance(argument.value, str)
@@ -159,7 +210,7 @@ def _name_leaves(node: ast.AST) -> set[str]:
 
 def _format_prefix(node: ast.Call) -> str:
     # `.log(level, msg, ...)` carries the format string at index 1.
-    index = 1 if isinstance(node.func, ast.Attribute) and node.func.attr == "log" else 0
+    index = 1 if _log_method(node) == "log" else 0
     first = node.args[index] if len(node.args) > index else None
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
         return first.value
