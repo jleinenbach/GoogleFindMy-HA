@@ -15,12 +15,19 @@ user action and used to log the display name at WARNING or ERROR:
   every poll cycle).
 
 Inside each function, every log call whose level is INFO or above is
-checked. A log call is a method call on a receiver that spells `LOG`
-(`_LOGGER.warning(...)`) or the same method fetched with `getattr`
-(`getattr(_LOGGER, "warning")(...)`). For `.log(level, ...)` the level
-decides: `logging.DEBUG`, `logging.NOTSET` or an integer constant up to 10
-is DEBUG and skipped; any other level, a variable included, counts as above
-DEBUG. Checked are all positional arguments, including the format argument with an
+checked. A log call is a method call on a logger: a receiver whose last
+name part is `log` or `logger` in any case, leading underscores ignored
+(`_LOGGER`, `LOGGER`, `self.logger`, `self.log`), or a `getLogger(...)`
+call. The method may be named directly (`_LOGGER.warning(...)`), through
+`.__call__`, through `getattr` (`getattr(_LOGGER, "warning")(...)`), or in
+either branch of a conditional expression
+(`(_LOGGER.warning if c else _LOGGER.error)(...)`). A `getattr` whose method
+name is not a string constant counts as above DEBUG. For `.log` the level,
+positional or `level=`, decides: `logging.DEBUG`, `DEBUG`, `logging.NOTSET`,
+`NOTSET` or an integer constant up to 10 is DEBUG and skipped; any other
+level, a variable included, counts as above DEBUG, and so does a `.log` call
+without a level, which raises at run time. The level argument itself is not
+checked for names. Checked are all positional arguments, including the format argument with an
 f-string or the right side of a `%` format, and all keyword values. An
 offender is any leaf below them that is a name, an attribute (other than
 `__name__`), a subscript with a string key, or a string constant passed to a
@@ -44,12 +51,14 @@ subscript whose spelling has neither `name` nor `label` (`fields = ...` in
 the decoder is such a case and is correct; `self._last = device_name`
 followed by a record with `self._last` would be a miss), a device object
 whose spelling has neither word rendered whole (`str(device)`,
-`repr(device)`, `%s` or `%r` with `device`, `{device!r}`), a logger method
-bound to a local name or wrapped in `functools.partial` (the receiver rule
-needs `LOG` in the receiver), a level held in a variable that is DEBUG at
-run time (counted as above DEBUG, so a false alarm rather than a miss), an
-exception whose own text carries the name, and records in helpers these
-functions call. The caplog tests in `tests/test_api_location_name_at_debug.py` and
+`repr(device)`, `%s` or `%r` with `device`, `{device!r}`), a logger stored
+under a name whose last part is not `log` or `logger`, a logger method bound
+to a local name, taken from a container (`methods[level](...)`) or wrapped
+in `functools.partial` or a lambda (the callee forms above are the only ones
+read), an exception whose own text carries the name, and records in helpers
+these functions call. A level held in a variable, or a `getattr` method name
+held in one, that is DEBUG at run time is counted as above DEBUG: a false
+alarm rather than a miss. The caplog tests in `tests/test_api_location_name_at_debug.py` and
 `tests/test_decoder_registry_name_at_debug.py` pin the record contents;
 this guard pins the shape of the call.
 
@@ -127,31 +136,56 @@ def _find_function(
     return None
 
 
-def _log_method(node: ast.Call) -> str | None:
-    """Return the logger method a call invokes, or ``None`` for other calls.
+_UNKNOWN_METHOD = "?"
 
-    Two spellings: ``_LOGGER.warning(...)`` and
-    ``getattr(_LOGGER, "warning")(...)``; the receiver must spell ``LOG``.
+
+def _is_logger(receiver: ast.expr) -> bool:
+    """True for ``_LOGGER``, ``self.logger``, ``self.log`` or ``getLogger(...)``."""
+    if isinstance(receiver, ast.Call):
+        callee = receiver.func
+        if isinstance(callee, ast.Attribute):
+            return callee.attr == "getLogger"
+        return isinstance(callee, ast.Name) and callee.id == "getLogger"
+    if isinstance(receiver, ast.Attribute):
+        last = receiver.attr
+    elif isinstance(receiver, ast.Name):
+        last = receiver.id
+    else:
+        return False
+    return last.lstrip("_").lower() in {"log", "logger"}
+
+
+def _log_methods(func: ast.expr) -> set[str]:
+    """Logger methods a callee expression may invoke; empty for other callees.
+
+    ``_UNKNOWN_METHOD`` stands for a ``getattr`` whose name is not a constant.
     """
-    func = node.func
     if isinstance(func, ast.Attribute):
-        receiver: ast.expr = func.value
-        method = func.attr
-    elif (
+        if func.attr == "__call__":
+            return _log_methods(func.value)
+        return {func.attr} if _is_logger(func.value) else set()
+    if isinstance(func, ast.IfExp):
+        return _log_methods(func.body) | _log_methods(func.orelse)
+    if (
         isinstance(func, ast.Call)
         and isinstance(func.func, ast.Name)
         and func.func.id == "getattr"
         and len(func.args) >= 2
-        and isinstance(func.args[1], ast.Constant)
-        and isinstance(func.args[1].value, str)
+        and _is_logger(func.args[0])
     ):
-        receiver = func.args[0]
-        method = func.args[1].value
-    else:
-        return None
-    if "LOG" not in ast.unparse(receiver).upper():
-        return None
-    return method
+        method = func.args[1]
+        if isinstance(method, ast.Constant) and isinstance(method.value, str):
+            return {method.value}
+        return {_UNKNOWN_METHOD}
+    return set()
+
+
+def _level_argument(node: ast.Call) -> ast.expr | None:
+    """The level of a ``.log`` call, positional or ``level=``."""
+    for keyword in node.keywords:
+        if keyword.arg == "level":
+            return keyword.value
+    return node.args[0] if node.args else None
 
 
 def _is_debug_level(level: ast.expr) -> bool:
@@ -161,12 +195,13 @@ def _is_debug_level(level: ast.expr) -> bool:
 
 
 def _is_log_call_above_debug(node: ast.Call) -> bool:
-    method = _log_method(node)
-    if method in _LEVELS_ABOVE_DEBUG:
+    methods = _log_methods(node.func)
+    if methods & (_LEVELS_ABOVE_DEBUG | {_UNKNOWN_METHOD}):
         return True
-    if method == "log":
-        # Without a level argument the call fails at run time; count it.
-        return not node.args or not _is_debug_level(node.args[0])
+    if "log" in methods:
+        level = _level_argument(node)
+        # A `.log` call without a level raises TypeError; count it all the same.
+        return level is None or not _is_debug_level(level)
     return False
 
 
@@ -209,9 +244,15 @@ def _name_leaves(node: ast.AST) -> set[str]:
 
 
 def _format_prefix(node: ast.Call) -> str:
-    # `.log(level, msg, ...)` carries the format string at index 1.
-    index = 1 if _log_method(node) == "log" else 0
+    # `.log(level, msg, ...)` carries the format string at index 1, unless the
+    # level is passed as `level=`; `msg=` may carry it as a keyword.
+    level_positional = "log" in _log_methods(node.func) and not any(
+        keyword.arg == "level" for keyword in node.keywords
+    )
+    index = 1 if level_positional else 0
     first = node.args[index] if len(node.args) > index else None
+    if first is None:
+        first = next((kw.value for kw in node.keywords if kw.arg == "msg"), None)
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
         return first.value
     return ""
@@ -245,9 +286,11 @@ def scan(
                 continue
             counts[qualname] += 1
             fmt = _format_prefix(node)
+            level = _level_argument(node) if "log" in _log_methods(node.func) else None
             leaves: set[str] = set()
             for argument in [*node.args, *(kw.value for kw in node.keywords)]:
-                leaves |= _name_leaves(argument)
+                if argument is not level:
+                    leaves |= _name_leaves(argument)
             for leaf in sorted(leaves):
                 if _is_excepted(rows, relative, leaf, fmt):
                     continue
