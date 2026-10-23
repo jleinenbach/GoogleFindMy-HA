@@ -66,6 +66,7 @@ from .const import (
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DEFAULT_CONTRIBUTOR_MODE,
+    DOMAIN,
     PlaySoundResult,
     SoundDispatchOutcome,
 )
@@ -1115,7 +1116,11 @@ class GoogleFindMyAPI:
 
         except NovaRateLimitError as err:
             _LOGGER.warning("Device list temporarily rate-limited: %s", _short_err(err))
-            raise UpdateFailed(_short_err(err)) from err
+            raise UpdateFailed(
+                _short_err(err),
+                translation_domain=DOMAIN,
+                translation_key="device_list_rate_limited",
+            ) from err
 
         except NovaHTTPError as err:
             # Map 401/403 explicitly to ConfigEntryAuthFailed
@@ -1133,7 +1138,12 @@ class GoogleFindMyAPI:
                 err.status,
                 _short_err(err),
             )
-            raise UpdateFailed(_short_err(err)) from err
+            raise UpdateFailed(
+                _short_err(err),
+                translation_domain=DOMAIN,
+                translation_key="device_list_server_error",
+                translation_placeholders={"status": str(err.status)},
+            ) from err
 
         except NovaAuthError as err:
             # Branch on the STATUS, never on the type. The transport raises this
@@ -1149,7 +1159,14 @@ class GoogleFindMyAPI:
                     getattr(err, "status", "unknown"),
                     _short_err(err),
                 )
-                raise UpdateFailed(_short_err(err)) from err
+                raise UpdateFailed(
+                    _short_err(err),
+                    translation_domain=DOMAIN,
+                    translation_key="device_list_rejected",
+                    translation_placeholders={
+                        "status": str(getattr(err, "status", "unknown"))
+                    },
+                ) from err
 
             # Mirror the location path's base handler: a permanent credential
             # failure (NovaAuthPermanentError subclass, or a base NovaAuthError
@@ -1176,7 +1193,11 @@ class GoogleFindMyAPI:
         except NovaProtobufDecodeError as err:
             # Protobuf decode failures indicate corrupted response or protocol mismatch
             _LOGGER.error("Failed to decode device list response: %s", _short_err(err))
-            raise UpdateFailed(_short_err(err)) from err
+            raise UpdateFailed(
+                _short_err(err),
+                translation_domain=DOMAIN,
+                translation_key="device_list_decode_failed",
+            ) from err
 
         except NovaLogicError as err:
             # Logic errors from Google (e.g., invalid device ID, permission denied)
@@ -1185,7 +1206,11 @@ class GoogleFindMyAPI:
                 err.code,
                 err.message or "Unknown",
             )
-            raise UpdateFailed(_short_err(err)) from err
+            raise UpdateFailed(
+                _short_err(err),
+                translation_domain=DOMAIN,
+                translation_key="device_list_logic_error",
+            ) from err
 
         # Normalize gpsoauth/ADM "BadAuthentication" style failures to ConfigEntryAuthFailed
         except (RuntimeError, ValueError) as err:
@@ -1226,12 +1251,20 @@ class GoogleFindMyAPI:
 
                 # Still raise UpdateFailed so the coordinator/flow can keep semantics,
                 # and the flow can recognize the guard by message content.
-                raise UpdateFailed(_short_err(msg)) from err
+                raise UpdateFailed(
+                    _short_err(msg),
+                    translation_domain=DOMAIN,
+                    translation_key="multi_entry_guard",
+                ) from err
 
             _LOGGER.warning(
                 "Failed to get basic device list (runtime/value): %s", _short_err(err)
             )
-            raise UpdateFailed(_short_err(err)) from err
+            raise UpdateFailed(
+                _short_err(err),
+                translation_domain=DOMAIN,
+                translation_key="device_list_failed",
+            ) from err
 
         except ClientError as err:
             # Minimal-invasive change: do not degrade to empty success; signal transient failure.
@@ -1239,7 +1272,9 @@ class GoogleFindMyAPI:
                 "Failed to get basic device list (async, network): %s", _short_err(err)
             )
             raise UpdateFailed(
-                f"Network error fetching device list: {_short_err(err)}"
+                f"Network error fetching device list: {_short_err(err)}",
+                translation_domain=DOMAIN,
+                translation_key="device_list_network_error",
             ) from err
 
         except Exception as err:
@@ -1248,7 +1283,9 @@ class GoogleFindMyAPI:
                 "Failed to get basic device list (async): %s", _short_err(err)
             )
             raise UpdateFailed(
-                f"Unexpected error fetching device list: {_short_err(err)}"
+                f"Unexpected error fetching device list: {_short_err(err)}",
+                translation_domain=DOMAIN,
+                translation_key="device_list_unexpected_error",
             ) from err
 
     def get_basic_device_list(self) -> list[dict[str, Any]]:
