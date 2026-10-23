@@ -18,13 +18,14 @@ Inside each function, every log call whose level is INFO or above is
 checked.
 
 Log calls, as a closed list: a call whose callee is `<logger>.<method>`,
-`<logger>.<method>.__call__`, `getattr(<logger>, <method>)`, or a
-conditional expression whose branches are such callees
-(`(_LOGGER.warning if c else _LOGGER.error)(...)`). `<logger>` is a name or
-attribute whose last part is `log` or `logger` in any case, leading
-underscores ignored (`_LOGGER`, `LOGGER`, `self.logger`, `self.log`), the
-module `logging` itself (`logging.warning(...)`), or a call to
-`getLogger(...)` or `.getChild(...)`. No other callee is read.
+`getattr(<logger>, <method>)` with or without a default, a conditional
+expression with at least one branch of these forms
+(`(_LOGGER.warning if c else _LOGGER.error)(...)`), or any of these followed
+by `.__call__`, once or more. `<logger>` is a name or attribute whose last
+part is `log` or `logger` in any case, leading underscores ignored
+(`_LOGGER`, `LOGGER`, `self.logger`, `self.log`), the module `logging`
+itself (`logging.warning(...)`), or a call to a function or method named
+`getLogger` or `getChild`. No other callee is read.
 
 Levels: `info`, `warning`, `warn`, `error`, `exception`, `critical` and
 `fatal` are above DEBUG. For `log`, the level passed positionally or as
@@ -32,7 +33,9 @@ Levels: `info`, `warning`, `warn`, `error`, `exception`, `critical` and
 integer constant up to 10 is DEBUG and skipped; any other level, a variable
 included, counts as above DEBUG, and so does a `log` call whose level is not
 visible (none given, or passed through `*args` or `**kwargs`). A `getattr`
-whose method name is not a string constant counts as above DEBUG. Each of
+whose method name is not a string constant counts as above DEBUG. When a
+conditional expression mixes `log` with another method, no argument is read
+as a level. Each of
 these rules errs towards a false alarm, not towards a miss.
 
 Checked in each log call: all positional arguments, a `*args` argument
@@ -265,7 +268,7 @@ def _name_leaves(node: ast.AST) -> set[str]:
 def _format_prefix(node: ast.Call) -> str:
     # `.log(level, msg, ...)` carries the format string at index 1, unless the
     # level is passed as `level=`; `msg=` may carry it as a keyword.
-    level_positional = "log" in _log_methods(node.func) and not any(
+    level_positional = _log_methods(node.func) == {"log"} and not any(
         keyword.arg == "level" for keyword in node.keywords
     )
     index = 1 if level_positional else 0
@@ -305,7 +308,10 @@ def scan(
                 continue
             counts[qualname] += 1
             fmt = _format_prefix(node)
-            level = _level_argument(node) if "log" in _log_methods(node.func) else None
+            # Only an unambiguous `.log` call has a level to skip.
+            level = (
+                _level_argument(node) if _log_methods(node.func) == {"log"} else None
+            )
             leaves: set[str] = set()
             for argument in [*node.args, *(kw.value for kw in node.keywords)]:
                 if argument is not level:
