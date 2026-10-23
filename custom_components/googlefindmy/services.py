@@ -723,12 +723,18 @@ def _control_entity_ids_for_target(
 
     The target is the value of the ``device_id`` field: a device registry id,
     an entity id of this integration or a canonical tracker id. The result is
-    the union of the enabled entities of this integration on every device the
-    action could run against: the device the value names directly, the device
-    of the named entity, and every device of this integration whose canonical
-    id equals the one the value resolves to. The last group is needed because
-    the action falls back to the first coordinator that knows the canonical id,
-    which can belong to another account than the named device.
+    the union of the enabled entities of this integration on the device the
+    value names directly (or the device of the named entity) and on every
+    device of this integration whose canonical id equals the one the value
+    resolves to. The second group is needed because the action falls back to
+    the first coordinator that knows the canonical id, which can belong to
+    another account than the named device.
+
+    A value that names a device, directly or through one of its entities,
+    whose entities of this integration are all disabled yields an empty set,
+    even when another account holds the same tracker with enabled entities.
+    Disabling every entity of a device therefore keeps non-admins off that
+    device; the tracker stays reachable through its canonical id.
 
     Membership in the integration comes from the entity registry
     (``platform == DOMAIN``) only; device entries are not inspected for their
@@ -770,6 +776,9 @@ def _control_entity_ids_for_target(
             and entity_entry.device_id
         ):
             target_devices.add(entity_entry.device_id)
+
+    if any(named not in entities_by_device for named in target_devices):
+        return set()
 
     for candidate_device_id in entities_by_device:
         if candidate_device_id in target_devices:

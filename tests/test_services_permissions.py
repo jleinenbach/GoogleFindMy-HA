@@ -192,6 +192,7 @@ class _World:
     coordinator: SimpleNamespace
     soft_migrate: AsyncMock
     second_canon1: _Device | None = None
+    second_canon3: _Device | None = None
     second_coordinator: SimpleNamespace | None = None
 
 
@@ -296,6 +297,7 @@ async def _build_world(
         )
         entry2.add_to_hass(hass)
         world.second_canon1 = _add_device(hass, entry2, "CANON1", enabled=1)
+        world.second_canon3 = _add_device(hass, entry2, "CANON3", enabled=1)
         world.second_coordinator = _coordinator(services)
         entries[entry2.entry_id] = SimpleNamespace(coordinator=world.second_coordinator)
 
@@ -553,6 +555,66 @@ async def test_same_tracker_in_two_accounts(
     assert reached == 1
 
 
+@pytest.mark.parametrize("form", ["device_id", "entity_id"])
+async def test_named_device_without_enabled_entity_in_two_accounts(
+    hass: HomeAssistant, services_module: ModuleType, form: str
+) -> None:
+    """A device with only disabled entities stays closed in a second account too."""
+
+    world = await _build_world(hass, services_module, second_account=True)
+    assert world.second_canon3 is not None and world.second_coordinator is not None
+    user = _mock_user(hass)
+    user.mock_policy(
+        {
+            "entities": {
+                "entity_ids": dict.fromkeys(world.second_canon3.enabled_entities, True)
+            }
+        }
+    )
+    value = {
+        "device_id": world.canon3.device_id,
+        "entity_id": world.canon3.disabled_entities[0],
+    }[form]
+    with pytest.raises(_unauthorized()):
+        await _call(hass, "locate_device", {"device_id": value}, user.id)
+    assert world.coordinator.async_locate_device.await_count == 0
+    assert world.second_coordinator.async_locate_device.await_count == 0
+
+    # Named by its Google ID, the tracker is the target, not the closed device.
+    await _call(
+        hass, "locate_device", {"device_id": world.canon3.canonical_id}, user.id
+    )
+    reached = (
+        world.coordinator.async_locate_device.await_count
+        + world.second_coordinator.async_locate_device.await_count
+    )
+    assert reached == 1
+
+
+async def test_device_that_does_not_resolve_does_not_block_others(
+    hass: HomeAssistant, services_module: ModuleType
+) -> None:
+    """A device of this integration whose id does not resolve is skipped."""
+
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    world = await _build_world(hass, services_module)
+    entry = hass.config_entries.async_get_entry("entry1")
+    orphan = dr.async_get(hass).async_get_or_create(
+        config_entry_id="entry1", identifiers={("other_domain", "orphan")}
+    )
+    er.async_get(hass).async_get_or_create(
+        "button", DOMAIN, "orphan-0", config_entry=entry, device_id=orphan.id
+    )
+    user = _mock_user(hass)
+    user.mock_policy(
+        {"entities": {"entity_ids": dict.fromkeys(world.canon1.enabled_entities, True)}}
+    )
+    await _call(hass, "locate_device", {"device_id": world.canon1.device_id}, user.id)
+    assert world.coordinator.async_locate_device.await_count == 1
+
+
 async def test_missing_control_on_one_enabled_entity_rejects(
     hass: HomeAssistant, services_module: ModuleType
 ) -> None:
@@ -630,6 +692,8 @@ async def test_uniform_rejection(
 
     world = await _build_world(hass, services_module)
     caplog.set_level(logging.DEBUG)
+    # Only the records of the rejections count, not those of building the world.
+    caplog.clear()
     reference = await _rejection(
         hass, service, world.canon1.device_id, hass_read_only_user.id
     )
@@ -644,6 +708,9 @@ async def test_uniform_rejection(
     assert str(reference) == str(other)
     assert world.canon1.device_id not in caplog.text
     assert TRACKER_NAME not in caplog.text
+    assert hass_read_only_user.id not in caplog.text
+    for entity_id in world.canon1.enabled_entities:
+        assert entity_id not in caplog.text
     assert _awaits(world.coordinator, service) == 0
 
 

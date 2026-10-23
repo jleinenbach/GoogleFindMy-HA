@@ -341,11 +341,14 @@ starts directly carries that user's context and is checked like a direct call.
 - **Device actions** (`locate_device`, `locate_external`, `play_sound`, `stop_sound`):
   administrators may always call them. Other users need control permission on every
   enabled entity of this integration on the target device. Read-only users are
-  therefore rejected. A device without such an entity cannot be called by non-admins.
+  therefore rejected. A device without such an entity, named by its device ID or one of
+  its entity IDs, cannot be called by non-admins.
 - **Same tracker in two accounts:** if the tracker belongs to more than one configured
   Google account, the action may run through any of them, so the user needs control
   permission on the entities of every device of that tracker. This holds for every way
-  of naming the target (device ID, entity ID or Google ID).
+  of naming the target (device ID, entity ID or Google ID). Named by its Google ID, the
+  tracker is the target, so a device of it without enabled entities does not block the
+  call.
 - **Maintenance actions** (`refresh_device_urls`, `rebuild_device_registry`,
   `rebuild_registry`) are for administrators only.
 - **The rejection is the same** whether the device is unknown or the permission is
