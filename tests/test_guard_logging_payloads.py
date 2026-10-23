@@ -166,8 +166,12 @@ name; measured on 2026-09-20, the package has no such site, and the three
 `.put(` calls it does have sit in `eid_resolver.py`, outside this guard's
 scope), a binding
 in one method read in another (`self.last = err` in `m`, logged in `n`:
-the flow stays inside one function), `with cm as err` (what `__enter__`
-returns is the manager's business, not the name's),
+the flow stays inside one function), a `with … as err` whose manager
+this file does not define (what `__enter__` returns is the manager's
+business, not the name's; binding every such target would report 7 sites
+in `Auth/`, measured on 2026-10-22, all HTTP responses of `async with
+session.post(...) as resp`; a module-local generator whose `yield` carries
+a bound exception is followed, see `_yielding_calls`),
 a helper reached otherwise than by its bare name or through `self.`/`cls.`
 (another receiver `self._client.h(err)`, an imported helper: this guard
 parses one file, `functools.partial`, an alias of a function `g = h; g(err)`,
@@ -2016,6 +2020,7 @@ def _flow_bound_names(
     modules: dict[str, str],
     local: dict[str, tuple[ast.AST, ...]],
     returning: frozenset[int] = frozenset(),
+    yielding: frozenset[int] = frozenset(),
 ) -> tuple[str, ...]:
     """Fourth binding: names that receive a bound exception inside one function.
 
@@ -2049,7 +2054,10 @@ def _flow_bound_names(
     report all three. An assignment, annotated assignment or walrus whose
     value (behind `await`) is a call in `returning` binds its target as a
     whole: the call reaches a module-local helper whose `return` carries a
-    bound exception (`_returning_calls`).
+    bound exception (`_returning_calls`). A `with` or `async with` item
+    whose manager is a call in `yielding` binds its `as`
+    target the same way: the manager is a module-local generator whose
+    `yield` carries a bound exception (`_yielding_calls`).
     """
     bound = set(seed)
     while True:
@@ -2068,6 +2076,11 @@ def _flow_bound_names(
                     bound.update(_unpacked_names(target, node.value, frozen))
                     if id(value) in returning:
                         bound.update(_target_names(target))
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    manager = item.context_expr
+                    if item.optional_vars is not None and id(manager) in yielding:
+                        bound.update(_target_names(item.optional_vars))
             elif isinstance(node, ast.AugAssign):
                 if _carries_exception(node.value, frozen):
                     bound.update(_target_names(node.target))
@@ -2298,11 +2311,19 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
     context = (own, aliases, local, scopes, imported, modules)
     forwarded: dict[int, tuple[str, ...]] = {}
     returning: frozenset[int] = frozenset()
+    yielding: frozenset[int] = frozenset()
     for _round in range(_FORWARD_ROUND_LIMIT):
         by_scope: dict[int, tuple[str, ...]] = {}
-        names = _names_for_seeds(tree, forwarded, context, returning, by_scope)
+        names = _names_for_seeds(
+            tree, forwarded, context, returning, by_scope, yielding
+        )
         seeds = _forwarded_parameter_seeds(tree, names, callees)
         calls = _returning_calls(tree, by_scope, callees, returning)
+        managers = _yielding_calls(tree, by_scope, callees, returning)
+        if managers != yielding:
+            yielding = managers
+            forwarded, returning = seeds, calls
+            continue
         if seeds == forwarded and calls == returning:
             return names
         forwarded, returning = seeds, calls
@@ -2311,6 +2332,7 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
         _all_callee_parameters(tree, callees),
         context,
         _all_returning_calls(tree, callees),
+        yielding=_all_yielding_calls(tree, callees),
     )
 
 
@@ -2384,6 +2406,87 @@ def _returning_calls(
     )
 
 
+def _scope_yields(
+    node: ast.AST,
+) -> Iterator[tuple[ast.Yield, tuple[int, ...]]]:
+    """The `yield` expressions of one function, with the handlers around each.
+
+    Like `_scope_returns`, but a `yield` is an expression and may stand
+    inside one (`sent = yield err`), so expressions are entered too, still
+    iteratively; a nested `def` or class is its own scope.
+    """
+    stack = [(child, ()) for child in ast.iter_child_nodes(node)]
+    while stack:
+        child, around = stack.pop()
+        if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if isinstance(child, ast.Yield):
+            yield child, around
+        inner = (*around, id(child)) if isinstance(child, ast.ExceptHandler) else around
+        stack.extend((grand, inner) for grand in ast.iter_child_nodes(child))
+
+
+def _yielding_calls(
+    tree: ast.AST,
+    by_scope: dict[int, tuple[str, ...]],
+    callees: dict[str, list[tuple[ast.AST, int]]],
+    returning: frozenset[int],
+) -> frozenset[int]:
+    """Calls that reach a module-local generator whose `yield` carries an exception.
+
+    Such a generator, wrapped by `contextlib.contextmanager` or
+    `asynccontextmanager`, hands what it yields to `with … as NAME`. Read
+    like `_returning_calls`: a `yield` carries a name bound in the generator,
+    the name of a foreign handler around it, or a call that returns an
+    exception (`yield pick(task)`, behind `await`). The decorator is not checked
+    (fail-closed: an undecorated generator in a `with` fails at runtime).
+    A manager the module does not define (a parameter `cm`, `async with
+    session.post(...) as resp`) is not one: one file does not show what its
+    `__enter__` returns.
+    """
+    yielders: set[int] = set()
+    for generator in ast.walk(tree):
+        if not isinstance(generator, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        names = by_scope.get(id(generator), ())
+        for node, handlers in _scope_yields(generator):
+            if node.value is None:
+                continue
+            yielded = node.value
+            if isinstance(yielded, ast.Await):
+                yielded = yielded.value
+            carried = frozenset(
+                [*names, *(n for h in handlers for n in by_scope.get(h, ()))]
+            )
+            if id(yielded) in returning or _carries_exception(yielded, carried):
+                yielders.add(id(generator))
+                break
+    return frozenset(
+        id(call)
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and any(id(f) in yielders for f, _ in _resolved_callees(call, callees))
+    )
+
+
+def _all_yielding_calls(
+    tree: ast.AST, callees: dict[str, list[tuple[ast.AST, int]]]
+) -> frozenset[int]:
+    """Every call of a module-local generator that yields a value (fail-closed)."""
+    yielders = {
+        id(function)
+        for function in ast.walk(tree)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(node.value is not None for node, _ in _scope_yields(function))
+    }
+    return frozenset(
+        id(call)
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and any(id(f) in yielders for f, _ in _resolved_callees(call, callees))
+    )
+
+
 def _all_returning_calls(
     tree: ast.AST, callees: dict[str, list[tuple[ast.AST, int]]]
 ) -> frozenset[int]:
@@ -2409,10 +2512,12 @@ def _names_for_seeds(
     context: tuple,
     returning: frozenset[int] = frozenset(),
     by_scope: dict[int, tuple[str, ...]] | None = None,
+    yielding: frozenset[int] = frozenset(),
 ) -> dict[int, tuple[str, ...]]:
     """One round of `_exception_names_by_call` for the given forwarded parameters.
 
-    `returning` are the calls whose result binds (`_returning_calls`);
+    `returning` are the calls whose result binds (`_returning_calls`),
+    `yielding` the managers whose `with … as` target binds (`_yielding_calls`);
     `by_scope`, when given, receives the names bound in each function and
     each foreign handler, keyed by the node's `id`.
     """
@@ -2442,7 +2547,7 @@ def _names_for_seeds(
         # The data flow reads the table for `match` class patterns only, where
         # a type parameter cannot stand (`case T():` raises at runtime).
         bound += _flow_bound_names(
-            function, bound, own, aliases, imported, modules, local, returning
+            function, bound, own, aliases, imported, modules, local, returning, yielding
         )
         if by_scope is not None:
             by_scope[id(function)] = bound
@@ -2464,7 +2569,15 @@ def _names_for_seeds(
         bound = (handler.name,) if handler.name else ()
         if handler.name:
             bound += _flow_bound_names(
-                handler, bound, own, aliases, imported, modules, local, returning
+                handler,
+                bound,
+                own,
+                aliases,
+                imported,
+                modules,
+                local,
+                returning,
+                yielding,
             )
         if by_scope is not None:
             by_scope[id(handler)] = bound
@@ -5462,6 +5575,180 @@ def test_shape_i_reads_own_exceptions_built_from_foreign_ones() -> None:
     ]
     outside, _ = _scan_tree(tree, "coordinator/fixture.py")
     assert outside == []
+
+
+_SHAPE_I_MANAGER_FIXTURE = """
+import contextlib
+import logging
+from aiohttp import ClientError
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def pick(task):
+    return task.exception()
+
+
+@contextlib.contextmanager
+def caught(task):
+    yield task.exception()
+
+
+@contextlib.contextmanager
+def relay(value):
+    yield value
+
+
+@contextlib.asynccontextmanager
+async def acaught(task):
+    yield task.exception()
+
+
+@contextlib.contextmanager
+def via(task):
+    yield pick(task)
+
+
+@contextlib.contextmanager
+def guarded():
+    try:
+        yield None
+    except ClientError as caught_err:
+        yield caught_err
+
+
+@contextlib.contextmanager
+def harmless(err: ClientError):
+    yield describe_exception(err)
+
+
+@contextlib.contextmanager
+def outer_cm(err: ClientError):
+    def inner():
+        yield err
+
+    yield "fixed"
+
+
+def f01(task) -> None:
+    with caught(task) as err:
+        _LOGGER.error("failed: %s", err)
+
+
+def f02(err: ClientError) -> None:
+    with relay(err) as again:
+        _LOGGER.error("failed: %s", again)
+
+
+async def f03(task) -> None:
+    async with acaught(task) as err:
+        _LOGGER.error("failed: %s", err)
+
+
+def f04(task) -> None:
+    with via(task) as err:
+        _LOGGER.error("failed: %s", err)
+
+
+def f05() -> None:
+    with guarded() as err:
+        _LOGGER.error("failed: %s", err)
+
+
+def f06(err: ClientError) -> None:
+    with harmless(err) as kind:
+        _LOGGER.error("failed: %s", kind)
+
+
+def f07(err: ClientError) -> None:
+    with outer_cm(err) as text:
+        _LOGGER.error("failed: %s", text)
+
+
+def f08(cm) -> None:
+    with cm as err:
+        _LOGGER.error("failed: %s", err)
+
+
+def f09(path) -> None:
+    with open(path) as fh, caught(path) as err:
+        _LOGGER.error("failed: %s %s", fh, err)
+
+
+async def fetch(task):
+    return task.exception()
+
+
+@contextlib.asynccontextmanager
+async def awaited(task):
+    yield await fetch(task)
+
+
+async def f10(task) -> None:
+    async with awaited(task) as err:
+        _LOGGER.error("failed: %s", err)
+"""
+
+
+def test_shape_i_follows_exceptions_yielded_by_local_context_managers() -> None:
+    """A `with … as` target binds when a module-local manager yields an exception.
+
+    `contextlib.contextmanager` hands what the generator yields to the `as`
+    target; when the generator is defined in this file, its `yield` is read
+    like a helper's `return` (`_yielding_calls`). Reported: a yielded
+    `task.exception()` (line 56), a forwarded parameter yielded back
+    (line 61), `async with` (line 66), a yielded helper result (line 71), a
+    foreign handler name yielded inside the handler (line 76), the second
+    item of a two-item `with` (line 96) and an awaited helper result
+    yielded by an async manager (line 110). Not reported: a safe wrapper
+    yielded (`describe_exception`, line 81), a `yield` in a nested function
+    (line 86), a manager the file does not define (the parameter `cm`,
+    line 91) and `open(path)` (line 96, `fh`). The same fixture outside
+    `Auth/` reports nothing.
+    """
+    tree = ast.parse(_SHAPE_I_MANAGER_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [
+        (56, "err"),
+        (61, "again"),
+        (66, "err"),
+        (71, "err"),
+        (76, "err"),
+        (96, "err"),
+        (110, "err"),
+    ]
+    outside, _ = _scan_tree(tree, "coordinator/fixture.py")
+    assert outside == []
+
+
+_SHAPE_I_MANAGER_LIMIT_FIXTURE = """
+def first(task):
+    return task.exception()
+
+
+def manager(task):
+    yield first(task)
+
+
+def start(task) -> None:
+    with manager(task) as err:
+        _LOGGER.error("x %s", err)
+"""
+
+
+def test_shape_i_manager_yields_stop_fail_closed_at_the_round_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the round limit every module-local generator that yields binds.
+
+    `manager` yields an exception only once `first` is known to return one,
+    one round later; with the limit at one the fixpoint stops before, and
+    the fail-closed branch still reports line 12.
+    """
+    monkeypatch.setitem(globals(), "_FORWARD_ROUND_LIMIT", 1)
+    tree = ast.parse(_SHAPE_I_MANAGER_LIMIT_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [(12, "err")]
 
 
 def test_shape_i_reports_producer_exceptions_in_broad_auth_handlers() -> None:
