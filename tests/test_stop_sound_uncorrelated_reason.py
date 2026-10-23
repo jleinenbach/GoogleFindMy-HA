@@ -27,7 +27,7 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.coordinator.helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
 )
-from tests.test_stop_sound_keep_key_and_defer import _coordinator
+from tests.test_stop_sound_keep_key_and_defer import _coordinator, events  # noqa: F401
 
 _DEV = "dev-1"
 _OWN = "own-key"
@@ -71,6 +71,7 @@ _CASES = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("events")
 @pytest.mark.parametrize(("cached", "aged", "supplied", "expected"), _CASES)
 async def test_reason_matches_the_outcome_of_the_stop(
     cached: str | None,
@@ -80,7 +81,7 @@ async def test_reason_matches_the_outcome_of_the_stop(
 ) -> None:
     """``None`` exactly when the stop is CANCELLED; otherwise the named case."""
 
-    coordinator, _events = _coordinator(uuids={_DEV: cached} if cached else None)
+    coordinator = _coordinator([], uuids={_DEV: cached} if cached else None)
     if aged:
         _aged(coordinator)
 
@@ -95,10 +96,11 @@ async def test_reason_matches_the_outcome_of_the_stop(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("events")
 async def test_a_repeated_stop_with_our_key_is_not_a_case() -> None:
     """Since the key is kept, a second stop is correlated again (K9 meets K10)."""
 
-    coordinator, _events = _coordinator(uuids={_DEV: _OWN})
+    coordinator = _coordinator([], uuids={_DEV: _OWN})
     await coordinator.async_stop_sound(_DEV, None)
 
     assert coordinator.classify_stop_correlation(_DEV, None) is None

@@ -1361,7 +1361,7 @@ class TestCorrelationPredicateIsShared:
         coord._stop_would_be_correlated.assert_called_once_with("dev-1", None)
 
     async def test_outcome_and_delay_follow_the_predicate_against_the_raw_cache(
-        self, coord: LocateStub
+        self, coord: LocateStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Predicate says yes while the cached key has aged past the limit."""
 
@@ -1369,14 +1369,17 @@ class TestCorrelationPredicateIsShared:
         coord._sound_request_uuids["dev-1"] = "uuid-old"
         coord._sound_request_timestamps["dev-1"] = time.time() - 3600.0
         coord._sound_play_accepted_at = {"dev-1": ("uuid-old", time.monotonic() - 3.0)}
-        coord._async_wait_before_stop = AsyncMock(return_value=None)
+        sleep = AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.coordinator.locate.asyncio.sleep", sleep
+        )
         coord._stop_would_be_correlated = MagicMock(return_value=True)
         coord.api.async_stop_sound.return_value = SoundDispatchOutcome.ACCEPTED
 
         outcome = await coord.async_stop_sound("dev-1")
 
         assert outcome is StopSoundOutcome.CANCELLED
-        coord._async_wait_before_stop.assert_awaited_once()
+        sleep.assert_awaited_once()
         assert coord._sound_request_uuids["dev-1"] == "uuid-old"
 
 

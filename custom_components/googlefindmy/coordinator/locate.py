@@ -1062,10 +1062,6 @@ class LocateOperations(_MixinBase):
             return StopSoundUncorrelatedReason.NO_KEY
         return StopSoundUncorrelatedReason.AGED_KEY
 
-    async def _async_wait_before_stop(self, delay: float) -> None:
-        """Sleep for ``delay`` seconds; a separate method so tests can replace it."""
-        await asyncio.sleep(delay)
-
     async def _async_hold_stop_until_ring_started(
         self, device_id: str, request_uuid: str
     ) -> None:
@@ -1097,7 +1093,7 @@ class LocateOperations(_MixinBase):
             "while its ring is starting can leave the tracker unresponsive",
             remaining,
         )
-        await self._async_wait_before_stop(remaining)
+        await asyncio.sleep(remaining)
 
     async def async_play_sound(self, device_id: str) -> PlaySoundOutcome:
         """Play sound on a device using the native async API (no executor).

@@ -36,18 +36,38 @@ from custom_components.googlefindmy.const import (
     StopSoundOutcome,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import locate as locate_module
 
 # Literal on purpose: the measured boundary, not a re-export of the constant.
 # test_min_delay_constant_matches_the_measured_boundary ties the two together.
 _MIN_DELAY_S = 12.0
 
 
+@pytest.fixture
+def events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
+    """Record the deferral sleep and the sends of one test in one ordered list.
+
+    ``asyncio.sleep`` (which ``coordinator.locate`` looks up at call time) is
+    replaced process-wide for this test, so the production line that waits
+    runs without waiting (tests/AGENTS.md: no sleeps, monkeypatch instead).
+    """
+
+    recorded: list[tuple[str, object]] = []
+
+    async def _sleep(delay: float) -> None:
+        recorded.append(("wait", delay))
+
+    monkeypatch.setattr(locate_module.asyncio, "sleep", _sleep)
+    return recorded
+
+
 def _coordinator(
+    events: list[tuple[str, object]],
     *,
     uuids: dict[str, str] | None = None,
     accepted_at: dict[str, tuple[str, float]] | None = None,
-) -> tuple[GoogleFindMyCoordinator, list[tuple[str, object]]]:
-    """Build a bare coordinator that records waits and sends in one list."""
+) -> GoogleFindMyCoordinator:
+    """Build a bare coordinator whose sends land in ``events`` next to the waits."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     coordinator._sound_request_uuids = dict(uuids or {})  # type: ignore[attr-defined]
@@ -65,13 +85,6 @@ def _coordinator(
 
     coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
 
-    events: list[tuple[str, object]] = []
-
-    async def _wait(delay: float) -> None:
-        events.append(("wait", delay))
-
-    coordinator._async_wait_before_stop = _wait  # type: ignore[attr-defined]
-
     async def _async_stop_sound(
         device_id: str, request_uuid: str | None
     ) -> SoundDispatchOutcome:
@@ -79,7 +92,7 @@ def _coordinator(
         return SoundDispatchOutcome.ACCEPTED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
-    return coordinator, events
+    return coordinator
 
 
 def test_min_delay_constant_matches_the_measured_boundary() -> None:
@@ -93,10 +106,12 @@ def test_min_delay_constant_matches_the_measured_boundary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_correlated_stop_keeps_the_cancel_key_for_a_second_press() -> None:
+async def test_a_correlated_stop_keeps_the_cancel_key_for_a_second_press(
+    events: list[tuple[str, object]],
+) -> None:
     """K9: the second press carries the same key and is still correlated."""
 
-    coordinator, events = _coordinator(uuids={"device-1": "uuid-1"})
+    coordinator = _coordinator(events, uuids={"device-1": "uuid-1"})
 
     first = await coordinator.async_stop_sound("device-1")
     second = await coordinator.async_stop_sound("device-1")
@@ -108,7 +123,9 @@ async def test_a_correlated_stop_keeps_the_cancel_key_for_a_second_press() -> No
 
 
 @pytest.mark.asyncio
-async def test_a_kept_key_lets_a_repeated_stop_through_a_running_cooldown() -> None:
+async def test_a_kept_key_lets_a_repeated_stop_through_a_running_cooldown(
+    events: list[tuple[str, object]],
+) -> None:
     """The cooldown exception still applies to the repeated stop, and cannot feed itself.
 
     Before the key was kept, the second press had no key, so it was not
@@ -118,7 +135,7 @@ async def test_a_kept_key_lets_a_repeated_stop_through_a_running_cooldown() -> N
     (IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN).
     """
 
-    coordinator, events = _coordinator(uuids={"device-1": "uuid-1"})
+    coordinator = _coordinator(events, uuids={"device-1": "uuid-1"})
     first = await coordinator.async_stop_sound("device-1")
     assert first is StopSoundOutcome.CANCELLED
 
@@ -147,10 +164,12 @@ async def test_a_kept_key_lets_a_repeated_stop_through_a_running_cooldown() -> N
 
 
 @pytest.mark.asyncio
-async def test_an_accepted_play_records_when_nova_accepted_it() -> None:
+async def test_an_accepted_play_records_when_nova_accepted_it(
+    events: list[tuple[str, object]],
+) -> None:
     """The delay is measured from the acceptance of THIS play, tied to its key."""
 
-    coordinator, _events = _coordinator()
+    coordinator = _coordinator(events)
     coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
 
     async def _async_play_sound(device_id: str) -> PlaySoundResult:
@@ -169,10 +188,12 @@ async def test_an_accepted_play_records_when_nova_accepted_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_ambiguous_play_does_not_arm_the_delay() -> None:
+async def test_an_ambiguous_play_does_not_arm_the_delay(
+    events: list[tuple[str, object]],
+) -> None:
     """A play that was not accepted proves no start time, so nothing is held back."""
 
-    coordinator, events = _coordinator()
+    coordinator = _coordinator(events)
     coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
 
     async def _async_play_sound(device_id: str) -> PlaySoundResult:
@@ -194,10 +215,12 @@ async def test_an_ambiguous_play_does_not_arm_the_delay() -> None:
 @pytest.mark.asyncio
 async def test_a_stop_three_seconds_after_acceptance_waits_until_twelve(
     caplog: pytest.LogCaptureFixture,
+    events: list[tuple[str, object]],
 ) -> None:
     """K15: the stop is sent only after the remaining delay, and the wait is logged."""
 
-    coordinator, events = _coordinator(
+    coordinator = _coordinator(
+        events,
         uuids={"device-1": "uuid-1"},
         accepted_at={"device-1": ("uuid-1", time.monotonic() - 3.0)},
     )
@@ -215,10 +238,13 @@ async def test_a_stop_three_seconds_after_acceptance_waits_until_twelve(
 
 
 @pytest.mark.asyncio
-async def test_a_stop_thirteen_seconds_after_acceptance_is_sent_at_once() -> None:
+async def test_a_stop_thirteen_seconds_after_acceptance_is_sent_at_once(
+    events: list[tuple[str, object]],
+) -> None:
     """Past the boundary there is nothing to wait for."""
 
-    coordinator, events = _coordinator(
+    coordinator = _coordinator(
+        events,
         uuids={"device-1": "uuid-1"},
         accepted_at={"device-1": ("uuid-1", time.monotonic() - 13.0)},
     )
@@ -230,10 +256,12 @@ async def test_a_stop_thirteen_seconds_after_acceptance_is_sent_at_once() -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_stop_without_a_key_is_never_deferred() -> None:
+async def test_a_stop_without_a_key_is_never_deferred(
+    events: list[tuple[str, object]],
+) -> None:
     """No key of ours, no known start: the stop goes out at once."""
 
-    coordinator, events = _coordinator()
+    coordinator = _coordinator(events)
 
     result = await coordinator.async_stop_sound("device-1")
 
@@ -242,10 +270,13 @@ async def test_a_stop_without_a_key_is_never_deferred() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_foreign_key_is_not_deferred_by_our_own_recent_play() -> None:
+async def test_a_foreign_key_is_not_deferred_by_our_own_recent_play(
+    events: list[tuple[str, object]],
+) -> None:
     """The delay belongs to our key; a caller-supplied foreign key does not inherit it."""
 
-    coordinator, events = _coordinator(
+    coordinator = _coordinator(
+        events,
         uuids={"device-1": "uuid-ours"},
         accepted_at={"device-1": ("uuid-ours", time.monotonic() - 3.0)},
     )
@@ -257,10 +288,13 @@ async def test_a_foreign_key_is_not_deferred_by_our_own_recent_play() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_acceptance_stamp_for_an_older_key_does_not_defer() -> None:
+async def test_an_acceptance_stamp_for_an_older_key_does_not_defer(
+    events: list[tuple[str, object]],
+) -> None:
     """A stamp left by a previous play does not hold back the stop of a newer key."""
 
-    coordinator, events = _coordinator(
+    coordinator = _coordinator(
+        events,
         uuids={"device-1": "uuid-new"},
         accepted_at={"device-1": ("uuid-old", time.monotonic() - 3.0)},
     )
@@ -272,10 +306,13 @@ async def test_an_acceptance_stamp_for_an_older_key_does_not_defer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_suppressed_stop_does_not_wait_first() -> None:
+async def test_a_suppressed_stop_does_not_wait_first(
+    events: list[tuple[str, object]],
+) -> None:
     """A stop the gate declines returns at once instead of sleeping and then declining."""
 
-    coordinator, events = _coordinator(
+    coordinator = _coordinator(
+        events,
         accepted_at={"device-1": ("uuid-1", time.monotonic() - 3.0)},
     )
     coordinator._api_push_ready = lambda: False  # type: ignore[attr-defined]
@@ -287,7 +324,9 @@ async def test_a_suppressed_stop_does_not_wait_first() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_delay_follows_the_correlation_predicate_when_it_says_no() -> None:
+async def test_the_delay_follows_the_correlation_predicate_when_it_says_no(
+    events: list[tuple[str, object]],
+) -> None:
     """Only a stop ``_stop_would_be_correlated`` vouches for is held back.
 
     The stamp alone matches here (same key, three seconds old), so a delay that
@@ -297,7 +336,8 @@ async def test_the_delay_follows_the_correlation_predicate_when_it_says_no() -> 
     "yes" direction.
     """
 
-    coordinator, events = _coordinator(
+    coordinator = _coordinator(
+        events,
         uuids={"device-1": "uuid-1"},
         accepted_at={"device-1": ("uuid-1", time.monotonic() - 3.0)},
     )
