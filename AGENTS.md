@@ -135,8 +135,8 @@
 
 Always keep any `from __future__` imports immediately after the module docstring, even when the file starts with the repository-relative path header described above. This ordering prevents pytest's import hook from rejecting the file during rewrites.
 > **Precedence:** (1) Official **Home Assistant Developer Docs** → (2) this AGENTS.md → (3) repository conventions. This file never overrides security/legal policies.
-> **Language policy:** Keep the project consistently in English for documentation, inline code comments, and docstrings. (Translation files remain multilingual.)
-> Guard: `tests/test_guard_prose_contract.py` (see the Language reminder above for its scope and limits).
+> **Language policy:** Keep the project consistently in English for documentation, inline code comments, docstrings, and configuration names such as workflow environments. (Translation files remain multilingual.)
+> Guard: `tests/test_guard_prose_contract.py` (see the Language reminder above for its scope and limits); workflow environment names: `tests/test_guard_workflow_environments.py`.
 > **Non-blocking:** Missing optional artifacts (README sections, `quality_scale.yaml`, CODEOWNERS, CI files) **must not block** urgent fixes. The agent proposes a minimal stub or follow-up task instead.
 > **References:** This contract relies on the sources listed below; for a curated, extended list of links, see [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md).
 > **Upstream documentation hierarchy:** When consulting external guidance, prioritize Home Assistant's canonical domains in this order: developer portal (`https://developers.home-assistant.io`), user documentation (`https://www.home-assistant.io`), and the alerts/service bulletins site (`https://alerts.home-assistant.io`). If a required host is unreachable while the connectivity probe still confirms general internet access, pause implementation, request manual approval for that domain, and document the escalation before proceeding.
@@ -956,13 +956,14 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   behaviour):
   * **PR CI passes an approval gate.** In
     `.github/workflows/ci.yml` the first job, `approval_gate`, runs only on
-    `pull_request` and is bound to the environment `ci-freigabe`; `hassfest`
-    needs it, and every other job needs `hassfest`. Where `ci-freigabe` has a
-    required reviewer (in `jleinenbach/GoogleFindMy-HA`), that reviewer must
-    approve the run before any job starts; where it has no protection rules
-    (in `BSkando/GoogleFindMy-HA`), the gate passes without waiting for
-    approval. Pushes to `main` skip the gate and run all jobs (each job
-    states an explicit `if:` so the skipped
+    `pull_request` and is bound to the environment `home-assistant-tests`;
+    `hassfest` needs it, and every other job needs `hassfest`. Where
+    `home-assistant-tests` has a required reviewer (in
+    `jleinenbach/GoogleFindMy-HA`), that reviewer must approve the run before
+    any job starts; where it has no protection rules (GitHub creates a missing
+    environment without rules on the first run that references it), the gate
+    passes without waiting for approval. Pushes to `main` skip the gate and
+    run all jobs (each job states an explicit `if:` so the skipped
     gate does not skip them). A run that is not approved, is rejected or
     expires never turns `CI Success` green: `CI Success` depends on the gate
     and fails a pull request run whose gate result is not `success`. Workflow
@@ -972,7 +973,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     run for the current head). The gate is only as strong as the environment: GitHub
     creates a missing environment without protection rules when a job
     references it, so the approval is enforced only while
-    `gh api repos/<owner>/<repo>/environments/ci-freigabe --jq '.protection_rules[].type'`
+    `gh api repos/<owner>/<repo>/environments/home-assistant-tests --jq '.protection_rules[].type'`
     prints `required_reviewers` for that repository. Name it explicitly:
     without `GH_REPO`, gh resolves the `{owner}/{repo}` placeholders from the
     checkout's git remotes, and in a fork checkout with an `upstream` remote
@@ -990,8 +991,11 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     Compatibility Check
     (`.github/workflows/ha-dependency-check.yml`, which installs
     `homeassistant` on every pull request). `tests/test_ci_approval_gate.py`
-    locks the shape of `ci.yml`. Gate, guard test and this bullet are
-    repository-neutral and may go upstream: where `ci-freigabe` has no
+    locks the shape of `ci.yml`.
+    `tests/test_guard_workflow_environments.py` pins every `environment:` in
+    `.github/workflows/` to an English allowlist; a new name is added there
+    deliberately, with a reason. Gate, guard tests and this bullet are
+    repository-neutral and may go upstream: where `home-assistant-tests` has no
     protection rules, the gate passes without approval, and nothing has to be
     configured there.
   * **`pip-audit` on PRs is report-only.** `.github/workflows/pip-audit.yml`
