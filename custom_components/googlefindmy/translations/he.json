@@ -902,7 +902,7 @@
       "message": "תם הזמן הקצוב לבקשת המיקום עבור המכשיר {device_id}."
     },
     "locate_not_accepted": {
-      "message": "אף מכשיר לא קיבל את בקשת המיקום במחזור זה ({not_accepted} לא התקבלו, {rejected} נדחו)."
+      "message": "במחזור זה לא התקבלה בקשת מיקום של אף מכשיר ({not_accepted} לא התקבלו, {rejected} נדחו)."
     },
     "locate_all_rejected": {
       "message": "השרת דחה במחזור זה את בקשת המיקום עבור כל המכשירים ({rejected})."

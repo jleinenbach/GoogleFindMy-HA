@@ -902,7 +902,7 @@
       "message": "O pedido de localização do dispositivo {device_id} excedeu o tempo limite."
     },
     "locate_not_accepted": {
-      "message": "Nenhum dispositivo aceitou o pedido de localização neste ciclo ({not_accepted} não aceites, {rejected} recusados)."
+      "message": "Neste ciclo, não foi aceite o pedido de localização de nenhum dispositivo ({not_accepted} não aceites, {rejected} recusados)."
     },
     "locate_all_rejected": {
       "message": "O servidor recusou o pedido de localização de todos os dispositivos ({rejected}) neste ciclo."

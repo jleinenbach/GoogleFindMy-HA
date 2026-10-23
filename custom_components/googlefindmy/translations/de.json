@@ -881,7 +881,7 @@
       "message": "Google hat beim Abrufen der Geräteliste einen Fehler gemeldet."
     },
     "multi_entry_guard": {
-      "message": "Mehrere Google-Find-My-Gerät-Einträge sind aktiv, aber diese Abfrage war keinem von ihnen zugeordnet. Die Integration versucht es automatisch erneut."
+      "message": "Mehrere Einträge von Google Find My Device sind aktiv, aber diese Abfrage war keinem von ihnen zugeordnet. Die Integration versucht es automatisch erneut."
     },
     "device_list_failed": {
       "message": "Die Geräteliste konnte nicht abgerufen werden."
@@ -902,7 +902,7 @@
       "message": "Bei der Ortungsanfrage für Gerät {device_id} wurde das Zeitlimit überschritten."
     },
     "locate_not_accepted": {
-      "message": "In diesem Durchlauf hat kein Gerät die Ortungsanfrage angenommen ({not_accepted} nicht angenommen, {rejected} abgelehnt)."
+      "message": "In diesem Durchlauf wurde die Ortungsanfrage keines Geräts angenommen ({not_accepted} nicht angenommen, {rejected} abgelehnt)."
     },
     "locate_all_rejected": {
       "message": "Der Server hat die Ortungsanfrage in diesem Durchlauf für alle Geräte ({rejected}) abgelehnt."

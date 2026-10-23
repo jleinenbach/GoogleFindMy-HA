@@ -902,7 +902,7 @@
       "message": "The location request for device {device_id} timed out."
     },
     "locate_not_accepted": {
-      "message": "No device accepted the location request this cycle ({not_accepted} not accepted, {rejected} rejected)."
+      "message": "No device's location request was accepted this cycle ({not_accepted} not accepted, {rejected} rejected)."
     },
     "locate_all_rejected": {
       "message": "The server rejected the location request for every device ({rejected}) this cycle."

@@ -902,7 +902,7 @@
       "message": "Er is een time-out opgetreden bij het locatieverzoek voor apparaat {device_id}."
     },
     "locate_not_accepted": {
-      "message": "Geen enkel apparaat heeft het locatieverzoek in deze ronde geaccepteerd ({not_accepted} niet geaccepteerd, {rejected} geweigerd)."
+      "message": "In deze ronde is het locatieverzoek van geen enkel apparaat geaccepteerd ({not_accepted} niet geaccepteerd, {rejected} geweigerd)."
     },
     "locate_all_rejected": {
       "message": "De server heeft het locatieverzoek in deze ronde voor alle apparaten ({rejected}) geweigerd."

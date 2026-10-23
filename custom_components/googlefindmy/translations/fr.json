@@ -902,7 +902,7 @@
       "message": "La demande de localisation de l'appareil {device_id} a expiré."
     },
     "locate_not_accepted": {
-      "message": "Aucun appareil n'a accepté la demande de localisation lors de ce cycle ({not_accepted} non acceptés, {rejected} refusés)."
+      "message": "Aucune demande de localisation n'a été acceptée lors de ce cycle ({not_accepted} non acceptées, {rejected} refusées)."
     },
     "locate_all_rejected": {
       "message": "Le serveur a refusé la demande de localisation pour tous les appareils ({rejected}) lors de ce cycle."
