@@ -266,3 +266,181 @@ async def test_a_failed_entry_write_is_swallowed_and_the_cache_still_updates(
     assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == stale
     if failure == "update_raises":
         assert "Failed to persist the refreshed FCM registration" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_between_dispatch_and_persist_skips_the_entry_write() -> None:
+    """The TOCTOU re-check drops an entry write for a torn-down entry.
+
+    The caller-side gate in ``_on_credentials_updated_for_entry`` runs before
+    the persistence task is dispatched; an entry removed in between must not be
+    written again. The cache write still proceeds: durability for a live cache
+    is harmless, resurrecting a removed entry's bundle is not.
+    """
+
+    stale = _registration("dead-registration")
+    fresh = _registration("fresh-registration")
+    entry = make_config_entry(
+        entry_id=ENTRY_ID,
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            "fcm_credentials": stale,
+            DATA_SECRET_BUNDLE: {
+                "username": "user@example.com",
+                "fcm_credentials": stale,
+            },
+        },
+    )
+    receiver, manager = _receiver_with_entry(entry)
+    cache = _Cache()
+    receiver._entry_caches[ENTRY_ID] = cache
+
+    receiver._on_credentials_updated_for_entry(ENTRY_ID, fresh)
+    # Synchronous teardown lands before the dispatched task runs.
+    receiver._unregistered.add(ENTRY_ID)
+    if receiver._active_tasks:
+        await asyncio.gather(*list(receiver._active_tasks))
+
+    assert cache.data["fcm_credentials"] == fresh
+    assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == stale
+    assert entry.data["fcm_credentials"] == stale
+    assert manager.update_calls == []
+
+
+@pytest.mark.parametrize(
+    "hass",
+    [
+        None,
+        SimpleNamespace(),
+        SimpleNamespace(config_entries=SimpleNamespace()),
+        SimpleNamespace(
+            config_entries=SimpleNamespace(
+                async_get_entry=None, async_update_entry=None
+            )
+        ),
+    ],
+    ids=["hass-missing", "manager-missing", "hooks-missing", "hooks-not-callable"],
+)
+def test_persist_credentials_without_usable_entry_manager_is_noop(
+    hass: Any,
+) -> None:
+    """Persistence without a usable entry manager returns quietly.
+
+    Detached receivers (no hass), hass doubles without a config-entry manager,
+    and managers whose lookup/update hooks are absent or not callable all hit
+    the same best-effort guard: nothing is written and nothing raises.
+    """
+
+    receiver = FcmReceiverHA()
+    if hass is not None:
+        receiver.attach_hass(hass)
+
+    receiver._persist_credentials_to_entry(ENTRY_ID, _registration("fresh"))
+
+
+def test_persist_credentials_for_unknown_entry_is_noop() -> None:
+    """A lookup miss (entry removed) is a quiet no-op, not an error."""
+
+    stale = _registration("dead-registration")
+    other = make_config_entry(
+        entry_id="entry-removed-elsewhere",
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            DATA_SECRET_BUNDLE: {"fcm_credentials": stale},
+        },
+    )
+    receiver, manager = _receiver_with_entry(other)
+
+    receiver._persist_credentials_to_entry(ENTRY_ID, _registration("fresh"))
+
+    assert manager.update_calls == []
+    assert other.data[DATA_SECRET_BUNDLE] == {"fcm_credentials": stale}
+
+
+def test_persist_credentials_skips_non_mapping_bundle() -> None:
+    """A bundle that is not a mapping is left alone, not rebuilt."""
+
+    entry = make_config_entry(
+        entry_id=ENTRY_ID,
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            DATA_SECRET_BUNDLE: "not-a-bundle",
+        },
+    )
+    receiver, manager = _receiver_with_entry(entry)
+
+    receiver._persist_credentials_to_entry(ENTRY_ID, _registration("fresh"))
+
+    assert manager.update_calls == []
+    assert entry.data[DATA_SECRET_BUNDLE] == "not-a-bundle"
+
+
+def test_persist_credentials_without_top_level_copy_does_not_invent_one() -> None:
+    """Only the bundle is rewritten when no top-level copy exists.
+
+    The seed reads the bundle, so a top-level key nothing reads must not be
+    created as a side effect of the refresh.
+    """
+
+    stale = _registration("dead-registration")
+    fresh = _registration("fresh-registration")
+    entry = make_config_entry(
+        entry_id=ENTRY_ID,
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            DATA_SECRET_BUNDLE: {"fcm_credentials": stale},
+        },
+    )
+    receiver, manager = _receiver_with_entry(entry)
+
+    receiver._persist_credentials_to_entry(ENTRY_ID, fresh)
+
+    assert len(manager.update_calls) == 1
+    assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == fresh
+    assert "fcm_credentials" not in entry.data
+
+
+@pytest.mark.asyncio
+async def test_persist_credentials_without_hass_still_updates_the_cache() -> None:
+    """A missing hass skips the entry write but not the cache write.
+
+    Drives the real ``_async_save_credentials_for_entry`` path: the entry half
+    is best-effort, the cache half is the live value the listener needs.
+    """
+
+    fresh = _registration("fresh-registration")
+    receiver = FcmReceiverHA()
+    cache = _Cache()
+    receiver._entry_caches[ENTRY_ID] = cache
+    receiver.creds[ENTRY_ID] = fresh
+
+    await receiver._async_save_credentials_for_entry(ENTRY_ID)
+
+    assert cache.data["fcm_credentials"] == fresh
+
+
+@pytest.mark.asyncio
+async def test_a_tokenless_update_persists_without_touching_the_entry() -> None:
+    """A non-mapping credential update never reaches the entry writer.
+
+    ``_on_credentials_updated_for_entry`` stores ``None`` for tokenless
+    updates; the save path must skip the entry rewrite (which assumes a
+    mapping) while still recording the cache value.
+    """
+
+    entry = make_config_entry(
+        entry_id=ENTRY_ID,
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            DATA_SECRET_BUNDLE: {"fcm_credentials": _registration("stale")},
+        },
+    )
+    receiver, manager = _receiver_with_entry(entry)
+    cache = _Cache()
+    receiver._entry_caches[ENTRY_ID] = cache
+    receiver.creds[ENTRY_ID] = None
+
+    await receiver._async_save_credentials_for_entry(ENTRY_ID)
+
+    assert manager.update_calls == []
+    assert cache.data["fcm_credentials"] is None
