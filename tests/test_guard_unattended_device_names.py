@@ -15,20 +15,30 @@ user action and used to log the display name at WARNING or ERROR:
   every poll cycle).
 
 Inside each function, every log call whose level is INFO or above is
-checked. A log call is a method call on a logger: a receiver whose last
-name part is `log` or `logger` in any case, leading underscores ignored
-(`_LOGGER`, `LOGGER`, `self.logger`, `self.log`), or a `getLogger(...)`
-call. The method may be named directly (`_LOGGER.warning(...)`), through
-`.__call__`, through `getattr` (`getattr(_LOGGER, "warning")(...)`), or in
-either branch of a conditional expression
-(`(_LOGGER.warning if c else _LOGGER.error)(...)`). A `getattr` whose method
-name is not a string constant counts as above DEBUG. For `.log` the level,
-positional or `level=`, decides: `logging.DEBUG`, `DEBUG`, `logging.NOTSET`,
-`NOTSET` or an integer constant up to 10 is DEBUG and skipped; any other
-level, a variable included, counts as above DEBUG, and so does a `.log` call
-without a level, which raises at run time. The level argument itself is not
-checked for names. Checked are all positional arguments, including the format argument with an
-f-string or the right side of a `%` format, and all keyword values. An
+checked.
+
+Log calls, as a closed list: a call whose callee is `<logger>.<method>`,
+`<logger>.<method>.__call__`, `getattr(<logger>, <method>)`, or a
+conditional expression whose branches are such callees
+(`(_LOGGER.warning if c else _LOGGER.error)(...)`). `<logger>` is a name or
+attribute whose last part is `log` or `logger` in any case, leading
+underscores ignored (`_LOGGER`, `LOGGER`, `self.logger`, `self.log`), the
+module `logging` itself (`logging.warning(...)`), or a call to
+`getLogger(...)` or `.getChild(...)`. No other callee is read.
+
+Levels: `info`, `warning`, `warn`, `error`, `exception`, `critical` and
+`fatal` are above DEBUG. For `log`, the level passed positionally or as
+`level=` decides: `logging.DEBUG`, `DEBUG`, `logging.NOTSET`, `NOTSET` or an
+integer constant up to 10 is DEBUG and skipped; any other level, a variable
+included, counts as above DEBUG, and so does a `log` call whose level is not
+visible (none given, or passed through `*args` or `**kwargs`). A `getattr`
+whose method name is not a string constant counts as above DEBUG. Each of
+these rules errs towards a false alarm, not towards a miss.
+
+Checked in each log call: all positional arguments, a `*args` argument
+included, with the format argument as an f-string or the right side of a
+`%` format, and all keyword values; a visible level argument is not checked
+for names. An
 offender is any leaf below them that is a name, an attribute (other than
 `__name__`), a subscript with a string key, or a string constant passed to a
 nested call as a positional or keyword argument
@@ -46,19 +56,16 @@ services, the manual locate) that may name the device by section 5 (b), and
 a package-wide name predicate would need an exception list longer than the
 rule.
 
-Blind spots, declared: a value copied into a variable, an attribute or a
-subscript whose spelling has neither `name` nor `label` (`fields = ...` in
-the decoder is such a case and is correct; `self._last = device_name`
-followed by a record with `self._last` would be a miss), a device object
-whose spelling has neither word rendered whole (`str(device)`,
-`repr(device)`, `%s` or `%r` with `device`, `{device!r}`), a logger stored
-under a name whose last part is not `log` or `logger`, a logger method bound
-to a local name, taken from a container (`methods[level](...)`) or wrapped
-in `functools.partial` or a lambda (the callee forms above are the only ones
-read), an exception whose own text carries the name, and records in helpers
-these functions call. A level held in a variable, or a `getattr` method name
-held in one, that is DEBUG at run time is counted as above DEBUG: a false
-alarm rather than a miss. The caplog tests in `tests/test_api_location_name_at_debug.py` and
+Blind spots, declared: every callee outside the closed list above (a logger
+under another name, a logger factory, a method bound to a local name or
+taken from a container, `functools.partial`, a lambda); a value copied into
+a variable, an attribute or a subscript whose spelling has neither `name`
+nor `label` (`fields = ...` in the decoder is such a case and is correct;
+`self._last = device_name` followed by a record with `self._last` would be
+a miss); a device object whose spelling has neither word rendered whole
+(`str(device)`, `repr(device)`, `%s` or `%r` with `device`, `{device!r}`);
+an exception whose own text carries the name; and records in helpers these
+functions call. The caplog tests in `tests/test_api_location_name_at_debug.py` and
 `tests/test_decoder_registry_name_at_debug.py` pin the record contents;
 this guard pins the shape of the call.
 
@@ -139,16 +146,22 @@ def _find_function(
 _UNKNOWN_METHOD = "?"
 
 
+_LOGGER_FACTORIES = frozenset({"getLogger", "getChild"})
+
+
 def _is_logger(receiver: ast.expr) -> bool:
-    """True for ``_LOGGER``, ``self.logger``, ``self.log`` or ``getLogger(...)``."""
+    """True for ``_LOGGER``, ``self.logger``, ``logging`` or ``getLogger(...)``."""
     if isinstance(receiver, ast.Call):
         callee = receiver.func
         if isinstance(callee, ast.Attribute):
-            return callee.attr == "getLogger"
-        return isinstance(callee, ast.Name) and callee.id == "getLogger"
+            return callee.attr in _LOGGER_FACTORIES
+        return isinstance(callee, ast.Name) and callee.id in _LOGGER_FACTORIES
     if isinstance(receiver, ast.Attribute):
         last = receiver.attr
     elif isinstance(receiver, ast.Name):
+        if receiver.id == "logging":
+            # The module-level functions log through the root logger.
+            return True
         last = receiver.id
     else:
         return False
@@ -181,11 +194,17 @@ def _log_methods(func: ast.expr) -> set[str]:
 
 
 def _level_argument(node: ast.Call) -> ast.expr | None:
-    """The level of a ``.log`` call, positional or ``level=``."""
+    """The visible level of a ``.log`` call, positional or ``level=``.
+
+    ``None`` when no level is visible: none given, or passed through
+    ``*args`` or ``**kwargs``.
+    """
     for keyword in node.keywords:
         if keyword.arg == "level":
             return keyword.value
-    return node.args[0] if node.args else None
+    if node.args and not isinstance(node.args[0], ast.Starred):
+        return node.args[0]
+    return None
 
 
 def _is_debug_level(level: ast.expr) -> bool:
@@ -200,7 +219,7 @@ def _is_log_call_above_debug(node: ast.Call) -> bool:
         return True
     if "log" in methods:
         level = _level_argument(node)
-        # A `.log` call without a level raises TypeError; count it all the same.
+        # No visible level: counted; with no level at all the call raises.
         return level is None or not _is_debug_level(level)
     return False
 
