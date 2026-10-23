@@ -397,6 +397,17 @@ are installed. **Review this checklist on every single change under
     outranks `default` in the rendered form. Resolve the binding
     (`cls.__mro__`, `inspect.getsourcefile`) before reasoning about which body
     runs; a stub file existing is not evidence that it is the one bound.
+11. **Service registry, service call and authorization doubles** —
+    `tests/test_service_doubles.py` pins the doubles in
+    [`tests/helpers/service_doubles.py`](helpers/service_doubles.py) against
+    the genuine core: the real `async_register_admin_service` registers
+    through `FakeServiceRegistry` (the admin wrapper is unwrapped to the
+    original handler, its schema and admin flag are recorded), a registry with
+    the old three-argument `async_register` is rejected by that helper, and the
+    stub `Unauthorized`/`UnknownUser` take the same keyword arguments as the
+    real classes. When Home Assistant changes the wrapper shape,
+    `unwrap_admin_handler` raises instead of passing a foreign `partial`
+    through; update the doubles and this test together.
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
@@ -523,6 +534,35 @@ violation. Its docstring lists what it does not see, for example a write inside
 a function that is called at import time, other alias forms and indirect access
 such as `getattr(sys, "modules")`. The rule above covers those as well.
 
+### Fresh import of an integration module under real Home Assistant modules
+
+`custom_components.googlefindmy.*` is imported under the stubs and stays bound
+to them; `use_real_homeassistant_modules` swaps in the real Home Assistant
+modules but does not rebind integration modules that are already imported. A
+test that needs a module bound to the real classes (real `Unauthorized`, real
+registries, the real admin helper) imports it freshly inside a fixture, after
+the swap, and hands every `custom_components.googlefindmy.*` key the import
+creates to `monkeypatch`: pop the new module and `monkeypatch.setitem` it back,
+so `monkeypatch` removes it on teardown and no module bound to the real
+modules stays in `sys.modules` for later stub-world tests. A key that existed
+before is removed through `monkeypatch.delitem` and restored on teardown. This
+follows the rule above: `sys.modules` is only touched through `monkeypatch`, in
+a fixture, never at import time. `tests/test_services_permissions.py`
+(`_fresh_import`, `services_module`) is the reference, and
+`tests/test_services_permissions_teardown.py` sorts after it and checks from the
+stub world that `services` is bound to the stubs again.
+
+The same file also builds Home Assistant itself from a freshly imported
+`pytest_homeassistant_custom_component.common` instead of using the plugin's
+`hass` fixture. The plugin's fixture builds Home Assistant from the modules the
+plugin imported when it was loaded; after the swap the test and the freshly
+imported module use other copies, so enums differ by identity
+(`RegistryEntryDisabler`, `HassJobType`). Measured: an admin action registered
+through the fresh `async_register_admin_service` is then never run, because the
+plugin's core does not recognise the job type of the fresh `HassJob`. Build the
+instance from the same copy (`ha_common` and `hass` fixtures there) when a test
+crosses that boundary.
+
 ## No full-command-line process kills
 
 `pkill -f <pattern>` selects by matching the **full command line** of every
@@ -595,6 +635,31 @@ Home Assistant modules so the integration can be imported and exercised in
 isolation. The recent additions mirror enough of the `ConfigFlow` contract to
 support discovery update tests and follow the real integration's behavior
 closely enough for regression coverage.
+
+### Service registry, service call and authorization stubs
+
+Service registries that integration handlers are registered on, and service
+calls they are invoked with, come only from
+[`tests.helpers.service_doubles`](helpers/service_doubles.py); do not define a
+local class with `async_register` or a local service call double in a test
+module. The one exception is a deliberately incompatible registry that shows a
+rejected signature, such as the three-argument registry in
+`tests/test_service_doubles.py`. `FakeServiceRegistry.async_register` accepts the full Home Assistant
+signature (schema, `supports_response`, keyword arguments), stores the
+unwrapped handler in `handlers` (alias `registered`), the registered object in
+`raw_handlers`, the schema in `schemas` and admin registrations in
+`admin_services`. `FakeServiceCall(data=None, context=None, domain=..., service=...)`
+defaults to a `FakeContext` without `user_id`, which is how an automation
+calls a service. `tests/conftest.py` installs both as `homeassistant.core.ServiceCall`
+and `homeassistant.core.Context`, adds the stub `Unauthorized` and
+`UnknownUser` to `homeassistant.exceptions` through
+`install_service_auth_stubs`, and gives the stub entity base a `_context`
+attribute. Import the names from `tests.helpers.service_doubles` directly; apart
+from `FakeServiceRegistry`, which `tests.helpers` and
+`tests.helpers.homeassistant` keep exporting under its old name, they are not
+exported through `tests.helpers`. In the stub world the admin wrapper in
+`raw_handlers` raises the real `homeassistant.exceptions.Unauthorized`, not the
+stub class; test admin rejections under real Home Assistant modules.
 
 ### `ServiceValidationError` string representation contract
 

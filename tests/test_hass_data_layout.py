@@ -69,6 +69,7 @@ from tests.helpers.homeassistant import (
     FakeEntityRegistry,
     resolve_config_entry_lookup,
 )
+from tests.helpers.service_doubles import FakeServiceCall, FakeServiceRegistry
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy import RuntimeData
@@ -369,16 +370,7 @@ class _StubConfigEntries:
                 break
 
 
-class _StubServices:
-    """Capture service registrations and expose them to tests."""
-
-    def __init__(self) -> None:
-        self.registered: dict[tuple[str, str], Callable[..., Any]] = {}
-
-    def async_register(
-        self, domain: str, service: str, handler: Callable[..., Any]
-    ) -> None:
-        self.registered[(domain, service)] = handler
+_StubServices = FakeServiceRegistry
 
 
 class _StubHass:
@@ -4010,18 +4002,9 @@ def test_service_no_active_entry_placeholders(
                 assert domain == DOMAIN
                 return list(entries)
 
-        class _ServicesStub:
-            def __init__(self) -> None:
-                self.registered: dict[tuple[str, str], Callable[..., Any]] = {}
-
-            def async_register(
-                self, domain: str, service: str, handler: Callable[..., Any]
-            ) -> None:
-                self.registered[(domain, service)] = handler
-
         hass = SimpleNamespace(
             data={},
-            services=_ServicesStub(),
+            services=FakeServiceRegistry(),
             config_entries=_ConfigEntriesStub(),
         )
 
@@ -4040,7 +4023,7 @@ def test_service_no_active_entry_placeholders(
         loop.run_until_complete(services_module.async_register_services(hass, ctx))
 
         handler = hass.services.registered[(DOMAIN, SERVICE_LOCATE_DEVICE)]
-        call = SimpleNamespace(data={"device_id": "device-1"})
+        call = FakeServiceCall({"device_id": "device-1"})
 
         with pytest.raises(ServiceValidationError) as errinfo:
             loop.run_until_complete(handler(call))

@@ -19,6 +19,7 @@ from custom_components.googlefindmy.const import (
     StopSoundOutcome,
 )
 from custom_components.googlefindmy.util_services import register_entity_service
+from tests.helpers.service_doubles import FakeServiceCall, FakeServiceRegistry
 
 
 class _PlatformRecorder:
@@ -89,12 +90,7 @@ def _build_stop_sound_service_hass(monkeypatch: pytest.MonkeyPatch):
         def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
             return self._entries.get(entry_id)
 
-    class _StubServices:
-        def __init__(self) -> None:
-            self.registered: dict[tuple[str, str], Any] = {}
-
-        def async_register(self, domain: str, service: str, handler: Any) -> None:
-            self.registered[(domain, service)] = handler
+    _StubServices = FakeServiceRegistry
 
     class _StubHass:
         def __init__(self, config_manager: _StubConfigManager) -> None:
@@ -106,9 +102,7 @@ def _build_stop_sound_service_hass(monkeypatch: pytest.MonkeyPatch):
         def async_get(self, device_id: str) -> Any | None:
             return None
 
-    class _StubServiceCall:
-        def __init__(self, data: dict[str, Any]) -> None:
-            self.data = data
+    _StubServiceCall = FakeServiceCall
 
     canonical_id = "canonical-stop"
     coordinator = _StubCoordinator()
@@ -263,12 +257,7 @@ def test_locate_service_handles_falsy_display_names(
             self.setup_calls.append(entry_id)
             return True
 
-    class _StubServices:
-        def __init__(self) -> None:
-            self.registered: dict[tuple[str, str], Any] = {}
-
-        def async_register(self, domain: str, service: str, handler: Any) -> None:
-            self.registered[(domain, service)] = handler
+    _StubServices = FakeServiceRegistry
 
     class _StubHass:
         def __init__(self, config_manager: _StubConfigManager) -> None:
@@ -283,9 +272,7 @@ def test_locate_service_handles_falsy_display_names(
         def async_get(self, device_id: str) -> Any | None:
             return None
 
-    class _StubServiceCall:
-        def __init__(self, data: dict[str, Any]) -> None:
-            self.data = data
+    _StubServiceCall = FakeServiceCall
 
     coordinator = _StubCoordinator()
     runtime = _StubRuntime(coordinator)

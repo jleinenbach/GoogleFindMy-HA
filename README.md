@@ -255,7 +255,7 @@ link then returns "Unauthorized".
 
 You do not have to restart to fix that. Call the service
 **`googlefindmy.refresh_device_urls`** (Developer tools → Actions → *Refresh
-Device URLs*); it rewrites the configuration URL of every device that belongs to one of this
+Device URLs*; administrators only); it rewrites the configuration URL of every device that belongs to one of this
 integration's config entries with a current token, and the link works again
 immediately.
 
@@ -324,13 +324,41 @@ The integration provides a couple of Home Assistant Actions for use with automat
 
 | Action | Attribute | Description |
 | :---: | :---: | --- |
-| googlefindmy.locate_device | Device ID (required) | Request fresh location data for a specific device. |
-| googlefindmy.play_sound | Device ID (required) | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. When the sound cannot be started, the action reports one of two things, and they differ in what you should do about it. *Suppressed* means the command was never sent because this instance is briefly unable to reach the device; it clears itself, and retrying shortly is the whole of the remedy. *Rejected* means the command was refused or failed for a reason this integration cannot clear by itself: the sign-in expired, the device reports that it cannot ring, a token is missing, or the server refused the request or rate-limited it. The log entry for the attempt names which one it was, and that matters, because the remedies differ: a rate limit does pass with time, an expired sign-in needs a new sign-in, and a device that cannot ring will never ring. Both are action errors, so a script or automation calling this action stops at this step unless you wrap it in `continue_on_error: true`. Note that a successful call means Google accepted the command, not that the device rang: no reply of the cloud API proves a ring. |
-| googlefindmy.stop_sound | Device ID (required), Request UUID (optional) | Stop the active sound on the selected device. Google matches a stop against the cancel key of the play request it belongs to. If this Home Assistant instance does not hold that key, because the ring was started from a phone or another instance, the stop is still submitted but the action reports that it could not be correlated and the device may keep ringing. The same report appears when the key is older than 30 minutes: it is still sent, because Google queues the command until the tracker is reachable and it may well still fit, but nothing proves it does. A key in that state is kept rather than discarded, so every further stop for that device keeps reporting "not correlated" until a new Play Sound or a restart replaces it. That report is an action error, so a script or automation calling it stops at this step unless you wrap it in `continue_on_error: true`. |
-| googlefindmy.locate_external | Device ID (required), Device Name (optional) | Trigger the locate flow via the external helper while optionally labeling logs with a human-readable device name. |
-| googlefindmy.refresh_device_urls | - | Refreshes all device Map View URLs.  Useful if you are having problems with accessing Map View pages. |
-| googlefindmy.rebuild_device_registry | - | Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry. |
-| googlefindmy.rebuild_registry | Config Entry ID(s) (optional) | Reload integration config entries; without a payload the first configured entry reloads, or target specific IDs by passing one or many `entry_id` values. |
+| googlefindmy.locate_device | Device ID (required) | Request fresh location data for a specific device. Requires control permission on the device's entities when called by a user (see [Permissions](#permissions)). |
+| googlefindmy.play_sound | Device ID (required) | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. When the sound cannot be started, the action reports one of two things, and they differ in what you should do about it. *Suppressed* means the command was never sent because this instance is briefly unable to reach the device; it clears itself, and retrying shortly is the whole of the remedy. *Rejected* means the command was refused or failed for a reason this integration cannot clear by itself: the sign-in expired, the device reports that it cannot ring, a token is missing, or the server refused the request or rate-limited it. The log entry for the attempt names which one it was, and that matters, because the remedies differ: a rate limit does pass with time, an expired sign-in needs a new sign-in, and a device that cannot ring will never ring. Both are action errors, so a script or automation calling this action stops at this step unless you wrap it in `continue_on_error: true`. Note that a successful call means Google accepted the command, not that the device rang: no reply of the cloud API proves a ring. Requires control permission on the device's entities when called by a user (see [Permissions](#permissions)). |
+| googlefindmy.stop_sound | Device ID (required), Request UUID (optional) | Stop the active sound on the selected device. Google matches a stop against the cancel key of the play request it belongs to. If this Home Assistant instance does not hold that key, because the ring was started from a phone or another instance, the stop is still submitted but the action reports that it could not be correlated and the device may keep ringing. The same report appears when the key is older than 30 minutes: it is still sent, because Google queues the command until the tracker is reachable and it may well still fit, but nothing proves it does. A key in that state is kept rather than discarded, so every further stop for that device keeps reporting "not correlated" until a new Play Sound or a restart replaces it. That report is an action error, so a script or automation calling it stops at this step unless you wrap it in `continue_on_error: true`. Requires control permission on the device's entities when called by a user (see [Permissions](#permissions)). |
+| googlefindmy.locate_external | Device ID (required), Device Name (optional) | Trigger the locate flow via the external helper while optionally labeling logs with a human-readable device name. Requires control permission on the device's entities when called by a user (see [Permissions](#permissions)). |
+| googlefindmy.refresh_device_urls | - | Refreshes all device Map View URLs.  Useful if you are having problems with accessing Map View pages. Administrators only when called by a user. |
+| googlefindmy.rebuild_device_registry | - | Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry. Administrators only when called by a user. |
+| googlefindmy.rebuild_registry | Config Entry ID(s) (optional) | Reload integration config entries; without a payload the first configured entry reloads, or target specific IDs by passing one or many `entry_id` values. Administrators only when called by a user. |
+
+### Permissions
+
+Actions are checked against the user who calls them. Calls without a user, such as
+automations and scripts that run on their own, are not affected. A script that a user
+starts directly carries that user's context and is checked like a direct call.
+
+- **Device actions** (`locate_device`, `locate_external`, `play_sound`, `stop_sound`):
+  administrators may always call them. Other users need control permission on every
+  enabled entity of this integration on the target device. Read-only users are
+  therefore rejected. A device without such an entity, named by its device ID or one of
+  its entity IDs, cannot be called by non-admins.
+- **Same tracker in two accounts:** if the tracker belongs to more than one configured
+  Google account, the action may run through any of them, so the user needs control
+  permission on the entities of every device of that tracker. This holds for every way
+  of naming the target (device ID, entity ID or Google ID). Named by its Google ID, the
+  tracker is the target, so a device of it without enabled entities does not block the
+  call.
+- **Maintenance actions** (`refresh_device_urls`, `rebuild_device_registry`,
+  `rebuild_registry`) are for administrators only.
+- **The rejection is the same** whether the device is unknown or the permission is
+  missing, and it names neither the device nor an entity.
+- **Buttons** forward the user who pressed them. A user with control permission on the
+  button but not on every entity of the device can press it, and the action rejects the
+  call. The Play Sound and Stop Sound buttons show that rejection. The Locate button
+  does not wait for the action, so the rejection only appears in the Home Assistant log.
+  As with every button, the "last pressed" time changes on every press, whether or not
+  the action accepts it.
 
 ## Supported devices and functions
 

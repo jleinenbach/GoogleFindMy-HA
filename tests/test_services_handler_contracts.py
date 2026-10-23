@@ -19,6 +19,7 @@ handlers run without a live Home Assistant device registry / network helper.
 
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import string
@@ -35,24 +36,21 @@ from custom_components.googlefindmy.services import (
     ServiceValidationError,
 )
 from tests.helpers.config_entries_stub import make_config_entry
+from tests.helpers.service_doubles import FakeServiceCall, FakeServiceRegistry
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
 
-class _FakeCall:
-    """Minimal ``ServiceCall`` double exposing only ``.data``."""
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        self.data = data
+_FakeCall = FakeServiceCall
 
 
 def _make_hass(entries: list[Any] | None = None) -> SimpleNamespace:
     """Build a fake hass with a capturing service registry and entry list."""
     entry_list = list(entries or [])
     return SimpleNamespace(
-        services=SimpleNamespace(async_register=lambda *a, **k: None),
+        services=FakeServiceRegistry(),
         config_entries=SimpleNamespace(async_entries=lambda _domain: entry_list),
         data={},
     )
@@ -97,12 +95,8 @@ def _register(hass: SimpleNamespace, ctx: dict[str, Any]) -> dict[str, Any]:
     loop, so this works both in a plain fixture and inside a running event loop
     (``asyncio.run`` would raise there).
     """
-    handlers: dict[str, Any] = {}
-
-    def _capture(domain: str, name: str, handler: Any) -> None:
-        handlers[name] = handler
-
-    hass.services.async_register = _capture  # type: ignore[attr-defined]
+    registry = FakeServiceRegistry()
+    hass.services = registry
     coro = services.async_register_services(hass, ctx)
     try:
         coro.send(None)
@@ -111,7 +105,9 @@ def _register(hass: SimpleNamespace, ctx: dict[str, Any]) -> dict[str, Any]:
     else:  # pragma: no cover - registration must not await
         coro.close()
         raise RuntimeError("async_register_services unexpectedly awaited")
-    return handlers
+    return {
+        service: handler for (_domain, service), handler in registry.handlers.items()
+    }
 
 
 @pytest.fixture
@@ -766,3 +762,386 @@ class TestSoundTranslationPlaceholders:
             f"{translation_key} would render with a stray literal: "
             f"missing {sorted(required - supplied)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Admin registration and the target set of the permission check
+# ---------------------------------------------------------------------------
+
+
+class TestAdminRegistration:
+    """Exactly the three maintenance actions go through the admin wrapper."""
+
+    def test_maintenance_services_are_admin_with_passthrough_schema(
+        self, full_ctx: dict[str, Any]
+    ) -> None:
+        registry = FakeServiceRegistry()
+        hass = _make_hass()
+        hass.services = registry
+        coro = services.async_register_services(hass, full_ctx)
+        with pytest.raises(StopIteration):
+            coro.send(None)
+
+        domain = services.DOMAIN
+        admin = {
+            (domain, services.SERVICE_REFRESH_DEVICE_URLS),
+            (domain, services.SERVICE_REBUILD_DEVICE_REGISTRY),
+            (domain, services.SERVICE_REBUILD_REGISTRY),
+        }
+        assert registry.admin_services == admin
+        payload = {"mode": "migrate", "entry_id": ["a"], "device_ids": ["d"]}
+        for key in admin:
+            schema = registry.schemas[key]
+            assert schema is not None
+            assert schema(dict(payload)) == payload
+        for key in set(registry.handlers) - admin:
+            assert registry.schemas[key] is None
+
+
+class TestControlTargetSet:
+    """Target set of the permission check with the integration's real resolver.
+
+    ``_control_entity_ids_for_target`` is fed the real
+    ``_resolve_canonical_from_any`` (the resolver the buttons use), so the
+    reverse lookup over canonical ids runs against the production
+    normalisation, which the real-Home-Assistant tests cannot reach.
+    """
+
+    CANON1_ENTITIES = {"button.canon1_play", "button.canon1_locate"}
+
+    @pytest.fixture
+    def resolver_ctx(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        import custom_components.googlefindmy as integration
+
+        domain = services.DOMAIN
+        devices = {
+            "dev-canon1": SimpleNamespace(
+                id="dev-canon1",
+                identifiers={(domain, "entry1:sub1:CANON1")},
+                name="Keys",
+                name_by_user=None,
+                config_entry_id="entry1",
+            ),
+            "dev-canon2": SimpleNamespace(
+                id="dev-canon2",
+                identifiers={(domain, "entry1:sub1:CANON2")},
+                name="Bag",
+                name_by_user=None,
+                config_entry_id="entry1",
+            ),
+        }
+
+        def _entity(entity_id: str, device_id: str, **kw: Any) -> SimpleNamespace:
+            return SimpleNamespace(
+                entity_id=entity_id,
+                platform=kw.get("platform", domain),
+                device_id=device_id,
+                disabled=kw.get("disabled", False),
+            )
+
+        entities = {
+            "button.canon1_play": _entity("button.canon1_play", "dev-canon1"),
+            "button.canon1_locate": _entity("button.canon1_locate", "dev-canon1"),
+            "button.canon1_off": _entity(
+                "button.canon1_off", "dev-canon1", disabled=True
+            ),
+            "sensor.canon1_other": _entity(
+                "sensor.canon1_other", "dev-canon1", platform="other"
+            ),
+            "button.canon2_play": _entity("button.canon2_play", "dev-canon2"),
+        }
+        dev_reg = SimpleNamespace(async_get=devices.get)
+        ent_reg = SimpleNamespace(entities=entities, async_get=entities.get)
+        monkeypatch.setattr(services.dr, "async_get", lambda _h: dev_reg)
+        monkeypatch.setattr(services.er, "async_get", lambda _h: ent_reg)
+        assert integration.dr is services.dr
+        assert integration.er is services.er
+        return {"resolve_canonical": integration._resolve_canonical_from_any}
+
+    @pytest.mark.parametrize("value", ["dev-canon1", "button.canon1_play", "CANON1"])
+    def test_canon1_target_set_for_every_input_form(
+        self, resolver_ctx: dict[str, Any], value: str
+    ) -> None:
+        result = services._control_entity_ids_for_target(object(), value, resolver_ctx)
+        assert result == {"button.canon1_play", "button.canon1_locate"}
+        assert "button.canon2_play" not in result
+
+    @pytest.mark.parametrize("value", ["dev-canon2", "button.canon2_play", "CANON2"])
+    def test_canon2_target_set_for_every_input_form(
+        self, resolver_ctx: dict[str, Any], value: str
+    ) -> None:
+        result = services._control_entity_ids_for_target(object(), value, resolver_ctx)
+        assert result == {"button.canon2_play"}
+
+    @pytest.mark.parametrize("value", ["", None, ["dev-canon1"], "UNKNOWN"])
+    def test_no_target_yields_empty_set(
+        self, resolver_ctx: dict[str, Any], value: Any
+    ) -> None:
+        assert (
+            services._control_entity_ids_for_target(object(), value, resolver_ctx)
+            == set()
+        )
+
+
+_DEVICE_HANDLERS = (
+    "async_locate_device_service",
+    "async_play_sound_service",
+    "async_stop_sound_service",
+    "async_locate_external_service",
+)
+_SYNC_RESOLVERS = ("_resolve_runtime_for_device_id", "_iter_runtimes")
+_SUSPENDING = (ast.Await, ast.AsyncFor, ast.AsyncWith)
+
+
+def _start(node: ast.AST) -> tuple[int, int]:
+    return (node.lineno, node.col_offset)  # type: ignore[attr-defined]
+
+
+def _end(node: ast.AST) -> tuple[int, int]:
+    return (node.end_lineno or 0, node.end_col_offset or 0)  # type: ignore[attr-defined]
+
+
+def _awaited_call(node: ast.AST) -> str:
+    """Return the source of the call an ``await`` node awaits, else ``""``."""
+
+    if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+        return ast.unparse(node.value.func)
+    return ""
+
+
+def _suspension_violations(source: str) -> list[str]:
+    """Return places where control may yield between check and dispatch.
+
+    Positions are compared as (line, column) start and end pairs, so an await
+    nested inside the resolver's or the coordinator's arguments counts, and
+    the span of each device handler runs from the permission check to the end
+    of the first awaited coordinator call.
+    """
+
+    functions = {
+        node.name: node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    violations: list[str] = []
+    for name in _SYNC_RESOLVERS:
+        if any(isinstance(n, _SUSPENDING) for n in ast.walk(functions[name])):
+            violations.append(name)
+
+    check = functions["_async_authorize_device_call"]
+    targets = [
+        n
+        for n in ast.walk(check)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "id", "") == "_control_entity_ids_for_target"
+    ]
+    if len(targets) != 1:
+        violations.append("_async_authorize_device_call: target set not found")
+    else:
+        for n in ast.walk(check):
+            if isinstance(n, _SUSPENDING) and _end(n) > _start(targets[0]):
+                violations.append(f"_async_authorize_device_call:{n.lineno}")
+
+    for name in _device_handler_names(source):
+        nodes = sorted(
+            (n for n in ast.walk(functions[name]) if isinstance(n, _SUSPENDING)),
+            key=_start,
+        )
+        start = next(
+            (n for n in nodes if _awaited_call(n) == "_async_authorize_device_call"),
+            None,
+        )
+        resolver = next(
+            (n for n in nodes if _awaited_call(n) == "_resolve_runtime_for_device_id"),
+            None,
+        )
+        dispatch = None
+        if resolver is not None:
+            dispatch = next(
+                (
+                    n
+                    for n in nodes
+                    if _start(n) > _start(resolver)
+                    and ".coordinator." in _awaited_call(n)
+                ),
+                None,
+            )
+        if start is None or resolver is None or dispatch is None:
+            violations.append(f"{name}: check, resolver or coordinator await not found")
+            continue
+        violations.extend(
+            f"{name}:{n.lineno}"
+            for n in nodes
+            if n is not start
+            and n is not resolver
+            and n is not dispatch
+            and _start(n) > _start(start)
+            and _end(n) <= _end(dispatch)
+        )
+    return violations
+
+
+def _device_handler_names(source: str) -> list[str]:
+    """Return the registered handlers that read ``device_id``, in source order."""
+
+    register = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "async_register_services"
+    )
+    handlers = {
+        node.name: node
+        for node in ast.walk(register)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    names: list[str] = []
+    for node in ast.walk(register):
+        if not isinstance(node, ast.Call):
+            continue
+        func = ast.unparse(node.func)
+        if func not in ("hass.services.async_register", "async_register_admin_service"):
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Name) and arg.id in handlers:
+                if "'device_id'" in ast.unparse(handlers[arg.id]):
+                    names.append(arg.id)
+    return names
+
+
+def _first_statement_violations(source: str) -> list[str]:
+    """Return device handlers whose first statement is not the permission check."""
+
+    functions = {
+        node.name: node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    violations: list[str] = []
+    for name in _device_handler_names(source):
+        body = functions[name].body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        first = body[0] if body else None
+        if not (
+            isinstance(first, ast.Expr)
+            and _awaited_call(first.value) == "_async_authorize_device_call"
+        ):
+            violations.append(name)
+    return violations
+
+
+class TestNoSuspensionBetweenCheckAndDispatch:
+    """Pin the invariant documented on ``_async_authorize_device_call``.
+
+    The permission check and the runtime resolution must see the same registry
+    state, so nothing between them may yield to the event loop.
+    """
+
+    _SOURCE = pathlib.Path(services.__file__).read_text(encoding="utf-8")
+
+    def test_source_has_no_suspension_point(self) -> None:
+        assert _suspension_violations(self._SOURCE) == []
+
+    def test_probe_detects_an_inserted_await(self) -> None:
+        anchor = "        runtimes = list(_iter_runtimes(hass))\n"
+        assert self._SOURCE.count(anchor) == 1
+        mutated = self._SOURCE.replace(
+            anchor, "        await asyncio.sleep(0)\n" + anchor, 1
+        )
+        assert _suspension_violations(mutated) == ["_resolve_runtime_for_device_id"]
+
+    def test_probe_detects_an_await_in_a_handler_span(self) -> None:
+        anchor = (
+            "        await _async_authorize_device_call(hass, call, "
+            'call.data.get("device_id"), ctx)\n'
+            '        raw_device_id = call.data.get("device_id")\n'
+        )
+        assert self._SOURCE.count(anchor) == 4
+        mutated = self._SOURCE.replace(
+            anchor, anchor + "        await asyncio.sleep(0)\n", 1
+        )
+        violations = _suspension_violations(mutated)
+        assert len(violations) == 1
+        assert violations[0].startswith("async_locate_device_service:")
+
+    def test_probe_detects_an_await_between_resolver_and_coordinator(
+        self,
+    ) -> None:
+        anchor = (
+            "            runtime, canonical_id = await "
+            "_resolve_runtime_for_device_id(raw_device_id)\n"
+            "            outcome = await runtime.coordinator.async_play_sound("
+        )
+        assert self._SOURCE.count(anchor) == 1
+        mutated = self._SOURCE.replace(
+            anchor,
+            anchor.replace(
+                "            outcome = await",
+                "            await asyncio.sleep(0)\n            outcome = await",
+            ),
+            1,
+        )
+        violations = _suspension_violations(mutated)
+        assert len(violations) == 1
+        assert violations[0].startswith("async_play_sound_service:")
+
+    def test_probe_detects_an_await_in_the_resolver_argument(self) -> None:
+        anchor = (
+            "            runtime, canonical_id = await "
+            "_resolve_runtime_for_device_id(raw_device_id)\n"
+            "            outcome = await runtime.coordinator.async_play_sound("
+        )
+        assert self._SOURCE.count(anchor) == 1
+        mutated = self._SOURCE.replace(
+            anchor,
+            anchor.replace(
+                "_resolve_runtime_for_device_id(raw_device_id)",
+                "_resolve_runtime_for_device_id(\n"
+                "                await asyncio.sleep(0, raw_device_id)\n"
+                "            )",
+            ),
+            1,
+        )
+        violations = _suspension_violations(mutated)
+        assert len(violations) == 1
+        assert violations[0].startswith("async_play_sound_service:")
+
+    def test_handler_set_comes_from_the_registrations(self) -> None:
+        assert sorted(_device_handler_names(self._SOURCE)) == sorted(_DEVICE_HANDLERS)
+        assert _first_statement_violations(self._SOURCE) == []
+
+    def test_probe_sees_an_unlisted_device_handler(self) -> None:
+        anchor = (
+            "    hass.services.async_register(DOMAIN, SERVICE_PLAY_SOUND, "
+            "async_play_sound_service)\n"
+        )
+        assert self._SOURCE.count(anchor) == 1
+        extra = (
+            "    async def async_extra_service(call: ServiceCall) -> None:\n"
+            '        raw_device_id = call.data.get("device_id")\n'
+            "        del raw_device_id\n"
+            '    hass.services.async_register(DOMAIN, "extra", async_extra_service)\n'
+        )
+        mutated = self._SOURCE.replace(anchor, anchor + extra, 1)
+        assert "async_extra_service" in _device_handler_names(mutated)
+        assert _first_statement_violations(mutated) == ["async_extra_service"]
+        assert any(
+            v.startswith("async_extra_service:")
+            for v in _suspension_violations(mutated)
+        )
+
+    def test_probe_detects_an_await_after_the_target_set(self) -> None:
+        anchor = "    entity_ids = _control_entity_ids_for_target(hass, raw_device_id, ctx)\n"
+        assert self._SOURCE.count(anchor) == 1
+        mutated = self._SOURCE.replace(
+            anchor, anchor + "    await asyncio.sleep(0)\n", 1
+        )
+        violations = _suspension_violations(mutated)
+        assert len(violations) == 1
+        assert violations[0].startswith("_async_authorize_device_call:")

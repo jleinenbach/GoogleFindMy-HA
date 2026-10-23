@@ -21,12 +21,20 @@ import time
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+import voluptuous as vol
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components.device_tracker import DOMAIN as DEVICE_TRACKER_DOMAIN
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import (
+    HomeAssistantError,
+    ServiceValidationError,
+    Unauthorized,
+    UnknownUser,
+)
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.network import NoURLAvailableError, get_url
+from homeassistant.helpers.service import async_register_admin_service
 
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -700,6 +708,136 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
     )
 
 
+# Home Assistant's admin helper validates with an empty schema that rejects
+# every field unless told otherwise. ``services.yaml`` only describes the
+# fields for the UI and does not validate at runtime; the maintenance handlers
+# check their fields themselves, so this schema accepts any field and passes
+# the data through unchanged.
+_ADMIN_PASSTHROUGH_SCHEMA = vol.Schema({}, extra=vol.ALLOW_EXTRA)
+
+
+def _control_entity_ids_for_target(
+    hass: HomeAssistant, raw_device_id: object, ctx: Mapping[str, Any]
+) -> set[str]:
+    """Return the entity ids a caller needs ``control`` on to act on a target.
+
+    The target is the value of the ``device_id`` field: a device registry id,
+    an entity id of this integration or a canonical tracker id. The result is
+    the union of the enabled entities of this integration on the device the
+    value names directly (or the device of the named entity) and on every
+    device of this integration whose canonical id equals the one the value
+    resolves to. The second group is needed because the action falls back to
+    the first coordinator that knows the canonical id, which can belong to
+    another account than the named device.
+
+    A value that names a device, directly or through one of its entities,
+    whose entities of this integration are all disabled yields an empty set,
+    even when another account holds the same tracker with enabled entities.
+    Disabling every entity of a device therefore keeps non-admins off that
+    device; the tracker stays reachable through its canonical id.
+
+    Membership in the integration comes from the entity registry
+    (``platform == DOMAIN``) only; device entries are not inspected for their
+    config entries. An empty set means "no entity to check against" and is
+    rejected by the caller.
+
+    Limit: a device with the same canonical id but without an enabled entity of
+    this integration (or known only to a coordinator) adds nothing to the set,
+    although the fallback may still run against it. It is the same physical
+    tracker, so the caller already holds ``control`` on that tracker elsewhere.
+    """
+
+    if not isinstance(raw_device_id, str) or not raw_device_id:
+        return set()
+
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+    entities_by_device: dict[str, set[str]] = {}
+    for entity in ent_reg.entities.values():
+        if entity.platform != DOMAIN or not entity.device_id or entity.disabled:
+            continue
+        entities_by_device.setdefault(entity.device_id, set()).add(entity.entity_id)
+
+    resolve = ctx["resolve_canonical"]
+    try:
+        canonical_id = resolve(hass, raw_device_id)[0]
+    except HomeAssistantError:
+        return set()
+
+    target_devices: set[str] = set()
+    device = dev_reg.async_get(raw_device_id)
+    if device is not None:
+        target_devices.add(device.id)
+    else:
+        entity_entry = ent_reg.async_get(raw_device_id)
+        if (
+            entity_entry is not None
+            and entity_entry.platform == DOMAIN
+            and entity_entry.device_id
+        ):
+            target_devices.add(entity_entry.device_id)
+
+    if any(named not in entities_by_device for named in target_devices):
+        return set()
+
+    for candidate_device_id in entities_by_device:
+        if candidate_device_id in target_devices:
+            continue
+        try:
+            candidate_canonical = resolve(hass, candidate_device_id)[0]
+        except HomeAssistantError:
+            continue
+        if candidate_canonical == canonical_id:
+            target_devices.add(candidate_device_id)
+
+    result: set[str] = set()
+    for target_device_id in target_devices:
+        result.update(entities_by_device.get(target_device_id, set()))
+    return result
+
+
+async def _async_authorize_device_call(
+    hass: HomeAssistant,
+    call: ServiceCall,
+    raw_device_id: object,
+    ctx: Mapping[str, Any],
+) -> None:
+    """Reject a user call that lacks ``control`` on the target's entities.
+
+    Calls without a user (automations, scripts not started by a user) and calls
+    by admins pass. For every other user, all entities returned by
+    ``_control_entity_ids_for_target`` must grant ``control``; an empty set is
+    rejected. The rejection is the same for an unknown device and for a missing
+    permission and names neither the device nor an entity.
+
+    Invariant: between building the target set here and the coordinator call
+    after ``_resolve_runtime_for_device_id`` there is no await that yields to
+    the event loop, so the check and the resolution see the same registry
+    state. Do not add one.
+    """
+
+    user_id = call.context.user_id
+    if not user_id:
+        return
+    user = await hass.auth.async_get_user(user_id)
+    if user is None:
+        raise UnknownUser(context=call.context, permission=POLICY_CONTROL)
+    if user.is_admin:
+        return
+
+    entity_ids = _control_entity_ids_for_target(hass, raw_device_id, ctx)
+    if not entity_ids or not all(
+        user.permissions.check_entity(entity_id, POLICY_CONTROL)
+        for entity_id in entity_ids
+    ):
+        _LOGGER.warning(
+            "Rejected %s.%s: caller lacks control permission on the target",
+            call.domain,
+            call.service,
+        )
+        raise Unauthorized(context=call.context, permission=POLICY_CONTROL)
+
+
 async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> None:
     """Register integration-wide services, using services.yaml for metadata.
 
@@ -723,6 +861,16 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         - "relink_subentry_entities": Callable[[HomeAssistant, Any], Any]
         - "coalesce_account_entries": Callable[[HomeAssistant, ConfigEntry], Awaitable[ConfigEntry]]
         - "extract_normalized_email": Callable[[ConfigEntry], str | None]
+
+    Permissions
+    -----------
+    ``locate_device``, ``locate_external``, ``play_sound`` and ``stop_sound``
+    check, as their first statement, that a calling user holds ``control`` on
+    every enabled entity of this integration at the target device
+    (``_async_authorize_device_call``); calls without a user and calls by
+    admins pass. ``refresh_device_urls``, ``rebuild_device_registry`` and
+    ``rebuild_registry`` are registered with ``async_register_admin_service``
+    and reject non-admin users.
     """
 
     # ---- Small local helpers (no circular imports) ---------------------------
@@ -894,6 +1042,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
     async def async_locate_device_service(call: ServiceCall) -> None:
         """Handle locate device service call (metadata in services.yaml)."""
+        await _async_authorize_device_call(hass, call, call.data.get("device_id"), ctx)
         raw_device_id = call.data.get("device_id")
         if not isinstance(raw_device_id, str) or not raw_device_id:
             placeholders = {"device_id": str(raw_device_id)}
@@ -920,6 +1069,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
     async def async_play_sound_service(call: ServiceCall) -> None:
         """Handle play sound service call."""
+        await _async_authorize_device_call(hass, call, call.data.get("device_id"), ctx)
         raw_device_id = call.data.get("device_id")
         if not isinstance(raw_device_id, str) or not raw_device_id:
             placeholders = {"device_id": str(raw_device_id)}
@@ -989,6 +1139,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
     async def async_stop_sound_service(call: ServiceCall) -> None:
         """Handle stop sound service call."""
+        await _async_authorize_device_call(hass, call, call.data.get("device_id"), ctx)
         raw_device_id = call.data.get("device_id")
         if not isinstance(raw_device_id, str) or not raw_device_id:
             placeholders = {"device_id": str(raw_device_id)}
@@ -1089,6 +1240,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
     async def async_locate_external_service(call: ServiceCall) -> None:
         """External locate device service (delegates to locate)."""
+        await _async_authorize_device_call(hass, call, call.data.get("device_id"), ctx)
         raw_device_id = call.data.get("device_id")
         if not isinstance(raw_device_id, str) or not raw_device_id:
             placeholders = {"device_id": str(raw_device_id)}
@@ -1509,7 +1661,10 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 _LOGGER.error("Error reloading config entry %s: %s", entry_id, err)
 
     # ---- Actual service registrations (global; visible even without entries) ----
-    # NOTE: We intentionally do NOT pass voluptuous schemas here; services.yaml is our SSoT.
+    # NOTE: Field validation lives in the handlers; services.yaml only
+    # describes the fields for the UI. The maintenance actions pass
+    # _ADMIN_PASSTHROUGH_SCHEMA only because the admin helper would otherwise
+    # reject every field.
     hass.services.async_register(
         DOMAIN, SERVICE_LOCATE_DEVICE, async_locate_device_service
     )
@@ -1518,14 +1673,24 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
     )
     hass.services.async_register(DOMAIN, SERVICE_PLAY_SOUND, async_play_sound_service)
     hass.services.async_register(DOMAIN, SERVICE_STOP_SOUND, async_stop_sound_service)
-    hass.services.async_register(
-        DOMAIN, SERVICE_REFRESH_DEVICE_URLS, async_refresh_device_urls_service
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        SERVICE_REFRESH_DEVICE_URLS,
+        async_refresh_device_urls_service,
+        _ADMIN_PASSTHROUGH_SCHEMA,
     )
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_REBUILD_DEVICE_REGISTRY,
         async_rebuild_device_registry_service,
+        _ADMIN_PASSTHROUGH_SCHEMA,
     )
-    hass.services.async_register(
-        DOMAIN, SERVICE_REBUILD_REGISTRY, async_rebuild_registry_service
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        SERVICE_REBUILD_REGISTRY,
+        async_rebuild_registry_service,
+        _ADMIN_PASSTHROUGH_SCHEMA,
     )
