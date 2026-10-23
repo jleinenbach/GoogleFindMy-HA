@@ -8043,11 +8043,13 @@ def _initial_refresh_reason(err: BaseException) -> BaseException:
     the translation fields of the ``UpdateFailed`` cause and no message of
     its own. Its ``str()`` is then built from the translation key, which is
     the bare key while no translations are cached. The cause carries the
-    readable English text, so it is preferred whenever it exists.
+    readable English text, so it is preferred whenever it exists and the
+    exception carries no message of its own.
     """
 
     cause: BaseException | None = err.__cause__
-    if isinstance(err, ConfigEntryNotReady) and cause is not None:
+    own_message = bool(err.args) and not getattr(err, "generate_message", False)
+    if isinstance(err, ConfigEntryNotReady) and cause is not None and not own_message:
         return cause
     return err
 

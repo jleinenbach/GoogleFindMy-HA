@@ -226,6 +226,38 @@ async def test_setup_retry_without_translation_keeps_the_old_text(
 
 
 @pytest.mark.asyncio
+async def test_setup_retry_keeps_an_own_message_over_the_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """Only a message-less ``ConfigEntryNotReady`` takes its text from the cause."""
+
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
+
+    async def _first_refresh(self) -> None:  # type: ignore[no-untyped-def]
+        del self
+        raise ConfigEntryNotReady("not ready yet") from ValueError("inner detail")
+
+    factory = functools.partial(
+        stub_coordinator_factory,
+        data=[],
+        methods={"async_config_entry_first_refresh": _first_refresh},
+    )
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, factory, asyncio.get_running_loop()
+    )
+
+    assert await harness.integration.async_setup(harness.hass, {}) is True
+    with pytest.raises(ConfigEntryNotReady) as excinfo:
+        await harness.integration.async_setup_entry(harness.hass, harness.entry)
+
+    assert str(excinfo.value) == "Initial refresh failed: not ready yet"
+
+
+@pytest.mark.asyncio
 async def test_coordinator_first_refresh_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

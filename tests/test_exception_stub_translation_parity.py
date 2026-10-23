@@ -5,8 +5,8 @@ The integration raises ``UpdateFailed`` with ``translation_domain``,
 ``translation_key`` and ``translation_placeholders``, and the setup wrapper
 re-raises ``ConfigEntryNotReady`` from it. The suite runs almost every test
 against the lightweight stubs in ``tests/conftest.py``, never against the core.
-A stub that rejected those keyword arguments would fail every test with a
-``TypeError``; a stub that accepted them but rendered ``str()`` differently
+A stub that rejected those keyword arguments would fail every test that
+builds one of them with a ``TypeError``; a stub that accepted them but rendered ``str()`` differently
 would let a wrong setup message look right. This module therefore builds the
 same exceptions from the stub and from the core and compares what each stores
 and renders.
@@ -77,7 +77,11 @@ def _translation_kwargs() -> dict[str, Any]:
 
 
 def _stored(err: BaseException, *, with_retry: bool) -> dict[str, Any]:
-    names = TRANSLATION_ATTRIBUTES + (("retry_after",) if with_retry else ())
+    names = (
+        *TRANSLATION_ATTRIBUTES,
+        "generate_message",
+        *(("retry_after",) if with_retry else ()),
+    )
     return {name: getattr(err, name) for name in names}
 
 
@@ -128,6 +132,23 @@ def test_stub_defaults_match_the_core(
     with_retry = index == 1
     assert _stored(stub, with_retry=with_retry) == _stored(core, with_retry=with_retry)
     assert str(stub) == str(core) == "text"
+
+
+def test_class_defaults_match_the_core(use_real_homeassistant_modules: None) -> None:
+    """A subclass that skips ``super().__init__`` reads the same defaults."""
+    core_error = _core_classes()[0]
+
+    class _CoreBare(core_error):  # type: ignore[misc, valid-type]
+        def __init__(self) -> None:
+            Exception.__init__(self)
+
+    class _StubBare(StubHomeAssistantError):
+        def __init__(self) -> None:
+            Exception.__init__(self)
+
+    assert _stored(_StubBare(), with_retry=False) == _stored(
+        _CoreBare(), with_retry=False
+    )
 
 
 def test_update_failed_text_wins_over_the_key(

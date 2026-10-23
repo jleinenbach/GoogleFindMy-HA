@@ -1064,7 +1064,14 @@ def _stub_homeassistant() -> None:
         too. ``ServiceValidationError`` below keeps its own ``__str__``
         (``"domain:key"``); see its docstring.
         ``tests/test_exception_stub_translation_parity.py`` holds the mirror.
+        The class defaults match the core, so a subclass that skips
+        ``super().__init__`` still reads ``None`` and ``False``.
         """
+
+        generate_message: bool = False
+        translation_domain: str | None = None
+        translation_key: str | None = None
+        translation_placeholders: Mapping[str, Any] | None = None
 
         def __init__(
             self,
@@ -1074,6 +1081,7 @@ def _stub_homeassistant() -> None:
             translation_placeholders: Mapping[str, Any] | None = None,
         ) -> None:
             if not args and translation_key and translation_domain:
+                self.generate_message = True
                 args = (translation_key,)
             super().__init__(*args)
             self.translation_domain = translation_domain
