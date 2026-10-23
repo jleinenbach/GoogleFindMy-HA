@@ -85,8 +85,11 @@ this package (`except Exception as exc`, bare `except`, `except
 (OSError, ssl.SSLError) as err`), a log call that carries the exception by name, wrapped
 (`_clip(exc)`, `str(exc)`, an f-string) or through an attribute other
 than a code (`errno`, `error_kind`, `status`, `status_code`, `code`,
-`__class__`); `describe_exception`,
-`type` and `isinstance` clear their own arguments. A traceback is a sink of
+`__class__`), and an exception constructor of shape (H) that does
+(`raise Own(str(exc)) from exc`: an own exception constructed from a foreign one
+carries the producer's text one hop later); `describe_exception`,
+`type`, `isinstance`, `len` and `_describe_aas_error_text` clear their own
+arguments. A traceback is a sink of
 its own, because its last rendered line is `str(exc)` and a chained cause is
 rendered too: under `Auth/` every `exc_info=` value other than `False` or
 `None` (a name, `True`, an alias bound outside the handler, a tuple,
@@ -205,7 +208,10 @@ that declares them (nested scopes included) or for the alias that uses them,
 never for another `T` of the same module, and there they shadow a module alias
 of the same name. A conditional alias value
 (`X = A if c else B`) is not collected either, `traceback.format_exc()`,
-an own exception built from a foreign one, and every module outside `Auth/`
+an own exception that subclasses a foreign one (an instance carries the
+text it is built with, and that is read at its constructor; the 27
+constructions of such classes in the package carry none, measured on
+2026-10-22), and every module outside `Auth/`
 (119 such sites counted on 2026-09-17). Reported although harmless, on purpose:
 a rebinding to a harmless value (`err = "safe"; log(err)`), a
 nested function whose own parameter shadows a bound name (`def inner(err:
@@ -279,7 +285,12 @@ _ROTATING_LEAVES: frozenset[str] = frozenset({"eid", "eid_hex", "truncated_eid_h
 # `missing_key` in `fcm_refresh_install_token` is `KeyError.args[0]` from
 # four literal lookups on the package's own credentials dict (`"fcm"`,
 # `"installation"`, `"refresh_token"`, `"fid"`): the key the code asked
-# for, not text a producer wrote (shape (I), 2026-09-18). The prefix keys
+# for, not text a producer wrote (shape (I), 2026-09-18). `_err` in
+# `Auth/auth_flow.py` is the `ImportError` of the optional selenium import
+# at module level; `missing_browser_dependency` quotes it after the install
+# hint (`browser_deps.py`). Its text comes from the import system and names
+# a module (`No module named 'selenium'`), not a server or a user, and the
+# install hint needs it (shape (I) constructor, 2026-10-23). The prefix keys
 # the exception to that one call; `test_each_reviewed_site_matches_
 # exactly_one_log_call` fails when the site disappears or is copied.
 _REVIEWED: frozenset[tuple[str, str, str]] = frozenset(
@@ -290,6 +301,7 @@ _REVIEWED: frozenset[tuple[str, str, str]] = frozenset(
             "missing_key",
             "Cannot refresh FCM token: missing credentials key",
         ),
+        ("Auth/auth_flow.py", "_err", "raise"),
     }
 )
 
@@ -850,9 +862,20 @@ _BUILTIN_EXCEPTIONS = frozenset(
 # (its 40 sites were rewritten, no file is excused).
 _SHAPE_I_ROOT = "Auth/"
 _BROAD_EXCEPTIONS = frozenset({"Exception", "BaseException"})
-# Wrappers that reduce an exception to a type, a kind or a count.
+# Wrappers that reduce an exception to a type, a kind or a count. `len` gives a
+# count; `_describe_aas_error_text` (`Auth/token_retrieval.py`) names the
+# markers of a gpsoauth error text and its length, never the text; both stand
+# in exception constructors there (measured on 2026-10-22, AP4 of
+# PLAN_GFMY_WAECHTER_LOGGING_LUECKEN: three sites, all harmless).
 _SAFE_EXCEPTION_WRAPPERS = frozenset(
-    {"describe_exception", "exception_origin", "type", "isinstance"}
+    {
+        "describe_exception",
+        "exception_origin",
+        "type",
+        "isinstance",
+        "len",
+        "_describe_aas_error_text",
+    }
 )
 # Calls whose result renders the exception text: binding their result binds
 # the name (`shown = str(err)`, `text = ", ".join(str(e) for e in errors)`);
@@ -2605,7 +2628,10 @@ def _scan_tree(
         scanned += 1
         bodies = bodies_by_call.get(id(call), frozenset())
         messages = messages_by_call.get(id(call), frozenset())
-        bound_names = exception_names.get(id(call), ()) if fmt != "raise" else ()
+        # Shape (I) reads an exception constructor like a log call: an own
+        # exception built from a foreign one (`raise Own(str(err)) from err`,
+        # `wrapped = Own(err)`) carries the producer's text one hop later.
+        bound_names = exception_names.get(id(call), ())
         arguments: list[ast.AST] = [*call.args, *(kw.value for kw in call.keywords)]
         # Shape (I) treats a traceback as a sink of its own: the last line of
         # a rendered traceback is `str(exc)`. `exc_info=<name>`, `exc_info=True`
@@ -5356,6 +5382,86 @@ def test_shape_i_helper_results_stop_fail_closed_at_the_round_limit(
     tree = ast.parse(_SHAPE_I_RESULT_LIMIT_FIXTURE)
     offenders, _ = _scan_tree(tree, "Auth/fixture.py")
     assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [(12, "err")]
+
+
+_SHAPE_I_CONSTRUCTOR_FIXTURE = """
+import logging
+from aiohttp import ClientError
+from .browser_deps import missing_dependency
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class OwnError(Exception):
+    pass
+
+
+def f01(err: ClientError) -> None:
+    raise OwnError(str(err)) from err
+
+
+def f02(err: ClientError) -> None:
+    raise OwnError(f"login failed: {err}")
+
+
+def f03(err: ClientError) -> None:
+    wrapped = OwnError(err)
+    raise wrapped
+
+
+def f04() -> None:
+    try:
+        run()
+    except ImportError as _err:
+        raise missing_dependency(_err) from _err
+
+
+def f05(err: ClientError) -> None:
+    raise OwnError(describe_exception(err)) from err
+
+
+def f06(err: ClientError) -> None:
+    message = str(err)
+    raise OwnError(f"failed ({len(message)} chars)") from err
+
+
+def f07(err: ClientError) -> None:
+    raise OwnError("login failed") from err
+
+
+def f08(err: ClientError) -> None:
+    raise OwnError(_describe_aas_error_text(str(err))) from err
+"""
+
+
+def test_shape_i_reads_own_exceptions_built_from_foreign_ones() -> None:
+    """The arguments of an exception's constructor are read like a log call's.
+
+    An own exception built from a foreign one carries the producer's text
+    one hop later (`97015e1f` lists the form next to the alias and
+    `traceback.format_exc()`); `auth_flow.py` raises
+    `missing_browser_dependency(_err)`, whose message quotes `_err`
+    (`browser_deps.py`). Reported, under the format marker `raise`: the
+    text of the exception (line 14), an f-string (line 18), the two-step
+    form `wrapped = OwnError(err)` (line 22) and a function the module does
+    not define, given a handler name (line 30). Not reported: a safe
+    wrapper (`describe_exception`), the length of a bound text (`len`), a
+    fixed message with the foreign cause chained (`from err` renders the
+    cause only where a traceback is logged, which shape (I) reports at the
+    log call) and the package's own description of a gpsoauth error text
+    (`_describe_aas_error_text`: markers and length). The same fixture
+    outside `Auth/` reports nothing.
+    """
+    tree = ast.parse(_SHAPE_I_CONSTRUCTOR_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    assert sorted((line, leaf, fmt) for _, line, leaf, fmt in offenders) == [
+        (14, "err", "raise"),
+        (18, "err", "raise"),
+        (22, "err", "raise"),
+        (30, "_err", "raise"),
+    ]
+    outside, _ = _scan_tree(tree, "coordinator/fixture.py")
+    assert outside == []
 
 
 def test_shape_i_reports_producer_exceptions_in_broad_auth_handlers() -> None:
