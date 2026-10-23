@@ -8057,8 +8057,8 @@ def _initial_refresh_not_ready(err: BaseException) -> ConfigEntryNotReady:
 
     Home Assistant builds the setup-retry reason of the integration card
     from ``translation_key`` and ``translation_placeholders`` of the raised
-    ``ConfigEntryNotReady``. The text never comes from the key (see
-    ``_initial_refresh_reason``).
+    ``ConfigEntryNotReady``. The text comes from the cause whenever the core
+    chained one (see ``_initial_refresh_reason``).
     """
 
     return ConfigEntryNotReady(

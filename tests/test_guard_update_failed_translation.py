@@ -4,9 +4,8 @@
 Home Assistant copies ``translation_key`` of an ``UpdateFailed`` into the
 setup-retry reason of the integration card when the first refresh fails, and
 the frontend shows that reason in the user's language. A raise without a key
-falls back to the English text again, and nothing else would notice. The
-checks run on the syntax tree of every module under
-``custom_components/googlefindmy``:
+falls back to the English text again. The checks run on the syntax tree of
+every module under ``custom_components/googlefindmy``:
 
 (a) coverage: each ``UpdateFailed(...)`` call passes ``translation_domain`` as
     the name ``DOMAIN`` and a ``translation_key``; no module imports
