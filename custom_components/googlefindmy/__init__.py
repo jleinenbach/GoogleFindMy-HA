@@ -8036,6 +8036,39 @@ async def _async_setup_subentry(
     return True
 
 
+def _initial_refresh_reason(err: BaseException) -> BaseException:
+    """Return the exception whose text explains a failed first refresh.
+
+    ``async_config_entry_first_refresh`` raises ``ConfigEntryNotReady`` with
+    the translation fields of the ``UpdateFailed`` cause and no message of
+    its own. Its ``str()`` is then built from the translation key, which is
+    the bare key while no translations are cached. The cause carries the
+    readable English text, so it is preferred whenever it exists.
+    """
+
+    cause: BaseException | None = err.__cause__
+    if isinstance(err, ConfigEntryNotReady) and cause is not None:
+        return cause
+    return err
+
+
+def _initial_refresh_not_ready(err: BaseException) -> ConfigEntryNotReady:
+    """Wrap a failed first refresh and keep its translation fields.
+
+    Home Assistant builds the setup-retry reason of the integration card
+    from ``translation_key`` and ``translation_placeholders`` of the raised
+    ``ConfigEntryNotReady``. The text never comes from the key (see
+    ``_initial_refresh_reason``).
+    """
+
+    return ConfigEntryNotReady(
+        f"Initial refresh failed: {_initial_refresh_reason(err)}",
+        translation_domain=getattr(err, "translation_domain", None),
+        translation_key=getattr(err, "translation_key", None),
+        translation_placeholders=getattr(err, "translation_placeholders", None),
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Set up a config entry.
 
@@ -8819,10 +8852,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _LOGGER.error(
             "[%s] Initial coordinator refresh failed: %s",
             entry.entry_id,
-            err,
+            _initial_refresh_reason(err),
             exc_info=True,
         )
-        raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
+        raise _initial_refresh_not_ready(err) from err
 
     raw_metadata = getattr(coordinator, "_subentry_metadata", None)
     metadata: Mapping[str, object] | None

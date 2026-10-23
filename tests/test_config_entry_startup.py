@@ -3,16 +3,20 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+import logging
 from collections.abc import Callable
 from typing import Any
 
 import pytest
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
     DATA_SECRET_BUNDLE,
+    DOMAIN,
     TRACKER_SUBENTRY_KEY,
 )
 from tests.helpers.config_entries_stub import make_config_entry
@@ -103,6 +107,75 @@ async def test_device_trackers_populate_after_initial_refresh(
         TRACKER_SUBENTRY_KEY
     )
     assert follow_up == snapshot
+
+
+@pytest.mark.asyncio
+async def test_setup_retry_keeps_translation_and_reason_text(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed first refresh keeps the cause's key and its readable text.
+
+    Home Assistant raises ``ConfigEntryNotReady`` from the first refresh with
+    the translation fields of the ``UpdateFailed`` cause and no message of its
+    own (``async_config_entry_first_refresh``). The setup wrapper must pass
+    those fields on, because HA builds the setup-retry reason of the
+    integration card from them. Its text must still come from the cause:
+    without cached translations the core renders the bare key instead.
+    """
+
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
+
+    loop = asyncio.get_running_loop()
+    cause_text = "Cold start: empty device list; treating as transient."
+
+    async def _first_refresh(self) -> None:  # type: ignore[no-untyped-def]
+        del self
+        cause = UpdateFailed(
+            cause_text,
+            translation_domain=DOMAIN,
+            translation_key="cold_start_empty_device_list",
+        )
+        # Mirrors the core: key and domain copied, no message, cause chained.
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="cold_start_empty_device_list",
+            translation_placeholders=None,
+        ) from cause
+
+    factory = functools.partial(
+        stub_coordinator_factory,
+        data=[],
+        methods={"async_config_entry_first_refresh": _first_refresh},
+    )
+    harness = _prepare_async_setup_entry_harness(monkeypatch, factory, loop)
+
+    assert await harness.integration.async_setup(harness.hass, {}) is True
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(ConfigEntryNotReady) as excinfo,
+    ):
+        await harness.integration.async_setup_entry(harness.hass, harness.entry)
+
+    err = excinfo.value
+    assert err.translation_domain == DOMAIN
+    assert err.translation_key == "cold_start_empty_device_list"
+    assert err.translation_placeholders is None
+    assert str(err) == f"Initial refresh failed: {cause_text}"
+    assert "cold_start_empty_device_list" not in str(err)
+
+    logged = [
+        r.getMessage()
+        for r in caplog.records
+        if "Initial coordinator refresh failed" in r.getMessage()
+    ]
+    assert len(logged) == 1, logged
+    assert cause_text in logged[0]
+    assert "cold_start_empty_device_list" not in logged[0]
 
 
 @pytest.mark.asyncio
