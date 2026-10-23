@@ -142,11 +142,15 @@ read as the task method or `sys.exc_info()`, `_LOGGER.exception(...)`
 included (fail-closed).
 A module bound by `from` (`from cryptography import exceptions as ce`)
 resolves `ce.InvalidTag` like `import` does. Not seen: `except
-builtins.Exception`, a helper's return value (`exc = _pick(task)`, `kind =
-_classify(err)`: a call's result is not knowable from the name), a lambda
-bound to a name and called (`g = lambda: str(err); log(g())`), a local
-annotation with a foreign type whose value is a helper's result (`last:
-str | ClientError | None = _pick(task)`) and a handler name aliased out
+builtins.Exception`, the result of a function this file does not define
+(`exc = _pick(task)`, `kind = _classify(err)`: one file does not show what
+it returns; binding every logged result would report 210 sites in `Auth/`,
+measured on 2026-10-22, none of them a producer's text; a module-local
+helper whose `return` carries a bound exception is followed, see
+`_returning_calls`), a lambda bound to a name and called (`g = lambda:
+str(err); log(g())`), a local annotation with a foreign type whose value is
+the result of such a function (`last: str | ClientError | None =
+_pick(task)`) and a handler name aliased out
 of its handler (`except Exception as exc: last_error = exc`): the package
 narrows such a name before each of its three log calls (`fcmregister.py`:
 one by `isinstance`, two by a `str` assignment in the same branch) and a
@@ -174,7 +178,8 @@ not a type), a type alias bound in *another* module (`from ._typing import
 Failure`, then `err: Failure`: this guard parses one file, and a name bound
 from a relative import counts as this package's own anyway), an alias whose
 value is the result of a call (`type Made = NewType("Made", ClientError)`,
-`cast(...)`: the same promise as for a helper's return value), the annotation
+`cast(...)`: the same promise as for the result of a function this file does
+not define), the annotation
 of a *local* assignment (`def f(): err: A = make()` does not bind `A`; reading
 it as a binding would report three sites in `fcmregister.py` today and would
 contradict what `_flow_bound_names` promises), and a bare `type` or `Callable`
@@ -241,7 +246,7 @@ import builtins
 import importlib
 import re
 import types
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -1849,8 +1854,10 @@ def _carries_exception(value: ast.AST, bound: frozenset[str]) -> bool:
     element carries, a starred or awaited value. Not followed, on purpose:
     any other function that takes the name as an argument (`kind =
     _classify(entry_id, err)`, `len(errors)`: a function's result is not
-    knowable from the name, and a helper's return value is a stated blind
-    spot); binding such a target would report every logged result. Any
+    knowable from the name, and the result of a function this file does not
+    define is a stated blind spot; a module-local helper whose `return`
+    carries is followed through `returning`); binding such a target would
+    report every logged result. Any
     call named `exception()` or `exc_info()` is read as the task method or
     `sys.exc_info()`, `_LOGGER.exception(...)` included: fail-closed, one
     review line. `operator.setitem(d, k, err)` and the like are functions,
@@ -1985,6 +1992,7 @@ def _flow_bound_names(
     imported: frozenset[str],
     modules: dict[str, str],
     local: dict[str, tuple[ast.AST, ...]],
+    returning: frozenset[int] = frozenset(),
 ) -> tuple[str, ...]:
     """Fourth binding: names that receive a bound exception inside one function.
 
@@ -2015,7 +2023,10 @@ def _flow_bound_names(
     after it: the package narrows such a name before each of its three
     log calls (`fcmregister.py`: one by `isinstance`, two by a `str`
     assignment in the same branch), and a flow-insensitive binding would
-    report all three.
+    report all three. An assignment, annotated assignment or walrus whose
+    value (behind `await`) is a call in `returning` binds its target as a
+    whole: the call reaches a module-local helper whose `return` carries a
+    bound exception (`_returning_calls`).
     """
     bound = set(seed)
     while True:
@@ -2027,8 +2038,13 @@ def _flow_bound_names(
                 targets = (
                     node.targets if isinstance(node, ast.Assign) else [node.target]
                 )
+                value = node.value
+                if isinstance(value, ast.Await):
+                    value = value.value
                 for target in targets:
                     bound.update(_unpacked_names(target, node.value, frozen))
+                    if id(value) in returning:
+                        bound.update(_target_names(target))
             elif isinstance(node, ast.AugAssign):
                 if _carries_exception(node.value, frozen):
                     bound.update(_target_names(node.target))
@@ -2258,21 +2274,125 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
     callees = _module_local_callees(tree)
     context = (own, aliases, local, scopes, imported, modules)
     forwarded: dict[int, tuple[str, ...]] = {}
+    returning: frozenset[int] = frozenset()
     for _round in range(_FORWARD_ROUND_LIMIT):
-        names = _names_for_seeds(tree, forwarded, context)
+        by_scope: dict[int, tuple[str, ...]] = {}
+        names = _names_for_seeds(tree, forwarded, context, returning, by_scope)
         seeds = _forwarded_parameter_seeds(tree, names, callees)
-        if seeds == forwarded:
+        calls = _returning_calls(tree, by_scope, callees, returning)
+        if seeds == forwarded and calls == returning:
             return names
-        forwarded = seeds
-    return _names_for_seeds(tree, _all_callee_parameters(tree, callees), context)
+        forwarded, returning = seeds, calls
+    return _names_for_seeds(
+        tree,
+        _all_callee_parameters(tree, callees),
+        context,
+        _all_returning_calls(tree, callees),
+    )
+
+
+def _scope_returns(
+    node: ast.AST, handlers: tuple[int, ...] = ()
+) -> Iterator[tuple[ast.Return, tuple[int, ...]]]:
+    """The `return` statements of one function, with the handlers around each.
+
+    A nested `def` or class is its own scope and not entered: its `return`
+    does not make the enclosing function return anything. Only statements,
+    handlers and `case` blocks are entered, iteratively: a `return` stands
+    nowhere else, and an expression may nest deeper than the recursion limit
+    (a long `|` chain in a type alias).
+    """
+    stack = [(child, handlers) for child in ast.iter_child_nodes(node)]
+    while stack:
+        child, around = stack.pop()
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if not isinstance(child, (ast.stmt, ast.excepthandler, ast.match_case)):
+            continue
+        if isinstance(child, ast.Return):
+            yield child, around
+            continue
+        inner = (*around, id(child)) if isinstance(child, ast.ExceptHandler) else around
+        stack.extend((grand, inner) for grand in ast.iter_child_nodes(child))
+
+
+def _returning_calls(
+    tree: ast.AST,
+    by_scope: dict[int, tuple[str, ...]],
+    callees: dict[str, list[tuple[ast.AST, int]]],
+    returning: frozenset[int],
+) -> frozenset[int]:
+    """Calls that reach a module-local helper whose `return` carries an exception.
+
+    A helper returns an exception when one of its own `return` statements
+    carries a name bound in the helper (`_carries_exception` over its
+    parameters, forwarded parameters and data flow, plus the name of a
+    foreign handler around the `return`: `except ClientError as caught:
+    return caught`) or returns, behind `await`, a call that already is such
+    a call (`return pick(task)`, one more hop per round). A helper named
+    like a safe wrapper (`describe_exception`) is not one; neither is a
+    function the module does not define (`_classify(err)`, an imported
+    helper): one file does not show what it returns.
+    """
+    returners: set[int] = set()
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if function.name in _SAFE_EXCEPTION_WRAPPERS:
+            continue
+        own = by_scope.get(id(function), ())
+        for node, handlers in _scope_returns(function):
+            if node.value is None:
+                continue
+            value = (
+                node.value.value if isinstance(node.value, ast.Await) else node.value
+            )
+            bound = frozenset(
+                [*own, *(n for h in handlers for n in by_scope.get(h, ()))]
+            )
+            if id(value) in returning or _carries_exception(value, bound):
+                returners.add(id(function))
+                break
+    return frozenset(
+        id(call)
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and any(id(f) in returners for f, _ in _resolved_callees(call, callees))
+    )
+
+
+def _all_returning_calls(
+    tree: ast.AST, callees: dict[str, list[tuple[ast.AST, int]]]
+) -> frozenset[int]:
+    """Every call of a module-local helper that returns a value (fail-closed)."""
+    returners = {
+        id(function)
+        for function in ast.walk(tree)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and function.name not in _SAFE_EXCEPTION_WRAPPERS
+        and any(node.value is not None for node, _ in _scope_returns(function))
+    }
+    return frozenset(
+        id(call)
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and any(id(f) in returners for f, _ in _resolved_callees(call, callees))
+    )
 
 
 def _names_for_seeds(
     tree: ast.AST,
     forwarded: dict[int, tuple[str, ...]],
     context: tuple,
+    returning: frozenset[int] = frozenset(),
+    by_scope: dict[int, tuple[str, ...]] | None = None,
 ) -> dict[int, tuple[str, ...]]:
-    """One round of `_exception_names_by_call` for the given forwarded parameters."""
+    """One round of `_exception_names_by_call` for the given forwarded parameters.
+
+    `returning` are the calls whose result binds (`_returning_calls`);
+    `by_scope`, when given, receives the names bound in each function and
+    each foreign handler, keyed by the node's `id`.
+    """
     own, aliases, local, scopes, imported, modules = context
     names: dict[int, tuple[str, ...]] = {}
     for function in ast.walk(tree):
@@ -2299,8 +2419,10 @@ def _names_for_seeds(
         # The data flow reads the table for `match` class patterns only, where
         # a type parameter cannot stand (`case T():` raises at runtime).
         bound += _flow_bound_names(
-            function, bound, own, aliases, imported, modules, local
+            function, bound, own, aliases, imported, modules, local, returning
         )
+        if by_scope is not None:
+            by_scope[id(function)] = bound
         if not bound:
             continue
         for inner in ast.walk(function):
@@ -2319,8 +2441,10 @@ def _names_for_seeds(
         bound = (handler.name,) if handler.name else ()
         if handler.name:
             bound += _flow_bound_names(
-                handler, bound, own, aliases, imported, modules, local
+                handler, bound, own, aliases, imported, modules, local, returning
             )
+        if by_scope is not None:
+            by_scope[id(handler)] = bound
         for inner in ast.walk(handler):
             if isinstance(inner, ast.Call):
                 names[id(inner)] = names.get(id(inner), ()) + bound
@@ -4520,10 +4644,11 @@ def test_shape_i_follows_bound_exceptions_by_data_flow() -> None:
     `extendleft` fills a `deque`, and `str(queue)` renders what is inside
     it; the Codex review of 2026-09-20 on `6ae6af90`, which found the queue
     added as a rendering carrier while its insertion methods were missing
-    from the mutator set). Not reported: a tuple target fed by a
-    helper's result (line 34, `_pick` is not followed), a code attribute and
-    a classifier's result (line 57, `code` and `kind`), a local annotation
-    whose value is a helper's result and a lambda that is called (line 116:
+    from the mutator set). Not reported: a tuple target fed by the result
+    of a function this file does not define (line 34, `_pick`), a code
+    attribute and a classifier's result (line 57, `code` and `kind`), a
+    local annotation whose value is such a result and a lambda that is
+    called (line 116:
     the package narrows such a name before logging, and a lambda's result
     is a call's), and four harmless derivations (line 136: a method on a
     safe wrapper's result, a method on a code attribute, `len()`, and
@@ -5027,6 +5152,210 @@ def test_shape_i_forwarding_stops_fail_closed_at_the_round_limit(
     tree = ast.parse(_SHAPE_I_FORWARD_LIMIT_FIXTURE)
     offenders, _ = _scan_tree(tree, "Auth/fixture.py")
     assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [(18, "c")]
+
+
+_SHAPE_I_RESULT_FIXTURE = """
+import logging
+from aiohttp import ClientError
+from .helpers import imported_pick
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def pick(task):
+    return task.exception()
+
+
+def f01(task) -> None:
+    err = pick(task)
+    _LOGGER.error("x %s", err)
+
+
+def ident(value):
+    return value
+
+
+def f02(e: ClientError) -> None:
+    err = ident(e)
+    _LOGGER.error("x %s", err)
+
+
+async def apick(task):
+    return task.exception()
+
+
+async def f03(task) -> None:
+    err = await apick(task)
+    _LOGGER.error("x %s", err)
+
+
+def f04(task) -> None:
+    if (err := pick(task)) is not None:
+        _LOGGER.error("x %s", err)
+
+
+def f05(task) -> None:
+    err: BaseException | None = pick(task)
+    _LOGGER.error("x %s", err)
+
+
+class Client:
+    def _pick(self, task):
+        return task.exception()
+
+    def run(self, task) -> None:
+        err = self._pick(task)
+        _LOGGER.error("x %s", err)
+
+
+def catch():
+    try:
+        work()
+    except ClientError as caught:
+        return caught
+    return None
+
+
+def f07() -> None:
+    err = catch()
+    _LOGGER.error("x %s", err)
+
+
+def outer(task):
+    return pick(task)
+
+
+def f08(task) -> None:
+    err = outer(task)
+    _LOGGER.error("x %s", err)
+
+
+def kept(task):
+    found = task.exception()
+    return found
+
+
+def f09(task) -> None:
+    err = kept(task)
+    _LOGGER.error("x %s", err)
+
+
+def tell(task):
+    return "fixed"
+
+
+def f10(task) -> None:
+    text = tell(task)
+    _LOGGER.error("x %s", text)
+
+
+def wrapper(task):
+    def inner():
+        return task.exception()
+
+    inner()
+    return "done"
+
+
+def f11(task) -> None:
+    status = wrapper(task)
+    _LOGGER.error("x %s", status)
+
+
+def f12(err: ClientError) -> None:
+    kind = _classify(err)
+    _LOGGER.error("x %s", kind)
+
+
+def f13(task) -> None:
+    err = imported_pick(task)
+    _LOGGER.error("x %s", err)
+
+
+def describe_exception(task):
+    return task.exception()
+
+
+def f14(task) -> None:
+    kind = describe_exception(task)
+    _LOGGER.error("x %s", kind)
+
+
+def relay(task):
+    found = pick(task)
+    return found
+
+
+def f15(task) -> None:
+    err = relay(task)
+    _LOGGER.error("x %s", err)
+"""
+
+
+def test_shape_i_follows_helper_results() -> None:
+    """A module-local helper whose `return` carries a bound exception binds its result.
+
+    `err = pick(task)` hides a producer's text behind a call; this guard reads
+    one file, so it follows a result where that file proves it: a helper of
+    the same module that returns `<task>.exception()` (line 15), a bound
+    parameter (line 24, the parameter bound by forwarding), through `await`
+    (line 33), a walrus (line 38), an annotated assignment (line 43), a method
+    called through `self` (line 52), a foreign handler name (line 65), the
+    result of another such helper (line 74, two hops), a name bound inside
+    the helper (line 84) and a name bound inside the helper from such a
+    result (line 135, one more round of the fixpoint). Not reported: a helper that returns a constant
+    (`tell`), a helper whose only carrying `return` sits in a nested function
+    (`wrapper`), a function the module does not define (`_classify`,
+    `imported_pick`: their result is not knowable from one file, EB-09 stays
+    declared for them) and a local function named like a safe wrapper
+    (`describe_exception`). The same fixture outside `Auth/` reports nothing.
+    """
+    tree = ast.parse(_SHAPE_I_RESULT_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [
+        (15, "err"),
+        (24, "err"),
+        (33, "err"),
+        (38, "err"),
+        (43, "err"),
+        (52, "err"),
+        (65, "err"),
+        (74, "err"),
+        (84, "err"),
+        (135, "err"),
+    ]
+    outside, _ = _scan_tree(tree, "coordinator/fixture.py")
+    assert outside == []
+
+
+_SHAPE_I_RESULT_LIMIT_FIXTURE = """
+def first(task):
+    return task.exception()
+
+
+def second(task):
+    return first(task)
+
+
+def start(task) -> None:
+    err = second(task)
+    _LOGGER.error("x %s", err)
+"""
+
+
+def test_shape_i_helper_results_stop_fail_closed_at_the_round_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the round limit every helper that returns a value binds its result.
+
+    `second` returns a result only once `first` is known to, one round later;
+    with the limit at one the fixpoint stops before, and the fail-closed
+    branch still reports line 12.
+    """
+    monkeypatch.setitem(globals(), "_FORWARD_ROUND_LIMIT", 1)
+    tree = ast.parse(_SHAPE_I_RESULT_LIMIT_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [(12, "err")]
 
 
 def test_shape_i_reports_producer_exceptions_in_broad_auth_handlers() -> None:
