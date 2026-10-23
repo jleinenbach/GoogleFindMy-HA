@@ -848,8 +848,10 @@ class GoogleFindMyCoordinator(
         ] = {}  # device_id -> creation timestamp
         # device_id -> (cancel key, time.monotonic() at which Nova accepted that
         # play). In memory only: it gates how soon a stop may follow the play
-        # (STOP_SOUND_MIN_DELAY_AFTER_PLAY_S), and after a restart that point
-        # has long passed.
+        # (STOP_SOUND_MIN_DELAY_AFTER_PLAY_S). A restart or a config-entry
+        # reload starts it empty, so a stop within that delay after a reload is
+        # sent at once. Known gap: the stored key does not record whether Nova
+        # accepted the play, so the stamp cannot be rebuilt from it.
         self._sound_play_accepted_at: dict[str, tuple[str, float]] = {}
 
         # Per-device poll cooldowns after owner/crowdsourced reports.

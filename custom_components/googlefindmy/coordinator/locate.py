@@ -992,8 +992,9 @@ class LocateOperations(_MixinBase):
         """Return True if a stop for ``device_id`` would carry a PROVEN cancel key.
 
         Read-only, no side effects. ``request_uuid`` must already be normalised
-        (a blank string collapsed to ``None``); ``async_stop_sound`` does that
-        at its single normalisation point before anything calls this.
+        (a blank string collapsed to ``None``) by ``_normalize_cancel_key``;
+        ``async_stop_sound`` and ``classify_stop_correlation`` both apply it
+        before they call this.
 
         Proven means exactly one thing: the key that would go on the wire is our
         own cached key and it is still fresh. An explicitly passed foreign
@@ -1316,16 +1317,17 @@ class LocateOperations(_MixinBase):
         # that rendered to nothing -- so it must fall through to the cached key
         # below, never pose as one. In-process the absence of a key already has
         # exactly one name, None, and only that name routes into the lookup.
-        # This is the SOLE normalisation point: every caller (service handler,
-        # button via the service, direct coordinator callers) passes here, and
-        # anything below the cache is too late to restore the fallback.
+        # Every stop (service handler, button via the service, direct
+        # coordinator callers) passes here, and anything below the cache is too
+        # late to restore the fallback. The rule itself lives only in
+        # _normalize_cancel_key, which classify_stop_correlation applies too.
         # Post-condition: request_uuid_to_use is None or non-blank, which is
         # what every `is not None` check below relies on.
         request_uuid_to_use = self._normalize_cancel_key(request_uuid)
         # True only when the key about to be sent came from our own cache AND
         # was still fresh. An explicitly passed foreign UUID does NOT qualify:
-        # popping our cache entry on its behalf would drop the handle of a
-        # different, possibly still running ring. Decided here, ABOVE the
+        # it proves nothing about a ring we started, so it neither counts as
+        # correlated nor arms the stop delay. Decided here, ABOVE the
         # readiness gate, because that gate needs the same answer; the single
         # definition lives in _stop_would_be_correlated().
         used_own_fresh_key = self._stop_would_be_correlated(

@@ -1922,9 +1922,9 @@ class GoogleFindMyAPI:
             ringing. The pre-/post-dispatch split is classified in-band on the
             raised NovaError (`NovaError.dispatched`), stamped uniformly at the
             transport's retry-loop choke point for every exit. See
-            IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY. On the Stop side the drop branch
-            is additionally bound to "the cancel key was our own and fresh", so
-            a foreign key passed in by a service call never evicts our handle.
+            IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY. On the Stop side the key is not
+            dropped at all (IRR-CA-STOP-KEEPS-CANCEL-KEY): neither our own key
+            nor a foreign key passed in by a service call evicts our handle.
 
             `ACCEPTED` means Nova accepted the submission (HTTP 200). This is
             NOT a confirmation that the device received or executed the command: no
