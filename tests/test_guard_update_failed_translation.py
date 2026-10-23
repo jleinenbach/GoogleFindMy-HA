@@ -28,11 +28,14 @@ every module under ``custom_components/googlefindmy``:
     derived information under ``AGENTS.md`` section 5 (b) and would land in
     the integration card and the log; devices are named by ID.
 
-A ``**kwargs`` mapping at a call fails closed: it is reported as a missing
-key. Not seen: ``getattr`` with a computed attribute name, code built at run
-time (``eval``, ``exec``), and a placeholder value that carries a device name
-under an identifier without those three words. Each arm has a self-test on a
-synthetic source that must fail.
+A ``**`` mapping at a call fails closed only when it carries the key itself
+(it is then reported as a missing key); next to a literal key it is not seen.
+Not seen either: ``getattr`` with a computed attribute name, a lookup through
+``__dict__`` or ``vars()``, ``type(err)(...)`` and ``err.__class__(...)``, an
+assignment expression inside an annotation, code built at run time
+(``eval``, ``exec``), a starred or empty message text, a placeholder value read
+by subscript or ``.get("name")``, and one under an identifier without those
+three words. Each arm has a self-test on a synthetic source that must fail.
 """
 
 from __future__ import annotations

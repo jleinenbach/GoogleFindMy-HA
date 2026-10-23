@@ -178,22 +178,42 @@ async def test_setup_retry_keeps_translation_and_reason_text(
     assert "cold_start_empty_device_list" not in logged[0]
 
 
+def _chained(outer: Exception, inner: Exception) -> Exception:
+    outer.__cause__ = inner
+    return outer
+
+
+def _logged_refresh_failures(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if "Initial coordinator refresh failed" in r.getMessage()
+    ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
-    [RuntimeError("boom"), ConfigEntryNotReady("not ready yet")],
-    ids=["plain_exception", "not_ready_without_cause"],
+    [
+        RuntimeError("boom"),
+        ConfigEntryNotReady("not ready yet"),
+        # Only a ConfigEntryNotReady hands its text over to the cause; any
+        # other message-less exception keeps the old, empty text.
+        _chained(RuntimeError(), ValueError("inner detail")),
+    ],
+    ids=["plain_exception", "not_ready_without_cause", "plain_exception_with_cause"],
 )
 async def test_setup_retry_without_translation_keeps_the_old_text(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+    caplog: pytest.LogCaptureFixture,
     failure: Exception,
 ) -> None:
     """A failure without a translatable cause keeps the previous behaviour.
 
-    The text is ``Initial refresh failed: <str(err)>`` as before, and no
-    translation field is invented.
+    The text is ``Initial refresh failed: <str(err)>`` as before, the ERROR
+    log names the same text, and no translation field is invented.
     """
 
     del (
@@ -214,12 +234,18 @@ async def test_setup_retry_without_translation_keeps_the_old_text(
     )
 
     assert await harness.integration.async_setup(harness.hass, {}) is True
-    with pytest.raises(ConfigEntryNotReady) as excinfo:
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(ConfigEntryNotReady) as excinfo,
+    ):
         await harness.integration.async_setup_entry(harness.hass, harness.entry)
 
     err = excinfo.value
     assert str(err) == f"Initial refresh failed: {failure}"
     assert err.__cause__ is failure
+    logged = _logged_refresh_failures(caplog)
+    assert len(logged) == 1, logged
+    assert logged[0].endswith(f"Initial coordinator refresh failed: {failure}")
     assert err.translation_domain is None
     assert err.translation_key is None
     assert err.translation_placeholders is None
@@ -230,6 +256,7 @@ async def test_setup_retry_keeps_an_own_message_over_the_cause(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Only a message-less ``ConfigEntryNotReady`` takes its text from the cause."""
 
@@ -251,10 +278,62 @@ async def test_setup_retry_keeps_an_own_message_over_the_cause(
     )
 
     assert await harness.integration.async_setup(harness.hass, {}) is True
-    with pytest.raises(ConfigEntryNotReady) as excinfo:
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(ConfigEntryNotReady) as excinfo,
+    ):
         await harness.integration.async_setup_entry(harness.hass, harness.entry)
 
     assert str(excinfo.value) == "Initial refresh failed: not ready yet"
+    logged = _logged_refresh_failures(caplog)
+    assert len(logged) == 1, logged
+    assert logged[0].endswith("Initial coordinator refresh failed: not ready yet")
+
+
+@pytest.mark.asyncio
+async def test_setup_retry_passes_the_placeholders_of_the_cause_on(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """The placeholders reach the card as well, or it shows ``{status}`` raw."""
+
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
+    placeholders = {"status": "500"}
+
+    async def _first_refresh(self) -> None:  # type: ignore[no-untyped-def]
+        del self
+        cause = UpdateFailed(
+            "HTTP Server Error 500: down",
+            translation_domain=DOMAIN,
+            translation_key="device_list_server_error",
+            translation_placeholders=placeholders,
+        )
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="device_list_server_error",
+            translation_placeholders=placeholders,
+        ) from cause
+
+    factory = functools.partial(
+        stub_coordinator_factory,
+        data=[],
+        methods={"async_config_entry_first_refresh": _first_refresh},
+    )
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, factory, asyncio.get_running_loop()
+    )
+
+    assert await harness.integration.async_setup(harness.hass, {}) is True
+    with pytest.raises(ConfigEntryNotReady) as excinfo:
+        await harness.integration.async_setup_entry(harness.hass, harness.entry)
+
+    err = excinfo.value
+    assert err.translation_key == "device_list_server_error"
+    assert err.translation_placeholders == {"status": "500"}
+    assert str(err) == "Initial refresh failed: HTTP Server Error 500: down"
 
 
 @pytest.mark.asyncio
