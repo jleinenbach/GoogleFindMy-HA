@@ -1018,10 +1018,6 @@ def _stub_homeassistant() -> None:
     class CoreState:  # minimal CoreState stub
         running = "running"
 
-    class ServiceCall:  # pragma: no cover - stub for service handlers
-        def __init__(self, data=None):
-            self.data = data or {}
-
     class Event(SimpleNamespace):
         """Minimal Event stub carrying type and data payload."""
 
@@ -1048,7 +1044,6 @@ def _stub_homeassistant() -> None:
 
     core_module.CoreState = CoreState
     core_module.HomeAssistant = HomeAssistant
-    core_module.ServiceCall = ServiceCall
     core_module.Event = Event
     core_module.State = State
     core_module.CALLBACK_TYPE = Callable[[], None]
