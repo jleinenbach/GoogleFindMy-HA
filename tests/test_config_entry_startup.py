@@ -179,6 +179,53 @@ async def test_setup_retry_keeps_translation_and_reason_text(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("boom"), ConfigEntryNotReady("not ready yet")],
+    ids=["plain_exception", "not_ready_without_cause"],
+)
+async def test_setup_retry_without_translation_keeps_the_old_text(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+    failure: Exception,
+) -> None:
+    """A failure without a translatable cause keeps the previous behaviour.
+
+    The text is ``Initial refresh failed: <str(err)>`` as before, and no
+    translation field is invented.
+    """
+
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
+
+    async def _first_refresh(self) -> None:  # type: ignore[no-untyped-def]
+        del self
+        raise failure
+
+    factory = functools.partial(
+        stub_coordinator_factory,
+        data=[],
+        methods={"async_config_entry_first_refresh": _first_refresh},
+    )
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, factory, asyncio.get_running_loop()
+    )
+
+    assert await harness.integration.async_setup(harness.hass, {}) is True
+    with pytest.raises(ConfigEntryNotReady) as excinfo:
+        await harness.integration.async_setup_entry(harness.hass, harness.entry)
+
+    err = excinfo.value
+    assert str(err) == f"Initial refresh failed: {failure}"
+    assert err.__cause__ is failure
+    assert err.translation_domain is None
+    assert err.translation_key is None
+    assert err.translation_placeholders is None
+
+
+@pytest.mark.asyncio
 async def test_coordinator_first_refresh_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
