@@ -1997,7 +1997,10 @@ class RegistryOperations(_MixinBase):
                     device=device,
                 )
                 healed_device = _refresh_device_entry(device_id, updated or device)
-                if healed_device is None:
+                # Unreachable today: ``device`` is not None here and
+                # ``_refresh_device_entry`` returns its fallback instead of None.
+                # Kept as a guard should the helper ever start returning None.
+                if healed_device is None:  # pragma: no cover - fallback never None
                     # The registry sync runs on every poll cycle, so the ERROR names
                     # the device by its registry id and the display name goes to a
                     # DEBUG companion (AGENTS.md section 5 (b)).
