@@ -864,6 +864,48 @@
     },
     "missing_namespace": {
       "message": "Namespace missing. Pass the entry-specific namespace or ConfigEntry ID to keep cached metadata isolated."
+    },
+    "device_list_rate_limited": {
+      "message": "Google is temporarily limiting requests for the device list. The integration will try again automatically."
+    },
+    "device_list_server_error": {
+      "message": "The device list is temporarily unavailable (server error {status}). The integration will try again automatically."
+    },
+    "device_list_rejected": {
+      "message": "The server rejected the device list request (HTTP {status})."
+    },
+    "device_list_decode_failed": {
+      "message": "Google's response to the device list request could not be decoded."
+    },
+    "device_list_logic_error": {
+      "message": "Google reported an error while listing the devices."
+    },
+    "multi_entry_guard": {
+      "message": "Several Google Find My Device entries are active, but this request was not bound to one of them. The integration will try again automatically."
+    },
+    "device_list_failed": {
+      "message": "The device list could not be retrieved."
+    },
+    "device_list_network_error": {
+      "message": "Network error while fetching the device list."
+    },
+    "device_list_unexpected_error": {
+      "message": "Unexpected error while fetching the device list."
+    },
+    "cold_start_empty_device_list": {
+      "message": "The device list was empty right after startup. This is treated as temporary, and the integration will try again automatically."
+    },
+    "update_unexpected_error": {
+      "message": "Unexpected error during the update ({error_type})."
+    },
+    "locate_timeout": {
+      "message": "The location request for device {device_id} timed out."
+    },
+    "locate_not_accepted": {
+      "message": "No device accepted the location request this cycle ({not_accepted} not accepted, {rejected} rejected)."
+    },
+    "locate_all_rejected": {
+      "message": "The server rejected the location request for every device ({rejected}) this cycle."
     }
   },
   "system_health": {

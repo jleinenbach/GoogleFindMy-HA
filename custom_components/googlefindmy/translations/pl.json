@@ -864,6 +864,48 @@
     },
     "missing_namespace": {
       "message": "Brak przestrzeni nazw. Przekaż przestrzeń nazw specyficzną dla wpisu lub identyfikator ConfigEntry, aby izolować buforowane metadane."
+    },
+    "device_list_rate_limited": {
+      "message": "Google tymczasowo ogranicza zapytania o listę urządzeń. Integracja automatycznie spróbuje ponownie."
+    },
+    "device_list_server_error": {
+      "message": "Lista urządzeń jest tymczasowo niedostępna (błąd serwera {status}). Integracja automatycznie spróbuje ponownie."
+    },
+    "device_list_rejected": {
+      "message": "Serwer odrzucił zapytanie o listę urządzeń (HTTP {status})."
+    },
+    "device_list_decode_failed": {
+      "message": "Nie udało się zdekodować odpowiedzi Google na zapytanie o listę urządzeń."
+    },
+    "device_list_logic_error": {
+      "message": "Google zgłosił błąd podczas pobierania listy urządzeń."
+    },
+    "multi_entry_guard": {
+      "message": "Aktywnych jest kilka wpisów Google Find My Device, ale to zapytanie nie było przypisane do żadnego z nich. Integracja automatycznie spróbuje ponownie."
+    },
+    "device_list_failed": {
+      "message": "Nie udało się pobrać listy urządzeń."
+    },
+    "device_list_network_error": {
+      "message": "Błąd sieci podczas pobierania listy urządzeń."
+    },
+    "device_list_unexpected_error": {
+      "message": "Nieoczekiwany błąd podczas pobierania listy urządzeń."
+    },
+    "cold_start_empty_device_list": {
+      "message": "Lista urządzeń była pusta tuż po uruchomieniu. Jest to traktowane jako stan przejściowy i integracja automatycznie spróbuje ponownie."
+    },
+    "update_unexpected_error": {
+      "message": "Nieoczekiwany błąd podczas aktualizacji ({error_type})."
+    },
+    "locate_timeout": {
+      "message": "Upłynął limit czasu żądania lokalizacji dla urządzenia {device_id}."
+    },
+    "locate_not_accepted": {
+      "message": "W tym cyklu żadne urządzenie nie przyjęło żądania lokalizacji (nieprzyjęte: {not_accepted}, odrzucone: {rejected})."
+    },
+    "locate_all_rejected": {
+      "message": "W tym cyklu serwer odrzucił żądanie lokalizacji dla wszystkich urządzeń ({rejected})."
     }
   },
   "system_health": {

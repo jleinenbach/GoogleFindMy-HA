@@ -864,6 +864,48 @@
     },
     "missing_namespace": {
       "message": "Falta el espacio de nombres. Pasa el espacio de nombres específico de la entrada o el ID de ConfigEntry para mantener aislados los metadatos en caché."
+    },
+    "device_list_rate_limited": {
+      "message": "Google está limitando temporalmente las solicitudes de la lista de dispositivos. La integración lo volverá a intentar automáticamente."
+    },
+    "device_list_server_error": {
+      "message": "La lista de dispositivos no está disponible temporalmente (error del servidor {status}). La integración lo volverá a intentar automáticamente."
+    },
+    "device_list_rejected": {
+      "message": "El servidor rechazó la solicitud de la lista de dispositivos (HTTP {status})."
+    },
+    "device_list_decode_failed": {
+      "message": "No se pudo descodificar la respuesta de Google a la solicitud de la lista de dispositivos."
+    },
+    "device_list_logic_error": {
+      "message": "Google informó de un error al obtener la lista de dispositivos."
+    },
+    "multi_entry_guard": {
+      "message": "Hay varias entradas de Google Find My Device activas, pero esta solicitud no estaba asociada a ninguna de ellas. La integración lo volverá a intentar automáticamente."
+    },
+    "device_list_failed": {
+      "message": "No se pudo obtener la lista de dispositivos."
+    },
+    "device_list_network_error": {
+      "message": "Error de red al obtener la lista de dispositivos."
+    },
+    "device_list_unexpected_error": {
+      "message": "Error inesperado al obtener la lista de dispositivos."
+    },
+    "cold_start_empty_device_list": {
+      "message": "La lista de dispositivos estaba vacía justo después del inicio. Se considera temporal, y la integración lo volverá a intentar automáticamente."
+    },
+    "update_unexpected_error": {
+      "message": "Error inesperado durante la actualización ({error_type})."
+    },
+    "locate_timeout": {
+      "message": "La solicitud de localización del dispositivo {device_id} superó el tiempo de espera."
+    },
+    "locate_not_accepted": {
+      "message": "Ningún dispositivo aceptó la solicitud de localización en este ciclo ({not_accepted} no aceptadas, {rejected} rechazadas)."
+    },
+    "locate_all_rejected": {
+      "message": "El servidor rechazó la solicitud de localización de todos los dispositivos ({rejected}) en este ciclo."
     }
   },
   "system_health": {

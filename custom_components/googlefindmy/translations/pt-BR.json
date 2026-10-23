@@ -864,6 +864,48 @@
     },
     "missing_namespace": {
       "message": "Espaço para nome ausente. "
+    },
+    "device_list_rate_limited": {
+      "message": "O Google está limitando temporariamente as solicitações da lista de dispositivos. A integração tentará novamente de forma automática."
+    },
+    "device_list_server_error": {
+      "message": "A lista de dispositivos está temporariamente indisponível (erro do servidor {status}). A integração tentará novamente de forma automática."
+    },
+    "device_list_rejected": {
+      "message": "O servidor recusou a solicitação da lista de dispositivos (HTTP {status})."
+    },
+    "device_list_decode_failed": {
+      "message": "Não foi possível decodificar a resposta do Google à solicitação da lista de dispositivos."
+    },
+    "device_list_logic_error": {
+      "message": "O Google relatou um erro ao obter a lista de dispositivos."
+    },
+    "multi_entry_guard": {
+      "message": "Há várias entradas do Encontre Meu Dispositivo do Google ativas, mas esta solicitação não estava associada a nenhuma delas. A integração tentará novamente de forma automática."
+    },
+    "device_list_failed": {
+      "message": "Não foi possível obter a lista de dispositivos."
+    },
+    "device_list_network_error": {
+      "message": "Erro de rede ao obter a lista de dispositivos."
+    },
+    "device_list_unexpected_error": {
+      "message": "Erro inesperado ao obter a lista de dispositivos."
+    },
+    "cold_start_empty_device_list": {
+      "message": "A lista de dispositivos estava vazia logo após a inicialização. Isso é considerado temporário, e a integração tentará novamente de forma automática."
+    },
+    "update_unexpected_error": {
+      "message": "Erro inesperado durante a atualização ({error_type})."
+    },
+    "locate_timeout": {
+      "message": "A solicitação de localização do dispositivo {device_id} excedeu o tempo limite."
+    },
+    "locate_not_accepted": {
+      "message": "Nenhum dispositivo aceitou a solicitação de localização neste ciclo ({not_accepted} não aceitas, {rejected} recusadas)."
+    },
+    "locate_all_rejected": {
+      "message": "O servidor recusou a solicitação de localização de todos os dispositivos ({rejected}) neste ciclo."
     }
   },
   "system_health": {

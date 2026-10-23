@@ -864,6 +864,48 @@
     },
     "missing_namespace": {
       "message": "Namespace ontbreekt. Geef de item-specifieke namespace of ConfigEntry-ID door om gecachete metadata geïsoleerd te houden."
+    },
+    "device_list_rate_limited": {
+      "message": "Google beperkt tijdelijk de aanvragen voor de apparatenlijst. De integratie probeert het automatisch opnieuw."
+    },
+    "device_list_server_error": {
+      "message": "De apparatenlijst is tijdelijk niet beschikbaar (serverfout {status}). De integratie probeert het automatisch opnieuw."
+    },
+    "device_list_rejected": {
+      "message": "De server heeft de aanvraag voor de apparatenlijst geweigerd (HTTP {status})."
+    },
+    "device_list_decode_failed": {
+      "message": "Het antwoord van Google op de aanvraag voor de apparatenlijst kon niet worden gedecodeerd."
+    },
+    "device_list_logic_error": {
+      "message": "Google heeft een fout gemeld bij het ophalen van de apparatenlijst."
+    },
+    "multi_entry_guard": {
+      "message": "Er zijn meerdere Google Find My Device-items actief, maar deze aanvraag was aan geen van deze items gekoppeld. De integratie probeert het automatisch opnieuw."
+    },
+    "device_list_failed": {
+      "message": "De apparatenlijst kon niet worden opgehaald."
+    },
+    "device_list_network_error": {
+      "message": "Netwerkfout bij het ophalen van de apparatenlijst."
+    },
+    "device_list_unexpected_error": {
+      "message": "Onverwachte fout bij het ophalen van de apparatenlijst."
+    },
+    "cold_start_empty_device_list": {
+      "message": "De apparatenlijst was direct na het opstarten leeg. Dit wordt als tijdelijk beschouwd en de integratie probeert het automatisch opnieuw."
+    },
+    "update_unexpected_error": {
+      "message": "Onverwachte fout tijdens de update ({error_type})."
+    },
+    "locate_timeout": {
+      "message": "Er is een time-out opgetreden bij het locatieverzoek voor apparaat {device_id}."
+    },
+    "locate_not_accepted": {
+      "message": "Geen enkel apparaat heeft het locatieverzoek in deze ronde geaccepteerd ({not_accepted} niet geaccepteerd, {rejected} geweigerd)."
+    },
+    "locate_all_rejected": {
+      "message": "De server heeft het locatieverzoek in deze ronde voor alle apparaten ({rejected}) geweigerd."
     }
   },
   "system_health": {
