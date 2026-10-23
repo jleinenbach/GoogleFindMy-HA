@@ -3497,6 +3497,12 @@ class FcmReceiverHA:
         debounced store write; a reload in between reads the updated entry, so
         no await is needed here.
         """
+        # The caller-side gate lives in ``_on_credentials_updated_for_entry``;
+        # re-check it here because that check ran before the persistence task
+        # was dispatched, and an entry torn down in between must not be written
+        # again (TOCTOU).
+        if entry_id in self._unregistered:
+            return
         hass = self._hass
         entries = getattr(hass, "config_entries", None) if hass is not None else None
         lookup = getattr(entries, "async_get_entry", None)

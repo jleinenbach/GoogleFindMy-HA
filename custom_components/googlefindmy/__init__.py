@@ -5637,6 +5637,9 @@ def _credential_fingerprint(data: Mapping[str, Any] | None) -> str:
     # refreshed value when that write lands, so it must not schedule a reload:
     # a reload would tear down the receiver that just obtained the registration
     # and repeat the handshake for nothing. Every other bundle member counts.
+    # Assumption: FCM credentials are machine-generated, never typed by the
+    # user, so excluding this member cannot hide a user-initiated change; do not
+    # "fix" it back, that would restore the reload loop above.
     bundle = values.get(DATA_SECRET_BUNDLE)
     if isinstance(bundle, Mapping):
         values[DATA_SECRET_BUNDLE] = {
