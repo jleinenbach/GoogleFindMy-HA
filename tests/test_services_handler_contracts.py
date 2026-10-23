@@ -893,8 +893,30 @@ _SYNC_RESOLVERS = ("_resolve_runtime_for_device_id", "_iter_runtimes")
 _SUSPENDING = (ast.Await, ast.AsyncFor, ast.AsyncWith)
 
 
+def _start(node: ast.AST) -> tuple[int, int]:
+    return (node.lineno, node.col_offset)  # type: ignore[attr-defined]
+
+
+def _end(node: ast.AST) -> tuple[int, int]:
+    return (node.end_lineno or 0, node.end_col_offset or 0)  # type: ignore[attr-defined]
+
+
+def _awaited_call(node: ast.AST) -> str:
+    """Return the source of the call an ``await`` node awaits, else ``""``."""
+
+    if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+        return ast.unparse(node.value.func)
+    return ""
+
+
 def _suspension_violations(source: str) -> list[str]:
-    """Return places where control may yield between check and dispatch."""
+    """Return places where control may yield between check and dispatch.
+
+    Positions are compared as (line, column) start and end pairs, so an await
+    nested inside the resolver's or the coordinator's arguments counts, and
+    the span of each device handler runs from the permission check to the end
+    of the first awaited coordinator call.
+    """
 
     functions = {
         node.name: node
@@ -907,37 +929,110 @@ def _suspension_violations(source: str) -> list[str]:
             violations.append(name)
 
     check = functions["_async_authorize_device_call"]
-    target_lines = [
-        n.lineno
+    targets = [
+        n
         for n in ast.walk(check)
         if isinstance(n, ast.Call)
         and getattr(n.func, "id", "") == "_control_entity_ids_for_target"
     ]
-    if len(target_lines) != 1:
+    if len(targets) != 1:
         violations.append("_async_authorize_device_call: target set not found")
     else:
         for n in ast.walk(check):
-            if isinstance(n, _SUSPENDING) and n.lineno > target_lines[0]:
+            if isinstance(n, _SUSPENDING) and _end(n) > _start(targets[0]):
                 violations.append(f"_async_authorize_device_call:{n.lineno}")
 
-    for name in _DEVICE_HANDLERS:
-        awaits = sorted(
-            (n.lineno, ast.unparse(n))
-            for n in ast.walk(functions[name])
-            if isinstance(n, _SUSPENDING)
+    for name in _device_handler_names(source):
+        nodes = sorted(
+            (n for n in ast.walk(functions[name]) if isinstance(n, _SUSPENDING)),
+            key=_start,
         )
         start = next(
-            (ln for ln, text in awaits if "_async_authorize_device_call" in text),
+            (n for n in nodes if _awaited_call(n) == "_async_authorize_device_call"),
             None,
         )
-        end = next(
-            (ln for ln, text in awaits if "_resolve_runtime_for_device_id" in text),
+        resolver = next(
+            (n for n in nodes if _awaited_call(n) == "_resolve_runtime_for_device_id"),
             None,
         )
-        if start is None or end is None:
-            violations.append(f"{name}: check or resolver await not found")
+        dispatch = None
+        if resolver is not None:
+            dispatch = next(
+                (
+                    n
+                    for n in nodes
+                    if _start(n) > _start(resolver)
+                    and ".coordinator." in _awaited_call(n)
+                ),
+                None,
+            )
+        if start is None or resolver is None or dispatch is None:
+            violations.append(f"{name}: check, resolver or coordinator await not found")
             continue
-        violations.extend(f"{name}:{ln}" for ln, _ in awaits if start < ln < end)
+        violations.extend(
+            f"{name}:{n.lineno}"
+            for n in nodes
+            if n is not start
+            and n is not resolver
+            and n is not dispatch
+            and _start(n) > _start(start)
+            and _end(n) <= _end(dispatch)
+        )
+    return violations
+
+
+def _device_handler_names(source: str) -> list[str]:
+    """Return the registered handlers that read ``device_id``, in source order."""
+
+    register = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "async_register_services"
+    )
+    handlers = {
+        node.name: node
+        for node in ast.walk(register)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    names: list[str] = []
+    for node in ast.walk(register):
+        if not isinstance(node, ast.Call):
+            continue
+        func = ast.unparse(node.func)
+        if func not in ("hass.services.async_register", "async_register_admin_service"):
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Name) and arg.id in handlers:
+                if "'device_id'" in ast.unparse(handlers[arg.id]):
+                    names.append(arg.id)
+    return names
+
+
+def _first_statement_violations(source: str) -> list[str]:
+    """Return device handlers whose first statement is not the permission check."""
+
+    functions = {
+        node.name: node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    violations: list[str] = []
+    for name in _device_handler_names(source):
+        body = functions[name].body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        first = body[0] if body else None
+        if not (
+            isinstance(first, ast.Expr)
+            and _awaited_call(first.value) == "_async_authorize_device_call"
+        ):
+            violations.append(name)
     return violations
 
 
@@ -974,6 +1069,72 @@ class TestNoSuspensionBetweenCheckAndDispatch:
         violations = _suspension_violations(mutated)
         assert len(violations) == 1
         assert violations[0].startswith("async_locate_device_service:")
+
+    def test_probe_detects_an_await_between_resolver_and_coordinator(
+        self,
+    ) -> None:
+        anchor = (
+            "            runtime, canonical_id = await "
+            "_resolve_runtime_for_device_id(raw_device_id)\n"
+            "            outcome = await runtime.coordinator.async_play_sound("
+        )
+        assert self._SOURCE.count(anchor) == 1
+        mutated = self._SOURCE.replace(
+            anchor,
+            anchor.replace(
+                "            outcome = await",
+                "            await asyncio.sleep(0)\n            outcome = await",
+            ),
+            1,
+        )
+        violations = _suspension_violations(mutated)
+        assert len(violations) == 1
+        assert violations[0].startswith("async_play_sound_service:")
+
+    def test_probe_detects_an_await_in_the_resolver_argument(self) -> None:
+        anchor = (
+            "            runtime, canonical_id = await "
+            "_resolve_runtime_for_device_id(raw_device_id)\n"
+            "            outcome = await runtime.coordinator.async_play_sound("
+        )
+        assert self._SOURCE.count(anchor) == 1
+        mutated = self._SOURCE.replace(
+            anchor,
+            anchor.replace(
+                "_resolve_runtime_for_device_id(raw_device_id)",
+                "_resolve_runtime_for_device_id(\n"
+                "                await asyncio.sleep(0, raw_device_id)\n"
+                "            )",
+            ),
+            1,
+        )
+        violations = _suspension_violations(mutated)
+        assert len(violations) == 1
+        assert violations[0].startswith("async_play_sound_service:")
+
+    def test_handler_set_comes_from_the_registrations(self) -> None:
+        assert sorted(_device_handler_names(self._SOURCE)) == sorted(_DEVICE_HANDLERS)
+        assert _first_statement_violations(self._SOURCE) == []
+
+    def test_probe_sees_an_unlisted_device_handler(self) -> None:
+        anchor = (
+            "    hass.services.async_register(DOMAIN, SERVICE_PLAY_SOUND, "
+            "async_play_sound_service)\n"
+        )
+        assert self._SOURCE.count(anchor) == 1
+        extra = (
+            "    async def async_extra_service(call: ServiceCall) -> None:\n"
+            '        raw_device_id = call.data.get("device_id")\n'
+            "        del raw_device_id\n"
+            '    hass.services.async_register(DOMAIN, "extra", async_extra_service)\n'
+        )
+        mutated = self._SOURCE.replace(anchor, anchor + extra, 1)
+        assert "async_extra_service" in _device_handler_names(mutated)
+        assert _first_statement_violations(mutated) == ["async_extra_service"]
+        assert any(
+            v.startswith("async_extra_service:")
+            for v in _suspension_violations(mutated)
+        )
 
     def test_probe_detects_an_await_after_the_target_set(self) -> None:
         anchor = "    entity_ids = _control_entity_ids_for_target(hass, raw_device_id, ctx)\n"
