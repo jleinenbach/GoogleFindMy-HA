@@ -16,13 +16,25 @@ their own reload, which would hide a listener that stays quiet.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from custom_components.googlefindmy.Auth import fcm_receiver_ha
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
-from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    DOMAIN,
+)
+from custom_components.googlefindmy.entry_self_write import (
+    SELF_WRITE_RECEIPTS_KEY,
+    credential_member_digest,
+)
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.test_hass_data_layout import _prepare_async_setup_entry_harness
 
 
@@ -117,3 +129,400 @@ async def test_receiver_self_write_schedules_no_reload(
     await notify(hass, entry)
 
     assert hass.config_entries.scheduled_reloads == []
+
+
+def _receiver_for(hass: Any, entry: Any) -> FcmReceiverHA:
+    """Return a receiver attached to ``hass`` that knows ``entry``'s registration."""
+
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+    receiver._note_entry_registration(entry)
+    return receiver
+
+
+def _receipts(hass: Any) -> dict[str, str]:
+    """Return the receipt map the receiver writes into ``hass.data``."""
+
+    receipts: dict[str, str] = hass.data.get(DOMAIN, {}).get(
+        SELF_WRITE_RECEIPTS_KEY, {}
+    )
+    return receipts
+
+
+@pytest.mark.asyncio
+async def test_two_receiver_writes_before_the_listener_runs_schedule_no_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Only the latest receipt counts, and it names the value actually stored."""
+
+    _integration, entry, hass, notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+
+    receiver._persist_credentials_to_entry(entry.entry_id, _registration("first"))
+    receiver._persist_credentials_to_entry(entry.entry_id, _registration("second"))
+    await notify(hass, entry)
+    await notify(hass, entry)
+
+    assert len(hass.config_entries.entry_update_calls) == 2
+    assert hass.config_entries.scheduled_reloads == []
+    assert _receipts(hass) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_user_import_after_the_receiver_write_still_reloads_once(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The receipt names the receiver's value, not the one the user stored."""
+
+    _integration, entry, hass, notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+
+    receiver._persist_credentials_to_entry(entry.entry_id, _registration("renewed"))
+    imported_bundle = {
+        **entry.data[DATA_SECRET_BUNDLE],
+        "fcm_credentials": _registration("imported-registration"),
+    }
+    entry.data = {**entry.data, DATA_SECRET_BUNDLE: imported_bundle}
+    await notify(hass, entry)
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_a_receiver_write_beside_another_change_reloads_once(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The receipt excuses the registration only, never a change beside it."""
+
+    _integration, entry, hass, notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+
+    receiver._persist_credentials_to_entry(entry.entry_id, _registration("renewed"))
+    changed_bundle = {**entry.data[DATA_SECRET_BUNDLE], "shared_key": "new-shared"}
+    entry.data = {**entry.data, DATA_SECRET_BUNDLE: changed_bundle}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id]
+    assert _receipts(hass) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_new_setup_drops_a_receipt_of_the_previous_one(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A reload between write and listener leaves no receipt behind.
+
+    The old listener's invocation is a bygone one and returns early, so it
+    never consumes the receipt; the next setup, whose fingerprint already
+    includes the written value, discards it. Removing the entry does too.
+    """
+
+    integration, entry, hass, _notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+    receiver._persist_credentials_to_entry(entry.entry_id, _registration("renewed"))
+    assert entry.entry_id in _receipts(hass)
+
+    assert await integration.async_unload_entry(hass, entry) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+    assert entry.entry_id not in _receipts(hass)
+
+    receiver._persist_credentials_to_entry(entry.entry_id, _registration("again"))
+    assert entry.entry_id in _receipts(hass)
+    await integration.async_remove_entry(hass, entry)
+    assert entry.entry_id not in _receipts(hass)
+
+
+@pytest.mark.asyncio
+async def test_the_receiver_leaves_a_registration_it_did_not_write_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Compare-and-swap: a user import still on its way to a reload wins."""
+
+    _integration, entry, hass, _notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+    imported_bundle = {
+        **entry.data[DATA_SECRET_BUNDLE],
+        "fcm_credentials": _registration("imported-registration"),
+    }
+    entry.data = {**entry.data, DATA_SECRET_BUNDLE: imported_bundle}
+    writes_before = len(hass.config_entries.entry_update_calls)
+
+    with caplog.at_level(logging.INFO):
+        receiver._persist_credentials_to_entry(entry.entry_id, _registration("renewed"))
+
+    assert len(hass.config_entries.entry_update_calls) == writes_before
+    persisted = entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"]
+    assert persisted == _registration("imported-registration")
+    assert entry.entry_id not in _receipts(hass)
+    assert any("did not write" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_registering_the_coordinator_records_the_entry_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The compare-and-swap baseline comes from ``register_coordinator``."""
+
+    _integration, entry, hass, _notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+    # The supervisor and cache mirroring are not under test; close each
+    # coroutine instead of running it.
+    monkeypatch.setattr(
+        receiver, "_dispatch_to_hass_loop", lambda coro, **_kwargs: coro.close()
+    )
+
+    receiver.register_coordinator(SimpleNamespace(config_entry=entry, cache=None))
+    assert receiver._entry_registration_digest[entry.entry_id] == (
+        credential_member_digest(_registration("setup-registration"))
+    )
+
+    receiver._persist_credentials_to_entry(entry.entry_id, _registration("renewed"))
+    assert receiver._entry_registration_digest[entry.entry_id] == (
+        credential_member_digest(_registration("renewed"))
+    )
+
+    receiver.unregister_coordinator(SimpleNamespace(config_entry=entry, cache=None))
+    assert entry.entry_id not in receiver._entry_registration_digest
+
+
+def test_an_entry_without_a_bundle_records_no_registration() -> None:
+    """No bundle, or data that is not a mapping, leaves no baseline."""
+
+    receiver = FcmReceiverHA()
+    entry = make_config_entry(entry_id="entry", data={})
+    receiver._entry_registration_digest["entry"] = "stale"
+    receiver._note_entry_registration(entry)
+    assert "entry" not in receiver._entry_registration_digest
+    entry.data = [1]
+    receiver._entry_registration_digest["entry"] = "stale"
+    receiver._note_entry_registration(entry)
+    assert "entry" not in receiver._entry_registration_digest
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_generation_does_not_write_the_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The persist path checks the generation the update was resolved for."""
+
+    _integration, entry, hass, _notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+    receiver._entry_generation[entry.entry_id] = 2
+    writes_before = len(hass.config_entries.entry_update_calls)
+
+    receiver._persist_credentials_to_entry(
+        entry.entry_id, _registration("renewed"), generation=1
+    )
+    assert len(hass.config_entries.entry_update_calls) == writes_before
+
+    receiver._persist_credentials_to_entry(
+        entry.entry_id, _registration("renewed"), generation=2
+    )
+    assert len(hass.config_entries.entry_update_calls) == writes_before + 1
+
+
+@pytest.mark.asyncio
+async def test_the_update_callback_passes_its_generation_to_the_entry_write(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A generation that is superseded between dispatch and write is honoured."""
+
+    _integration, entry, hass, _notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+    seen: list[int | None] = []
+
+    def _record(entry_id: str, creds: Any, generation: int | None = None) -> None:
+        seen.append(generation)
+
+    monkeypatch.setattr(receiver, "_persist_credentials_to_entry", _record)
+    receiver.creds[entry.entry_id] = _registration("renewed")
+
+    await receiver._async_save_credentials_for_entry(entry.entry_id, 7)
+
+    assert seen == [7]
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_registration_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Writing the value the entry already holds leaves no receipt behind."""
+
+    _integration, entry, hass, _notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+    writes_before = len(hass.config_entries.entry_update_calls)
+
+    receiver._persist_credentials_to_entry(
+        entry.entry_id, _registration("setup-registration")
+    )
+
+    assert len(hass.config_entries.entry_update_calls) == writes_before
+    assert entry.entry_id not in _receipts(hass)
+
+
+class _Manager:
+    """Entry manager whose ``async_update_entry`` result is chosen per test."""
+
+    def __init__(self, entries: list[Any], result: Any) -> None:
+        self._entries = {entry.entry_id: entry for entry in entries}
+        self._result = result
+        self.calls = 0
+
+    def async_get_entry(self, entry_id: str) -> Any | None:
+        return self._entries.get(entry_id)
+
+    def async_update_entry(self, entry: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        if isinstance(self._result, Exception):
+            raise self._result
+        if self._result is not False:
+            entry.data = dict(kwargs["data"])
+        return self._result
+
+
+def _bundle_entry(entry_id: str) -> Any:
+    return make_config_entry(
+        entry_id=entry_id,
+        data={DATA_SECRET_BUNDLE: {"fcm_credentials": _registration("old")}},
+    )
+
+
+def test_an_update_that_stores_nothing_drops_the_receipt() -> None:
+    """``async_update_entry`` returning ``False`` runs no listener."""
+
+    entry = _bundle_entry("entry-a")
+    hass = SimpleNamespace(data={}, config_entries=_Manager([entry], False))
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    receiver._persist_credentials_to_entry("entry-a", _registration("renewed"))
+
+    assert hass.config_entries.calls == 1
+    assert _receipts(hass) == {}
+
+
+def test_a_failed_update_drops_the_receipt_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A store error leaves a warning without the value and no receipt."""
+
+    entry = _bundle_entry("entry-a")
+    hass = SimpleNamespace(
+        data={}, config_entries=_Manager([entry], RuntimeError("token-text"))
+    )
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    with caplog.at_level(logging.WARNING):
+        receiver._persist_credentials_to_entry("entry-a", _registration("renewed"))
+
+    assert _receipts(hass) == {}
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "entry-a" in warnings[0].getMessage()
+    assert "token-text" not in warnings[0].getMessage()
+
+
+def test_receipts_of_two_entries_on_a_shared_receiver_stay_apart() -> None:
+    """Each entry's write leaves its own receipt for its own value."""
+
+    first, second = _bundle_entry("entry-a"), _bundle_entry("entry-b")
+    hass = SimpleNamespace(data={}, config_entries=_Manager([first, second], True))
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    receiver._persist_credentials_to_entry("entry-a", _registration("a"))
+    receiver._persist_credentials_to_entry("entry-b", _registration("b"))
+
+    assert _receipts(hass) == {
+        "entry-a": credential_member_digest(_registration("a")),
+        "entry-b": credential_member_digest(_registration("b")),
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_after_the_callback_suppresses_the_queued_entry_write(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The callback hands its driving generation to the write it queues.
+
+    A supervisor publishes its generation around the handshake. When a fast
+    reload bumps the generation after the callback queued the write but before
+    the write runs, the write belongs to a superseded supervisor and is dropped.
+    """
+
+    _integration, entry, hass, _notify = await _set_up_entry_with_bundle(
+        monkeypatch, stub_coordinator_factory
+    )
+    receiver = _receiver_for(hass, entry)
+    writes_before = len(hass.config_entries.entry_update_calls)
+
+    token = fcm_receiver_ha._FCM_DRIVING_GENERATION.set((entry.entry_id, 0))
+    try:
+        receiver._on_credentials_updated_for_entry(
+            entry.entry_id, _registration("renewed")
+        )
+    finally:
+        fcm_receiver_ha._FCM_DRIVING_GENERATION.reset(token)
+    # The teardown of a fast reload happens before the queued write runs.
+    receiver._entry_generation[entry.entry_id] = 1
+    await asyncio.gather(*list(receiver._active_tasks))
+
+    assert len(hass.config_entries.entry_update_calls) == writes_before
+
+
+def test_refreshing_only_the_top_level_copy_leaves_no_receipt() -> None:
+    """The bundle already holds the value; only the stale top-level copy moves.
+
+    The credential fingerprint does not include the top-level copy, so the
+    listener sees no change and would never consume a receipt.
+    """
+
+    renewed = _registration("renewed")
+    entry = make_config_entry(
+        entry_id="entry-a",
+        data={
+            "fcm_credentials": _registration("old"),
+            DATA_SECRET_BUNDLE: {"fcm_credentials": renewed},
+        },
+    )
+    hass = SimpleNamespace(data={}, config_entries=_Manager([entry], True))
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    receiver._persist_credentials_to_entry("entry-a", renewed)
+
+    assert hass.config_entries.calls == 1
+    assert entry.data["fcm_credentials"] == renewed
+    assert _receipts(hass) == {}

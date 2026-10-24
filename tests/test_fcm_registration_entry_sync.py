@@ -153,14 +153,15 @@ async def test_a_refreshed_registration_survives_the_next_setup(
     assert stored["fcm"]["registration"]["token"] == "fresh-registration"
 
 
-def test_a_registration_refresh_is_not_a_credential_change(
+def test_the_registration_counts_in_the_fingerprint_but_not_in_the_rest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The written-back registration must not schedule an entry reload.
+    """A registration change reaches the listener; only the rest tells it apart.
 
-    The live cache already carries the refreshed value, so the update listener
-    has to stay silent; a reload would tear down the receiver that just obtained
-    the registration. A change to a seeded bundle member still counts.
+    The full fingerprint includes the bundle's registration, so a user import
+    that changes nothing else still reloads the entry. The receiver's own
+    write is told apart by a receipt (``entry_self_write``) and the fingerprint
+    without the registration, which a change to a seeded member still moves.
     """
 
     integration = _integration_module(monkeypatch)
@@ -172,15 +173,22 @@ def test_a_registration_refresh_is_not_a_credential_change(
     refreshed = {**bundle, "fcm_credentials": _registration("fresh-registration")}
     changed_shared_key = {**bundle, "shared_key": "another-shared-key"}
 
-    base_fingerprint = integration._credential_fingerprint({DATA_SECRET_BUNDLE: bundle})
+    full = integration._credential_fingerprint
+    rest = integration._credential_fingerprint_without_registration
 
-    assert (
-        integration._credential_fingerprint({DATA_SECRET_BUNDLE: refreshed})
-        == base_fingerprint
+    assert full({DATA_SECRET_BUNDLE: refreshed}) != full({DATA_SECRET_BUNDLE: bundle})
+    assert rest({DATA_SECRET_BUNDLE: refreshed}) == rest({DATA_SECRET_BUNDLE: bundle})
+    assert rest({DATA_SECRET_BUNDLE: changed_shared_key}) != rest(
+        {DATA_SECRET_BUNDLE: bundle}
     )
-    assert (
-        integration._credential_fingerprint({DATA_SECRET_BUNDLE: changed_shared_key})
-        != base_fingerprint
+    # Data without a bundle, or with a bundle that is not a mapping, still
+    # fingerprints without raising.
+    assert rest({DATA_SECRET_BUNDLE: "not-a-mapping"}) != rest({})
+    assert rest(None) == rest({})
+    assert integration._bundle_registration(None) is None
+    assert integration._bundle_registration({DATA_SECRET_BUNDLE: "x"}) is None
+    assert integration._bundle_registration({DATA_SECRET_BUNDLE: refreshed}) == (
+        _registration("fresh-registration")
     )
 
 

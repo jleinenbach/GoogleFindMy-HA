@@ -1176,6 +1176,44 @@ def test_the_credential_fingerprint_keeps_no_plaintext() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_a_receiver_self_write_leaves_no_plaintext_in_hass_data(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The self-write receipt in ``hass.data`` is a digest, never the value."""
+
+    from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
+    from custom_components.googlefindmy.entry_self_write import (
+        SELF_WRITE_RECEIPTS_KEY,
+    )
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    secret = "VERY_SECRET_FCM_TOKEN"
+    harness.entry.data = {
+        CONF_GOOGLE_EMAIL: "user@example.com",
+        DATA_SECRET_BUNDLE: {"fcm_credentials": {"fcm": {"token": "old"}}},
+    }
+    harness.cache.values = {integration.username_string: "user@example.com"}
+    assert await integration.async_setup(harness.hass, {}) is True
+    assert await integration.async_setup_entry(harness.hass, harness.entry)
+
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(harness.hass)
+    receiver._persist_credentials_to_entry(
+        harness.entry.entry_id, {"fcm": {"token": secret}}
+    )
+
+    receipts = harness.hass.data[integration.DOMAIN][SELF_WRITE_RECEIPTS_KEY]
+    assert list(receipts) == [harness.entry.entry_id]
+    assert secret not in repr(receipts)
+    assert secret not in repr(harness.hass.data[integration.DOMAIN])
+
+
 # ---------------------------------------------------------------------------
 # Deferred container-login cleanup (P2)
 #
