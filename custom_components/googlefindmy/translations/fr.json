@@ -859,6 +859,15 @@
     "stop_sound_uncorrelated": {
       "message": "Stop Sound pour {device_id} a été envoyé, mais n'a pas pu être associé à la sonnerie en cours: elle a été déclenchée ailleurs, ou la clé dont dispose cette instance est trop ancienne pour en répondre. Google risque de ne pas pouvoir associer l'arrêt à la sonnerie, l'appareil peut donc continuer à sonner. Appuyez sur le bouton du traceur ou attendez la fin de la sonnerie."
     },
+    "stop_sound_no_cancel_key": {
+      "message": "Stop Sound pour {device_id} a été envoyé, mais cette instance ne dispose d'aucune clé pour une sonnerie sur cet appareil. La sonnerie a probablement été déclenchée ailleurs, par exemple dans l'application Find Hub, Google risque donc de ne pas pouvoir associer l'arrêt et l'appareil peut continuer à sonner. Arrêtez-la là où elle a été déclenchée, appuyez sur le bouton du traceur ou attendez la fin de la sonnerie."
+    },
+    "stop_sound_cancel_key_aged": {
+      "message": "Stop Sound pour {device_id} a été envoyé avec la clé de la dernière sonnerie déclenchée par cette instance, mais cette clé date de plus de 30 minutes et ne peut pas répondre de la sonnerie actuelle, l'appareil peut donc continuer à sonner. Appuyez sur le bouton du traceur ou attendez la fin de la sonnerie."
+    },
+    "stop_sound_cancel_key_foreign": {
+      "message": "Stop Sound pour {device_id} a été envoyé avec le request UUID fourni, mais celui-ci n'appartient à aucune sonnerie déclenchée par cette instance : rien ne prouve que l'arrêt corresponde à la sonnerie en cours, l'appareil peut donc continuer à sonner. Laissez le request UUID vide pour utiliser la clé propre à cette instance, appuyez sur le bouton du traceur ou attendez la fin de la sonnerie."
+    },
     "missing_token_cache": {
       "message": "Cache de jetons manquant. Fournissez le TokenCache spécifique à l’entrée (par exemple entry.runtime_data.token_cache)."
     },

@@ -52,6 +52,11 @@ def _build_stop_sound_service_hass(monkeypatch: pytest.MonkeyPatch):
             self.display_queries.append(canonical_id)
             return "friendly"
 
+        def classify_stop_correlation(
+            self, canonical_id: str, request_uuid: str | None
+        ) -> None:
+            return None
+
         def get_device_location_data(self, canonical_id: str) -> dict[str, Any]:
             return {"id": canonical_id}
 

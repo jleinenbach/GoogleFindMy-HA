@@ -30,7 +30,11 @@ from unittest import mock
 import pytest
 
 from custom_components.googlefindmy import services
-from custom_components.googlefindmy.const import PlaySoundOutcome, StopSoundOutcome
+from custom_components.googlefindmy.const import (
+    PlaySoundOutcome,
+    StopSoundOutcome,
+    StopSoundUncorrelatedReason,
+)
 from custom_components.googlefindmy.services import (
     HomeAssistantError,
     ServiceValidationError,
@@ -393,6 +397,7 @@ class TestResolverDispatch:
         """A valid ``request_uuid`` is forwarded verbatim to the coordinator."""
         coord = SimpleNamespace(
             async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.CANCELLED),
+            classify_stop_correlation=mock.Mock(return_value=None),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -420,6 +425,7 @@ class TestResolverDispatch:
 
         coord = SimpleNamespace(
             async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.UNCORRELATED),
+            classify_stop_correlation=mock.Mock(return_value=None),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -447,6 +453,7 @@ class TestResolverDispatch:
 
         coord = SimpleNamespace(
             async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.SUPPRESSED),
+            classify_stop_correlation=mock.Mock(return_value=None),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -477,6 +484,7 @@ class TestResolverDispatch:
 
         coord = SimpleNamespace(
             async_stop_sound=mock.AsyncMock(return_value=True),
+            classify_stop_correlation=mock.Mock(return_value=None),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -507,6 +515,7 @@ class TestResolverDispatch:
 
         coord = SimpleNamespace(
             async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.FAILED),
+            classify_stop_correlation=mock.Mock(return_value=None),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -685,6 +694,7 @@ class TestSoundTranslationPlaceholders:
             stop = mock.AsyncMock(return_value=outcome)
         coord = SimpleNamespace(
             async_stop_sound=stop,
+            classify_stop_correlation=mock.Mock(return_value=None),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -1145,3 +1155,84 @@ class TestNoSuspensionBetweenCheckAndDispatch:
         violations = _suspension_violations(mutated)
         assert len(violations) == 1
         assert violations[0].startswith("_async_authorize_device_call:")
+
+
+# ---------------------------------------------------------------------------
+# K10: an uncorrelated stop names its case
+# ---------------------------------------------------------------------------
+
+_STOP_REASON_KEYS = {
+    StopSoundUncorrelatedReason.NO_KEY: "stop_sound_no_cancel_key",
+    StopSoundUncorrelatedReason.AGED_KEY: "stop_sound_cancel_key_aged",
+    StopSoundUncorrelatedReason.FOREIGN_KEY: "stop_sound_cancel_key_foreign",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("reason", "translation_key"), list(_STOP_REASON_KEYS.items()))
+async def test_handler_raises_the_key_of_the_case(
+    full_ctx: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    reason: StopSoundUncorrelatedReason,
+    translation_key: str,
+) -> None:
+    """Each case reaches the user as its own error, never as success."""
+
+    order: list[str] = []
+
+    def _classify(device_id: str, request_uuid: str | None) -> Any:
+        order.append(f"classify:{device_id}:{request_uuid}")
+        return reason
+
+    async def _stop(device_id: str, request_uuid: str | None) -> StopSoundOutcome:
+        order.append(f"stop:{device_id}:{request_uuid}")
+        return StopSoundOutcome.UNCORRELATED
+
+    coord = SimpleNamespace(
+        async_stop_sound=_stop,
+        classify_stop_correlation=_classify,
+        get_device_display_name=mock.Mock(return_value="Tag"),
+    )
+    hass = _hass_with_coordinator(coord)
+    monkeypatch.setattr(
+        services.dr, "async_get", lambda _h: SimpleNamespace(async_get=lambda _d: None)
+    )
+    handlers = _register(hass, full_ctx)
+
+    with pytest.raises(ServiceValidationError) as excinfo:
+        await handlers[services.SERVICE_STOP_SOUND](
+            _FakeCall({"device_id": "dev1", "request_uuid": "k"})
+        )
+
+    assert excinfo.value.translation_key == translation_key
+    # Read before the stop, with the same arguments the stop receives.
+    assert order == ["classify:CANON:k", "stop:CANON:k"]
+    message = json.loads(
+        (pathlib.Path(services.__file__).parent / "strings.json").read_text(
+            encoding="utf-8"
+        )
+    )["exceptions"][translation_key]["message"]
+    required = {f for _, f, _, _ in string.Formatter().parse(message) if f}
+    assert required <= set(excinfo.value.translation_placeholders or {})
+
+
+@pytest.mark.asyncio
+async def test_a_correlated_stop_ignores_the_case(
+    full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The case only selects a message; a CANCELLED stop still succeeds."""
+
+    coord = SimpleNamespace(
+        async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.CANCELLED),
+        classify_stop_correlation=mock.Mock(
+            return_value=StopSoundUncorrelatedReason.NO_KEY
+        ),
+        get_device_display_name=mock.Mock(return_value="Tag"),
+    )
+    hass = _hass_with_coordinator(coord)
+    monkeypatch.setattr(
+        services.dr, "async_get", lambda _h: SimpleNamespace(async_get=lambda _d: None)
+    )
+    handlers = _register(hass, full_ctx)
+
+    await handlers[services.SERVICE_STOP_SOUND](_FakeCall({"device_id": "dev1"}))

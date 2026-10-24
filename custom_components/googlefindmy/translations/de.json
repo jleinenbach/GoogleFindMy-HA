@@ -859,6 +859,15 @@
     "stop_sound_uncorrelated": {
       "message": "Stop Sound für {device_id} wurde gesendet, konnte aber dem laufenden Klingeln nicht zugeordnet werden: Das Klingeln wurde anderswo gestartet, oder der hier vorliegende Schlüssel ist zu alt, um dafür einzustehen. Google kann den Stopp möglicherweise nicht zuordnen, das Gerät klingelt dann weiter. Drücke die Taste am Tracker oder warte, bis das Klingeln von selbst endet."
     },
+    "stop_sound_no_cancel_key": {
+      "message": "Stop Sound für {device_id} wurde gesendet, aber diese Instanz hat keinen Schlüssel für ein Klingeln auf diesem Gerät. Das Klingeln wurde vermutlich anderswo gestartet, etwa in der App Find Hub. Google kann den Stopp dann möglicherweise nicht zuordnen, und das Gerät klingelt weiter. Beende es dort, wo es gestartet wurde, drücke die Taste am Tracker oder warte, bis das Klingeln von selbst endet."
+    },
+    "stop_sound_cancel_key_aged": {
+      "message": "Stop Sound für {device_id} wurde mit dem Schlüssel des letzten Klingelns dieser Instanz gesendet, aber der Schlüssel ist älter als 30 Minuten und kann nicht für das jetzige Klingeln einstehen. Das Gerät klingelt möglicherweise weiter. Drücke die Taste am Tracker oder warte, bis das Klingeln von selbst endet."
+    },
+    "stop_sound_cancel_key_foreign": {
+      "message": "Stop Sound für {device_id} wurde mit der angegebenen Request-UUID gesendet, aber sie gehört zu keinem Klingeln, das diese Instanz gestartet hat. Nichts belegt, dass der Stopp das laufende Klingeln trifft, das Gerät klingelt möglicherweise weiter. Lass die Request-UUID leer, damit der eigene Schlüssel dieser Instanz verwendet wird, drücke die Taste am Tracker oder warte, bis das Klingeln von selbst endet."
+    },
     "missing_token_cache": {
       "message": "Token-Cache fehlt. Bitte den eintragsbezogenen TokenCache übergeben (z. B. entry.runtime_data.token_cache)."
     },

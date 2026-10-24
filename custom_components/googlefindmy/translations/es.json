@@ -859,6 +859,15 @@
     "stop_sound_uncorrelated": {
       "message": "Stop Sound para {device_id} se envió, pero no se pudo asociar al timbre en curso: se inició desde otro lugar, o la clave que tiene esta instancia es demasiado antigua para garantizarla. Puede que Google no consiga asociar la detención al timbre, así que el dispositivo podría seguir sonando. Pulsa el botón del rastreador o espera a que el timbre termine."
     },
+    "stop_sound_no_cancel_key": {
+      "message": "Stop Sound para {device_id} se envió, pero esta instancia no tiene ninguna clave de un timbre en este dispositivo. Probablemente el timbre se inició desde otro lugar, por ejemplo en la app Find Hub, así que puede que Google no consiga asociar la detención y el dispositivo siga sonando. Detenlo donde se inició, pulsa el botón del rastreador o espera a que el timbre termine."
+    },
+    "stop_sound_cancel_key_aged": {
+      "message": "Stop Sound para {device_id} se envió con la clave del último timbre que inició esta instancia, pero esa clave tiene más de 30 minutos y no puede garantizar el timbre actual, así que el dispositivo podría seguir sonando. Pulsa el botón del rastreador o espera a que el timbre termine."
+    },
+    "stop_sound_cancel_key_foreign": {
+      "message": "Stop Sound para {device_id} se envió con el request UUID indicado, pero no pertenece a ningún timbre iniciado por esta instancia, así que nada garantiza que la detención corresponda al timbre en curso y el dispositivo podría seguir sonando. Deja vacío el request UUID para usar la clave propia de esta instancia, pulsa el botón del rastreador o espera a que el timbre termine."
+    },
     "missing_token_cache": {
       "message": "Falta la caché de tokens. Proporciona la TokenCache específica de la entrada (por ejemplo, entry.runtime_data.token_cache)."
     },

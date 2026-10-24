@@ -88,6 +88,7 @@ class _MixinBase:
     _locate_requested_mono: dict[str, float]
     _device_action_locks: dict[str, asyncio.Lock]
     _sound_request_uuids: dict[str, str]
+    _sound_play_accepted_at: dict[str, tuple[str, float]]
     _device_poll_cooldown_until: dict[str, float]
     _enabled_poll_device_ids: set[str]
     _devices_with_entry: set[str]

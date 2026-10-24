@@ -859,6 +859,15 @@
     "stop_sound_uncorrelated": {
       "message": "Polecenie Stop Sound dla {device_id} zostało wysłane, ale nie udało się powiązać go z trwającym dzwonieniem: zostało uruchomione gdzie indziej albo klucz, którym dysponuje ta instancja, jest zbyt stary, by za niego ręczyć. Google może nie powiązać zatrzymania z dzwonieniem, więc urządzenie może dzwonić dalej. Naciśnij przycisk na lokalizatorze albo poczekaj, aż dzwonienie samo ustanie."
     },
+    "stop_sound_no_cancel_key": {
+      "message": "Polecenie Stop Sound dla {device_id} zostało wysłane, ale ta instancja nie ma klucza do żadnego dzwonienia na tym urządzeniu. Dzwonienie zostało prawdopodobnie uruchomione gdzie indziej, na przykład w aplikacji Find Hub, więc Google może nie powiązać zatrzymania i urządzenie może dzwonić dalej. Zatrzymaj je tam, gdzie zostało uruchomione, naciśnij przycisk na lokalizatorze albo poczekaj, aż dzwonienie samo ustanie."
+    },
+    "stop_sound_cancel_key_aged": {
+      "message": "Polecenie Stop Sound dla {device_id} zostało wysłane z kluczem ostatniego dzwonienia uruchomionego przez tę instancję, ale klucz ma ponad 30 minut i nie może ręczyć za obecne dzwonienie, więc urządzenie może dzwonić dalej. Naciśnij przycisk na lokalizatorze albo poczekaj, aż dzwonienie samo ustanie."
+    },
+    "stop_sound_cancel_key_foreign": {
+      "message": "Polecenie Stop Sound dla {device_id} zostało wysłane z podanym request UUID, ale nie należy on do żadnego dzwonienia uruchomionego przez tę instancję, więc nic nie potwierdza, że zatrzymanie dotyczy trwającego dzwonienia, i urządzenie może dzwonić dalej. Pozostaw request UUID puste, aby użyć klucza tej instancji, naciśnij przycisk na lokalizatorze albo poczekaj, aż dzwonienie samo ustanie."
+    },
     "missing_token_cache": {
       "message": "Brak pamięci podręcznej tokenów. Podaj TokenCache specyficzny dla wpisu (na przykład entry.runtime_data.token_cache)."
     },
