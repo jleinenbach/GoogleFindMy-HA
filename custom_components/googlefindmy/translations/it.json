@@ -864,6 +864,48 @@
     },
     "missing_namespace": {
       "message": "Namespace mancante. Passa il namespace specifico della voce o l’ID della ConfigEntry per mantenere isolati i metadati memorizzati nella cache."
+    },
+    "device_list_rate_limited": {
+      "message": "Google sta limitando temporaneamente le richieste dell'elenco dei dispositivi. L'integrazione riproverà automaticamente."
+    },
+    "device_list_server_error": {
+      "message": "L'elenco dei dispositivi non è temporaneamente disponibile (errore del server {status}). L'integrazione riproverà automaticamente."
+    },
+    "device_list_rejected": {
+      "message": "Il server ha rifiutato la richiesta dell'elenco dei dispositivi (HTTP {status})."
+    },
+    "device_list_decode_failed": {
+      "message": "Non è stato possibile decodificare la risposta di Google alla richiesta dell'elenco dei dispositivi."
+    },
+    "device_list_logic_error": {
+      "message": "Google ha segnalato un errore durante il recupero dell'elenco dei dispositivi."
+    },
+    "multi_entry_guard": {
+      "message": "Sono attive più voci di Google Find My Device, ma questa richiesta non era associata a nessuna di esse. L'integrazione riproverà automaticamente."
+    },
+    "device_list_failed": {
+      "message": "Impossibile recuperare l'elenco dei dispositivi."
+    },
+    "device_list_network_error": {
+      "message": "Errore di rete durante il recupero dell'elenco dei dispositivi."
+    },
+    "device_list_unexpected_error": {
+      "message": "Errore imprevisto durante il recupero dell'elenco dei dispositivi."
+    },
+    "cold_start_empty_device_list": {
+      "message": "L'elenco dei dispositivi era vuoto subito dopo l'avvio. La situazione è considerata temporanea e l'integrazione riproverà automaticamente."
+    },
+    "update_unexpected_error": {
+      "message": "Errore imprevisto durante l'aggiornamento ({error_type})."
+    },
+    "locate_timeout": {
+      "message": "La richiesta di localizzazione per il dispositivo {device_id} è scaduta."
+    },
+    "locate_not_accepted": {
+      "message": "In questo ciclo non è stata accettata la richiesta di localizzazione di alcun dispositivo ({not_accepted} non accettate, {rejected} rifiutate)."
+    },
+    "locate_all_rejected": {
+      "message": "Il server ha rifiutato la richiesta di localizzazione per tutti i dispositivi ({rejected}) in questo ciclo."
     }
   },
   "system_health": {

@@ -8036,6 +8036,55 @@ async def _async_setup_subentry(
     return True
 
 
+def _initial_refresh_reason(err: BaseException) -> BaseException:
+    """Return the exception whose text explains a failed first refresh.
+
+    ``async_config_entry_first_refresh`` raises a ``ConfigEntryNotReady``
+    without a message of its own and chains the ``UpdateFailed`` cause.
+    Newer cores (2026.9.3 measured) copy the translation fields of the cause
+    into it, and its ``str()`` is then built from the translation key, which
+    is the bare key while no translations are cached; older cores (2025.9.1
+    and 2026.1.3 measured) raise it bare. The cause carries the readable
+    English text, so it is preferred whenever it exists and the exception
+    carries no message of its own.
+    """
+
+    cause: BaseException | None = err.__cause__
+    own_message = bool(err.args) and not getattr(err, "generate_message", False)
+    if isinstance(err, ConfigEntryNotReady) and cause is not None and not own_message:
+        return cause
+    return err
+
+
+def _initial_refresh_not_ready(err: BaseException) -> ConfigEntryNotReady:
+    """Wrap a failed first refresh and keep its translation fields.
+
+    Home Assistant builds the setup-retry reason of the integration card
+    from ``translation_key`` and ``translation_placeholders`` of the raised
+    ``ConfigEntryNotReady``. Newer cores copy those fields from the
+    ``UpdateFailed`` cause into the ``ConfigEntryNotReady`` they raise; older
+    ones (2025.9.1 and 2026.1.3 measured) raise it bare and only chain the
+    cause. A key of the outer exception wins; without one the fields come
+    from the exception whose text is shown (see ``_initial_refresh_reason``),
+    and from the cause only when it belongs to this integration, because the
+    older cores look the key up under the integration's domain.
+    """
+
+    reason = _initial_refresh_reason(err)
+    source: BaseException = err
+    if (
+        getattr(err, "translation_key", None) is None
+        and getattr(reason, "translation_domain", None) == DOMAIN
+    ):
+        source = reason
+    return ConfigEntryNotReady(
+        f"Initial refresh failed: {reason}",
+        translation_domain=getattr(source, "translation_domain", None),
+        translation_key=getattr(source, "translation_key", None),
+        translation_placeholders=getattr(source, "translation_placeholders", None),
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Set up a config entry.
 
@@ -8819,10 +8868,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _LOGGER.error(
             "[%s] Initial coordinator refresh failed: %s",
             entry.entry_id,
-            err,
+            _initial_refresh_reason(err),
             exc_info=True,
         )
-        raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
+        raise _initial_refresh_not_ready(err) from err
 
     raw_metadata = getattr(coordinator, "_subentry_metadata", None)
     metadata: Mapping[str, object] | None

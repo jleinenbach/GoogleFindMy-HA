@@ -1052,13 +1052,59 @@ def _stub_homeassistant() -> None:
     exceptions_module = ModuleType("homeassistant.exceptions")
 
     class HomeAssistantError(Exception):
-        pass
+        """Stubbed HomeAssistantError accepting the core translation metadata.
+
+        Mirrors ``homeassistant.exceptions.HomeAssistantError.__init__``: the
+        three translation arguments are stored as attributes, and without a
+        message but with domain and key the key becomes the only argument. The
+        core then looks the key up in the translation cache of the running
+        instance; the stub renders the raw key, which is what the core returns
+        when nothing is cached. That is the least favourable case, so a wrapper
+        that builds its text from such an exception shows the raw key in tests
+        too. ``ServiceValidationError`` below keeps its own ``__str__``
+        (``"domain:key"``); see its docstring.
+        ``tests/test_exception_stub_translation_parity.py`` holds the mirror.
+        The class defaults match the core, so a subclass that skips
+        ``super().__init__`` still reads ``None`` and ``False``.
+        """
+
+        generate_message: bool = False
+        translation_domain: str | None = None
+        translation_key: str | None = None
+        translation_placeholders: Mapping[str, Any] | None = None
+
+        def __init__(
+            self,
+            *args: Any,
+            translation_domain: str | None = None,
+            translation_key: str | None = None,
+            translation_placeholders: Mapping[str, Any] | None = None,
+        ) -> None:
+            if not args and translation_key and translation_domain:
+                self.generate_message = True
+                args = (translation_key,)
+            super().__init__(*args)
+            self.translation_domain = translation_domain
+            self.translation_key = translation_key
+            self.translation_placeholders = translation_placeholders
 
     class ConfigEntryNotReady(HomeAssistantError):
-        pass
+        """Stubbed ConfigEntryNotReady falling back to its cause like the core.
+
+        The core's ``IntegrationError.__str__`` returns ``str(self.__cause__)``
+        when the exception carries no message.
+        """
+
+        def __str__(self) -> str:
+            return super().__str__() or str(self.__cause__)
 
     class ServiceValidationError(HomeAssistantError):
-        """Stubbed ServiceValidationError carrying translation metadata."""
+        """Stubbed ServiceValidationError carrying translation metadata.
+
+        Unlike the base stub (and the core), a key without a message renders
+        as ``"domain:key"`` here; tests assert on that form (``tests/AGENTS.md``,
+        string representation contract), so it stays.
+        """
 
         def __init__(
             self,
@@ -1753,8 +1799,17 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.helpers.storage"] = storage_module
     setattr(helpers_pkg, "storage", storage_module)
 
-    class UpdateFailed(Exception):
-        pass
+    class UpdateFailed(HomeAssistantError):
+        """Stubbed UpdateFailed; like the core it is a ``HomeAssistantError``."""
+
+        def __init__(
+            self,
+            *args: Any,
+            retry_after: float | None = None,
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(*args, **kwargs)
+            self.retry_after = retry_after
 
     update_coordinator_module = sys.modules["homeassistant.helpers.update_coordinator"]
     update_coordinator_module.UpdateFailed = UpdateFailed

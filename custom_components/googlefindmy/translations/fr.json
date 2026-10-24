@@ -864,6 +864,48 @@
     },
     "missing_namespace": {
       "message": "Espace de noms manquant. Transmettez l’espace de noms spécifique à l’entrée ou l’ID de ConfigEntry pour isoler les métadonnées mises en cache."
+    },
+    "device_list_rate_limited": {
+      "message": "Google limite temporairement les requêtes de la liste des appareils. L'intégration réessaiera automatiquement."
+    },
+    "device_list_server_error": {
+      "message": "La liste des appareils est temporairement indisponible (erreur serveur {status}). L'intégration réessaiera automatiquement."
+    },
+    "device_list_rejected": {
+      "message": "Le serveur a refusé la requête de la liste des appareils (HTTP {status})."
+    },
+    "device_list_decode_failed": {
+      "message": "La réponse de Google à la requête de la liste des appareils n'a pas pu être décodée."
+    },
+    "device_list_logic_error": {
+      "message": "Google a signalé une erreur lors de la récupération de la liste des appareils."
+    },
+    "multi_entry_guard": {
+      "message": "Plusieurs entrées Google Find My Device sont actives, mais cette requête n'était associée à aucune d'elles. L'intégration réessaiera automatiquement."
+    },
+    "device_list_failed": {
+      "message": "Impossible de récupérer la liste des appareils."
+    },
+    "device_list_network_error": {
+      "message": "Erreur réseau lors de la récupération de la liste des appareils."
+    },
+    "device_list_unexpected_error": {
+      "message": "Erreur inattendue lors de la récupération de la liste des appareils."
+    },
+    "cold_start_empty_device_list": {
+      "message": "La liste des appareils était vide juste après le démarrage. Cette situation est considérée comme temporaire, et l'intégration réessaiera automatiquement."
+    },
+    "update_unexpected_error": {
+      "message": "Erreur inattendue lors de la mise à jour ({error_type})."
+    },
+    "locate_timeout": {
+      "message": "La demande de localisation de l'appareil {device_id} a expiré."
+    },
+    "locate_not_accepted": {
+      "message": "Aucune demande de localisation n'a été acceptée lors de ce cycle ({not_accepted} non acceptées, {rejected} refusées)."
+    },
+    "locate_all_rejected": {
+      "message": "Le serveur a refusé la demande de localisation pour tous les appareils ({rejected}) lors de ce cycle."
     }
   },
   "system_health": {

@@ -864,6 +864,48 @@
     },
     "missing_namespace": {
       "message": "מרחב שמות חסר. יש להעביר את מרחב השמות הייעודי לרשומה או את מזהה ה-ConfigEntry כדי לשמור על בידוד של מטא-נתונים מאוחסנים."
+    },
+    "device_list_rate_limited": {
+      "message": "Google מגביל זמנית את הבקשות לרשימת המכשירים. השילוב ינסה שוב באופן אוטומטי."
+    },
+    "device_list_server_error": {
+      "message": "רשימת המכשירים אינה זמינה זמנית (שגיאת שרת {status}). השילוב ינסה שוב באופן אוטומטי."
+    },
+    "device_list_rejected": {
+      "message": "השרת דחה את הבקשה לרשימת המכשירים (HTTP {status})."
+    },
+    "device_list_decode_failed": {
+      "message": "לא ניתן היה לפענח את התשובה של Google לבקשה לרשימת המכשירים."
+    },
+    "device_list_logic_error": {
+      "message": "Google דיווח על שגיאה בעת אחזור רשימת המכשירים."
+    },
+    "multi_entry_guard": {
+      "message": "מספר רשומות של Google Find My Device פעילות, אך בקשה זו לא שויכה לאף אחת מהן. השילוב ינסה שוב באופן אוטומטי."
+    },
+    "device_list_failed": {
+      "message": "לא ניתן היה לאחזר את רשימת המכשירים."
+    },
+    "device_list_network_error": {
+      "message": "שגיאת רשת בעת אחזור רשימת המכשירים."
+    },
+    "device_list_unexpected_error": {
+      "message": "שגיאה בלתי צפויה בעת אחזור רשימת המכשירים."
+    },
+    "cold_start_empty_device_list": {
+      "message": "רשימת המכשירים הייתה ריקה מיד לאחר ההפעלה. מצב זה נחשב זמני, והשילוב ינסה שוב באופן אוטומטי."
+    },
+    "update_unexpected_error": {
+      "message": "שגיאה בלתי צפויה במהלך העדכון ({error_type})."
+    },
+    "locate_timeout": {
+      "message": "תם הזמן הקצוב לבקשת המיקום עבור המכשיר {device_id}."
+    },
+    "locate_not_accepted": {
+      "message": "במחזור זה לא התקבלה בקשת מיקום של אף מכשיר ({not_accepted} לא התקבלו, {rejected} נדחו)."
+    },
+    "locate_all_rejected": {
+      "message": "השרת דחה במחזור זה את בקשת המיקום עבור כל המכשירים ({rejected})."
     }
   },
   "system_health": {

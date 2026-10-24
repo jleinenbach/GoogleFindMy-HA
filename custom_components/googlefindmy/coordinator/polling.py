@@ -1453,7 +1453,9 @@ class PollingOperations(_MixinBase):
             # Cold-start guard: if the very first seen list is empty, treat it as transient
             if not filtered_devices and self._last_nonempty_wall == 0.0:
                 raise UpdateFailed(
-                    "Cold start: empty device list; treating as transient."
+                    "Cold start: empty device list; treating as transient.",
+                    translation_domain=DOMAIN,
+                    translation_key="cold_start_empty_device_list",
                 )
 
             # Maintain owner index for FCM fallback routing (entry-scoped).
@@ -1746,7 +1748,12 @@ class PollingOperations(_MixinBase):
             message = self._short_error_message(err)
             self._set_api_status(ApiStatus.ERROR, reason=message)
             _LOGGER.exception("Unexpected error during coordinator update")
-            raise UpdateFailed(f"{type(err).__name__}: {err}") from err
+            raise UpdateFailed(
+                f"{type(err).__name__}: {err}",
+                translation_domain=DOMAIN,
+                translation_key="update_unexpected_error",
+                translation_placeholders={"error_type": type(err).__name__},
+            ) from err
 
     def _request_poll_reauth(self, reauth_exc: ConfigEntryAuthFailed) -> None:
         """Start the config-entry reauth flow from the background poll cycle.
@@ -2402,7 +2409,10 @@ class PollingOperations(_MixinBase):
                             # must not displace anything.
                             if last_exception is None:
                                 last_exception = UpdateFailed(
-                                    f"Location request timed out for device {dev_id}"
+                                    f"Location request timed out for device {dev_id}",
+                                    translation_domain=DOMAIN,
+                                    translation_key="locate_timeout",
+                                    translation_placeholders={"device_id": str(dev_id)},
                                 )
                                 last_exception.__cause__ = terr
                             # INVARIANT, not a live condition: mutating
@@ -2419,7 +2429,10 @@ class PollingOperations(_MixinBase):
                                 and independent_error is None
                             ):
                                 independent_error = UpdateFailed(
-                                    f"Location request timed out for device {dev_id}"
+                                    f"Location request timed out for device {dev_id}",
+                                    translation_domain=DOMAIN,
+                                    translation_key="locate_timeout",
+                                    translation_placeholders={"device_id": str(dev_id)},
                                 )
                                 independent_error.__cause__ = terr
                     except SpotAuthPermanentError:
@@ -3005,7 +3018,13 @@ class PollingOperations(_MixinBase):
                     last_exception = UpdateFailed(
                         f"No device's locate request was accepted this cycle "
                         f"({cycle_unaccepted_devices} not accepted, "
-                        f"{cycle_rejected_devices} rejected)"
+                        f"{cycle_rejected_devices} rejected)",
+                        translation_domain=DOMAIN,
+                        translation_key="locate_not_accepted",
+                        translation_placeholders={
+                            "not_accepted": str(cycle_unaccepted_devices),
+                            "rejected": str(cycle_rejected_devices),
+                        },
                     )
                 # Every device was refused by name: on the rejections' own
                 # terms that is account-wide, so the cycle must surface. Kept as
@@ -3020,7 +3039,12 @@ class PollingOperations(_MixinBase):
                 ):
                     last_exception = UpdateFailed(
                         f"Every device ({cycle_rejected_devices}) was rejected by "
-                        "the server this cycle"
+                        "the server this cycle",
+                        translation_domain=DOMAIN,
+                        translation_key="locate_all_rejected",
+                        translation_placeholders={
+                            "rejected": str(cycle_rejected_devices)
+                        },
                     )
                 # Resolve the cycle's decrypt verdict AND reconcile the cycle's
                 # failure state with it in one place (positive proof dominates: a
