@@ -306,18 +306,59 @@ async def test_registering_the_coordinator_records_the_entry_registration(
     assert entry.entry_id not in receiver._entry_registration_digest
 
 
-def test_an_entry_without_a_bundle_records_no_registration() -> None:
-    """No bundle, or data that is not a mapping, leaves no baseline."""
+def test_an_entry_without_a_bundle_records_an_absent_registration() -> None:
+    """No bundle, or data that is not a mapping, records "no registration"."""
 
     receiver = FcmReceiverHA()
+    absent = credential_member_digest(None)
     entry = make_config_entry(entry_id="entry", data={})
     receiver._entry_registration_digest["entry"] = "stale"
     receiver._note_entry_registration(entry)
-    assert "entry" not in receiver._entry_registration_digest
+    assert receiver._entry_registration_digest["entry"] == absent
     entry.data = [1]
     receiver._entry_registration_digest["entry"] = "stale"
     receiver._note_entry_registration(entry)
-    assert "entry" not in receiver._entry_registration_digest
+    assert receiver._entry_registration_digest["entry"] == absent
+
+
+def test_a_bundle_imported_after_a_registration_without_one_wins() -> None:
+    """Compare-and-swap also holds for an entry that had no bundle at setup.
+
+    A manual-login entry gets a ``secrets.json`` with its own registration
+    through a flow whose reload is still on its way. A renewal in that window
+    must not overwrite the imported registration.
+    """
+
+    entry = make_config_entry(entry_id="entry-a", data={})
+    hass = SimpleNamespace(data={}, config_entries=_Manager([entry], True))
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+    receiver._note_entry_registration(entry)
+    entry.data = {DATA_SECRET_BUNDLE: {"fcm_credentials": _registration("imported")}}
+
+    receiver._persist_credentials_to_entry("entry-a", _registration("renewed"))
+
+    assert hass.config_entries.calls == 0
+    assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == _registration(
+        "imported"
+    )
+    assert _receipts(hass) == {}
+
+
+def test_a_bundle_without_a_registration_still_receives_the_renewal() -> None:
+    """An absent registration matches the recorded absent one, so it is written."""
+
+    entry = make_config_entry(entry_id="entry-a", data={})
+    hass = SimpleNamespace(data={}, config_entries=_Manager([entry], True))
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+    receiver._note_entry_registration(entry)
+    entry.data = {DATA_SECRET_BUNDLE: {"username": "user@example.com"}}
+
+    receiver._persist_credentials_to_entry("entry-a", _registration("renewed"))
+
+    assert hass.config_entries.calls == 1
+    assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == _registration("renewed")
 
 
 @pytest.mark.asyncio
@@ -526,3 +567,75 @@ def test_refreshing_only_the_top_level_copy_leaves_no_receipt() -> None:
     assert hass.config_entries.calls == 1
     assert entry.data["fcm_credentials"] == renewed
     assert _receipts(hass) == {}
+
+
+class _RecordingCache:
+    """Token cache double that records ``set`` calls."""
+
+    def __init__(self) -> None:
+        self.sets: list[tuple[str, Any]] = []
+
+    async def set(self, name: str, value: Any) -> None:
+        self.sets.append((name, value))
+
+
+class _LookupFails:
+    """Entry manager whose lookup raises, as a broken core state would."""
+
+    calls = 0
+
+    def async_get_entry(self, entry_id: str) -> Any:
+        raise RuntimeError("lookup-text")
+
+    def async_update_entry(self, entry: Any, **kwargs: Any) -> Any:
+        raise AssertionError("not reached")
+
+
+@pytest.mark.asyncio
+async def test_a_failing_entry_write_does_not_cost_the_cache_write(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The entry write is best-effort; the cache write that predates it still runs."""
+
+    hass = SimpleNamespace(data={}, config_entries=_LookupFails())
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+    receiver.creds["entry-a"] = _registration("renewed")
+    cache = _RecordingCache()
+    receiver._entry_caches["entry-a"] = cache
+
+    with caplog.at_level(logging.WARNING):
+        await receiver._async_save_credentials_for_entry("entry-a")
+
+    assert cache.sets == [("fcm_credentials", _registration("renewed"))]
+    assert _receipts(hass) == {}
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "entry-a" in warnings[0].getMessage()
+    assert "lookup-text" not in warnings[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_an_invalidation_reaches_the_entry_bundle() -> None:
+    """An entry with a bundle re-seeds the cache from it; the invalidation goes there too."""
+
+    entry = make_config_entry(
+        entry_id="entry-a",
+        data={DATA_SECRET_BUNDLE: {"fcm_credentials": _registration("old")}},
+    )
+    hass = SimpleNamespace(data={}, config_entries=_Manager([entry], True))
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+    receiver._note_entry_registration(entry)
+    receiver.creds["entry-a"] = _registration("old")
+    cache = _RecordingCache()
+    receiver._entry_caches["entry-a"] = cache
+
+    await receiver._invalidate_fcm_tokens("entry-a")
+
+    stored = entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"]
+    assert "fcm" not in stored
+    assert stored == receiver.creds["entry-a"]
+    assert stored is not receiver.creds["entry-a"]
+    assert _receipts(hass) == {"entry-a": credential_member_digest(stored)}
+    assert cache.sets and cache.sets[-1][0] == "fcm_credentials"

@@ -2204,7 +2204,11 @@ class FcmReceiverHA:
                     entry_id,
                 )
 
-            # Persist partial credentials so restarts also trigger re-register
+            # Persist partial credentials so restarts also trigger re-register.
+            # The entry first: an entry with a bundle re-seeds the cache from it
+            # on every setup, so a cache-only invalidation would bring the stale
+            # tokens back on the next start.
+            self._persist_credentials_to_entry_best_effort(entry_id, creds, generation)
             entry_cache = self._entry_caches.get(entry_id)
             if entry_cache is not None:
                 try:
@@ -3500,12 +3504,15 @@ class FcmReceiverHA:
 
         data = getattr(entry, "data", None)
         bundle = data.get(DATA_SECRET_BUNDLE) if isinstance(data, Mapping) else None
-        if isinstance(bundle, Mapping):
-            self._entry_registration_digest[entry.entry_id] = credential_member_digest(
-                bundle.get("fcm_credentials")
-            )
-        else:
-            self._entry_registration_digest.pop(entry.entry_id, None)
+        # An entry without a bundle records the digest of "no registration", so
+        # a bundle that appears later with a registration (a user import whose
+        # reload is on its way) counts as a value this receiver did not write.
+        registration = (
+            bundle.get("fcm_credentials") if isinstance(bundle, Mapping) else None
+        )
+        self._entry_registration_digest[entry.entry_id] = credential_member_digest(
+            registration
+        )
 
     def _entry_bundle_for_write(
         self, entry_id: str
@@ -3529,6 +3536,29 @@ class FcmReceiverHA:
         if not isinstance(bundle, Mapping):
             return None
         return update, entry, data, bundle
+
+    def _persist_credentials_to_entry_best_effort(
+        self,
+        entry_id: str,
+        creds: Mapping[str, Any],
+        generation: int | None = None,
+    ) -> None:
+        """Run ``_persist_credentials_to_entry`` without failing the caller.
+
+        The entry write runs before the token cache write, and that cache write
+        ran unconditionally before the entry became the durable store. An
+        exception in the entry lookup, the copy or the digest must not cost it.
+        """
+        try:
+            self._persist_credentials_to_entry(entry_id, creds, generation)
+        except Exception as err:  # noqa: BLE001 - durability is best-effort
+            discard_self_write(self._hass, entry_id)
+            _LOGGER.warning(
+                "[entry=%s] Failed to persist the FCM registration to the config "
+                "entry; the next restart may restore the previous one: %s",
+                entry_id,
+                describe_exception(err),
+            )
 
     def _persist_credentials_to_entry(
         self,
@@ -3648,7 +3678,7 @@ class FcmReceiverHA:
         """
         creds = self.creds.get(entry_id)
         if isinstance(creds, Mapping):
-            self._persist_credentials_to_entry(entry_id, creds, generation)
+            self._persist_credentials_to_entry_best_effort(entry_id, creds, generation)
         cache = self._entry_caches.get(entry_id)
         if cache is not None:
             try:

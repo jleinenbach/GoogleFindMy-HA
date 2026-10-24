@@ -463,8 +463,10 @@ async def test_the_entry_copy_is_detached_from_the_receiver_state() -> None:
     ``_invalidate_fcm_tokens`` edits ``self.creds[entry_id]`` (and its nested
     ``gcm`` block) in place. A shallow copy at the receiver/entry boundary
     would share that block with ``entry.data``, so the invalidation would
-    silently change the entry behind Home Assistant's back and the next store
-    write of any entry would persist the half-invalidated registration.
+    silently change the entry behind Home Assistant's back, without a store
+    write and without the update listener. The invalidation does reach the
+    entry, but only as a second ``async_update_entry`` with its own copy; the
+    data handed over by the first write stays as it was.
     """
 
     fresh = _registration("fresh-registration")
@@ -499,6 +501,11 @@ async def test_the_entry_copy_is_detached_from_the_receiver_state() -> None:
     # The invalidation really ran on the live state ...
     assert "fcm" not in fresh
     assert fresh["gcm"].get("orphan_app_id") == "subscription-app-id"
-    # ... and left the entry exactly as it was persisted.
-    assert dict(entry.data) == persisted
-    assert len(manager.update_calls) == 1
+    # ... left the data of the first write exactly as it was persisted ...
+    assert manager.update_calls[0][1]["data"] == persisted
+    # ... and reached the entry only through a second write of its own copy.
+    assert len(manager.update_calls) == 2
+    invalidated = entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"]
+    assert "fcm" not in invalidated
+    assert invalidated is not fresh
+    assert invalidated["gcm"] is not fresh["gcm"]

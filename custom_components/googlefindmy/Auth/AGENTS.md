@@ -110,7 +110,8 @@ bundle, so a cold start keeps its registration (Issue #152). Enforced by
 
 * **Detached copies.** A credential value that crosses between the FCM
   receiver, the `TokenCache` and `entry.data` is handed over as a deep copy,
-  and `TokenCache` stores and returns copies of container values. Reason: the
+  and `TokenCache` stores and returns a copy of every value that is not an
+  immutable scalar, in `all()` as well. Reason: the
   receiver edits its registration and the nested `gcm` block in place
   (`_invalidate_fcm_tokens`); a shared container would rewrite `entry.data`
   without `async_update_entry`, so neither the store nor the update listener
@@ -124,10 +125,16 @@ bundle, so a cold start keeps its registration (Issue #152). Enforced by
   self-write receipt (`entry_self_write`, see
   `agents/runtime_patterns/AGENTS.md`, "One owner per entry reload"). When the
   bundle holds a registration the receiver neither registered nor wrote
-  itself, it leaves the entry as it is. Reason: that value comes from a user
-  change, usually an imported `secrets.json`, whose reload is already on its
-  way; overwriting it would undo the import. Enforced by
-  `tests/test_fcm_entry_self_write_receipt.py`.
+  itself, it leaves the entry as it is; an entry that had no bundle when the
+  receiver registered counts as holding no registration. Reason: that value
+  comes from a user change, usually an imported `secrets.json`, whose reload
+  is already on its way; overwriting it would undo the import. An
+  invalidation is written to the entry as well, before the cache. Reason: an
+  entry with a bundle re-seeds the cache from it on every setup, so a
+  cache-only invalidation would bring the stale tokens back on the next
+  start. A failing entry write is logged as a warning and never stops the
+  cache write. Enforced by `tests/test_fcm_entry_self_write_receipt.py` and
+  `tests/test_fcm_registration_entry_sync.py`.
 
 ### Soft invalidation (standalone)
 
