@@ -8039,12 +8039,14 @@ async def _async_setup_subentry(
 def _initial_refresh_reason(err: BaseException) -> BaseException:
     """Return the exception whose text explains a failed first refresh.
 
-    ``async_config_entry_first_refresh`` raises ``ConfigEntryNotReady`` with
-    the translation fields of the ``UpdateFailed`` cause and no message of
-    its own. Its ``str()`` is then built from the translation key, which is
-    the bare key while no translations are cached. The cause carries the
-    readable English text, so it is preferred whenever it exists and the
-    exception carries no message of its own.
+    ``async_config_entry_first_refresh`` raises a ``ConfigEntryNotReady``
+    without a message of its own and chains the ``UpdateFailed`` cause.
+    Newer cores (2026.9.3 measured) copy the translation fields of the cause
+    into it, and its ``str()`` is then built from the translation key, which
+    is the bare key while no translations are cached; older cores (2025.9.1
+    and 2026.1.3 measured) raise it bare. The cause carries the readable
+    English text, so it is preferred whenever it exists and the exception
+    carries no message of its own.
     """
 
     cause: BaseException | None = err.__cause__
@@ -8061,22 +8063,22 @@ def _initial_refresh_not_ready(err: BaseException) -> ConfigEntryNotReady:
     from ``translation_key`` and ``translation_placeholders`` of the raised
     ``ConfigEntryNotReady``. Newer cores copy those fields from the
     ``UpdateFailed`` cause into the ``ConfigEntryNotReady`` they raise; older
-    ones (2025.9.1, the floor in ``hacs.json``) raise a bare
-    ``ConfigEntryNotReady()`` and only chain the cause, so the fields are then
-    taken from the cause. The text comes from the cause whenever the core
-    chained one (see ``_initial_refresh_reason``).
+    ones (2025.9.1 and 2026.1.3 measured) raise it bare and only chain the
+    cause. The fields therefore come from the exception whose text is shown
+    (see ``_initial_refresh_reason``): a key of the outer exception wins, and
+    the cause supplies the fields only when it belongs to this integration,
+    because the older cores look the key up under the integration's domain.
     """
 
+    reason = _initial_refresh_reason(err)
     source: BaseException = err
-    cause: BaseException | None = err.__cause__
     if (
-        isinstance(err, ConfigEntryNotReady)
-        and getattr(err, "translation_key", None) is None
-        and cause is not None
+        getattr(err, "translation_key", None) is None
+        and getattr(reason, "translation_domain", None) == DOMAIN
     ):
-        source = cause
+        source = reason
     return ConfigEntryNotReady(
-        f"Initial refresh failed: {_initial_refresh_reason(err)}",
+        f"Initial refresh failed: {reason}",
         translation_domain=getattr(source, "translation_domain", None),
         translation_key=getattr(source, "translation_key", None),
         translation_placeholders=getattr(source, "translation_placeholders", None),

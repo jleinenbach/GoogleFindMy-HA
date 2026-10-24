@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.googlefindmy.const import (
@@ -336,32 +336,128 @@ async def test_setup_retry_passes_the_placeholders_of_the_cause_on(
     assert str(err) == "Initial refresh failed: HTTP Server Error 500: down"
 
 
+_COLD_START = "Cold start: empty device list; treating as transient."
+_COLD_START_KEY = "cold_start_empty_device_list"
+
+
+def _bare_not_ready_from_own_cause() -> Exception:
+    """Shape of Home Assistant 2025.9.1 and 2026.1.3: bare, cause chained."""
+    return _chained(
+        ConfigEntryNotReady(),
+        UpdateFailed(
+            _COLD_START, translation_domain=DOMAIN, translation_key=_COLD_START_KEY
+        ),
+    )
+
+
+def _own_message_over_keyed_cause() -> Exception:
+    return _chained(
+        ConfigEntryNotReady("not ready yet"),
+        UpdateFailed(
+            _COLD_START, translation_domain=DOMAIN, translation_key=_COLD_START_KEY
+        ),
+    )
+
+
+def _outer_key_over_cause_key() -> Exception:
+    return _chained(
+        ConfigEntryNotReady(
+            translation_domain=DOMAIN, translation_key="locate_not_accepted"
+        ),
+        UpdateFailed(
+            _COLD_START, translation_domain=DOMAIN, translation_key=_COLD_START_KEY
+        ),
+    )
+
+
+def _bare_not_ready_from_foreign_cause() -> Exception:
+    return _chained(
+        ConfigEntryNotReady(),
+        HomeAssistantError(
+            "foreign detail", translation_domain="homeassistant", translation_key="x"
+        ),
+    )
+
+
+def _other_error_from_keyed_cause() -> Exception:
+    return _chained(
+        RuntimeError("boom"),
+        UpdateFailed(
+            _COLD_START, translation_domain=DOMAIN, translation_key=_COLD_START_KEY
+        ),
+    )
+
+
 @pytest.mark.asyncio
-async def test_setup_retry_takes_the_key_from_the_cause_on_older_cores(
+@pytest.mark.parametrize(
+    ("build", "domain", "key", "reason"),
+    [
+        pytest.param(
+            _bare_not_ready_from_own_cause,
+            DOMAIN,
+            _COLD_START_KEY,
+            _COLD_START,
+            id="bare-from-own-cause",
+        ),
+        pytest.param(
+            _own_message_over_keyed_cause,
+            None,
+            None,
+            "not ready yet",
+            id="own-message-keeps-no-key",
+        ),
+        pytest.param(
+            _outer_key_over_cause_key,
+            DOMAIN,
+            "locate_not_accepted",
+            _COLD_START,
+            id="outer-key-wins",
+        ),
+        pytest.param(
+            _bare_not_ready_from_foreign_cause,
+            None,
+            None,
+            "foreign detail",
+            id="foreign-domain-not-taken",
+        ),
+        pytest.param(
+            _other_error_from_keyed_cause,
+            None,
+            None,
+            "boom",
+            id="not-a-not-ready-error",
+        ),
+    ],
+)
+async def test_setup_retry_fields_and_text_share_one_source(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+    caplog: pytest.LogCaptureFixture,
+    build: Callable[[], Exception],
+    domain: str | None,
+    key: str | None,
+    reason: str,
 ) -> None:
-    """Older cores raise a bare ``ConfigEntryNotReady`` from the first refresh.
+    """Translation fields and reason text of the setup retry come from one place.
 
-    Home Assistant 2025.9.1 (the floor in ``hacs.json``) raises
-    ``ConfigEntryNotReady()`` and only sets ``__cause__``; it copies no
-    translation field. The wrapper then takes the fields from the cause, or
-    the card stays untranslated on those versions.
+    Home Assistant 2025.9.1 and 2026.1.3 raise a bare ``ConfigEntryNotReady()``
+    from the first refresh and only chain the ``UpdateFailed`` cause; newer
+    cores copy the translation fields of the cause into it. The wrapper takes
+    the fields from the exception whose text it shows, and from the cause only
+    when that cause belongs to this integration, because the older cores look
+    the key up under the integration's own domain. A key of the outer
+    exception wins over the key of its cause.
     """
 
     del (
         deterministic_config_subentry_id
     )  # fixture side effects patch ensure_config_subentry_id
-    cause_text = "Cold start: empty device list; treating as transient."
+    raised = build()
 
     async def _first_refresh(self) -> None:  # type: ignore[no-untyped-def]
         del self
-        raise ConfigEntryNotReady() from UpdateFailed(
-            cause_text,
-            translation_domain=DOMAIN,
-            translation_key="cold_start_empty_device_list",
-        )
+        raise raised
 
     factory = functools.partial(
         stub_coordinator_factory,
@@ -373,14 +469,19 @@ async def test_setup_retry_takes_the_key_from_the_cause_on_older_cores(
     )
 
     assert await harness.integration.async_setup(harness.hass, {}) is True
-    with pytest.raises(ConfigEntryNotReady) as excinfo:
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(ConfigEntryNotReady) as excinfo,
+    ):
         await harness.integration.async_setup_entry(harness.hass, harness.entry)
 
     err = excinfo.value
-    assert err.translation_domain == DOMAIN
-    assert err.translation_key == "cold_start_empty_device_list"
-    assert err.translation_placeholders is None
-    assert str(err) == f"Initial refresh failed: {cause_text}"
+    assert err.translation_domain == domain
+    assert err.translation_key == key
+    assert str(err) == f"Initial refresh failed: {reason}"
+    logged = _logged_refresh_failures(caplog)
+    assert len(logged) == 1, logged
+    assert logged[0].endswith(f"Initial coordinator refresh failed: {reason}")
 
 
 @pytest.mark.asyncio
