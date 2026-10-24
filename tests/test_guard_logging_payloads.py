@@ -149,8 +149,11 @@ builtins.Exception`, the result of a function this file does not define
 (`exc = _pick(task)`, `kind = _classify(err)`: one file does not show what
 it returns; binding every logged result would report 210 sites in `Auth/`,
 measured on 2026-10-22, none of them a producer's text; a module-local
-helper whose `return` carries a bound exception is followed, see
-`_returning_calls`), a lambda bound to a name and called (`g = lambda:
+helper whose `return` carries a bound exception is followed where its
+result is bound or used in place, see `_returning_calls` and
+`_returned_exception_leaves`, but not where that result is passed on to
+another helper (`show(pick(task))`) or reaches a name through a text
+wrapper (`msg = str(pick(task))`)), a lambda bound to a name and called (`g = lambda:
 str(err); log(g())`), a local annotation with a foreign type whose value is
 the result of such a function (`last: str | ClientError | None =
 _pick(task)`) and a handler name aliased out
@@ -168,10 +171,13 @@ scope), a binding
 in one method read in another (`self.last = err` in `m`, logged in `n`:
 the flow stays inside one function), a `with … as err` whose manager
 this file does not define (what `__enter__` returns is the manager's
-business, not the name's; binding every such target would report 7 sites
-in `Auth/`, measured on 2026-10-22, all HTTP responses of `async with
-session.post(...) as resp`; a module-local generator whose `yield` carries
-a bound exception is followed, see `_yielding_calls`),
+business, not the name's; binding every such target would bind 10 targets
+in `Auth/`, measured on 2026-10-24: six HTTP responses of `async with
+self._session.post(...) as resp`, one `ThreadPoolExecutor` and three files
+from `open`; a module-local generator whose `yield` carries a bound
+exception is followed, see `_yielding_calls`, but not a class this file
+defines with its own `__enter__`, a manager bound to a name before the
+`with` (`cm = held(err)`, then `with cm as e`), or a `yield from`),
 a helper reached otherwise than by its bare name or through `self.`/`cls.`
 (another receiver `self._client.h(err)`, an imported helper: this guard
 parses one file, `functools.partial`, an alias of a function `g = h; g(err)`,
@@ -215,7 +221,11 @@ of the same name. A conditional alias value
 an own exception that subclasses a foreign one (an instance carries the
 text it is built with, and that is read at its constructor; the 27
 constructions of such classes in the package carry none, measured on
-2026-10-22), and every module outside `Auth/`
+2026-10-22), an own exception built from a foreign one that is neither
+raised nor bound to a name that is raised (`return Own(str(err))`,
+`fut.set_exception(Own(str(err)))`: the constructor sink is the one of
+shape (H)), a note added to an exception (`err.add_note(str(other))`), and
+every module outside `Auth/`
 (119 such sites counted on 2026-09-17). Reported although harmless, on purpose:
 a rebinding to a harmless value (`err = "safe"; log(err)`), a
 nested function whose own parameter shadows a bound name (`def inner(err:
@@ -293,8 +303,8 @@ _ROTATING_LEAVES: frozenset[str] = frozenset({"eid", "eid_hex", "truncated_eid_h
 # `Auth/auth_flow.py` is the `ImportError` of the optional selenium import
 # at module level; `missing_browser_dependency` quotes it after the install
 # hint (`browser_deps.py`). Its text comes from the import system and names
-# a module (`No module named 'selenium'`), not a server or a user, and the
-# install hint needs it (shape (I) constructor, 2026-10-23). The prefix keys
+# a module (`No module named 'selenium'`) or, for a broken installation, a
+# path inside it; not a server or a user, and the install hint needs it (shape (I) constructor, 2026-10-23). The prefix keys
 # the exception to that one call; `test_each_reviewed_site_matches_
 # exactly_one_log_call` fails when the site disappears or is copied.
 _REVIEWED: frozenset[tuple[str, str, str]] = frozenset(
@@ -2280,7 +2290,9 @@ def _all_callee_parameters(
     return seeds
 
 
-def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
+def _exception_names_by_call(
+    tree: ast.AST, carrying: set[int] | None = None
+) -> dict[int, tuple[str, ...]]:
     """Map each call to every foreign exception name in scope, `()` if none.
 
     Five bindings, accumulated rather than replaced: every parameter annotated
@@ -2299,6 +2311,9 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
     handler (`logger.exception`, `exc_info=True`) is reported positionally,
     not through this map. Past `_FORWARD_ROUND_LIMIT` rounds every parameter
     of every module-local callee is bound (fail-closed).
+    `carrying`, when given, receives the calls of module-local helpers whose
+    `return` carries at the fixpoint (fail-closed: every such call that returns
+    a value); `_returned_exception_leaves` reads them where no name binds them.
     """
     own = _own_type_names(tree)
     aliases = _import_aliases(tree)
@@ -2326,13 +2341,18 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
             forwarded, returning = seeds, calls
             continue
         if seeds == forwarded and calls == returning:
+            if carrying is not None:
+                carrying.update(returning)
             return names
         forwarded, returning = seeds, calls
+    every_returning = _all_returning_calls(tree, callees)
+    if carrying is not None:
+        carrying.update(every_returning)
     return _names_for_seeds(
         tree,
         _all_callee_parameters(tree, callees),
         context,
-        _all_returning_calls(tree, callees),
+        every_returning,
         yielding=_all_yielding_calls(tree, callees),
     )
 
@@ -2652,6 +2672,39 @@ def _retrieved_exception_leaves(argument: ast.AST) -> list[tuple[str, str]]:
     return []
 
 
+def _returned_exception_leaves(
+    argument: ast.AST, carrying: set[int], bound: tuple[str, ...]
+) -> list[tuple[str, str]]:
+    """Shape (I): the result of a module-local helper whose `return` carries, used in place.
+
+    `_LOGGER.error("%s", pick(task))` has no name to bind; like
+    `task.exception()` passed directly, the call is the leaf, wherever it
+    sits in the argument (`str(pick(task))`, `f"{pick(task)}"`,
+    `pick(task).args`, `pick(task) or None`). Not reported: the call inside a
+    safe wrapper, under a code attribute (`pick(task).errno`), and a call
+    whose own arguments carry a bound name (the name is the leaf already).
+    """
+    cleared: set[int] = set()
+    for node in ast.walk(argument):
+        if isinstance(node, ast.Call):
+            chain = _chain(node.func)
+            if chain and chain[0] in _SAFE_EXCEPTION_WRAPPERS:
+                for inner in node.args:
+                    cleared.update(id(n) for n in ast.walk(inner))
+        elif isinstance(node, ast.Attribute) and node.attr in _SAFE_EXCEPTION_ATTRS:
+            cleared.add(id(node.value))
+    names = frozenset(bound)
+    for node in ast.walk(argument):
+        if (
+            isinstance(node, ast.Call)
+            and id(node) in carrying
+            and id(node) not in cleared
+            and not _mentions_exception(node, names)
+        ):
+            return [("I", f"{ast.unparse(node.func)}()")]
+    return []
+
+
 def _is_exception_constructor(
     value: ast.AST, targets: list[ast.expr], raised_names: set[str]
 ) -> bool:
@@ -2703,7 +2756,8 @@ def _scan_tree(
                             aliases_by_call.get(id(inner), frozenset()) | aliases
                         )
     in_scope_for_i = relative.startswith(_SHAPE_I_ROOT)
-    exception_names = _exception_names_by_call(tree) if in_scope_for_i else {}
+    carrying: set[int] = set()
+    exception_names = _exception_names_by_call(tree, carrying) if in_scope_for_i else {}
     raised_names = {
         node.exc.id
         for node in ast.walk(tree)
@@ -2791,6 +2845,11 @@ def _scan_tree(
                 ),
                 *(
                     _retrieved_exception_leaves(argument)
+                    if in_scope_for_i and id(argument) not in traceback_args
+                    else []
+                ),
+                *(
+                    _returned_exception_leaves(argument, carrying, bound_names)
                     if in_scope_for_i and id(argument) not in traceback_args
                     else []
                 ),
@@ -5195,6 +5254,23 @@ def f13b(err: ClientError) -> None:
 
 def kind_helper(kind) -> None:
     _LOGGER.error("x %s", kind)
+
+
+def spread_sink(a, b, c) -> None:
+    _LOGGER.error("x %s", c)
+
+
+def f14(err: ClientError) -> None:
+    spread_sink(1, *[err])
+
+
+class Box:
+    def method_sink(self, value) -> None:
+        _LOGGER.error("x %s", value)
+
+
+def f15(err: ClientError) -> None:
+    method_sink(1, err)
 """
 
 
@@ -5225,7 +5301,10 @@ def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
     `Client.remote`), a helper given another function's result (line 236,
     `_classify(err)`: a result is not knowable from the name) and an imported
     helper (`imported_helper`, this guard
-    reads one file). The same fixture outside `Auth/` reports nothing.
+    reads one file). A starred argument in the middle of a call binds its
+    slot and every positional slot after it (line 240), and a bare name never
+    reaches a method of the same name (line 249 stays silent). The same
+    fixture outside `Auth/` reports nothing.
     """
     tree = ast.parse(_SHAPE_I_FORWARD_FIXTURE)
     offenders, _ = _scan_tree(tree, "Auth/fixture.py")
@@ -5254,6 +5333,7 @@ def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
         (216, "v"),
         (220, "v"),
         (224, "v"),
+        (240, "c"),
     ]
     outside, _ = _scan_tree(tree, "coordinator/fixture.py")
     assert outside == []
@@ -5480,6 +5560,17 @@ def second(task):
 def start(task) -> None:
     err = second(task)
     _LOGGER.error("x %s", err)
+    _LOGGER.error("x %s", second(task))
+
+
+def describe_exception(task):
+    return task.exception()
+
+
+def quiet(task) -> None:
+    kind = describe_exception(task)
+    _LOGGER.error("x %s", kind)
+    _LOGGER.error("x %s", describe_exception(task))
 """
 
 
@@ -5490,12 +5581,130 @@ def test_shape_i_helper_results_stop_fail_closed_at_the_round_limit(
 
     `second` returns a result only once `first` is known to, one round later;
     with the limit at one the fixpoint stops before, and the fail-closed
-    branch still reports line 12.
+    branch still reports line 12 and the result used in place (line 13). A
+    local function named like a safe wrapper (`describe_exception`) stays
+    out of the fail-closed branch too.
     """
     monkeypatch.setitem(globals(), "_FORWARD_ROUND_LIMIT", 1)
     tree = ast.parse(_SHAPE_I_RESULT_LIMIT_FIXTURE)
     offenders, _ = _scan_tree(tree, "Auth/fixture.py")
-    assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [(12, "err")]
+    assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [
+        (12, "err"),
+        (13, "second()"),
+    ]
+
+
+_SHAPE_I_RESULT_INPLACE_FIXTURE = """
+import logging
+from aiohttp import ClientError
+from .helpers import imported_pick
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class OwnError(Exception):
+    pass
+
+
+def pick(task):
+    return task.exception()
+
+
+async def apick(task):
+    return task.exception()
+
+
+def tell(task):
+    return "fixed"
+
+
+def f01(task) -> None:
+    _LOGGER.error("x %s", pick(task))
+
+
+def f02(task) -> None:
+    _LOGGER.error("x %s", str(pick(task)))
+
+
+def f03(task) -> None:
+    _LOGGER.error(f"x {pick(task)}")
+
+
+def f04(task) -> None:
+    _LOGGER.error("x %s", pick(task).args)
+
+
+async def f05(task) -> None:
+    _LOGGER.error("x %s", await apick(task))
+
+
+def f06(task) -> None:
+    raise OwnError(str(pick(task)))
+
+
+class Holder:
+    def pick(self, task):
+        return task.exception()
+
+    def f07(self, task) -> None:
+        _LOGGER.error("x %s", self.pick(task))
+
+
+def f08(task) -> None:
+    _LOGGER.error("x %s", pick(task) or None, pick(task)[0])
+
+
+def f09(task) -> None:
+    _LOGGER.error("x %s", pick(task).errno)
+
+
+def f10(task) -> None:
+    _LOGGER.error("x %s", describe_exception(pick(task)))
+
+
+def f11(task) -> None:
+    _LOGGER.error("x %s", tell(task))
+
+
+def f12(task) -> None:
+    _LOGGER.error("x %s", imported_pick(task))
+
+
+def f13(err: ClientError) -> None:
+    _LOGGER.error("x %s", pick(err))
+"""
+
+
+def test_shape_i_reports_helper_results_used_in_place() -> None:
+    """A module-local helper whose `return` carries is reported where its result is used.
+
+    `_LOGGER.error("%s", pick(task))` has no name to bind; the call itself is
+    the leaf, like `task.exception()` passed directly. Reported: the bare
+    result (line 26), `str()` around it (line 30), an f-string (line
+    34), `.args` (line 38), behind `await` (line 42), in the constructor of an
+    own exception (line 46), a method called through `self` (line 54), and `or`
+    or a subscript around it (line 58, one leaf per line). Not reported: a code
+    attribute (`.errno`, line 62), the result inside a safe wrapper (line
+    66), a helper that returns a constant (line 70), and a function this
+    file does not define (line 74). A call whose own argument is a bound name
+    reports the name, not the call a second time (line 78). The same fixture
+    outside `Auth/` reports nothing.
+    """
+    tree = ast.parse(_SHAPE_I_RESULT_INPLACE_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    assert sorted((line, leaf) for _, line, leaf, _ in offenders) == [
+        (26, "pick()"),
+        (30, "pick()"),
+        (34, "pick()"),
+        (38, "pick()"),
+        (42, "apick()"),
+        (46, "pick()"),
+        (54, "self.pick()"),
+        (58, "pick()"),
+        (78, "err"),
+    ]
+    outside, _ = _scan_tree(tree, "coordinator/fixture.py")
+    assert outside == []
 
 
 _SHAPE_I_CONSTRUCTOR_FIXTURE = """
