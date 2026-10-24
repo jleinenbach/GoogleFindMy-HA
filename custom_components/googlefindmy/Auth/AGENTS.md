@@ -225,11 +225,16 @@ annotation names the type outright or reaches it
 the guard resolves it before it classifies. Inside a handler the same holds for
 the handler name (`except OSError as exc: text = str(exc)` binds `text`
 there). The guard's module docstring lists the forms it does not follow
-(a helper's return value, a lambda, a handler name aliased out of its
-handler and narrowed before the log call, `with ... as`); those remain a
-review matter, not a guard one.
+(the result of a helper of this module beyond the whole assignment
+`e = pick(task)` and the call inside the log arguments, any helper's
+result defined elsewhere, a lambda, a handler name aliased out of its
+handler and narrowed before the log call, `with ... as` on a manager this
+module does not define as a generator, a generator consumed by `for`);
+those remain a review matter, not a guard one.
 `tests/test_guard_logging_payloads.py` (shape (I)) fails the suite
-on a bare exception in such a record under `Auth/`, and on any `exc_info=`
+on a bare exception in such a record under `Auth/`, on an own exception
+constructed from one (`raise OwnError(str(err)) from err`: its message is
+logged one hop later), and on any `exc_info=`
 value other than `False`/`None` or any `logger.exception(...)` under `Auth/`,
 whatever the handler. A record whose value only looks like exception text
 (the key of a `KeyError` raised by a literal lookup on the package's own

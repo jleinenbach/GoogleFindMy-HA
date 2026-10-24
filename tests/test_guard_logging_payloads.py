@@ -149,11 +149,17 @@ builtins.Exception`, the result of a function this file does not define
 (`exc = _pick(task)`, `kind = _classify(err)`: one file does not show what
 it returns; binding every logged result would report 210 sites in `Auth/`,
 measured on 2026-10-22, none of them a producer's text; a module-local
-helper whose `return` carries a bound exception is followed where its
-result is bound or used in place, see `_returning_calls` and
-`_returned_exception_leaves`, but not where that result is passed on to
-another helper (`show(pick(task))`) or reaches a name through a text
-wrapper (`msg = str(pick(task))`)), a lambda bound to a name and called (`g = lambda:
+helper whose `return` carries a bound exception is followed in two places
+only, see `_returning_calls` and `_returned_exception_leaves`: assigned
+whole to a name (`e = pick(task)`, also behind `await`) and inside a log
+call's argument (`_LOGGER.error("%s", pick(task))`, also in `str()`, an
+f-string or `.args`); every other derivation of that result is not
+followed, measured on 2026-10-24: `e = pick(task) or 'none'`, a
+conditional, a tuple (`e, n = pick(task), 0`), `d.get(k, pick(task))`,
+`msg += str(pick(task))`, a text wrapper into a name (`msg =
+str(pick(task))`), `errs.append(pick(task))`, `for e in [pick(task)]`, and
+the result passed on to another helper that logs it (`show(pick(task))`)),
+a lambda bound to a name and called (`g = lambda:
 str(err); log(g())`), a local annotation with a foreign type whose value is
 the result of such a function (`last: str | ClientError | None =
 _pick(task)`) and a handler name aliased out
@@ -175,13 +181,16 @@ business, not the name's; binding every such target would bind 10 targets
 in `Auth/`, measured on 2026-10-24: six HTTP responses of `async with
 self._session.post(...) as resp`, one `ThreadPoolExecutor` and three files
 from `open`; a module-local generator whose `yield` carries a bound
-exception is followed, see `_yielding_calls`, but not a class this file
+exception is followed as the manager of a `with`, see `_yielding_calls`,
+but not when iterated (`for e in gen(task)`), not a class this file
 defines with its own `__enter__`, a manager bound to a name before the
 `with` (`cm = held(err)`, then `with cm as e`), or a `yield from`),
 a helper reached otherwise than by its bare name or through `self.`/`cls.`
 (another receiver `self._client.h(err)`, an imported helper: this guard
 parses one file, `functools.partial`, an alias of a function `g = h; g(err)`,
-a lambda, a `getattr` dispatch), an alias
+a lambda, a `getattr` dispatch, a hand-off to a callback or an executor:
+`hass.async_add_executor_job(h, err)`, `loop.run_in_executor(None, h,
+err)`), an alias
 resolved to a symbol without a suffix in a module that cannot be imported
 (`from mylib import Result as ClientError`: the symbol's name decides, not
 the alias's, and `mylib` cannot be asked),
@@ -2064,7 +2073,8 @@ def _flow_bound_names(
     report all three. An assignment, annotated assignment or walrus whose
     value (behind `await`) is a call in `returning` binds its target as a
     whole: the call reaches a module-local helper whose `return` carries a
-    bound exception (`_returning_calls`). A `with` or `async with` item
+    bound exception (`_returning_calls`); a value that only contains such a
+    call (`pick(task) or 'none'`) binds nothing. A `with` or `async with` item
     whose manager is a call in `yielding` binds its `as`
     target the same way: the manager is a module-local generator whose
     `yield` carries a bound exception (`_yielding_calls`).
@@ -2151,7 +2161,7 @@ def _flow_bound_names(
 # of every module-local callee is bound (fail-closed). A chain needs one round
 # per hop plus one to confirm; measured on 2026-10-24, with helper results
 # and manager yields in the fixpoint, every `Auth/` module settles within
-# three rounds (two of twenty need the third).
+# three rounds (two of the nineteen scanned modules need the third).
 _FORWARD_ROUND_LIMIT = 64
 _RECEIVERS = frozenset({"self", "cls"})
 
@@ -2239,7 +2249,10 @@ def _forwarded_parameter_seeds(
             args = callee.args
             positional = [*args.posonlyargs, *args.args][skip:]
             variadic = [args.vararg.arg] if args.vararg else []
-            keyword = {p.arg for p in [*args.args[skip:], *args.kwonlyargs]}
+            # The receiver may be positional-only (`def h(self, /, v)`):
+            # skip it in the joint list, not in `args.args`.
+            keyword = {p.arg for p in [*positional, *args.kwonlyargs]}
+            keyword -= {p.arg for p in args.posonlyargs}
             spread = False
             hit: set[str] = set()
             for index, argument in enumerate(call.args):
@@ -5271,6 +5284,14 @@ class Box:
 
 def f15(err: ClientError) -> None:
     method_sink(1, err)
+
+
+class Slash:
+    def slash_sink(self, /, v) -> None:
+        _LOGGER.error("x %s", v)
+
+    def f16(self, err: ClientError) -> None:
+        self.slash_sink(v=err)
 """
 
 
@@ -5303,7 +5324,9 @@ def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
     helper (`imported_helper`, this guard
     reads one file). A starred argument in the middle of a call binds its
     slot and every positional slot after it (line 240), and a bare name never
-    reaches a method of the same name (line 249 stays silent). The same
+    reaches a method of the same name (line 249 stays silent). A receiver
+    declared positional-only (`def slash_sink(self, /, v)`) leaves `v`
+    reachable by keyword (line 258). The same
     fixture outside `Auth/` reports nothing.
     """
     tree = ast.parse(_SHAPE_I_FORWARD_FIXTURE)
@@ -5334,6 +5357,7 @@ def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
         (220, "v"),
         (224, "v"),
         (240, "c"),
+        (258, "v"),
     ]
     outside, _ = _scan_tree(tree, "coordinator/fixture.py")
     assert outside == []
