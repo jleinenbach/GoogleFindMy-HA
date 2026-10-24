@@ -413,7 +413,10 @@ are installed. **Review this checklist on every single change under
     `HomeAssistantError`, `UpdateFailed` and `ConfigEntryNotReady` from the
     `conftest` stubs and from the core and compares the stored
     `translation_domain`, `translation_key`, `translation_placeholders` and
-    `retry_after` plus `str()`: a text argument wins, a key without text
+    `retry_after` plus `str()`. Features an older core lacks (`retry_after`
+    before 2026.1.3, class defaults of the translation fields before
+    2026.9.3, as measured) are skipped with a reason there and fail on any
+    core from that version on. A text argument wins, a key without text
     renders the raw key (the core's result when no translation is cached),
     and `ConfigEntryNotReady` without text falls back to `str(__cause__)`.
     The stub `UpdateFailed` derives from the stub `HomeAssistantError` as in
