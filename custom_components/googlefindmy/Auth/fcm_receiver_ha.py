@@ -2196,8 +2196,14 @@ class FcmReceiverHA:
             if entry_cache is not None:
                 try:
                     await entry_cache.set("fcm_credentials", creds)
-                except Exception:
-                    pass
+                except Exception as err:  # noqa: BLE001 - logged, never raised
+                    _LOGGER.warning(
+                        "[entry=%s] Failed to save the invalidated FCM "
+                        "registration to the entry cache; a restart may reuse "
+                        "the stale tokens: %s",
+                        entry_id,
+                        describe_exception(err),
+                    )
 
     @staticmethod
     def _raise_if_fatal_client_error(entry_id: str, err: ClientError) -> None:
