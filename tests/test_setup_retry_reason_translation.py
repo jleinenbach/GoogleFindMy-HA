@@ -181,6 +181,18 @@ def _has_reason_domain(entry: Any) -> bool:
     return False
 
 
+async def test_missing_reason_domain_fails_from_its_anchor_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A core from the anchor on without the field fails; an older one passes."""
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "version", lambda _name: REASON_DOMAIN_SINCE)
+    with pytest.raises(AssertionError, match="error_reason_translation_domain"):
+        _has_reason_domain(object())
+    monkeypatch.setattr(module, "version", lambda _name: "2026.1.3")
+    assert _has_reason_domain(object()) is False
+
+
 async def test_setup_retry_carries_the_translation_key_of_the_cause(
     hass: HomeAssistant,
     ha_common: ModuleType,

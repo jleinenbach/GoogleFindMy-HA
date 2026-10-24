@@ -32,6 +32,7 @@ shows the raw key in the stub world as well, and its test fails.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
@@ -99,6 +100,30 @@ def _require_core_feature(present: bool, feature: str, since: str) -> None:
         f"{feature} is missing on core {installed}, measured present on {since}"
     )
     pytest.skip(f"core {installed} predates {feature} (measured present on {since})")
+
+
+def test_missing_feature_fails_from_its_anchor_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A core at or above the anchor that lacks the feature fails, not skips."""
+    monkeypatch.setattr(sys.modules[__name__], "version", lambda _name: "2026.1.3")
+    try:
+        _require_core_feature(False, "probe", "2026.1.3")
+    except pytest.skip.Exception:
+        pytest.fail("a core at the anchor without the feature was skipped")
+    except AssertionError as err:
+        assert "measured present on 2026.1.3" in str(err)
+    else:
+        pytest.fail("a core at the anchor without the feature passed")
+
+
+def test_missing_feature_is_skipped_below_its_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A core below the anchor that lacks the feature is skipped with a reason."""
+    monkeypatch.setattr(sys.modules[__name__], "version", lambda _name: "2025.9.1")
+    with pytest.raises(pytest.skip.Exception, match="predates probe"):
+        _require_core_feature(False, "probe", "2026.1.3")
 
 
 def _stub_classes() -> tuple[type[Any], type[Any], type[Any]]:
