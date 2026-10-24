@@ -10,26 +10,39 @@ the rest of the suite:
   ``fcm_credentials`` out of it silenced the receiver's own write, but it also
   hid a user import that changes only that member until the next restart. A
   receiver self-write is told apart by a one-shot receipt (``entry_self_write``)
-  instead. This guard fails when the fingerprint filters a member again or stops
-  covering the secrets bundle.
+  instead.
 * **R1, detached copies** (``Auth/AGENTS.md``, "Credential ownership across
   receiver, cache and entry"). The receiver edits its registration in place, so a
   registration it hands to ``entry.data`` must be a deep copy; a shared container
-  would rewrite the entry behind Home Assistant's back. This guard fails when a
-  write of ``fcm_credentials`` in ``Auth/fcm_receiver_ha.py`` takes a value that
-  is not produced by ``copy.deepcopy``.
+  would rewrite the entry behind Home Assistant's back.
 
-Why ``ast`` and a behaviour probe side by side: the behaviour probe pins today's
-key set, but a filter keyed on a different member would pass it; the structural
-check names the shape (a filtering comprehension, a member literal) whatever the
-member is.
+Both checks are closed against the grammar rather than against the forms seen so
+far, and fail on anything they cannot classify:
 
-Detection limits, stated rather than implied. The copy check follows a value
-through local names bound in the same function, nothing further: a value
-returned by a helper, an attribute, or a name bound by a loop or ``with`` counts
-as not detached and fails, which is the safe direction. Writes of
-``fcm_credentials`` outside the receiver (the config flow, ``TokenCache``) are
-out of scope; ``tests/test_token_cache_value_isolation.py`` covers the cache.
+* The fingerprint body may only call the functions on ``_FINGERPRINT_CALLS`` and
+  may not delete, filter in a comprehension, assign into a subscript or name the
+  member. A filter written as ``del``, ``pop``, a helper call or a delegation
+  therefore fails as an unknown call or statement. A behaviour probe pins that
+  every credential key and every sampled bundle member moves the fingerprint.
+* Every occurrence of the member key in ``Auth/fcm_receiver_ha.py`` (string
+  constant, module constant bound to it, or keyword argument) is classified as a
+  read (``.get`` argument, ``in`` test, subscript load), a token cache write
+  (``<...cache>.set``, isolated by ``TokenCache`` itself and pinned in
+  ``tests/test_token_cache_value_isolation.py``), or a mapping write (subscript
+  store, dict display key, keyword argument). A mapping write must take a
+  detached value; any other occurrence fails as unclassified.
+* A value is detached when it is a ``copy.deepcopy(...)`` call, or a local name
+  every binding of which in the enclosing function is a plain assignment of such
+  a call. Every binding form of the grammar counts (assignment and unpacking
+  targets, augmented and annotated assignment, walrus, loop, ``with`` and
+  comprehension targets, parameters, ``except ... as``, ``match`` captures,
+  imports, ``global``/``nonlocal``, nested definitions); any but the plain
+  deepcopy assignment fails.
+
+Detection limits, stated rather than implied. A key built at runtime (string
+concatenation, a constant imported from another module) is not recognised as the
+member. Writes of the member outside the receiver (the config flow,
+``TokenCache``) are out of scope.
 """
 
 from __future__ import annotations
@@ -42,6 +55,19 @@ _INTEGRATION = _REPO_ROOT / "custom_components" / "googlefindmy"
 _INIT = _INTEGRATION / "__init__.py"
 _RECEIVER = _INTEGRATION / "Auth" / "fcm_receiver_ha.py"
 _MEMBER = "fcm_credentials"
+
+#: Calls ``_credential_fingerprint`` may make, as ``ast.unparse`` of the callee.
+#: Anything else (a helper, ``pop``, ``filter``) could drop a member.
+_FINGERPRINT_CALLS = frozenset(
+    {
+        "isinstance",
+        "json.dumps",
+        "hashlib.sha256",
+        "material.encode",
+        "hashlib.sha256(material.encode('utf-8')).hexdigest",
+        "container.get",
+    }
+)
 
 
 def _parse(path: pathlib.Path) -> ast.Module:
@@ -60,11 +86,12 @@ def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
 
 def _credential_keys(tree: ast.Module) -> list[str]:
     for node in tree.body:
-        target = None
         if isinstance(node, ast.AnnAssign):
             target, value = node.target, node.value
         elif isinstance(node, ast.Assign) and len(node.targets) == 1:
             target, value = node.targets[0], node.value
+        else:
+            continue
         if isinstance(target, ast.Name) and target.id == "_CREDENTIAL_KEYS":
             assert isinstance(value, ast.Tuple | ast.List), "unexpected shape"
             return [ast.unparse(element) for element in value.elts]
@@ -75,23 +102,23 @@ def test_the_fingerprint_filters_no_member() -> None:
     """R2: ``_credential_fingerprint`` hashes every credential key in full."""
 
     function = _function(_parse(_INIT), "_credential_fingerprint")
-    filters = [
-        ast.unparse(node)
-        for node in ast.walk(function)
-        if isinstance(node, ast.comprehension) and node.ifs
-    ]
-    assert not filters, (
-        "_credential_fingerprint filters a member; tell a writer apart by a "
-        f"receipt (entry_self_write) instead: {filters}"
-    )
-    literals = [
-        node.lineno
-        for node in ast.walk(function)
-        if isinstance(node, ast.Constant) and node.value == _MEMBER
-    ]
-    assert not literals, (
-        f"_credential_fingerprint names {_MEMBER!r} (lines {literals}); the "
-        "full fingerprint must not single out a member"
+    problems: list[str] = []
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call):
+            callee = ast.unparse(node.func)
+            if callee not in _FINGERPRINT_CALLS:
+                problems.append(f"line {node.lineno}: call {callee}")
+        elif isinstance(node, ast.comprehension) and node.ifs:
+            problems.append(f"line {node.lineno}: filtering comprehension")
+        elif isinstance(node, ast.Delete):
+            problems.append(f"line {node.lineno}: del")
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+            problems.append(f"line {node.lineno}: subscript assignment")
+        elif isinstance(node, ast.Constant) and node.value == _MEMBER:
+            problems.append(f"line {node.lineno}: names {_MEMBER!r}")
+    assert not problems, (
+        "_credential_fingerprint may drop a member; tell a writer apart by a "
+        f"receipt (entry_self_write) instead: {problems}"
     )
 
 
@@ -101,15 +128,32 @@ def test_the_fingerprint_covers_the_secrets_bundle() -> None:
     assert "DATA_SECRET_BUNDLE" in _credential_keys(_parse(_INIT))
 
 
-def test_a_registration_change_alone_moves_the_fingerprint() -> None:
-    """R2, behaviour: a change of only the bundle's registration is visible."""
+def test_every_credential_key_and_bundle_member_moves_the_fingerprint() -> None:
+    """R2, behaviour: a change of any single key or bundle member is visible."""
 
-    from custom_components.googlefindmy import _credential_fingerprint
+    from custom_components.googlefindmy import (
+        _CREDENTIAL_KEYS,
+        _credential_fingerprint,
+    )
     from custom_components.googlefindmy.const import DATA_SECRET_BUNDLE
 
-    before = {DATA_SECRET_BUNDLE: {"username": "u", _MEMBER: {"gcm": {"a": 1}}}}
-    after = {DATA_SECRET_BUNDLE: {"username": "u", _MEMBER: {"gcm": {"a": 2}}}}
-    assert _credential_fingerprint(before) != _credential_fingerprint(after)
+    bundle = {
+        "username": "u",
+        _MEMBER: {"gcm": {"a": 1}},
+        "owner_key": "k",
+        "shared_key": "s",
+    }
+    base = {key: "v" for key in _CREDENTIAL_KEYS}
+    base[DATA_SECRET_BUNDLE] = bundle
+    reference = _credential_fingerprint(base)
+    for key in _CREDENTIAL_KEYS:
+        if key == DATA_SECRET_BUNDLE:
+            continue
+        changed = {**base, key: "w"}
+        assert _credential_fingerprint(changed) != reference, key
+    for member in bundle:
+        changed = {**base, DATA_SECRET_BUNDLE: {**bundle, member: "changed"}}
+        assert _credential_fingerprint(changed) != reference, member
 
 
 def _is_deepcopy(node: ast.AST) -> bool:
@@ -122,91 +166,195 @@ def _is_deepcopy(node: ast.AST) -> bool:
     )
 
 
-def _bindings(function: ast.AST, name: str) -> list[ast.AST]:
-    """Every binding of ``name`` in ``function``.
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
 
-    A plain ``name = value`` contributes its value. Any other binding (an
-    unpacking, an augmented or annotated assignment, a loop or ``with`` target,
-    a parameter, a walrus) contributes the binding node itself, which is never a
-    ``copy.deepcopy`` call and therefore fails the check: not followed means not
-    shown to be detached.
-    """
 
-    bound: list[ast.AST] = []
+def _binding_sites(function: ast.AST, name: str) -> list[ast.AST]:
+    """Every node in ``function`` that binds ``name``, in any grammar form."""
+
+    sites: list[ast.AST] = []
     for node in ast.walk(function):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    if target.id == name:
-                        bound.append(node.value)
-                elif _binds(target, name):
-                    bound.append(node)
-        elif isinstance(node, ast.AugAssign | ast.AnnAssign | ast.NamedExpr):
-            if _binds(node.target, name):
-                bound.append(node)
-        elif isinstance(node, ast.For | ast.AsyncFor):
-            if _binds(node.target, name):
-                bound.append(node)
-        elif isinstance(node, ast.withitem):
-            if node.optional_vars is not None and _binds(node.optional_vars, name):
-                bound.append(node)
+        if isinstance(node, ast.Name) and node.id == name:
+            if isinstance(node.ctx, ast.Store | ast.Del):
+                sites.append(node)
         elif isinstance(node, ast.arg) and node.arg == name:
-            bound.append(node)
-    return bound
+            sites.append(node)
+        elif isinstance(node, ast.ExceptHandler) and node.name == name:
+            sites.append(node)
+        elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name == name:
+            sites.append(node)
+        elif isinstance(node, ast.MatchMapping) and node.rest == name:
+            sites.append(node)
+        elif isinstance(node, ast.alias):
+            if (node.asname or node.name.split(".")[0]) == name:
+                sites.append(node)
+        elif isinstance(node, ast.Global | ast.Nonlocal) and name in node.names:
+            sites.append(node)
+        elif (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+            and node is not function
+            and node.name == name
+        ):
+            sites.append(node)
+    return sites
 
 
-def _binds(target: ast.AST, name: str) -> bool:
-    """Whether an assignment target binds ``name`` (subscripts do not)."""
-
-    if isinstance(target, ast.Name):
-        return target.id == name
-    if isinstance(target, ast.Tuple | ast.List | ast.Starred):
-        children = (
-            target.elts if isinstance(target, ast.Tuple | ast.List) else [target.value]
-        )
-        return any(_binds(child, name) for child in children)
-    return False
-
-
-def _is_detached(value: ast.AST, function: ast.AST) -> bool:
+def _is_detached(
+    value: ast.AST, function: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> bool:
     if _is_deepcopy(value):
         return True
-    if isinstance(value, ast.Name):
-        bound = _bindings(function, value.id)
-        return bool(bound) and all(_is_deepcopy(node) for node in bound)
-    return False
+    if not isinstance(value, ast.Name):
+        return False
+    sites = _binding_sites(function, value.id)
+    if not sites:
+        return False
+    for site in sites:
+        statement = parents.get(site)
+        if not (
+            isinstance(site, ast.Name)
+            and isinstance(site.ctx, ast.Store)
+            and isinstance(statement, ast.Assign)
+            and site in statement.targets
+            and _is_deepcopy(statement.value)
+        ):
+            return False
+    return True
 
 
-def _member_writes(tree: ast.Module) -> list[tuple[ast.AST, ast.Assign]]:
-    writes: list[tuple[ast.AST, ast.Assign]] = []
-    for function in ast.walk(tree):
-        if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        for node in ast.walk(function):
-            if not isinstance(node, ast.Assign):
+def _member_names(tree: ast.Module) -> set[str]:
+    """Module-level names bound to the member key, used as a key elsewhere."""
+
+    names: set[str] = set()
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        if isinstance(value, ast.Constant) and value.value == _MEMBER:
+            names.update(t.id for t in targets if isinstance(t, ast.Name))
+    return names
+
+
+def _is_member_key(node: ast.AST, names: set[str]) -> bool:
+    if isinstance(node, ast.Constant):
+        return node.value == _MEMBER
+    return isinstance(node, ast.Name) and node.id in names
+
+
+def _enclosing_function(
+    node: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> ast.AST | None:
+    current = parents.get(node)
+    while current is not None and not isinstance(
+        current, ast.FunctionDef | ast.AsyncFunctionDef
+    ):
+        current = parents.get(current)
+    return current
+
+
+def _classify_subscript(
+    parent: ast.Subscript, parents: dict[ast.AST, ast.AST]
+) -> tuple[str, ast.AST | None]:
+    """Classify the member key used as the index of ``parent``."""
+
+    if isinstance(parent.ctx, ast.Load):
+        return "read", None
+    statement = parents.get(parent)
+    if isinstance(statement, ast.Assign) and parent in statement.targets:
+        return "mapping write", statement.value
+    if isinstance(statement, ast.AnnAssign) and statement.target is parent:
+        return "mapping write", statement.value
+    return "unclassified", None
+
+
+def _classify_call_argument(parent: ast.Call) -> str:
+    """Classify the member key passed as the first argument of ``parent``."""
+
+    callee = parent.func
+    if isinstance(callee, ast.Attribute):
+        if callee.attr == "get":
+            return "read"
+        if callee.attr == "set" and ast.unparse(callee.value).endswith("cache"):
+            return "cache write"
+    return "unclassified"
+
+
+def _classify(
+    node: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> tuple[str, ast.AST | None]:
+    """Return ``(kind, written value)`` for one occurrence of the member key."""
+
+    parent = parents.get(node)
+    kind: tuple[str, ast.AST | None] = ("unclassified", None)
+    if isinstance(node, ast.keyword):
+        kind = ("mapping write", node.value)
+    elif isinstance(parent, ast.Subscript) and node is parent.slice:
+        kind = _classify_subscript(parent, parents)
+    elif isinstance(parent, ast.Dict) and node in parent.keys:
+        kind = ("mapping write", parent.values[parent.keys.index(node)])  # type: ignore[arg-type]
+    elif isinstance(parent, ast.Compare) and node is parent.left:
+        if all(isinstance(op, ast.In | ast.NotIn) for op in parent.ops):
+            kind = ("read", None)
+    elif isinstance(parent, ast.Call) and parent.args and parent.args[0] is node:
+        kind = (_classify_call_argument(parent), None)
+    elif isinstance(parent, ast.Assign | ast.AnnAssign):
+        if _enclosing_function(node, parents) is None:
+            kind = ("module constant", None)
+    return kind
+
+
+def _occurrences(tree: ast.Module) -> list[ast.AST]:
+    names = _member_names(tree)
+    found: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg == _MEMBER:
+            found.append(node)
+        elif isinstance(node, ast.Constant | ast.Name) and _is_member_key(node, names):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
                 continue
-            for target in node.targets:
-                if (
-                    isinstance(target, ast.Subscript)
-                    and isinstance(target.slice, ast.Constant)
-                    and target.slice.value == _MEMBER
-                ):
-                    writes.append((function, node))
-    return writes
+            found.append(node)
+    return found
 
 
 def test_every_receiver_write_of_the_registration_is_a_deep_copy() -> None:
     """R1: ``fcm_credentials`` written by the receiver is never shared state."""
 
-    writes = _member_writes(_parse(_RECEIVER))
-    # Two today: the bundle member and the top-level copy. An empty scan would
-    # pass the loop below silently.
-    assert len(writes) >= 2, f"expected the receiver writes, found {len(writes)}"
-    shared = [
-        f"line {node.lineno}: {ast.unparse(node)}"
-        for function, node in writes
-        if not _is_detached(node.value, function)
+    tree = _parse(_RECEIVER)
+    parents = _parents(tree)
+    occurrences = _occurrences(tree)
+    kinds = [_classify(node, parents) for node in occurrences]
+    writes = [
+        (node, value)
+        for node, (kind, value) in zip(occurrences, kinds, strict=True)
+        if kind == "mapping write"
     ]
+    # Two today: the bundle member and the top-level copy. An empty scan would
+    # pass the checks below silently.
+    assert len(writes) >= 2, f"expected the receiver writes, found {len(writes)}"
+    unclassified = [
+        f"line {node.lineno}: {ast.unparse(parents.get(node, node))}"
+        for node, (kind, _value) in zip(occurrences, kinds, strict=True)
+        if kind == "unclassified"
+    ]
+    assert not unclassified, (
+        f"unclassified use of {_MEMBER!r}; extend the guard deliberately: "
+        f"{unclassified}"
+    )
+    shared = []
+    for node, value in writes:
+        function = _enclosing_function(node, parents)
+        if (
+            value is None
+            or function is None
+            or not _is_detached(value, function, parents)
+        ):
+            shared.append(f"line {node.lineno}: {ast.unparse(parents.get(node, node))}")
     assert not shared, (
         "the receiver hands the entry a registration that is not a deep copy "
         f"(Auth/AGENTS.md, 'Detached copies'): {shared}"
