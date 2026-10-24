@@ -8064,10 +8064,10 @@ def _initial_refresh_not_ready(err: BaseException) -> ConfigEntryNotReady:
     ``ConfigEntryNotReady``. Newer cores copy those fields from the
     ``UpdateFailed`` cause into the ``ConfigEntryNotReady`` they raise; older
     ones (2025.9.1 and 2026.1.3 measured) raise it bare and only chain the
-    cause. The fields therefore come from the exception whose text is shown
-    (see ``_initial_refresh_reason``): a key of the outer exception wins, and
-    the cause supplies the fields only when it belongs to this integration,
-    because the older cores look the key up under the integration's domain.
+    cause. A key of the outer exception wins; without one the fields come
+    from the exception whose text is shown (see ``_initial_refresh_reason``),
+    and from the cause only when it belongs to this integration, because the
+    older cores look the key up under the integration's domain.
     """
 
     reason = _initial_refresh_reason(err)

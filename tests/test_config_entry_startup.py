@@ -350,6 +350,18 @@ def _bare_not_ready_from_own_cause() -> Exception:
     )
 
 
+def _bare_not_ready_from_own_cause_with_placeholders() -> Exception:
+    return _chained(
+        ConfigEntryNotReady(),
+        UpdateFailed(
+            "HTTP Server Error 500: down",
+            translation_domain=DOMAIN,
+            translation_key="device_list_server_error",
+            translation_placeholders={"status": "500"},
+        ),
+    )
+
+
 def _own_message_over_keyed_cause() -> Exception:
     return _chained(
         ConfigEntryNotReady("not ready yet"),
@@ -390,17 +402,27 @@ def _other_error_from_keyed_cause() -> Exception:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("build", "domain", "key", "reason"),
+    ("build", "domain", "key", "placeholders", "reason"),
     [
         pytest.param(
             _bare_not_ready_from_own_cause,
             DOMAIN,
             _COLD_START_KEY,
+            None,
             _COLD_START,
             id="bare-from-own-cause",
         ),
         pytest.param(
+            _bare_not_ready_from_own_cause_with_placeholders,
+            DOMAIN,
+            "device_list_server_error",
+            {"status": "500"},
+            "HTTP Server Error 500: down",
+            id="bare-from-own-cause-with-placeholders",
+        ),
+        pytest.param(
             _own_message_over_keyed_cause,
+            None,
             None,
             None,
             "not ready yet",
@@ -410,11 +432,13 @@ def _other_error_from_keyed_cause() -> Exception:
             _outer_key_over_cause_key,
             DOMAIN,
             "locate_not_accepted",
+            None,
             _COLD_START,
             id="outer-key-wins",
         ),
         pytest.param(
             _bare_not_ready_from_foreign_cause,
+            None,
             None,
             None,
             "foreign detail",
@@ -424,12 +448,13 @@ def _other_error_from_keyed_cause() -> Exception:
             _other_error_from_keyed_cause,
             None,
             None,
+            None,
             "boom",
             id="not-a-not-ready-error",
         ),
     ],
 )
-async def test_setup_retry_fields_and_text_share_one_source(
+async def test_setup_retry_translation_fields_follow_their_source(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
@@ -437,17 +462,18 @@ async def test_setup_retry_fields_and_text_share_one_source(
     build: Callable[[], Exception],
     domain: str | None,
     key: str | None,
+    placeholders: dict[str, str] | None,
     reason: str,
 ) -> None:
-    """Translation fields and reason text of the setup retry come from one place.
+    """The translation fields of the setup retry follow a fixed source order.
 
     Home Assistant 2025.9.1 and 2026.1.3 raise a bare ``ConfigEntryNotReady()``
     from the first refresh and only chain the ``UpdateFailed`` cause; newer
-    cores copy the translation fields of the cause into it. The wrapper takes
-    the fields from the exception whose text it shows, and from the cause only
-    when that cause belongs to this integration, because the older cores look
-    the key up under the integration's own domain. A key of the outer
-    exception wins over the key of its cause.
+    cores copy the translation fields of the cause into it. A key of the
+    outer exception wins; without one the fields come from the exception
+    whose text is shown, and from the cause only when that cause belongs to
+    this integration, because the older cores look the key up under the
+    integration's own domain.
     """
 
     del (
@@ -478,6 +504,7 @@ async def test_setup_retry_fields_and_text_share_one_source(
     err = excinfo.value
     assert err.translation_domain == domain
     assert err.translation_key == key
+    assert err.translation_placeholders == placeholders
     assert str(err) == f"Initial refresh failed: {reason}"
     logged = _logged_refresh_failures(caplog)
     assert len(logged) == 1, logged
