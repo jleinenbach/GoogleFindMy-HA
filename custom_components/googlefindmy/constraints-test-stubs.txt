@@ -1,4 +1,5 @@
-# Pinned Home Assistant stub packages to speed up make test-stubs runs
+# Pins for the Home Assistant test stack, read via `-c` from requirements-dev.txt.
+# The HA compatibility axes in .github/workflows/ci.yml rewrite the two pins per axis.
 homeassistant==2025.12.1
 pytest-homeassistant-custom-component==0.13.299
 pycares<5
