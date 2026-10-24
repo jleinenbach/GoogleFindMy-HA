@@ -96,7 +96,38 @@ that replace older ones express "this account has no bundle / no AAS token any
 more" by leaving the key out (`const.OPTIONAL_CREDENTIAL_KEYS`, written by
 `config_flow._merge_credential_updates`). The one exception is an entry that
 carries no credentials at all: that is the migration gap the seed exists for, and
-there the cache is read back in full.
+there the cache is read back in full, with one exception. A bundle field the
+runtime renews in place (`_RUNTIME_REFRESHED_BUNDLE_FIELDS` in `__init__.py`,
+today only `fcm_credentials`) keeps its non-empty top-level value in the cache
+instead of being replaced by the copy inside the cached bundle. Reason: that copy
+predates every renewal since the bundle was stored, and the receiver's entry
+write never reaches an entry without a bundle, so the older registration would
+come back on every setup. An empty top-level value is still filled from the
+bundle, so a cold start keeps its registration (Issue #152). Enforced by
+`tests/test_credential_seed_cache_branch.py`.
+
+### Credential ownership across receiver, cache and entry
+
+* **Detached copies.** A credential value that crosses between the FCM
+  receiver, the `TokenCache` and `entry.data` is handed over as a deep copy,
+  and `TokenCache` stores and returns copies of container values. Reason: the
+  receiver edits its registration and the nested `gcm` block in place
+  (`_invalidate_fcm_tokens`); a shared container would rewrite `entry.data`
+  without `async_update_entry`, so neither the store nor the update listener
+  would see the change. Enforced by `tests/test_guard_credential_entry_writes.py`
+  (every `fcm_credentials` write in `fcm_receiver_ha.py` is a `copy.deepcopy`),
+  `tests/test_fcm_registration_entry_sync.py` and
+  `tests/test_token_cache_value_isolation.py`.
+* **The entry is the durable store for a renewed registration.** The receiver
+  writes only the member it owns, `fcm_credentials` in the secrets bundle (and
+  the top-level copy where the entry already carries one), after leaving a
+  self-write receipt (`entry_self_write`, see
+  `agents/runtime_patterns/AGENTS.md`, "One owner per entry reload"). When the
+  bundle holds a registration the receiver neither registered nor wrote
+  itself, it leaves the entry as it is. Reason: that value comes from a user
+  change, usually an imported `secrets.json`, whose reload is already on its
+  way; overwriting it would undo the import. Enforced by
+  `tests/test_fcm_entry_self_write_receipt.py`.
 
 ### Soft invalidation (standalone)
 
