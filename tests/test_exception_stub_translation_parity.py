@@ -32,6 +32,7 @@ shows the raw key in the stub world as well, and its test fails.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -62,6 +63,17 @@ def _core_classes() -> tuple[type[Any], type[Any], type[Any]]:
     from homeassistant.helpers.update_coordinator import UpdateFailed
 
     return HomeAssistantError, UpdateFailed, ConfigEntryNotReady
+
+
+def _core_takes_retry_after() -> bool:
+    """``UpdateFailed(retry_after=...)`` exists in newer cores only.
+
+    Home Assistant 2025.9.1, the floor in ``hacs.json``, defines
+    ``UpdateFailed`` without an ``__init__`` of its own. The stubs follow the
+    newest core, so on the floor the ``retry_after`` comparison is left out.
+    """
+    _, core_update_failed, _ = _core_classes()
+    return "retry_after" in inspect.signature(core_update_failed).parameters
 
 
 def _stub_classes() -> tuple[type[Any], type[Any], type[Any]]:
@@ -109,6 +121,7 @@ def test_stub_stores_translation_arguments_like_the_core(
     use_real_homeassistant_modules: None, index: int, with_retry: bool
 ) -> None:
     """All translation arguments (and ``retry_after``) are accepted and stored alike."""
+    with_retry = with_retry and _core_takes_retry_after()
     extra = {"retry_after": 30.0} if with_retry else {}
     core = _core_classes()[index]("text", **_translation_kwargs(), **extra)
     stub = _stub_classes()[index]("text", **_translation_kwargs(), **extra)
@@ -129,14 +142,25 @@ def test_stub_defaults_match_the_core(
     core = _core_classes()[index]("text")
     stub = _stub_classes()[index]("text")
 
-    with_retry = index == 1
+    with_retry = index == 1 and _core_takes_retry_after()
     assert _stored(stub, with_retry=with_retry) == _stored(core, with_retry=with_retry)
     assert str(stub) == str(core) == "text"
 
 
 def test_class_defaults_match_the_core(use_real_homeassistant_modules: None) -> None:
-    """A subclass that skips ``super().__init__`` reads the same defaults."""
+    """A subclass that skips ``super().__init__`` reads the same defaults.
+
+    Compared are the class attributes the core defines; the floor in
+    ``hacs.json`` (2025.9.1) has no class defaults for the three translation
+    fields yet.
+    """
     core_error = _core_classes()[0]
+    names = [
+        name
+        for name in (*TRANSLATION_ATTRIBUTES, "generate_message")
+        if hasattr(core_error, name)
+    ]
+    assert "generate_message" in names
 
     class _CoreBare(core_error):  # type: ignore[misc, valid-type]
         def __init__(self) -> None:
@@ -146,9 +170,8 @@ def test_class_defaults_match_the_core(use_real_homeassistant_modules: None) -> 
         def __init__(self) -> None:
             Exception.__init__(self)
 
-    assert _stored(_StubBare(), with_retry=False) == _stored(
-        _CoreBare(), with_retry=False
-    )
+    stub, core = _StubBare(), _CoreBare()
+    assert {n: getattr(stub, n) for n in names} == {n: getattr(core, n) for n in names}
 
 
 def test_update_failed_text_wins_over_the_key(

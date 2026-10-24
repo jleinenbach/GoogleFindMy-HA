@@ -337,6 +337,53 @@ async def test_setup_retry_passes_the_placeholders_of_the_cause_on(
 
 
 @pytest.mark.asyncio
+async def test_setup_retry_takes_the_key_from_the_cause_on_older_cores(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """Older cores raise a bare ``ConfigEntryNotReady`` from the first refresh.
+
+    Home Assistant 2025.9.1 (the floor in ``hacs.json``) raises
+    ``ConfigEntryNotReady()`` and only sets ``__cause__``; it copies no
+    translation field. The wrapper then takes the fields from the cause, or
+    the card stays untranslated on those versions.
+    """
+
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
+    cause_text = "Cold start: empty device list; treating as transient."
+
+    async def _first_refresh(self) -> None:  # type: ignore[no-untyped-def]
+        del self
+        raise ConfigEntryNotReady() from UpdateFailed(
+            cause_text,
+            translation_domain=DOMAIN,
+            translation_key="cold_start_empty_device_list",
+        )
+
+    factory = functools.partial(
+        stub_coordinator_factory,
+        data=[],
+        methods={"async_config_entry_first_refresh": _first_refresh},
+    )
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, factory, asyncio.get_running_loop()
+    )
+
+    assert await harness.integration.async_setup(harness.hass, {}) is True
+    with pytest.raises(ConfigEntryNotReady) as excinfo:
+        await harness.integration.async_setup_entry(harness.hass, harness.entry)
+
+    err = excinfo.value
+    assert err.translation_domain == DOMAIN
+    assert err.translation_key == "cold_start_empty_device_list"
+    assert err.translation_placeholders is None
+    assert str(err) == f"Initial refresh failed: {cause_text}"
+
+
+@pytest.mark.asyncio
 async def test_coordinator_first_refresh_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

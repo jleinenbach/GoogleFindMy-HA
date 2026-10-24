@@ -8059,15 +8059,27 @@ def _initial_refresh_not_ready(err: BaseException) -> ConfigEntryNotReady:
 
     Home Assistant builds the setup-retry reason of the integration card
     from ``translation_key`` and ``translation_placeholders`` of the raised
-    ``ConfigEntryNotReady``. The text comes from the cause whenever the core
+    ``ConfigEntryNotReady``. Newer cores copy those fields from the
+    ``UpdateFailed`` cause into the ``ConfigEntryNotReady`` they raise; older
+    ones (2025.9.1, the floor in ``hacs.json``) raise a bare
+    ``ConfigEntryNotReady()`` and only chain the cause, so the fields are then
+    taken from the cause. The text comes from the cause whenever the core
     chained one (see ``_initial_refresh_reason``).
     """
 
+    source: BaseException = err
+    cause: BaseException | None = err.__cause__
+    if (
+        isinstance(err, ConfigEntryNotReady)
+        and getattr(err, "translation_key", None) is None
+        and cause is not None
+    ):
+        source = cause
     return ConfigEntryNotReady(
         f"Initial refresh failed: {_initial_refresh_reason(err)}",
-        translation_domain=getattr(err, "translation_domain", None),
-        translation_key=getattr(err, "translation_key", None),
-        translation_placeholders=getattr(err, "translation_placeholders", None),
+        translation_domain=getattr(source, "translation_domain", None),
+        translation_key=getattr(source, "translation_key", None),
+        translation_placeholders=getattr(source, "translation_placeholders", None),
     )
 
 

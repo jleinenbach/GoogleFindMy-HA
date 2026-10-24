@@ -173,7 +173,9 @@ async def test_setup_retry_carries_the_translation_key_of_the_cause(
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert entry.error_reason_translation_key == KEY
-    assert entry.error_reason_translation_domain == DOMAIN
+    # The field exists in newer cores only; the floor (2025.9.1) implies the
+    # entry's own domain.
+    assert getattr(entry, "error_reason_translation_domain", DOMAIN) == DOMAIN
     assert entry.reason == (
         "Initial refresh failed: Cold start: empty device list; treating as transient."
     )
@@ -192,4 +194,4 @@ async def test_setup_retry_without_a_key_on_the_cause_has_no_key(
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert entry.error_reason_translation_key is None
-    assert entry.error_reason_translation_domain is None
+    assert getattr(entry, "error_reason_translation_domain", None) is None
