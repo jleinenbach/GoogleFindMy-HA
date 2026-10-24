@@ -30,10 +30,12 @@ import importlib
 import importlib.util
 import sys
 from collections.abc import AsyncIterator
+from importlib.metadata import version
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from awesomeversion import AwesomeVersion
 
 if (
     importlib.util.find_spec("pytest_homeassistant_custom_component") is None
@@ -158,6 +160,27 @@ async def _setup_entry_with_cause(
     return entry
 
 
+# First core on which ``error_reason_translation_domain`` was measured
+# present; 2025.9.1 and 2026.1.3 lack it and look the key up under the
+# entry's own domain.
+REASON_DOMAIN_SINCE = "2026.9.3"
+
+
+def _has_reason_domain(entry: Any) -> bool:
+    """Whether the core records the domain of the retry reason.
+
+    A core from ``REASON_DOMAIN_SINCE`` on without the field fails, so a
+    renamed field cannot drop the domain check silently.
+    """
+    if hasattr(entry, "error_reason_translation_domain"):
+        return True
+    installed = AwesomeVersion(version("homeassistant"))
+    assert installed < AwesomeVersion(REASON_DOMAIN_SINCE), (
+        f"error_reason_translation_domain is missing on core {installed}"
+    )
+    return False
+
+
 async def test_setup_retry_carries_the_translation_key_of_the_cause(
     hass: HomeAssistant,
     ha_common: ModuleType,
@@ -176,9 +199,8 @@ async def test_setup_retry_carries_the_translation_key_of_the_cause(
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert entry.error_reason_translation_key == KEY
-    # The field exists in newer cores only; the floor (2025.9.1) implies the
-    # entry's own domain.
-    assert getattr(entry, "error_reason_translation_domain", DOMAIN) == DOMAIN
+    if _has_reason_domain(entry):
+        assert entry.error_reason_translation_domain == DOMAIN
     assert entry.reason == (
         "Initial refresh failed: Cold start: empty device list; treating as transient."
     )
@@ -197,4 +219,5 @@ async def test_setup_retry_without_a_key_on_the_cause_has_no_key(
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert entry.error_reason_translation_key is None
-    assert getattr(entry, "error_reason_translation_domain", None) is None
+    if _has_reason_domain(entry):
+        assert entry.error_reason_translation_domain is None

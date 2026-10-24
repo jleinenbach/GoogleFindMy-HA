@@ -32,10 +32,11 @@ shows the raw key in the stub world as well, and its test fails.
 from __future__ import annotations
 
 import importlib.util
-import inspect
+from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from awesomeversion import AwesomeVersion
 from homeassistant.exceptions import ConfigEntryNotReady as StubConfigEntryNotReady
 from homeassistant.exceptions import HomeAssistantError as StubHomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed as StubUpdateFailed
@@ -52,6 +53,10 @@ TRANSLATION_ATTRIBUTES = (
     "translation_placeholders",
 )
 
+# First core on which a feature was measured present; older cores may lack it.
+RETRY_AFTER_SINCE = "2026.1.3"  # absent on 2025.9.1
+CLASS_DEFAULTS_SINCE = "2026.9.3"  # absent on 2026.1.3
+
 _HAS_PLUGIN = (
     importlib.util.find_spec("pytest_homeassistant_custom_component") is not None
 )
@@ -66,14 +71,34 @@ def _core_classes() -> tuple[type[Any], type[Any], type[Any]]:
 
 
 def _core_takes_retry_after() -> bool:
-    """``UpdateFailed(retry_after=...)`` exists in newer cores only.
+    """Probe ``UpdateFailed(retry_after=...)`` by construction.
 
     Home Assistant 2025.9.1, the floor in ``hacs.json``, defines
-    ``UpdateFailed`` without an ``__init__`` of its own. The stubs follow the
-    newest core, so on the floor the ``retry_after`` comparison is left out.
+    ``UpdateFailed`` without an ``__init__`` of its own and rejects the
+    keyword.
     """
     _, core_update_failed, _ = _core_classes()
-    return "retry_after" in inspect.signature(core_update_failed).parameters
+    try:
+        err = core_update_failed("text", retry_after=1.0)
+    except TypeError:
+        return False
+    return getattr(err, "retry_after", None) == 1.0
+
+
+def _require_core_feature(present: bool, feature: str, since: str) -> None:
+    """Skip on a core older than ``since``; fail on a newer core without it.
+
+    The stubs follow the newest core. A core that predates a feature is
+    skipped with a visible reason; a core from ``since`` on that lacks it
+    fails, so a renamed or removed field cannot drop a comparison silently.
+    """
+    if present:
+        return
+    installed = AwesomeVersion(version("homeassistant"))
+    assert installed < AwesomeVersion(since), (
+        f"{feature} is missing on core {installed}, measured present on {since}"
+    )
+    pytest.skip(f"core {installed} predates {feature} (measured present on {since})")
 
 
 def _stub_classes() -> tuple[type[Any], type[Any], type[Any]]:
@@ -114,14 +139,24 @@ def test_stub_hierarchy_matches_the_core(use_real_homeassistant_modules: None) -
 
 @pytest.mark.parametrize(
     ("index", "with_retry"),
-    [(0, False), (1, True), (2, False)],
-    ids=["HomeAssistantError", "UpdateFailed", "ConfigEntryNotReady"],
+    [(0, False), (1, False), (1, True), (2, False)],
+    ids=[
+        "HomeAssistantError",
+        "UpdateFailed",
+        "UpdateFailed-retry_after",
+        "ConfigEntryNotReady",
+    ],
 )
 def test_stub_stores_translation_arguments_like_the_core(
     use_real_homeassistant_modules: None, index: int, with_retry: bool
 ) -> None:
     """All translation arguments (and ``retry_after``) are accepted and stored alike."""
-    with_retry = with_retry and _core_takes_retry_after()
+    if with_retry:
+        _require_core_feature(
+            _core_takes_retry_after(),
+            "UpdateFailed(retry_after=...)",
+            RETRY_AFTER_SINCE,
+        )
     extra = {"retry_after": 30.0} if with_retry else {}
     core = _core_classes()[index]("text", **_translation_kwargs(), **extra)
     stub = _stub_classes()[index]("text", **_translation_kwargs(), **extra)
@@ -142,25 +177,26 @@ def test_stub_defaults_match_the_core(
     core = _core_classes()[index]("text")
     stub = _stub_classes()[index]("text")
 
-    with_retry = index == 1 and _core_takes_retry_after()
-    assert _stored(stub, with_retry=with_retry) == _stored(core, with_retry=with_retry)
+    assert _stored(stub, with_retry=False) == _stored(core, with_retry=False)
     assert str(stub) == str(core) == "text"
 
 
-def test_class_defaults_match_the_core(use_real_homeassistant_modules: None) -> None:
-    """A subclass that skips ``super().__init__`` reads the same defaults.
+def test_update_failed_retry_after_default_matches_the_core(
+    use_real_homeassistant_modules: None,
+) -> None:
+    """Without ``retry_after`` both sides store ``None``."""
+    _require_core_feature(
+        _core_takes_retry_after(), "UpdateFailed(retry_after=...)", RETRY_AFTER_SINCE
+    )
+    _, core_update_failed, _ = _core_classes()
+    assert (
+        StubUpdateFailed("text").retry_after == core_update_failed("text").retry_after
+    )
 
-    Compared are the class attributes the core defines; the floor in
-    ``hacs.json`` (2025.9.1) has no class defaults for the three translation
-    fields yet.
-    """
+
+def _bare_pair() -> tuple[BaseException, BaseException]:
+    """Instances of a stub and a core subclass that skip ``super().__init__``."""
     core_error = _core_classes()[0]
-    names = [
-        name
-        for name in (*TRANSLATION_ATTRIBUTES, "generate_message")
-        if hasattr(core_error, name)
-    ]
-    assert "generate_message" in names
 
     class _CoreBare(core_error):  # type: ignore[misc, valid-type]
         def __init__(self) -> None:
@@ -170,8 +206,31 @@ def test_class_defaults_match_the_core(use_real_homeassistant_modules: None) -> 
         def __init__(self) -> None:
             Exception.__init__(self)
 
-    stub, core = _StubBare(), _CoreBare()
-    assert {n: getattr(stub, n) for n in names} == {n: getattr(core, n) for n in names}
+    return _StubBare(), _CoreBare()
+
+
+def test_class_default_of_generate_message_matches_the_core(
+    use_real_homeassistant_modules: None,
+) -> None:
+    """A subclass that skips ``super().__init__`` reads ``generate_message`` alike."""
+    stub, core = _bare_pair()
+    assert stub.generate_message == core.generate_message  # type: ignore[attr-defined]
+
+
+def test_class_defaults_of_translation_fields_match_the_core(
+    use_real_homeassistant_modules: None,
+) -> None:
+    """A subclass that skips ``super().__init__`` reads the same field defaults."""
+    core_error = _core_classes()[0]
+    _require_core_feature(
+        all(hasattr(core_error, name) for name in TRANSLATION_ATTRIBUTES),
+        "class defaults of the translation fields",
+        CLASS_DEFAULTS_SINCE,
+    )
+    stub, core = _bare_pair()
+    assert {n: getattr(stub, n) for n in TRANSLATION_ATTRIBUTES} == {
+        n: getattr(core, n) for n in TRANSLATION_ATTRIBUTES
+    }
 
 
 def test_update_failed_text_wins_over_the_key(
