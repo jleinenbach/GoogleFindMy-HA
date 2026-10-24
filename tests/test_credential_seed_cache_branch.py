@@ -268,3 +268,17 @@ async def test_a_regeneration_for_an_entry_without_a_bundle_survives_the_next_se
     assert second.integration._async_save_secrets_data is not real_save
 
     assert _token(second.cache.values["fcm_credentials"]) == "fresh"
+
+
+def test_a_bundle_that_is_not_a_mapping_is_passed_on_unchanged() -> None:
+    """The filter leaves a malformed cached bundle to the seed's own handling."""
+    integration = importlib.import_module("custom_components.googlefindmy")
+    snapshot = {"fcm_credentials": _registration("fresh")}
+
+    assert (
+        integration._bundle_without_fields_refreshed_since("not-a-bundle", snapshot)
+        == "not-a-bundle"
+    )
+    assert integration._bundle_without_fields_refreshed_since(
+        {"username": EMAIL, "fcm_credentials": _registration("stale")}, snapshot
+    ) == {"username": EMAIL}
