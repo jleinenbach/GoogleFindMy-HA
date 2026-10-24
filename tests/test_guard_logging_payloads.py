@@ -2139,8 +2139,9 @@ def _flow_bound_names(
 
 # Rounds of the module-wide fixpoint over helper calls; past it every parameter
 # of every module-local callee is bound (fail-closed). A chain needs one round
-# per hop plus one to confirm; measured on 2026-10-22, every `Auth/` module
-# settles within two rounds (one hop, five modules, nine parameters).
+# per hop plus one to confirm; measured on 2026-10-24, with helper results
+# and manager yields in the fixpoint, every `Auth/` module settles within
+# three rounds (two of twenty need the third).
 _FORWARD_ROUND_LIMIT = 64
 _RECEIVERS = frozenset({"self", "cls"})
 
