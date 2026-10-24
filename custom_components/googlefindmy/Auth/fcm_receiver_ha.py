@@ -58,6 +58,7 @@ import asyncio
 import base64
 import binascii
 import contextvars
+import copy
 import functools
 import json
 import logging
@@ -3518,8 +3519,12 @@ class FcmReceiverHA:
         bundle = data.get(DATA_SECRET_BUNDLE)
         if not isinstance(bundle, Mapping):
             return
+        # Every copy handed to the entry is detached (deep copy): the receiver
+        # edits ``self.creds[entry_id]`` and its nested ``gcm`` block in place
+        # (``_invalidate_fcm_tokens``), and a shared container would rewrite
+        # ``entry.data`` behind Home Assistant's back.
         updated_bundle = dict(bundle)
-        updated_bundle["fcm_credentials"] = dict(creds)
+        updated_bundle["fcm_credentials"] = copy.deepcopy(dict(creds))
         updated_data = dict(data)
         updated_data[DATA_SECRET_BUNDLE] = updated_bundle
         # The config flow also stores the same value at the top level of the
@@ -3527,7 +3532,7 @@ class FcmReceiverHA:
         # carry two contradictory registrations; a missing copy is not created
         # here, because the seed reads the bundle and nothing reads this key.
         if "fcm_credentials" in updated_data:
-            updated_data["fcm_credentials"] = dict(creds)
+            updated_data["fcm_credentials"] = copy.deepcopy(dict(creds))
         try:
             update(entry, data=updated_data)
         except Exception as err:  # noqa: BLE001 - durability is best-effort

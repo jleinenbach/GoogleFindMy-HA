@@ -15,6 +15,7 @@ credentials-update path and then simulate the next setup by re-running
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import sys
 from importlib import import_module
@@ -444,3 +445,51 @@ async def test_a_tokenless_update_persists_without_touching_the_entry() -> None:
 
     assert manager.update_calls == []
     assert cache.data["fcm_credentials"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_entry_copy_is_detached_from_the_receiver_state() -> None:
+    """Invalidating the live registration must not rewrite the entry in place.
+
+    ``_invalidate_fcm_tokens`` edits ``self.creds[entry_id]`` (and its nested
+    ``gcm`` block) in place. A shallow copy at the receiver/entry boundary
+    would share that block with ``entry.data``, so the invalidation would
+    silently change the entry behind Home Assistant's back and the next store
+    write of any entry would persist the half-invalidated registration.
+    """
+
+    fresh = _registration("fresh-registration")
+    fresh["gcm"]["app_id"] = "subscription-app-id"
+    entry = make_config_entry(
+        entry_id=ENTRY_ID,
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            "fcm_credentials": _registration("stale"),
+            DATA_SECRET_BUNDLE: {"fcm_credentials": _registration("stale")},
+        },
+    )
+    receiver, manager = _receiver_with_entry(entry)
+    receiver._entry_caches[ENTRY_ID] = _Cache()
+    receiver.creds[ENTRY_ID] = fresh
+
+    await receiver._async_save_credentials_for_entry(ENTRY_ID)
+    assert len(manager.update_calls) == 1
+    bundle_copy = entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"]
+    top_level_copy = entry.data["fcm_credentials"]
+    persisted = copy.deepcopy(dict(entry.data))
+
+    # Neither entry copy shares a container with the live state or each other.
+    assert bundle_copy is not fresh
+    assert bundle_copy["gcm"] is not fresh["gcm"]
+    assert top_level_copy is not fresh
+    assert top_level_copy["gcm"] is not fresh["gcm"]
+    assert top_level_copy["gcm"] is not bundle_copy["gcm"]
+
+    await receiver._invalidate_fcm_tokens(ENTRY_ID)
+
+    # The invalidation really ran on the live state ...
+    assert "fcm" not in fresh
+    assert fresh["gcm"].get("orphan_app_id") == "subscription-app-id"
+    # ... and left the entry exactly as it was persisted.
+    assert dict(entry.data) == persisted
+    assert len(manager.update_calls) == 1
