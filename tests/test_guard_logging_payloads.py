@@ -149,10 +149,12 @@ builtins.Exception`, the result of a function this file does not define
 (`exc = _pick(task)`, `kind = _classify(err)`: one file does not show what
 it returns; binding every logged result would report 210 sites in `Auth/`,
 measured on 2026-10-22, none of them a producer's text; a module-local
-helper whose `return` carries a bound exception is followed in two places
-only, see `_returning_calls` and `_returned_exception_leaves`: assigned
-whole to a name (`e = pick(task)`, also behind `await`) and inside a log
-call's argument (`_LOGGER.error("%s", pick(task))`, also in `str()`, an
+helper whose `return` carries a bound exception, or another such helper's
+result (`return pick(task)`), is followed only as far as `_returning_calls`
+and `_returned_exception_leaves` reach: assigned whole to a name (`e =
+pick(task)`, also behind `await`) and inside the arguments of a log call or
+of a raised constructor (`_LOGGER.error("%s", pick(task))`, `raise
+OwnError(str(pick(task)))`, also in `str()`, an
 f-string or `.args`); every other derivation of that result is not
 followed, measured on 2026-10-24: `e = pick(task) or 'none'`, a
 conditional, a tuple (`e, n = pick(task), 0`), `d.get(k, pick(task))`,
@@ -184,7 +186,9 @@ from `open`; a module-local generator whose `yield` carries a bound
 exception is followed as the manager of a `with`, see `_yielding_calls`,
 but not when iterated (`for e in gen(task)`), not a class this file
 defines with its own `__enter__`, a manager bound to a name before the
-`with` (`cm = held(err)`, then `with cm as e`), or a `yield from`),
+`with` (`cm = held(err)`, then `with cm as e`), a manager entered by hand
+(`stack.enter_context(held(task))`, `held(task).__enter__()`), or a
+`yield from`),
 a helper reached otherwise than by its bare name or through `self.`/`cls.`
 (another receiver `self._client.h(err)`, an imported helper: this guard
 parses one file, `functools.partial`, an alias of a function `g = h; g(err)`,
@@ -5292,6 +5296,14 @@ class Slash:
 
     def f16(self, err: ClientError) -> None:
         self.slash_sink(v=err)
+
+
+def posonly_kw_sink(a, /, **kw) -> None:
+    _LOGGER.error("x %s", kw)
+
+
+def f17(err: ClientError) -> None:
+    posonly_kw_sink(1, a=err)
 """
 
 
@@ -5326,7 +5338,8 @@ def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
     slot and every positional slot after it (line 240), and a bare name never
     reaches a method of the same name (line 249 stays silent). A receiver
     declared positional-only (`def slash_sink(self, /, v)`) leaves `v`
-    reachable by keyword (line 258). The same
+    reachable by keyword (line 258), and a keyword named like a
+    positional-only parameter lands in `**kw` (line 265). The same
     fixture outside `Auth/` reports nothing.
     """
     tree = ast.parse(_SHAPE_I_FORWARD_FIXTURE)
@@ -5358,6 +5371,7 @@ def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
         (224, "v"),
         (240, "c"),
         (258, "v"),
+        (265, "kw"),
     ]
     outside, _ = _scan_tree(tree, "coordinator/fixture.py")
     assert outside == []
