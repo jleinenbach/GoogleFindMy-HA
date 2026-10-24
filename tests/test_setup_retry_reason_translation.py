@@ -52,7 +52,9 @@ pytestmark = pytest.mark.asyncio
 
 DOMAIN = "googlefindmy"
 KEY = "cold_start_empty_device_list"
-COMMON = "pytest_homeassistant_custom_component.common"
+COMMON_PARENT = "pytest_homeassistant_custom_component"
+COMMON_CHILD = "common"
+COMMON = f"{COMMON_PARENT}.{COMMON_CHILD}"
 
 
 @pytest.fixture(autouse=True)
@@ -73,9 +75,10 @@ def ha_common(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
     before = _keys()
     monkeypatch.delitem(sys.modules, COMMON, raising=False)
-    parent_name, _, child = COMMON.rpartition(".")
-    parent = importlib.import_module(parent_name)
-    monkeypatch.setattr(parent, child, getattr(parent, child, None), raising=False)
+    parent = importlib.import_module(COMMON_PARENT)
+    monkeypatch.setattr(
+        parent, COMMON_CHILD, getattr(parent, COMMON_CHILD, None), raising=False
+    )
     module = importlib.import_module(COMMON)
     for key in sorted(_keys() - before):
         created = sys.modules.pop(key)
