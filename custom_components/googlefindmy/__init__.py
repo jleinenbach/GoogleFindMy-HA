@@ -657,6 +657,36 @@ _LOGGABLE_BUNDLE_FIELDS: tuple[str, ...] = (
 )
 
 
+# Bundle fields the runtime renews in place after setup. The receiver stores a
+# renewed FCM registration at the top level of the cache, and also in the
+# entry's bundle when the entry carries one. An entry without a bundle is
+# seeded from the cache's bundle copy, which predates the renewal; the seed
+# keeps a non-empty top-level value for these fields instead of restoring it
+# (see ``_bundle_without_fields_refreshed_since``).
+_RUNTIME_REFRESHED_BUNDLE_FIELDS: Final[frozenset[str]] = frozenset({"fcm_credentials"})
+
+
+def _bundle_without_fields_refreshed_since(
+    bundle: Any, cache_snapshot: Mapping[str, Any]
+) -> Any:
+    """Return ``bundle`` without the fields the cache holds a newer value for.
+
+    Only used where the bundle itself was read from the cache: there the
+    top-level value of a runtime-refreshed field is at least as new as the
+    bundle's copy. A field whose top-level value is empty is kept, so a cold
+    start still receives the bundle's registration (Issue #152). A bundle that
+    is not a mapping is returned unchanged for ``_async_save_secrets_data``.
+    """
+    if not isinstance(bundle, Mapping):
+        return bundle
+    return {
+        field: value
+        for field, value in bundle.items()
+        if field not in _RUNTIME_REFRESHED_BUNDLE_FIELDS
+        or not cache_snapshot.get(field)
+    }
+
+
 def _optional_credential_label(key: str) -> str:
     """Return a fixed log name for a key of ``OPTIONAL_CREDENTIAL_KEYS``.
 
@@ -8595,10 +8625,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     #
     # Only the keys the entry mirrors are dropped. Material derived from a
     # bundle (owner_key, shared_key, fcm_credentials) belongs to the same
-    # account, is refreshed in place, and stays.
+    # account, is refreshed in place, and stays. That includes the branch
+    # below that reads the bundle back from the cache: a runtime-refreshed
+    # field the cache already holds a value for is not overwritten by the
+    # bundle's older copy (_RUNTIME_REFRESHED_BUNDLE_FIELDS).
     entry_carries_credentials = bool(secrets_data or oauth_token or aas_token_entry)
 
     cache_snapshot: Mapping[str, Any] | None = None
+    # The cache snapshot the credentials were recovered from, if any.
+    recovered_from: Mapping[str, Any] | None = None
     try:
         cache_snapshot = await cache.all()
     except Exception as err:  # pragma: no cover - defensive cache read
@@ -8633,10 +8668,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         secrets_data = cache_snapshot.get(DATA_SECRET_BUNDLE)
         oauth_token = cache_snapshot.get(CONF_OAUTH_TOKEN)
         aas_token_entry = cache_snapshot.get(DATA_AAS_TOKEN)
+        recovered_from = cache_snapshot
 
     if secrets_data:
+        seed_bundle = secrets_data
+        if recovered_from is not None:
+            seed_bundle = _bundle_without_fields_refreshed_since(
+                secrets_data, recovered_from
+            )
         await _async_save_secrets_data(
-            cache, secrets_data, account_label=_label_entry_for_log(entry)
+            cache, seed_bundle, account_label=_label_entry_for_log(entry)
         )
         _LOGGER.debug("Persisted secrets.json bundle to token cache (entry-scoped)")
         if isinstance(aas_token_entry, str) and aas_token_entry:

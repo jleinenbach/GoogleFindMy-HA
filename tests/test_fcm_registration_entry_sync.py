@@ -198,8 +198,9 @@ def _receiver_with_entry(
 def test_persist_credentials_without_a_bundle_does_not_invent_one() -> None:
     """An entry without a secrets bundle is left untouched.
 
-    The seed reads the bundle, so individual-token sign-ins have nothing to
-    refresh; inventing a bundle here would create a key the seed never wrote.
+    Inventing a bundle here would create a key the seed never wrote. Such an
+    entry is seeded from the token cache, where the receiver's cache write
+    keeps the refreshed registration (``test_credential_seed_cache_branch``).
     """
 
     entry = make_config_entry(

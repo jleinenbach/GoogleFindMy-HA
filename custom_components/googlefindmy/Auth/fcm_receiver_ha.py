@@ -3495,10 +3495,13 @@ class FcmReceiverHA:
 
         Only the ``fcm_credentials`` member of an existing bundle is rewritten,
         together with the top-level copy the config flow may have left beside
-        it. An entry without a bundle (individual-token sign-in) has nothing the
-        seed would clobber, and a missing bundle is not invented here. The
-        payload is the entry data read at write time, so a concurrent change to
-        another key is not rolled back.
+        it. A missing bundle is not invented here. An entry without one is
+        seeded from the token cache instead, and that seed keeps a non-empty
+        cached registration rather than restoring the cached bundle's older
+        copy (``_RUNTIME_REFRESHED_BUNDLE_FIELDS`` in the package
+        ``__init__``), so the cache write below is what makes the registration
+        durable there. The payload is the entry data read at write time, so a
+        concurrent change to another key is not rolled back.
 
         ``async_update_entry`` mutates the in-memory entry and schedules the
         debounced store write; a reload in between reads the updated entry, so
