@@ -110,8 +110,8 @@
 > fragment; and Markdown is out of its scope, because this file itself quotes a German translation
 > guideline.
 
-> **Environment reset reminder:** After a container or virtualenv reset, rerun `make test-stubs` so the Home Assistant and
-> pytest stubs are reinstalled before invoking linting or pytest commands.
+> **Environment reset reminder:** After a container or virtualenv reset, rerun `make install-dev` (or `poetry install --with dev,test`)
+> so Home Assistant and the pytest plugin are reinstalled before invoking linting or pytest commands.
 
 ## Start here — platinum essentials (front page)
 
@@ -122,7 +122,7 @@
   untyped `hass.data` buckets; the guardrails live under [Home Assistant specifics (must-haves)](#117-home-assistant-specifics-
   must-haves) and [Config subentry maintenance helper](#config-subentry-maintenance-helper).
 * **Required local checks.** Before committing, run `python -m ruff check --fix`, `python -m mypy --strict --install-types --
-  non-interactive`, and `python -m pytest --cov -q` (after `make test-stubs` in new environments); see [Local commands
+  non-interactive`, and `python -m pytest --cov -q` (after `make install-dev` in new environments); see [Local commands
   (VERIFY)](#10-local-commands-verify) for context.
 
 <a id="language-policy"></a>
@@ -384,19 +384,19 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 ### Quick-reference (per-task checklist)
 
 * Connectivity probe: follow the [connectivity probe](#connectivity-probe) before each implementation cycle.
-* Dependency bootstrap: `python -m pip install --upgrade homeassistant pytest-homeassistant-custom-component` or run `make test-stubs` before linting or tests.
-* Dependency primer (fresh environments): install core extras such as `httpx[http2]`, `ecdsa`, and `selenium` alongside the Home Assistant stubs so coverage and flow tests do not stall on missing HTTP/crypto/browser drivers.
-* Cache accelerators: preserve the pip download cache (for example, mount/retain `.cache/pip`) so repeated `make test-stubs` and `pip install -r custom_components/googlefindmy/requirements-dev.txt` runs reuse the built wheels instead of redownloading them on every validation cycle.
-* Optional driver preload: `make test-stubs` now also installs `custom_components/googlefindmy/requirements-dev.txt` so optional clients (for example, `gpsoauth`) are ready for `pytest --cov -q` without extra commands.
+* Dependency bootstrap: run `make install-dev` (or `poetry install --with dev,test`) before linting or tests; it installs `homeassistant`, `pytest-homeassistant-custom-component` and the rest of the dev/test toolchain from `poetry.lock`.
+* Dependency primer (fresh environments): `make install-dev` already installs core extras such as `httpx[http2]`, `ecdsa`, and `selenium` (runtime dependencies in `pyproject.toml`); install them by hand only in pip-based setups so coverage and flow tests do not stall on missing HTTP/crypto/browser drivers.
+* Cache accelerators: preserve the download caches (for example, mount/retain `~/.cache/pypoetry` for Poetry and `.cache/pip` for pip) so repeated `make install-dev` and `pip install -r custom_components/googlefindmy/requirements-dev.txt` runs reuse the built wheels instead of redownloading them on every validation cycle.
+* Optional driver preload: `make install-dev` installs the runtime dependencies from `pyproject.toml` together with the `dev` and `test` groups, so optional clients (for example, `gpsoauth`) are ready for `pytest --cov -q` without extra commands.
 * Required checks (in order): `python -m ruff check --fix`, `python -m mypy --strict`, `python -m pytest --cov -q`.
 * Registry helpers: when adjusting device/entity relink logic, reuse the shared helper contract documented near `_async_relink_entities_for_entry` instead of adding new lookup paths so registry fallbacks stay consistent.
 
-> **`make test-stubs` refresh (fresh checkout quick how-to):**
-> 1. Run `make test-stubs` once after cloning or after `make clean` to install the Home Assistant + pytest stubs.
-> 2. If the command reports a missing Python, activate your environment first (for example, `source .venv/bin/activate`) and rerun it.
-> 3. Reuse the same command whenever mypy/pytest import errors resurface after environment resets; the target is idempotent and completes quickly when the stubs are already present.
+> **`make install-dev` refresh (fresh checkout quick how-to):**
+> 1. Run `make install-dev` once after cloning to install Home Assistant, `pytest-homeassistant-custom-component` and the dev/test toolchain into the Poetry environment.
+> 2. If the command reports a missing `poetry`, install it first (`pip install poetry`, see the README) and rerun it.
+> 3. Reuse the same command whenever mypy/pytest import errors resurface after environment resets; Poetry skips packages that are already installed at the locked version.
 
-> **Quickstart:** Run `make test-stubs` once per fresh environment to install `homeassistant` and `pytest-homeassistant-custom-component` before `pytest -q`, `mypy --strict`, or `ruff check`; the download/build step typically finishes in about five minutes, so plan lint/test runs with that buffer in mind.
+> **Quickstart:** Run `make install-dev` once per fresh environment to install `homeassistant` and `pytest-homeassistant-custom-component` before `pytest -q`, `mypy --strict`, or `ruff check`; the download/build step typically finishes in about five minutes, so plan lint/test runs with that buffer in mind.
 
 ### Connectivity probe
 
@@ -409,15 +409,15 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 
 * **Cache cleanup:** Run `make clean` to prune `__pycache__` directories and stale bytecode before rerunning tests.
 * **Connectivity probe:** Follow the [connectivity probe](#connectivity-probe) and capture the output before running tests.
-* **Test stub install:** Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` when you need a minimal bootstrap immediately before `pytest -q`. Plan for several minutes of download time in the hosted environment because the Home Assistant wheels are large.
+* **Test dependency install:** Use `make install-dev` to install `homeassistant`, `pytest-homeassistant-custom-component` and the remaining dev/test packages before `pytest -q`. Plan for several minutes of download time in the hosted environment because the Home Assistant wheels are large.
 * **Lint-in-test requirement:** Every testing cycle must include `python -m ruff check --fix .` so lint autofixes run alongside the rest of the suite.
-* **Pinned stub constraints:** The stub versions are locked in `custom_components/googlefindmy/constraints-test-stubs.txt` to reduce resolver backtracking; reuse that constraint file when installing Home Assistant stubs outside the Makefile targets.
+* **Pinned stub constraints:** `make install-dev` resolves Home Assistant and the pytest plugin from `poetry.lock`. `custom_components/googlefindmy/constraints-test-stubs.txt` only applies to pip-based installs: `custom_components/googlefindmy/requirements-dev.txt` includes it via `-c`, and the `test_legacy_python` job in `.github/workflows/ci.yml` rewrites its pins for each Home Assistant axis. Reuse it when installing Home Assistant with pip outside Poetry.
 * **DocToc preinstall:** Run `make bootstrap-doctoc` once per environment to install the DocToc dev dependency non-interactively (cached under `.npm-cache`); subsequent `make doctoc` calls reuse the installation to refresh the AGENTS.md table of contents.
 > **Connectivity Probes in Final Reports:** Clarify that a "connectivity probe" (manual verification of API/FCM reachability) counts as a valid required "test" step for the final report when automated integration tests cannot simulate the specific network outage scenario. This reduces ambiguity regarding documentation of probes versus traditional test runs.
-* **Strict mypy prep:** In a fresh environment, run `make test-stubs` before `mypy --install-types --non-interactive --strict` so the Home Assistant stubs are already present and strict type checking doesn't trip over missing packages.
+* **Strict mypy prep:** In a fresh environment, run `make install-dev` before `mypy --install-types --non-interactive --strict` so the Home Assistant stubs are already present and strict type checking doesn't trip over missing packages.
 * **Coverage reminder:** After adjusting registry helper fallbacks, rerun `pytest --cov -q` to confirm coverage stays intact before committing.
-* **Pytest coverage guard:** `pytest -q --cov` will raise the conftest bootstrap error if the Home Assistant stubs are missing. Run `make test-stubs` first so coverage runs complete without runtime import failures.
-* **Pytest-homeassistant HTTP stub:** When `pytest-homeassistant-custom-component` is installed (for example via `make test-stubs` or `pip install -r custom_components/googlefindmy/requirements-dev.txt`), keep the autouse `disable_http_server` fixture in `tests/conftest.py` enabled. The plugin accesses `homeassistant.helpers.http` during startup in HA 2025.12.0; the fixture patches that helper so imports succeed under the lightweight stub environment.
+* **Pytest coverage guard:** `pytest -q --cov` will raise the conftest bootstrap error if the Home Assistant stubs are missing. Run `make install-dev` first so coverage runs complete without runtime import failures.
+* **Pytest-homeassistant HTTP stub:** When `pytest-homeassistant-custom-component` is installed (for example via `make install-dev` or `pip install -r custom_components/googlefindmy/requirements-dev.txt`), keep the autouse `disable_http_server` fixture in `tests/conftest.py` enabled. The plugin accesses `homeassistant.helpers.http` during startup in HA 2025.12.0; the fixture patches that helper so imports succeed under the lightweight stub environment.
 * **Import normalization:** Run `python -m ruff check --select I --fix` to auto-sort import blocks (especially in `tests/`) instead of rearranging them manually. Import coroutine annotations (for example, `Coroutine`) from `collections.abc` alongside other container ABCs to avoid duplicate-definition lint errors when `typing` re-exports overlap.
 * **Pytest log capture for citations:** Pipe full coverage runs to a log file (for example, `python -m pytest --cov -q | tee pytest-full.log`) and cite the relevant tail snippet instead of rerunning the suite when only the output is needed.
 
@@ -425,11 +425,11 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 
 * **Generated protobuf sampling.** Use `script/rg_proto_snippet.sh` to preview hits when searching massive generated files (for example, `script/rg_proto_snippet.sh encryptedMetadata custom_components/googlefindmy/ProtoDecoders`). The helper wraps `rg --max-count` and truncates each line via `cut` so shell output stays within the limit documented in this guide.
 
-* **Dependency bootstrap timing:** Expect `pip install --upgrade homeassistant pytest-homeassistant-custom-component` to run for roughly five minutes in the hosted environment (downloads + wheel builds). Plan shell work accordingly so lengthy installs finish before kicking off lint or test runs.
-* **Dev dependency install guard:** Run `make test-deps` after cloning or rebasing to install the full `requirements-dev.txt` stack (and Home Assistant stubs). This avoids skipped or failed `pytest`/`mypy` runs due to missing packages and keeps the resolver checks green without manual pip retries. **Always run this (or an equivalent `python -m pip install -r requirements-dev.txt`) before any lint/test invocation**, especially when exercising Moto Tag regression suites that import optional crypto/backoff libraries.
+* **Dependency bootstrap timing:** Expect `make install-dev` to run for roughly five minutes in the hosted environment (downloads + wheel builds). Plan shell work accordingly so lengthy installs finish before kicking off lint or test runs.
+* **Dev dependency install guard:** Run `make install-dev` after cloning or rebasing to install the full dev/test stack (including Home Assistant). This avoids skipped or failed `pytest`/`mypy` runs due to missing packages and keeps the resolver checks green without manual pip retries. **Always run this (or an equivalent `python -m pip install -r custom_components/googlefindmy/requirements-dev.txt`) before any lint/test invocation**, especially when exercising Moto Tag regression suites that import optional crypto/backoff libraries.
 * **Rotation-window debug toggle:** The resolver's rotation window helper now accepts an `allow_negative` flag to log and scan negative windows when debugging drift-heavy anchors. When investigating timebase drift, enable the toggle in the resolver debug path instead of re-reading the code to remember how negative offsets are surfaced.
-* **Bootstrap helper:** Run `make bootstrap-base-deps` from the repo root to pre-install `homeassistant` and `pytest-homeassistant-custom-component` once per environment. The task drops a sentinel at `.bootstrap/homeassistant-preinstall.stamp`; delete it (or run `make clean`) if you need to force a reinstall. For a faster, test-focused bootstrap immediately before running `pytest -q`, prefer `make test-stubs`, which installs only these two stub packages without the broader base toolchain.
-* **Stub refresh after upgrades:** When dependency versions change (for example, after rebasing or updating requirements), rerun `make test-stubs` so Home Assistant stubs stay in sync before invoking `pytest -q` or `mypy --strict`.
+* **Bootstrap helper:** `make install-dev` is the single bootstrap target. The former targets `make bootstrap-base-deps`, `make test-deps`, `make test-stubs` and `make install-ha-stubs` were removed with the move to Poetry and no longer exist.
+* **Stub refresh after upgrades:** When dependency versions change (for example, after rebasing or updating requirements), rerun `make install-dev` so Home Assistant and the pytest plugin stay in sync before invoking `pytest -q` or `mypy --strict`.
 * **Fallback reminder:** If a CLI helper such as `pre-commit` is not yet on the PATH, rerun the command via its module form (for example, `python -m pre_commit run --all-files`) so the initial check still succeeds.
 * **Online mode:** When a network connection is available you may install or update missing development tooling (for example, `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) whenever it is necessary for maintenance or local verification.
 * **Offline mode:** When no connection is available, limit the work to local analysis only and call out any follow-up actions that must happen once connectivity is restored.
@@ -437,7 +437,7 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 ### Cleanup shortcuts
 
 * **DocToc reinstall:** Run `make clean` to delete `.bootstrap/doctoc-preinstall.stamp` when you need to force a fresh DocToc install before rerunning `make doctoc`.
-* **Home Assistant stub reinstall:** Run `make clean` to delete `.bootstrap/homeassistant-preinstall.stamp` when a dependency change requires reinstalling the `homeassistant`/`pytest-homeassistant-custom-component` stubs via `make bootstrap-base-deps`.
+* **Home Assistant reinstall:** After a dependency change, rerun `make install-dev`; Poetry reinstalls the changed `homeassistant`/`pytest-homeassistant-custom-component` versions from `poetry.lock`. There is no sentinel file to delete.
 
 ### Module invocation primer
 
@@ -452,8 +452,8 @@ Prefer the executable name when it is available; fall back to the module form wh
 
 ### Shared pip cache for stub installs
 
-* Export `PIP_CACHE_DIR=/workspace/.cache/pip` (or reuse the default `~/.cache/pip`) before invoking `make test-stubs` so wheel downloads persist across sessions. Reusing the same cache keeps the Home Assistant and pytest stub installs fast and avoids repeated dependency fetches in fresh shells.
-* If you routinely rebuild the stub environment, keep a reusable virtualenv or wheelhouse around to sidestep the lengthy `make test-stubs` bootstrap. For example, cache a pre-populated `.venv` or store `pip download` artifacts in a shared directory that `PIP_FIND_LINKS` or `pip --no-index --find-links` can consume on the next run.
+* Export `PIP_CACHE_DIR=/workspace/.cache/pip` (or reuse the default `~/.cache/pip`) and `POETRY_CACHE_DIR` (default `~/.cache/pypoetry`) before invoking `make install-dev` or pip installs so wheel downloads persist across sessions. Reusing the same caches keeps the Home Assistant and pytest plugin installs fast and avoids repeated dependency fetches in fresh shells.
+* If you routinely rebuild the stub environment, keep a reusable virtualenv or wheelhouse around to sidestep the lengthy `make install-dev` bootstrap. For example, cache a pre-populated `.venv` or store `pip download` artifacts in a shared directory that `PIP_FIND_LINKS` or `pip --no-index --find-links` can consume on the next run.
 
 ---
 
@@ -501,7 +501,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – ruff check . *(mandatory; you may run `ruff check --fix` beforehand, but finish with a non-fixing run and document the result)*
 > – mypy --strict --explicit-package-bases custom_components/googlefindmy tests *(mandatory for Python changes; capture the outcome)*
 > – pytest -q *(mandatory; investigate and resolve every `DeprecationWarning`; capture the outcome)*
-> – If Home Assistant stubs are missing, run `make install-ha-stubs` before rerunning pytest (see [README — Installing Home Assistant test dependencies on demand](README.md#installing-home-assistant-test-dependencies-on-demand)).
+> – If Home Assistant stubs are missing, run `make install-dev` before rerunning pytest (see [README — Installing Home Assistant test dependencies on demand](README.md#installing-home-assistant-test-dependencies-on-demand)).
 >
 > **Online mode (in addition to the offline steps):**
 > – pip install -r custom_components/googlefindmy/requirements-dev.txt *(install or update missing dependencies)*
