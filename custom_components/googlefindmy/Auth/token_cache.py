@@ -460,8 +460,10 @@ class TokenCache:
             return result
 
     async def all(self) -> CacheData:
-        """Return a shallow copy of the entire cache snapshot."""
-        return self._snapshot()
+        """Return a copy of the entire cache with every value detached."""
+        return cast(
+            CacheData, {key: _detached(value) for key, value in self._data.items()}
+        )
 
     # ---------- Coordinator/API compatibility aliases (Protocol-friendly) ----------
 
@@ -590,11 +592,13 @@ def _detached(value: Any) -> Any:
     itself, the write would be skipped and the edit never saved (the FCM
     invalidation path did exactly that). Copying container values on the way
     in and out keeps the stored value and the caller's value apart. Cached
-    values are small JSON documents, so the copy is cheap.
+    values are small JSON documents, so the copy is cheap. Every value that is
+    not an immutable scalar is copied, so a tuple or set holding a container is
+    detached as well.
     """
-    if isinstance(value, (dict, list)):
-        return copy.deepcopy(value)
-    return value
+    if value is None or isinstance(value, (str, bytes, int, float)):
+        return value
+    return copy.deepcopy(value)
 
 
 def _legacy_migration_done() -> bool:

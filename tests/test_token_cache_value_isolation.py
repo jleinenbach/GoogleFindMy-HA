@@ -182,3 +182,33 @@ async def test_a_failed_save_of_an_invalidation_is_logged(
     assert ENTRY_ID in message
     assert "RuntimeError" in message
     assert "secret-looking failure text" not in message
+
+
+@pytest.mark.asyncio
+async def test_a_container_inside_a_tuple_is_detached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not only dicts and lists: any value holding a container is copied."""
+    cache = _real_cache(monkeypatch)
+    written = ({"nested": 1},)
+    await cache.set("tuple_value", written)
+    written[0]["nested"] = 2
+
+    read = await cache.get("tuple_value")
+    read[0]["nested"] = 3
+
+    assert await cache.get("tuple_value") == ({"nested": 1},)
+
+
+@pytest.mark.asyncio
+async def test_all_hands_out_detached_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Editing a value of ``all()`` in place leaves the cache unchanged."""
+    cache = _real_cache(monkeypatch)
+    await cache.set("fcm_credentials", _registration())
+
+    snapshot = await cache.all()
+    snapshot["fcm_credentials"]["gcm"].pop("token")
+
+    assert await cache.get("fcm_credentials") == _registration()
