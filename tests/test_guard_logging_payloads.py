@@ -2257,14 +2257,17 @@ def _forwarded_parameter_seeds(
             # skip it in the joint list, not in `args.args`.
             keyword = {p.arg for p in [*positional, *args.kwonlyargs]}
             keyword -= {p.arg for p in args.posonlyargs}
-            spread = False
+            # A starred argument may unpack to nothing, so every argument
+            # from the first one on may land in its slot (`h(*(), err)`).
+            first_star: int | None = None
             hit: set[str] = set()
             for index, argument in enumerate(call.args):
-                spread = spread or isinstance(argument, ast.Starred)
+                if first_star is None and isinstance(argument, ast.Starred):
+                    first_star = index
                 if not _carries_exception(argument, bound):
                     continue
-                if spread:
-                    hit.update(p.arg for p in positional[index:])
+                if first_star is not None:
+                    hit.update(p.arg for p in positional[first_star:])
                     hit.update(variadic)
                 elif index < len(positional):
                     hit.add(positional[index].arg)
@@ -5304,6 +5307,14 @@ def posonly_kw_sink(a, /, **kw) -> None:
 
 def f17(err: ClientError) -> None:
     posonly_kw_sink(1, a=err)
+
+
+def empty_star_sink(a, b=None) -> None:
+    _LOGGER.error("x %s", a)
+
+
+def f18(err: ClientError) -> None:
+    empty_star_sink(*(), err)
 """
 
 
@@ -5339,7 +5350,9 @@ def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
     reaches a method of the same name (line 249 stays silent). A receiver
     declared positional-only (`def slash_sink(self, /, v)`) leaves `v`
     reachable by keyword (line 258), and a keyword named like a
-    positional-only parameter lands in `**kw` (line 265). The same
+    positional-only parameter lands in `**kw` (line 265), and an argument
+    after an empty starred one may land in the starred slot (line 273,
+    `empty_star_sink(*(), err)`). The same
     fixture outside `Auth/` reports nothing.
     """
     tree = ast.parse(_SHAPE_I_FORWARD_FIXTURE)
@@ -5372,6 +5385,7 @@ def test_shape_i_follows_exceptions_into_module_local_helpers() -> None:
         (240, "c"),
         (258, "v"),
         (265, "kw"),
+        (273, "a"),
     ]
     outside, _ = _scan_tree(tree, "coordinator/fixture.py")
     assert outside == []
