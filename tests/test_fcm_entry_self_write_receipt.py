@@ -694,3 +694,27 @@ def test_a_top_level_write_that_fails_keeps_the_receipt_of_an_earlier_write(
 
     assert hass.config_entries.calls == 1
     assert _receipts(hass) == {"entry-a": _EARLIER}
+
+
+@pytest.mark.parametrize(
+    "result", [RuntimeError("store-text"), False], ids=["raises", "stores-nothing"]
+)
+def test_a_registration_write_that_fails_restores_the_receipt_it_replaced(
+    result: Any,
+) -> None:
+    """Write B replaces the receipt of write A; storing nothing puts A's back.
+
+    A's listener has not run yet. Without its receipt it would reload for the
+    receiver's own write.
+    """
+
+    entry = _bundle_entry("entry-a")
+    hass = SimpleNamespace(data={}, config_entries=_Manager([entry], result))
+    note_self_write(hass, "entry-a", _EARLIER)
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    receiver._persist_credentials_to_entry("entry-a", _registration("renewed"))
+
+    assert hass.config_entries.calls == 1
+    assert _receipts(hass) == {"entry-a": _EARLIER}

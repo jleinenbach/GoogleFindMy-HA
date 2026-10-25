@@ -91,6 +91,7 @@ from custom_components.googlefindmy.Auth.log_safety import (
     exception_origin,
 )
 from custom_components.googlefindmy.entry_self_write import (
+    consume_self_write,
     credential_member_digest,
     discard_self_write,
     note_self_write,
@@ -3560,6 +3561,14 @@ class FcmReceiverHA:
                 describe_exception(err),
             )
 
+    def _restore_receipt(self, entry_id: str, earlier: str | None) -> None:
+        """Put back the receipt an unstored write replaced, or drop its own."""
+
+        if earlier is None:
+            discard_self_write(self._hass, entry_id)
+        else:
+            note_self_write(self._hass, entry_id, earlier)
+
     def _persist_credentials_to_entry(
         self,
         entry_id: str,
@@ -3643,17 +3652,19 @@ class FcmReceiverHA:
         # listener task inside ``async_update_entry``. Only a changed bundle
         # registration moves the fingerprint; a write that only refreshes the
         # top-level copy reaches the listener without a change and would leave
-        # the receipt unconsumed. A receipt is only dropped below when this call
-        # left it; otherwise it belongs to an earlier write still waiting for
-        # its listener.
+        # the receipt unconsumed. A receipt already there belongs to an earlier
+        # write still waiting for its listener: this call replaces it only for
+        # a write that goes through and puts it back when nothing is stored.
         noted = stored != digest
+        earlier: str | None = None
         if noted:
+            earlier = consume_self_write(hass, entry_id)
             note_self_write(hass, entry_id, digest)
         try:
             changed = update(entry, data=updated_data)
         except Exception as err:  # noqa: BLE001 - durability is best-effort
             if noted:
-                discard_self_write(hass, entry_id)
+                self._restore_receipt(entry_id, earlier)
             _LOGGER.warning(
                 "[entry=%s] Failed to persist the refreshed FCM registration to "
                 "the config entry; the next restart may restore the previous "
@@ -3665,7 +3676,7 @@ class FcmReceiverHA:
         if changed is False:
             # Nothing was stored, so no listener runs to consume the receipt.
             if noted:
-                discard_self_write(hass, entry_id)
+                self._restore_receipt(entry_id, earlier)
             return
         self._entry_registration_digest[entry_id] = digest
         _LOGGER.info(
