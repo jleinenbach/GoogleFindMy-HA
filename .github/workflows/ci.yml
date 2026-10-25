@@ -593,17 +593,22 @@ jobs:
           # testing there would leave the pre-2025.11
           # paths -- such as the `EntityCategory` import fallback in button.py --
           # unexercised by every axis. 0.13.278 is the plugin release that
-          # carries Home Assistant 2025.9.1.
+          # carries Home Assistant 2025.9.1. `floor` marks the axis that is
+          # checked against hacs.json and that needs the `pycares<5` cap.
           - label: "declared floor"
             ha_pin: "2025.9.1"
             plugin_pin: "0.13.278"
-          # The last Home Assistant line that still supports Python 3.13
-          # (2026.2.3). Without this axis the final three 3.13-era releases go
-          # untested. Both pins are dropped so pip resolves the newest release
-          # that satisfies the interpreter; the step below adds `pycares<5`.
+            floor: true
+          # The last Home Assistant release that still supports Python 3.13:
+          # 2026.3.0 requires Python 3.14.2, so this pin is final. 0.13.316 is
+          # the last plugin release for Python 3.13 and requires exactly
+          # 2026.2.3. Left unpinned, pip's backtracking resolver settled on an
+          # older set instead (Home Assistant 2026.1.3, and 2025.10.4 once the
+          # pytest-asyncio pin was dropped), and the run still passed.
           - label: "last 3.13 line"
-            ha_pin: ""
-            plugin_pin: ""
+            ha_pin: "2026.2.3"
+            plugin_pin: "0.13.316"
+            floor: false
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -627,7 +632,7 @@ jobs:
       # Guards against silent drift: if someone raises the floor in hacs.json,
       # this axis would keep testing the old one and the label would lie.
       - name: Verify the pinned floor still matches hacs.json
-        if: matrix.ha_pin != ''
+        if: matrix.floor
         run: |
           set -euo pipefail
           declared="$(python -c 'import json;print(json.load(open("hacs.json"))["homeassistant"])')"
@@ -640,28 +645,30 @@ jobs:
       - name: Rewrite the stub constraints for this axis
         run: |
           set -euo pipefail
+          if [ -z "${{ matrix.ha_pin }}" ] || [ -z "${{ matrix.plugin_pin }}" ]; then
+            echo "::error::Every axis must pin both homeassistant and pytest-homeassistant-custom-component; an unpinned axis tests whatever pip happens to resolve."
+            exit 1
+          fi
           constraints=custom_components/googlefindmy/constraints-test-stubs.txt
           sed -i -E '/^(homeassistant|pytest-homeassistant-custom-component)==/d' "$constraints"
           # The plugin release that carries an older Home Assistant also
-          # carries the pytest stack of its own era: 0.13.278 requires
-          # pytest-asyncio==1.1.0 and 0.13.316, the last release for Python
-          # 3.13, requires 1.3.0, while requirements-dev.txt pins the poetry.lock
-          # version (1.4.0). Keeping both makes the resolution impossible.
-          # Testing an old Home Assistant line means testing it with the test
-          # tooling that line shipped with, so the local pin steps aside on
-          # every axis of this job.
+          # carries the pytest stack of its own era and pins it exactly:
+          # 0.13.278 requires pytest-asyncio==1.1.0 and 0.13.316 requires
+          # 1.3.0, while requirements-dev.txt pins the poetry.lock version
+          # (1.4.0). Keeping both makes the resolution impossible, so the local
+          # pin steps aside on every axis and the plugin pin decides.
           sed -i -E '/^pytest-asyncio==/d' \
             custom_components/googlefindmy/requirements-dev.txt
           # Home Assistant 2025.9.1 pulls aiodns 3.5.0, which annotates with
-          # pycares 4 result types but sets no upper bound on pycares, so this
-          # job caps it. The repository file no longer does, because the
-          # poetry.lock Home Assistant release (Python 3.14 only) pulls
-          # aiodns 4, which requires pycares>=5.
-          printf 'pycares<5\n' >> "$constraints"
-          if [ -n "${{ matrix.ha_pin }}" ]; then
-            printf 'homeassistant==%s\n' "${{ matrix.ha_pin }}" >> "$constraints"
-            printf 'pytest-homeassistant-custom-component==%s\n' "${{ matrix.plugin_pin }}" >> "$constraints"
+          # pycares 4 result types but sets no upper bound on pycares, so the
+          # floor axis caps it. The other axis must not: 2026.2.3 requires
+          # aiodns==4.0.0, which requires pycares>=5, as does the poetry.lock
+          # release in the repository file.
+          if [ "${{ matrix.floor }}" = "true" ]; then
+            printf 'pycares<5\n' >> "$constraints"
           fi
+          printf 'homeassistant==%s\n' "${{ matrix.ha_pin }}" >> "$constraints"
+          printf 'pytest-homeassistant-custom-component==%s\n' "${{ matrix.plugin_pin }}" >> "$constraints"
           echo "Constraints for this axis:"
           cat "$constraints"
 
@@ -671,25 +678,23 @@ jobs:
           pip install -r custom_components/googlefindmy/requirements-dev.txt
 
       # Printed, and asserted, so this job's claim about which Home Assistant
-      # line it exercised is measured rather than inferred from the matrix
-      # label. Without the assertion a future change to the constraints file
-      # could silently collapse both axes onto the same release.
-      - name: Report and verify the resolved Home Assistant version
+      # release it exercised is measured rather than inferred from the matrix
+      # label. A passing run only proves that the dependencies installed; this
+      # step proves that they are the ones the axis is named after.
+      - name: Report and verify the resolved Home Assistant and plugin versions
         run: |
           set -euo pipefail
           resolved="$(python -c 'from importlib.metadata import version; print(version("homeassistant"))')"
+          plugin="$(python -c 'from importlib.metadata import version; print(version("pytest-homeassistant-custom-component"))')"
           echo "homeassistant==${resolved}"
-          echo "pytest-homeassistant-custom-component==$(python -c 'from importlib.metadata import version; print(version("pytest-homeassistant-custom-component"))')"
-          if [ -n "${{ matrix.ha_pin }}" ]; then
-            if [ "${resolved}" != "${{ matrix.ha_pin }}" ]; then
-              echo "::error::The floor axis resolved to ${resolved}, not the pinned ${{ matrix.ha_pin }}."
-              exit 1
-            fi
-          else
-            if [ "${resolved}" = "2025.9.1" ]; then
-              echo "::error::The unpinned axis resolved to the declared floor (${resolved}); both axes are testing the same release."
-              exit 1
-            fi
+          echo "pytest-homeassistant-custom-component==${plugin}"
+          if [ "${resolved}" != "${{ matrix.ha_pin }}" ]; then
+            echo "::error::The ${{ matrix.label }} axis resolved Home Assistant ${resolved}, not the pinned '${{ matrix.ha_pin }}'."
+            exit 1
+          fi
+          if [ "${plugin}" != "${{ matrix.plugin_pin }}" ]; then
+            echo "::error::The ${{ matrix.label }} axis resolved pytest-homeassistant-custom-component ${plugin}, not the pinned '${{ matrix.plugin_pin }}'."
+            exit 1
           fi
 
       # No coverage gate here: coverage is measured once, by the `test` job on

@@ -951,9 +951,11 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   and `custom_components/googlefindmy/constraints-test-stubs.txt` pins
   `homeassistant==2026.10.3` and `pytest-homeassistant-custom-component==0.13.374`
   (the `poetry.lock` versions; bump both together, since each plugin release
-  requires one exact Home Assistant release). The `test_legacy_python` job adds
-  the cap `pycares<5` for its Python 3.13 axes (an upper bound, not an exact pin;
-  the runtime floor `pycares>=4.4.0` lives in `requirements-dev.txt`).
+  requires one exact Home Assistant release). The `test_legacy_python` job pins
+  its two Python 3.13 axes exactly (`homeassistant==2025.9.1` with plugin
+  `0.13.278`, and `homeassistant==2026.2.3` with plugin `0.13.316`) and adds the
+  cap `pycares<5` for the declared-floor axis only (an upper bound, not an exact
+  pin; the runtime floor `pycares>=4.4.0` lives in `requirements-dev.txt`).
 * Actual coverage today (each claim cites the workflow proving its *effective*
   behaviour):
   * **PR CI passes an approval gate.** In
