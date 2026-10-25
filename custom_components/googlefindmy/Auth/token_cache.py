@@ -767,7 +767,7 @@ def get_cached_value(name: str) -> Any:
         if not _INSTANCES:
             return None
         cache = _get_default_cache()
-        return cache._data.get(name)
+        return _detached(cache._data.get(name))
     else:
         raise RuntimeError(
             f"Sync `get_cached_value({name!r})` used inside event loop. "
@@ -796,11 +796,12 @@ def set_cached_value(name: str, value: Any | None) -> None:
         return
 
     cache = _get_default_cache()
-    # Direct write to in-memory dict for sync context (CLI/tests). No disk write here.
+    # In-memory write for sync context (CLI/tests), detached like the write
+    # methods of the instance. No disk write here.
     if value is None:
         cache._data.pop(name, None)
     else:
-        cache._data[name] = value
+        cache._data[name] = _detached(value)
 
 
 def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
@@ -831,10 +832,10 @@ def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
 
     cache = _get_default_cache()
     if name in cache._data:
-        return cache._data[name]
+        return _detached(cache._data[name])
 
     value = generator()
-    cache._data[name] = value
+    cache._data[name] = _detached(value)
     return value
 
 

@@ -212,3 +212,27 @@ async def test_all_hands_out_detached_values(
     snapshot["fcm_credentials"]["gcm"].pop("token")
 
     assert await cache.get("fcm_credentials") == _registration()
+
+
+def test_the_sync_facades_hand_out_and_keep_detached_values() -> None:
+    """``get_cached_value``, ``set_cached_value`` and ``get_cached_value_or_set``.
+
+    The module facades reach the default instance's store directly; they copy
+    like the instance methods, so no caller shares a container with the cache.
+    """
+
+    cache = SimpleNamespace(_data={})
+    tc._INSTANCES[ENTRY_ID] = cache
+
+    written = _registration()
+    tc.set_cached_value("fcm_credentials", written)
+    written["gcm"]["token"] = "edited-after-set"
+    read = tc.get_cached_value("fcm_credentials")
+    read["gcm"]["token"] = "edited-after-get"
+    hit = tc.get_cached_value_or_set("fcm_credentials", _registration)
+    hit["gcm"]["token"] = "edited-after-hit"
+    generated = tc.get_cached_value_or_set("other", _registration)
+    generated["gcm"]["token"] = "edited-after-miss"
+
+    assert cache._data["fcm_credentials"] == _registration()
+    assert cache._data["other"] == _registration()
