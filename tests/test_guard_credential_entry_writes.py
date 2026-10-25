@@ -36,21 +36,27 @@ far, and fail on anything they cannot classify:
   written through (``bundle[K]["gcm"] = v``, ``self.creds[e] = bundle.get(K)``)
   fails too.
 * A mapping write must take a detached value: a ``copy.deepcopy(x)`` call with
-  a single argument (a memo can return ``x`` itself), where ``copy`` is bound
-  only by ``import copy``, or a local name every binding of which in the
-  enclosing function is a single-target assignment of such a call. One value
-  written to several keys is shared and fails. Every binding form of the grammar counts
-  (assignment and unpacking targets, augmented and annotated assignment, walrus,
-  loop, ``with`` and comprehension targets, parameters, ``except ... as``,
-  ``match`` captures, imports, ``global``/``nonlocal``, nested definitions); any
-  but the plain deepcopy assignment fails. Such a local may then be written
-  once and otherwise only hashed or copied again; a second write or any other
-  use would share the container.
+  a single argument (a memo can return ``x`` itself), where every binding of the
+  name ``copy`` in the module is ``import copy``, or a local name every binding
+  of which in the enclosing function is a single-target assignment of such a
+  call. One value written to several keys, or a write that shares its statement
+  with another target (``keep = data[K] = copy.deepcopy(r)``), is shared and
+  fails. These binding forms count (assignment and unpacking targets, augmented
+  and annotated assignment, walrus, loop, ``with`` and comprehension targets,
+  parameters, ``except ... as``, ``match`` captures, imports,
+  ``global``/``nonlocal``, nested definitions); any but the plain deepcopy
+  assignment fails. Such a local may then be written once and otherwise only
+  hashed or copied again; a second write or any other use would share the
+  container.
 * ``_BROKEN`` pins the forms found in review against a clean reference source.
 
 Detection limits, stated rather than implied. A key built at runtime (string
 concatenation, a constant imported from another module) is not recognised as the
 member. The token cache is recognised by its receiver name, from a closed list.
+Not seen either: a rebinding of ``copy`` other than by name (``copy.deepcopy = f``,
+``setattr(copy, ...)``, ``from x import *``), PEP 695 type parameters as a binding,
+scopes (a binding in a nested ``def`` counts for the enclosing function), a
+shared container around the copy, and keys written as f-strings.
 Writes of the member outside the receiver (the config flow, ``TokenCache``) are
 out of scope.
 """
@@ -393,6 +399,22 @@ def _classify(
     return kind
 
 
+def _has_other_targets(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """True for a subscript store that shares its statement with another target.
+
+    ``keep = data[K] = copy.deepcopy(r)`` binds one copy to the key and to
+    ``keep``; the copy is fresh, but it is no longer the entry's alone.
+    """
+
+    parent = parents.get(node)
+    statement = parents.get(parent) if parent is not None else None
+    return (
+        isinstance(parent, ast.Subscript)
+        and isinstance(statement, ast.Assign)
+        and len(statement.targets) > 1
+    )
+
+
 def _shared_uses(
     name: str,
     function: ast.AST,
@@ -466,6 +488,9 @@ def _receiver_problems(tree: ast.Module) -> tuple[int, list[str], list[str]]:
     for node, value in writes:
         if targets_per_value[id(value)] > 1:
             shared.append(f"line {node.lineno}: one value written to several keys")
+            continue
+        if _has_other_targets(node, parents):
+            shared.append(f"line {node.lineno}: one value bound to several targets")
             continue
         function = _enclosing_function(node, parents)
         if (
@@ -566,6 +591,14 @@ _BROKEN = {
         "        registration = copy.deepcopy(dict(creds))\n",
         "        registration = alias = copy.deepcopy(dict(creds))\n"
         "        data[K] = alias\n",
+    ),
+    "deep copy also bound to an attribute in one statement": (
+        "            data[K2] = copy.deepcopy(registration)\n",
+        "            self.keep = data[K2] = copy.deepcopy(registration)\n",
+    ),
+    "deep copy also bound to a local in one statement": (
+        "            data[K2] = copy.deepcopy(registration)\n",
+        "            data[K2] = keep = copy.deepcopy(registration)\n",
     ),
     "deepcopy with a memo": (
         "            data[K2] = copy.deepcopy(registration)\n",
