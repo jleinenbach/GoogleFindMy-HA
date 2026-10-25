@@ -25,7 +25,8 @@ far, and fail on anything they cannot classify:
   therefore fails as an unknown call or statement. A behaviour probe pins that
   every credential key and every sampled bundle member moves the fingerprint.
 * Every occurrence of the member key in ``Auth/fcm_receiver_ha.py`` (string
-  constant, module-body constant bound to it, or keyword argument) is classified
+  constant, module-body name bound to it directly or through another such name,
+  or keyword argument) is classified
   as a hash read (``.get`` or subscript load whose value goes straight into
   ``credential_member_digest``), an ``in`` test, a token cache read or write
   (``.get``/``.set`` on a receiver named in ``_CACHE_RECEIVERS``; ``TokenCache``
@@ -34,9 +35,11 @@ far, and fail on anything they cannot classify:
   other occurrence fails as unclassified, so a read whose value is kept or
   written through (``bundle[K]["gcm"] = v``, ``self.creds[e] = bundle.get(K)``)
   fails too.
-* A mapping write must take a detached value: a ``copy.deepcopy(...)`` call, or
-  a local name every binding of which in the enclosing function is a plain
-  assignment of such a call. Every binding form of the grammar counts
+* A mapping write must take a detached value: a ``copy.deepcopy(x)`` call with
+  a single argument (a memo can return ``x`` itself), where ``copy`` is bound
+  only by ``import copy``, or a local name every binding of which in the
+  enclosing function is a single-target assignment of such a call. One value
+  written to several keys is shared and fails. Every binding form of the grammar counts
   (assignment and unpacking targets, augmented and annotated assignment, walrus,
   loop, ``with`` and comprehension targets, parameters, ``except ... as``,
   ``match`` captures, imports, ``global``/``nonlocal``, nested definitions); any
@@ -56,6 +59,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+from collections import Counter
 
 import pytest
 
@@ -179,12 +183,31 @@ def test_every_credential_key_and_bundle_member_moves_the_fingerprint() -> None:
 
 
 def _is_deepcopy(node: ast.AST) -> bool:
+    """``copy.deepcopy(x)`` with one argument; a memo can hand back ``x`` itself.
+
+    That ``copy`` is the module is checked once per file
+    (``_copy_is_the_module``), not here.
+    """
+
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "deepcopy"
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "copy"
+        and len(node.args) == 1
+        and not isinstance(node.args[0], ast.Starred)
+        and not node.keywords
+    )
+
+
+def _copy_is_the_module(tree: ast.Module) -> bool:
+    """``copy`` is bound only by ``import copy``, so ``copy.deepcopy`` is the real one."""
+
+    sites = _binding_sites(tree, "copy")
+    return bool(sites) and all(
+        isinstance(site, ast.alias) and site.name == "copy" and site.asname is None
+        for site in sites
     )
 
 
@@ -240,7 +263,7 @@ def _is_detached(
             isinstance(site, ast.Name)
             and isinstance(site.ctx, ast.Store)
             and isinstance(statement, ast.Assign)
-            and site in statement.targets
+            and statement.targets == [site]
             and _is_deepcopy(statement.value)
         ):
             return False
@@ -251,15 +274,23 @@ def _member_names(tree: ast.Module) -> set[str]:
     """Module-level names bound to the member key, used as a key elsewhere."""
 
     names: set[str] = set()
-    for node in tree.body:
-        targets: list[ast.expr] = []
-        value: ast.expr | None = None
-        if isinstance(node, ast.Assign):
-            targets, value = list(node.targets), node.value
-        elif isinstance(node, ast.AnnAssign):
-            targets, value = [node.target], node.value
-        if isinstance(value, ast.Constant) and value.value == _MEMBER:
-            names.update(t.id for t in targets if isinstance(t, ast.Name))
+    grown = True
+    # Repeat until stable: ``K2 = K`` makes ``K2`` a key once ``K`` is one.
+    while grown:
+        grown = False
+        for node in tree.body:
+            targets: list[ast.expr] = []
+            value: ast.expr | None = None
+            if isinstance(node, ast.Assign):
+                targets, value = list(node.targets), node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets, value = [node.target], node.value
+            if value is None or not _is_member_key(value, names):
+                continue
+            new = {t.id for t in targets if isinstance(t, ast.Name)} - names
+            if new:
+                names |= new
+                grown = True
     return names
 
 
@@ -348,9 +379,16 @@ def _classify(
     elif isinstance(parent, ast.Call) and parent.args and parent.args[0] is node:
         kind = (_classify_call_argument(parent, parents), None)
     elif isinstance(parent, ast.Assign | ast.AnnAssign):
-        # Only a statement of the module body binds a module constant; one in a
-        # class body is reached as ``self.NAME`` and would escape the scan.
-        if isinstance(parents.get(parent), ast.Module):
+        # Only a plain name bound in the module body is a module constant (and
+        # tracked as a key by ``_member_names``); one in a class body is reached
+        # as ``self.NAME`` and an attribute target as ``obj.NAME``, both of
+        # which would escape the scan.
+        if isinstance(parents.get(parent), ast.Module) and all(
+            isinstance(target, ast.Name)
+            for target in (
+                parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+            )
+        ):
             kind = ("module constant", None)
     return kind
 
@@ -421,8 +459,14 @@ def _receiver_problems(tree: ast.Module) -> tuple[int, list[str], list[str]]:
         if kind == "unclassified"
     ]
     written = {id(value) for _node, value in writes if value is not None}
+    targets_per_value = Counter(id(value) for _node, value in writes)
     shared: list[str] = []
+    if writes and not _copy_is_the_module(tree):
+        shared.append("copy is not only bound by 'import copy'")
     for node, value in writes:
+        if targets_per_value[id(value)] > 1:
+            shared.append(f"line {node.lineno}: one value written to several keys")
+            continue
         function = _enclosing_function(node, parents)
         if (
             value is None
@@ -458,6 +502,7 @@ def test_every_receiver_write_of_the_registration_is_a_deep_copy() -> None:
 _CLEAN = """
 import copy
 K = "fcm_credentials"
+K2 = K
 
 class R:
     async def save(self, cache, entry_cache, bundle, data, creds):
@@ -470,7 +515,7 @@ class R:
         digest = credential_member_digest(registration)
         bundle["fcm_credentials"] = registration
         if "fcm_credentials" in data:
-            data[K] = copy.deepcopy(registration)
+            data[K2] = copy.deepcopy(registration)
         return known, cached, digest
 """
 
@@ -490,7 +535,7 @@ _BROKEN = {
         "        digest = credential_member_digest(registration)\n",
     ),
     "deep copy written twice": (
-        "            data[K] = copy.deepcopy(registration)\n",
+        "            data[K2] = copy.deepcopy(registration)\n",
         "            data[K] = registration\n",
     ),
     "class constant as key": (
@@ -504,6 +549,31 @@ _BROKEN = {
     "shallow write": (
         '        bundle["fcm_credentials"] = registration\n',
         '        bundle["fcm_credentials"] = creds\n',
+    ),
+    "key bound to an attribute at module level": (
+        "K2 = K\n",
+        "K2 = K\nSETTINGS.key = K\n",
+    ),
+    "write through a module alias of the key": (
+        "            data[K2] = copy.deepcopy(registration)\n",
+        "            data[K2] = creds\n",
+    ),
+    "one deep copy written to two keys": (
+        "            data[K2] = copy.deepcopy(registration)\n",
+        '            bundle["fcm_credentials"] = data[K2] = copy.deepcopy(registration)\n',
+    ),
+    "one deep copy bound to two names": (
+        "        registration = copy.deepcopy(dict(creds))\n",
+        "        registration = alias = copy.deepcopy(dict(creds))\n"
+        "        data[K] = alias\n",
+    ),
+    "deepcopy with a memo": (
+        "            data[K2] = copy.deepcopy(registration)\n",
+        "            data[K] = copy.deepcopy(registration, {})\n",
+    ),
+    "copy shadowed by a parameter": (
+        "    async def save(self, cache, entry_cache, bundle, data, creds):\n",
+        "    async def save(self, cache, entry_cache, bundle, data, creds, copy):\n",
     ),
     "dict display without copy": (
         '        bundle["fcm_credentials"] = registration\n',
