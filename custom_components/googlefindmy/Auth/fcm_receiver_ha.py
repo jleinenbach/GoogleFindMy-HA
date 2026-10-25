@@ -3548,11 +3548,14 @@ class FcmReceiverHA:
         The entry write runs before the token cache write, and that cache write
         ran unconditionally before the entry became the durable store. An
         exception in the entry lookup, the copy or the digest must not cost it.
+
+        No receipt is dropped here: such an exception is raised before
+        ``note_self_write``, so the receipt of this entry, if any, belongs to an
+        earlier write whose listener has not run yet.
         """
         try:
             self._persist_credentials_to_entry(entry_id, creds, generation)
         except Exception as err:  # noqa: BLE001 - durability is best-effort
-            discard_self_write(self._hass, entry_id)
             _LOGGER.warning(
                 "[entry=%s] Failed to persist the FCM registration to the config "
                 "entry; the next restart may restore the previous one: %s",
@@ -3643,13 +3646,17 @@ class FcmReceiverHA:
         # listener task inside ``async_update_entry``. Only a changed bundle
         # registration moves the fingerprint; a write that only refreshes the
         # top-level copy reaches the listener without a change and would leave
-        # the receipt unconsumed.
-        if stored != digest:
+        # the receipt unconsumed. A receipt is only dropped below when this call
+        # left it; otherwise it belongs to an earlier write still waiting for
+        # its listener.
+        noted = stored != digest
+        if noted:
             note_self_write(hass, entry_id, digest)
         try:
             changed = update(entry, data=updated_data)
         except Exception as err:  # noqa: BLE001 - durability is best-effort
-            discard_self_write(hass, entry_id)
+            if noted:
+                discard_self_write(hass, entry_id)
             _LOGGER.warning(
                 "[entry=%s] Failed to persist the refreshed FCM registration to "
                 "the config entry; the next restart may restore the previous "
@@ -3660,7 +3667,8 @@ class FcmReceiverHA:
             return
         if changed is False:
             # Nothing was stored, so no listener runs to consume the receipt.
-            discard_self_write(hass, entry_id)
+            if noted:
+                discard_self_write(hass, entry_id)
             return
         self._entry_registration_digest[entry_id] = digest
         _LOGGER.info(

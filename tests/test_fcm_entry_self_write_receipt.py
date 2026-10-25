@@ -33,6 +33,7 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.entry_self_write import (
     SELF_WRITE_RECEIPTS_KEY,
     credential_member_digest,
+    note_self_write,
 )
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.test_hass_data_layout import _prepare_async_setup_entry_harness
@@ -639,3 +640,57 @@ async def test_an_invalidation_reaches_the_entry_bundle() -> None:
     assert stored is not receiver.creds["entry-a"]
     assert _receipts(hass) == {"entry-a": credential_member_digest(stored)}
     assert cache.sets and cache.sets[-1][0] == "fcm_credentials"
+
+
+_EARLIER = "digest-of-an-earlier-write"
+
+
+def test_a_failing_lookup_keeps_the_receipt_of_an_earlier_write() -> None:
+    """The exception comes before this call leaves a receipt; the one there stays.
+
+    An earlier write's receipt still waits for its listener; dropping it would
+    make that listener reload for the receiver's own write.
+    """
+
+    hass = SimpleNamespace(data={}, config_entries=_LookupFails())
+    note_self_write(hass, "entry-a", _EARLIER)
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    receiver._persist_credentials_to_entry_best_effort(
+        "entry-a", _registration("renewed")
+    )
+
+    assert _receipts(hass) == {"entry-a": _EARLIER}
+
+
+def _top_level_only_entry() -> tuple[Any, dict[str, Any]]:
+    renewed = _registration("renewed")
+    entry = make_config_entry(
+        entry_id="entry-a",
+        data={
+            "fcm_credentials": _registration("old"),
+            DATA_SECRET_BUNDLE: {"fcm_credentials": renewed},
+        },
+    )
+    return entry, renewed
+
+
+@pytest.mark.parametrize(
+    "result", [RuntimeError("store-text"), False], ids=["raises", "stores-nothing"]
+)
+def test_a_top_level_write_that_fails_keeps_the_receipt_of_an_earlier_write(
+    result: Any,
+) -> None:
+    """Only a receipt this call left is dropped when its write stores nothing."""
+
+    entry, renewed = _top_level_only_entry()
+    hass = SimpleNamespace(data={}, config_entries=_Manager([entry], result))
+    note_self_write(hass, "entry-a", _EARLIER)
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    receiver._persist_credentials_to_entry("entry-a", renewed)
+
+    assert hass.config_entries.calls == 1
+    assert _receipts(hass) == {"entry-a": _EARLIER}
