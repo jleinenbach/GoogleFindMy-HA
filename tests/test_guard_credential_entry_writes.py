@@ -27,9 +27,11 @@ far, and fail on anything they cannot classify:
 * Every occurrence of the member key in ``Auth/fcm_receiver_ha.py`` is
   classified. A key is any expression that folds to the member: a string
   constant, an f-string whose placeholders fold, ``+`` of two folding parts, a
-  module-level name bound to such an expression (directly or through another
-  such name), a constant of ``const.py`` reached by import, or a keyword
-  argument. Allowed kinds are a hash read (``.get`` or subscript load whose
+  name bound at module level to such an expression (directly or through another
+  such name, also inside any block that runs at import; a name bound to several
+  strings counts as the member if any of them is), a constant of ``const.py``
+  reached by import (``from ..const import X``, ``const.X``, ``a.b.const.X``),
+  or a keyword argument. Allowed kinds are a hash read (``.get`` or subscript load whose
   value goes straight into ``credential_member_digest``), an ``in`` test, a
   token cache read or write (``.get``/``.set`` on a receiver named in
   ``_CACHE_RECEIVERS``; ``TokenCache`` detaches values itself, pinned in
@@ -39,31 +41,36 @@ far, and fail on anything they cannot classify:
   (``bundle[K]["gcm"] = v``, ``self.creds[e] = bundle.get(K)``) fails too.
 * A mapping write must take a detached value: a ``copy.deepcopy(x)`` call with
   a single argument (a memo can return ``x`` itself), or a local name every
-  binding of which in the enclosing function is a single-target assignment of
-  such a call. ``copy`` must be the module: every binding of the name anywhere
-  in the file is ``import copy`` (a star import, a PEP 695 type parameter or any
-  other binding form fails), and every read of it is an attribute load, so
-  ``copy.deepcopy = f`` and ``setattr(copy, ...)`` fail.
+  binding of which in the enclosing function is a single-target assignment,
+  annotated or not, of such a call. ``copy`` must be the module: every binding
+  of the name anywhere in the file is ``import copy`` (a star import, a PEP 695
+  type parameter or any other binding form fails), and every read of it calls
+  ``copy.deepcopy``, so ``copy.deepcopy = f``, ``setattr(copy, ...)`` and
+  ``copy.__dict__[...]`` fail. A file that binds ``dict`` fails too, because
+  ``dict(x)`` then need not make a new container.
 * Bindings of a local are counted in its own scope: the body of a nested
   ``def``, lambda or class belongs to that scope, while its name, decorators,
   defaults and bases do not; comprehension targets and a nested ``nonlocal`` or
   ``global`` of the name count (fail closed). Such a local may be written once
-  and otherwise only hashed or copied again; a second write or any other use
-  would share it. One value written to several keys, or a write that shares its
+  and otherwise only hashed or copied again as the single argument of
+  ``copy.deepcopy``; a second write or any other use, a memo included, would
+  share it. One value written to several keys, or a write that shares its
   statement with another target (``keep = data[K] = copy.deepcopy(r)``), is
   shared and fails.
 * The container a write goes into must be fresh (a dict display, ``dict(x)``
-  or a deep copy) and local, and may only reach the entry: be indexed, compared,
-  put into a further such container, or handed to a call on ``_WRITER_CALLS``.
-  Kept on ``self``, returned, bound to a second name or handed to any other call,
-  it is shared and fails.
+  or a deep copy, bound once, annotated or not) and local, and may only reach
+  the entry: be written into by index, compared, put into a further such
+  container, or handed to a call on ``_WRITER_CALLS``; an element may be read
+  back only into ``credential_member_digest``. Kept on ``self``, returned, bound
+  to a second name, read back or handed to any other call, it is shared and
+  fails.
 * ``_BROKEN`` pins forms that must fail and ``_ACCEPTED`` equivalent forms that
   must pass, each against a clean reference source.
 
 Detection limits, stated rather than implied. Not seen: a key computed at
 runtime (a call, ``%``, ``format``, ``join``, a name bound in a function or in
-another module other than ``const.py``); a t-string key is not a ``str`` and
-therefore never the member. The token cache is recognised by its receiver name,
+another module other than ``const.py``). A t-string is not a ``str`` and so
+never the member as a key; one spelling the member still fails as unclassified. The token cache is recognised by its receiver name,
 from a closed list, and a writer on ``_WRITER_CALLS`` is trusted by its name;
 its body is not followed. Code in another module that rebinds
 ``copy.deepcopy`` at runtime is outside what one file can show. Writes of the
@@ -374,20 +381,25 @@ def _uses(scope: ast.AST, name: str) -> list[ast.Name]:
     return found
 
 
-def _copy_is_the_module(tree: ast.Module) -> bool:
-    """``copy`` is the module: bound only by ``import copy`` and only read as ``copy.X``.
+def _bindings_anywhere(tree: ast.Module, name: str) -> list[ast.AST]:
+    """Every binding of ``name`` in the file, type parameters and a star import included."""
 
-    Every binding anywhere in the file counts, type parameters and a star import
-    included; a read other than an attribute load (``copy.deepcopy = f``,
-    ``setattr(copy, ...)``) could replace ``deepcopy`` and fails as well.
-    """
-
-    sites = [
+    return [
         node
         for node in ast.walk(tree)
-        if _binds(node, "copy")
-        or (isinstance(node, _TYPE_PARAMS) and node.name == "copy")
+        if _binds(node, name) or (isinstance(node, _TYPE_PARAMS) and node.name == name)
     ]
+
+
+def _copy_is_the_module(tree: ast.Module) -> bool:
+    """``copy`` is the module: bound only by ``import copy``, read only to call ``copy.deepcopy``.
+
+    Every binding anywhere in the file counts. Any other read (``copy.deepcopy = f``,
+    ``setattr(copy, ...)``, ``copy.__dict__[...]``, ``copy._deepcopy_dispatch``)
+    could replace what ``deepcopy`` does and fails as well.
+    """
+
+    sites = _bindings_anywhere(tree, "copy")
     if not sites or not all(
         isinstance(site, ast.alias) and site.name == "copy" and site.asname is None
         for site in sites
@@ -402,10 +414,27 @@ def _copy_is_the_module(tree: ast.Module) -> bool:
         ):
             parent = parents.get(node)
             if not (
-                isinstance(parent, ast.Attribute) and isinstance(parent.ctx, ast.Load)
+                isinstance(parent, ast.Attribute)
+                and isinstance(parent.ctx, ast.Load)
+                and parent.attr == "deepcopy"
+                and isinstance(parents.get(parent), ast.Call)
+                and parents[parent].func is parent  # type: ignore[attr-defined]
             ):
                 return False
     return True
+
+
+def _assigned_value(site: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST | None:
+    """The value of a single-target assignment, annotated or not, binding ``site``."""
+
+    statement = parents.get(site)
+    if not (isinstance(site, ast.Name) and isinstance(site.ctx, ast.Store)):
+        return None
+    if isinstance(statement, ast.Assign) and statement.targets == [site]:
+        return statement.value
+    if isinstance(statement, ast.AnnAssign) and statement.target is site:
+        return statement.value
+    return None
 
 
 def _is_detached(
@@ -419,16 +448,21 @@ def _is_detached(
     if not sites:
         return False
     for site in sites:
-        statement = parents.get(site)
-        if not (
-            isinstance(site, ast.Name)
-            and isinstance(site.ctx, ast.Store)
-            and isinstance(statement, ast.Assign)
-            and statement.targets == [site]
-            and _is_deepcopy(statement.value)
-        ):
+        assigned = _assigned_value(site, parents)
+        if assigned is None or not _is_deepcopy(assigned):
             return False
     return True
+
+
+def _dotted(node: ast.AST) -> str | None:
+    """``a.b.c`` for a chain of names and attributes, else ``None``."""
+
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return None if base is None else f"{base}.{node.attr}"
+    return None
 
 
 def _fold(node: ast.AST, strings: dict[str, str]) -> str | None:
@@ -443,8 +477,9 @@ def _fold(node: ast.AST, strings: dict[str, str]) -> str | None:
         return node.value if isinstance(node.value, str) else None
     if isinstance(node, ast.Name):
         return strings.get(node.id)
-    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-        return strings.get(f"{node.value.id}.{node.attr}")
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return None if base is None else strings.get(f"{base}.{node.attr}")
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left, right = _fold(node.left, strings), _fold(node.right, strings)
         return None if left is None or right is None else left + right
@@ -471,18 +506,25 @@ def _fold_joined(node: ast.JoinedStr, strings: dict[str, str]) -> str | None:
 
 
 def _module_level(tree: ast.Module) -> list[ast.stmt]:
-    """Statements run at import: the module body and its ``if``/``try``/``with`` blocks."""
+    """Statements run at import: the module body and every block in it.
+
+    Every compound statement but a def or class is entered (``if``, ``for``,
+    ``while``, ``with``, ``try``, ``match``), the same set ``_at_module_level``
+    accepts, so a name bound there is resolved as well as classified.
+    """
 
     found: list[ast.stmt] = []
     stack: list[ast.stmt] = list(tree.body)
     while stack:
         node = stack.pop()
         found.append(node)
-        if isinstance(node, ast.If | ast.With | ast.Try | ast.TryStar):
-            for field in ("body", "orelse", "finalbody"):
-                stack.extend(getattr(node, field, []))
-            for handler in getattr(node, "handlers", []):
-                stack.extend(handler.body)
+        if isinstance(node, _NESTED_SCOPES):
+            continue
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.stmt):
+                stack.append(child)
+            elif isinstance(child, ast.excepthandler | ast.match_case):
+                stack.extend(child.body)
     return found
 
 
@@ -490,8 +532,8 @@ def _module_strings(tree: ast.Module, constants: dict[str, str]) -> dict[str, st
     """Module-level names bound to a constant string, ``const`` imports resolved.
 
     ``from ..const import X`` binds ``X`` and ``from .. import const`` makes
-    ``const.X`` resolve, both through ``constants``; ``K2 = K`` resolves once ``K``
-    does.
+    ``const.X`` resolve, both through ``constants``, as does ``a.b.const.X``
+    after ``import a.b.const``; ``K2 = K`` resolves once ``K`` does.
     """
 
     statements = _module_level(tree)
@@ -509,10 +551,10 @@ def _module_strings(tree: ast.Module, constants: dict[str, str]) -> dict[str, st
                     )
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[-1] == "const" and alias.asname:
+                if alias.name.split(".")[-1] == "const":
+                    bound = alias.asname or alias.name
                     strings.update(
-                        (f"{alias.asname}.{key}", value)
-                        for key, value in constants.items()
+                        (f"{bound}.{key}", value) for key, value in constants.items()
                     )
     grown = True
     # Repeat until stable: ``K2 = K`` resolves once ``K`` does.
@@ -529,7 +571,13 @@ def _module_strings(tree: ast.Module, constants: dict[str, str]) -> dict[str, st
             if folded is None:
                 continue
             for target in targets:
-                if isinstance(target, ast.Name) and strings.get(target.id) != folded:
+                if not isinstance(target, ast.Name):
+                    continue
+                current = strings.get(target.id)
+                # Monotone, so the loop ends: a name takes its first value and
+                # moves at most once more, to the member. A name rebound to
+                # several strings counts as the member if any of them is.
+                if current is None or (folded == _MEMBER != current):
                     strings[target.id] = folded
                     grown = True
     return strings
@@ -668,8 +716,9 @@ def _shared_uses(
     """Uses of a detached local that would share its container.
 
     A deep copy stays detached only while nothing else holds it: it may be
-    written as the member once, hashed, or copied again. A second write or any
-    other use (``self.creds[e] = reg``, a call, an alias) shares the container.
+    written as the member once, hashed, or copied again as the single argument
+    of ``copy.deepcopy``. A second write or any other use (``self.creds[e] =
+    reg``, a call, an alias, a memo) shares the container.
     """
 
     bad: list[ast.AST] = []
@@ -683,8 +732,10 @@ def _shared_uses(
                 bad.append(node)
         elif not (
             isinstance(parent, ast.Call)
-            and ast.unparse(parent.func) in _DIGEST_CALLS | {"copy.deepcopy"}
-            and node in parent.args
+            and (
+                (ast.unparse(parent.func) in _DIGEST_CALLS and node in parent.args)
+                or (_is_deepcopy(parent) and parent.args[0] is node)
+            )
         ):
             bad.append(node)
     return bad
@@ -743,18 +794,20 @@ def _name_escapes(
     problems = [
         f"line {getattr(site, 'lineno', 0)}: the container {name} is not a fresh local"
         for site in sites
-        if not (
-            isinstance(site, ast.Name)
-            and isinstance(parents.get(site), ast.Assign)
-            and parents[site].targets == [site]  # type: ignore[attr-defined]
-            and _is_fresh(parents[site].value)  # type: ignore[attr-defined]
-        )
+        if (assigned := _assigned_value(site, parents)) is None
+        or not _is_fresh(assigned)
     ]
     if not sites:
         problems.append(f"the container {name} is not bound in the function")
     for use in _uses(function, name):
         parent = parents.get(use)
         if isinstance(parent, ast.Subscript) and parent.value is use:
+            if isinstance(parent.ctx, ast.Load) and not _feeds_the_digest(
+                parent, parents
+            ):
+                problems.append(
+                    f"line {use.lineno}: an element of the container {name} is read back"
+                )
             continue
         if isinstance(parent, ast.Compare):
             continue
@@ -849,7 +902,9 @@ def _receiver_problems(
     targets_per_value = Counter(id(value) for _node, value in writes)
     shared: list[str] = []
     if writes and not _copy_is_the_module(tree):
-        shared.append("copy is not only bound by 'import copy' and read as copy.X")
+        shared.append("copy is not only bound by 'import copy' and called as deepcopy")
+    if writes and _bindings_anywhere(tree, "dict"):
+        shared.append("dict is bound in the module, so dict(x) may not be a new dict")
     for node, value in writes:
         line = node.lineno  # type: ignore[attr-defined]
         if targets_per_value[id(value)] > 1:
@@ -925,7 +980,7 @@ class R:
 _SNIPPET_CONSTANTS = {"FCM_CREDENTIALS": _MEMBER}
 
 #: Forms that must fail, each a one-place change to ``_CLEAN``.
-_BROKEN = {
+_BROKEN: dict[str, tuple[str, ...]] = {
     "nested write through a read": (
         '        cached = await cache.get("fcm_credentials")\n',
         '        bundle["fcm_credentials"]["gcm"] = creds\n',
@@ -1078,6 +1133,50 @@ _BROKEN = {
         "        update(entry, data=updated_data)\n",
         "        store(entry, updated_data)\n",
     ),
+    # Round 5: module blocks, rebinding, reads back, memo, dict, full path.
+    "key constant bound in a module-level for block": (
+        "K2 = K\n",
+        "K2 = K\nfor _ in range(1):\n    K3 = 'fcm_credentials'\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[K3] = creds\n",
+    ),
+    "key constant rebound to the member": (
+        "K2 = K\n",
+        "K2 = K\nK3 = 'other'\nK3 = 'fcm_credentials'\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[K3] = creds\n",
+    ),
+    "fully qualified const constant as key": (
+        "import copy\n",
+        "import copy\nimport custom_components.googlefindmy.const\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[custom_components.googlefindmy.const.FCM_CREDENTIALS]"
+        " = creds\n",
+    ),
+    "copy patched through its __dict__": (
+        "import copy\n",
+        "import copy\ncopy.__dict__['deepcopy'] = lambda value: value\n",
+    ),
+    "copy dispatch table patched": (
+        "import copy\n",
+        "import copy\ncopy._deepcopy_dispatch[dict] = lambda x, memo, deep: x\n",
+    ),
+    "detached local handed to deepcopy as a memo": (
+        "        digest = credential_member_digest(registration)\n",
+        "        digest = credential_member_digest(registration)\n"
+        "        self.junk = copy.deepcopy(self.creds, registration)\n",
+    ),
+    "dict rebound by a parameter": (
+        "    async def save(self, cache, entry_cache, bundle, data, creds, update, entry):\n",
+        "    async def save(\n"
+        "        self, cache, entry_cache, bundle, data, creds, update, entry, dict\n"
+        "    ):\n",
+    ),
+    "inner container read back by index": (
+        "        update(entry, data=updated_data)\n",
+        "        update(entry, data=updated_data)\n"
+        "        self.last = updated_data['bundle']\n",
+    ),
     "container taken from receiver state": (
         "        updated_bundle = dict(bundle)\n",
         "        updated_bundle = self._bundle\n",
@@ -1090,7 +1189,7 @@ _BROKEN = {
 
 #: Forms that must pass with both writes recognised, each a one-place change to
 #: ``_CLEAN``. Two writes prove the key is still seen as the member.
-_ACCEPTED = {
+_ACCEPTED: dict[str, tuple[str, ...]] = {
     "nested def with a parameter of the same name": (
         "        digest = credential_member_digest(registration)\n",
         "        digest = credential_member_digest(registration)\n"
@@ -1100,6 +1199,23 @@ _ACCEPTED = {
     "container handed positionally to a writer": (
         "        update(entry, data=updated_data)\n",
         "        update(entry, updated_data)\n",
+    ),
+    "module constant rebound to another string": (
+        "K2 = K\n",
+        "K2 = K\nK3 = 'one'\nK3 = 'two'\n",
+    ),
+    "annotated container and annotated copy": (
+        "        updated_bundle = dict(bundle)\n",
+        "        updated_bundle: dict = dict(bundle)\n",
+    ),
+    "annotated deep copy": (
+        "        registration = copy.deepcopy(dict(creds))\n",
+        "        registration: dict = copy.deepcopy(dict(creds))\n",
+    ),
+    "member read back into the digest": (
+        "        updated_data = dict(data)\n",
+        "        again = credential_member_digest(updated_bundle['fcm_credentials'])\n"
+        "        updated_data = dict(data)\n",
     ),
     "lambda parameter of the same name": (
         "        digest = credential_member_digest(registration)\n",
@@ -1131,6 +1247,16 @@ def _snippet_problems(source: str) -> tuple[int, list[str], list[str]]:
     return _receiver_problems(ast.parse(source), _SNIPPET_CONSTANTS)
 
 
+def _changed(changes: tuple[str, ...], label: str) -> str:
+    """``_CLEAN`` with each ``(old, new)`` pair of ``changes`` applied once."""
+
+    source = _CLEAN
+    for old, new in zip(changes[::2], changes[1::2], strict=True):
+        assert source.count(old) == 1, label
+        source = source.replace(old, new)
+    return source
+
+
 def test_the_guard_accepts_the_clean_form() -> None:
     """The reference source passes, so every broken form below fails for its change."""
 
@@ -1141,9 +1267,7 @@ def test_the_guard_accepts_the_clean_form() -> None:
 def test_the_guard_rejects_a_shared_or_unknown_form(label: str) -> None:
     """Each form the reviews found escapes neither classification nor copy check."""
 
-    old, new = _BROKEN[label]
-    assert _CLEAN.count(old) == 1, label
-    _writes, unclassified, shared = _snippet_problems(_CLEAN.replace(old, new))
+    _writes, unclassified, shared = _snippet_problems(_changed(_BROKEN[label], label))
     assert unclassified or shared, label
 
 
@@ -1151,6 +1275,5 @@ def test_the_guard_rejects_a_shared_or_unknown_form(label: str) -> None:
 def test_the_guard_accepts_an_equivalent_form(label: str) -> None:
     """An equivalent rewrite keeps both writes recognised and raises nothing."""
 
-    old, new = _ACCEPTED[label]
-    assert _CLEAN.count(old) == 1, label
-    assert _snippet_problems(_CLEAN.replace(old, new)) == (2, [], []), label
+    source = _changed(_ACCEPTED[label], label)
+    assert _snippet_problems(source) == (2, [], []), label
