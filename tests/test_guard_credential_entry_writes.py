@@ -25,14 +25,21 @@ far, and fail on anything they cannot classify:
   therefore fails as an unknown call or statement. A behaviour probe pins that
   every credential key and every sampled bundle member moves the fingerprint.
 * Every occurrence of the member key in ``Auth/fcm_receiver_ha.py`` is
-  classified. A key is any expression that folds to the member: a string
-  constant, an f-string whose placeholders fold, ``+`` of two folding parts, a
-  name bound at module level to such an expression (directly or through another
-  such name, also inside any block that runs at import; a name bound to several
-  strings counts as the member if any of them is), a constant of ``const.py``
-  reached by import (``from ..const import X``, ``const.X``, ``a.b.const.X``),
-  or a keyword argument. Allowed kinds are a hash read (``.get`` or subscript load whose
-  value goes straight into ``credential_member_digest``), an ``in`` test, a
+  classified. A key is any expression that may evaluate to the member: a
+  string constant, an f-string whose placeholders fold, ``+`` of two folding
+  parts, a name bound at module level, a constant of ``const.py`` reached by
+  import (``from ..const import X``, ``const.X``, ``a.b.const.X``), or a
+  keyword argument. A module name holds the set of every value any of its
+  bindings gives it, in any block that runs at import and in any order
+  (``A = 'fcm_'; K = A + 'credentials'; A = 'x'`` keeps ``K`` the member). A
+  binding that does not fold (``+=``, ``for``, ``:=``, ``with``, unpacking,
+  ``match``, ``global`` in a function, a call) or more than ``_VALUE_LIMIT``
+  values make the name unknown, and an unknown key of a subscript store or
+  ``del``, a dict display, ``setdefault`` or ``pop`` fails as unclassified.
+  ``test_python_is_the_oracle_for_module_keys`` runs generated module code and
+  holds the guard to what Python computes. Allowed kinds are a hash read
+  (``.get`` or subscript load whose value goes straight into
+  ``credential_member_digest``), an ``in`` test, a
   token cache read or write (``.get``/``.set`` on a receiver named in
   ``_CACHE_RECEIVERS``; ``TokenCache`` detaches values itself, pinned in
   ``tests/test_token_cache_value_isolation.py``), or a mapping write (subscript
@@ -47,7 +54,10 @@ far, and fail on anything they cannot classify:
   type parameter or any other binding form fails), and every read of it calls
   ``copy.deepcopy``, so ``copy.deepcopy = f``, ``setattr(copy, ...)`` and
   ``copy.__dict__[...]`` fail. A file that binds ``dict`` fails too, because
-  ``dict(x)`` then need not make a new container.
+  ``dict(x)`` then need not make a new container, and so does a file that
+  reaches ``copy`` or ``dict`` another way (``sys.modules``, ``builtins``,
+  ``__import__``, ``importlib``, ``import copy as c``, a store or ``setattr``
+  of an attribute named ``deepcopy`` or ``dict``).
 * Bindings of a local are counted in its own scope: the body of a nested
   ``def``, lambda or class belongs to that scope, while its name, decorators,
   defaults and bases do not; comprehension targets and a nested ``nonlocal`` or
@@ -68,23 +78,29 @@ far, and fail on anything they cannot classify:
   must pass, each against a clean reference source.
 
 Detection limits, stated rather than implied. Not seen: a key computed at
-runtime (a call, ``%``, ``format``, ``join``, a name bound in a function or in
-another module other than ``const.py``). A t-string is not a ``str`` and so
-never the member as a key; one spelling the member still fails as unclassified. The token cache is recognised by its receiver name,
-from a closed list, and a writer on ``_WRITER_CALLS`` is trusted by its name;
-its body is not followed. Code in another module that rebinds
-``copy.deepcopy`` at runtime is outside what one file can show. Writes of the
-member outside the receiver (the config flow, ``TokenCache``) are out of scope.
+runtime inside a function (a call, ``%``, ``format``, ``join``, a local name)
+or bound in another module other than ``const.py``; at module level such a
+name is unknown and fails as a key. A t-string is not a ``str`` and so never
+the member as a key; one spelling the member still fails as unclassified. The
+token cache is recognised by its receiver name, from a closed list, and a
+writer on ``_WRITER_CALLS`` is trusted by its name; its body is not followed.
+Code in another module that rebinds ``copy.deepcopy`` at runtime is outside
+what one file can show. Writes of the member outside the receiver (the config
+flow, ``TokenCache``) are out of scope.
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import functools
 import pathlib
 from collections import Counter
+from collections.abc import Mapping
 
 import pytest
+from hypothesis import event, given, settings
+from hypothesis import strategies as st
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _INTEGRATION = _REPO_ROOT / "custom_components" / "googlefindmy"
@@ -424,6 +440,49 @@ def _copy_is_the_module(tree: ast.Module) -> bool:
     return True
 
 
+#: Ways to reach a module object other than by its import name; with any of
+#: them a file can replace ``copy.deepcopy`` or ``dict`` behind the checks.
+_MODULE_HANDLES = frozenset({"builtins", "__builtins__", "__import__", "sys.modules"})
+
+#: Attributes whose replacement changes what a detached copy is.
+_COPY_ATTRIBUTES = frozenset({"deepcopy", "dict"})
+
+
+def _copy_reached_another_way(tree: ast.Module) -> bool:
+    """True if the file may replace ``copy.deepcopy`` or ``dict`` without naming
+    ``copy`` (Round 6 N4): through ``sys.modules``, ``builtins``,
+    ``__import__``, an alias of ``copy``, ``importlib``, or a store, ``del``,
+    ``setattr`` or ``delattr`` of an attribute named ``deepcopy`` or ``dict``
+    on any object."""
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.alias):
+            root = node.name.split(".")[0]
+            if root in {"builtins", "importlib"} or (
+                root == "copy"
+                and (node.name != "copy" or node.asname not in (None, "copy"))
+            ):
+                return True
+        elif isinstance(node, ast.Name | ast.Attribute):
+            if _dotted(node) in _MODULE_HANDLES:
+                return True
+            if (
+                isinstance(node, ast.Attribute)
+                and not isinstance(node.ctx, ast.Load)
+                and node.attr in _COPY_ATTRIBUTES
+            ):
+                return True
+        elif (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func) in {"setattr", "delattr"}
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in _COPY_ATTRIBUTES
+        ):
+            return True
+    return False
+
+
 def _assigned_value(site: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST | None:
     """The value of a single-target assignment, annotated or not, binding ``site``."""
 
@@ -457,137 +516,279 @@ def _is_detached(
 def _dotted(node: ast.AST) -> str | None:
     """``a.b.c`` for a chain of names and attributes, else ``None``."""
 
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        base = _dotted(node.value)
-        return None if base is None else f"{base}.{node.attr}"
-    return None
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
 
 
-def _fold(node: ast.AST, strings: dict[str, str]) -> str | None:
-    """The value of a constant string expression, or ``None``.
+#: A name whose value the guard cannot bound: bound by a form that does not
+#: fold, or to more strings than ``_VALUE_LIMIT``.
+_UNKNOWN = None
 
-    Folds string constants, f-strings whose placeholders fold, ``+`` of two
-    folding operands, module names bound to such an expression and constants
-    of ``const.py`` reached by import (``strings``).
+#: The values a module name may hold, ``_UNKNOWN`` if not bounded.
+Values = frozenset[str] | None
+
+#: More values than this make a name unknown, so the fixpoint ends.
+_VALUE_LIMIT = 32
+
+
+def _join(left: Values, right: Values) -> Values:
+    """Every concatenation of a value of ``left`` with one of ``right``."""
+
+    if left is _UNKNOWN or right is _UNKNOWN:
+        return _UNKNOWN
+    joined = frozenset(a + b for a in left for b in right)
+    return _UNKNOWN if len(joined) > _VALUE_LIMIT else joined
+
+
+def _values(node: ast.AST, env: Mapping[str, Values]) -> Values:
+    """The strings ``node`` may evaluate to, or ``_UNKNOWN``.
+
+    Folds string constants, ``+``, f-strings without conversion or format
+    spec, and names and ``a.b`` paths through ``env``. Anything else, and a
+    name ``env`` does not know (a local, a builtin), is no string the guard can
+    see: an empty set, the stated limit for keys computed at runtime.
     """
 
     if isinstance(node, ast.Constant):
-        return node.value if isinstance(node.value, str) else None
-    if isinstance(node, ast.Name):
-        return strings.get(node.id)
-    if isinstance(node, ast.Attribute):
-        base = _dotted(node.value)
-        return None if base is None else strings.get(f"{base}.{node.attr}")
+        return frozenset({node.value}) if isinstance(node.value, str) else frozenset()
+    if isinstance(node, ast.Name | ast.Attribute):
+        path = _dotted(node)
+        return env.get(path, frozenset()) if path is not None else frozenset()
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left, right = _fold(node.left, strings), _fold(node.right, strings)
-        return None if left is None or right is None else left + right
+        return _join(_values(node.left, env), _values(node.right, env))
     if isinstance(node, ast.JoinedStr):
-        return _fold_joined(node, strings)
-    return None
+        joined: Values = frozenset({""})
+        for part in node.values:
+            inner: ast.AST = part
+            if isinstance(part, ast.FormattedValue):
+                if part.conversion != -1 or part.format_spec is not None:
+                    return frozenset()
+                inner = part.value
+            joined = _join(joined, _values(inner, env))
+        return joined
+    return frozenset()
 
 
-def _fold_joined(node: ast.JoinedStr, strings: dict[str, str]) -> str | None:
-    """An f-string folds when every placeholder folds and carries no conversion."""
-
-    parts: list[str] = []
-    for part in node.values:
-        inner: ast.AST = part
-        if isinstance(part, ast.FormattedValue):
-            if part.conversion != -1 or part.format_spec is not None:
-                return None
-            inner = part.value
-        folded = _fold(inner, strings)
-        if folded is None:
-            return None
-        parts.append(folded)
-    return "".join(parts)
+def _is_member(node: ast.AST, env: Mapping[str, Values]) -> bool:
+    values = _values(node, env)
+    return values is not _UNKNOWN and _MEMBER in values
 
 
-def _module_level(tree: ast.Module) -> list[ast.stmt]:
-    """Statements run at import: the module body and every block in it.
+#: What one module-level binding gives its name: an expression to fold, the
+#: values of an imported ``const`` constant, or ``_UNKNOWN``.
+_Site = ast.expr | frozenset[str] | None
 
-    Every compound statement but a def or class is entered (``if``, ``for``,
-    ``while``, ``with``, ``try``, ``match``), the same set ``_at_module_level``
-    accepts, so a name bound there is resolved as well as classified.
+
+class _ModuleBindings:
+    """Every binding of a module name, whatever statement or block it is in.
+
+    Scopes follow the language reference: a def, lambda or class body binds its
+    own names unless they are declared ``global`` there; a comprehension binds
+    its targets, while ``:=`` in it binds in the enclosing scope. Decorators,
+    defaults, bases and the first iterable run in the enclosing scope.
     """
 
-    found: list[ast.stmt] = []
-    stack: list[ast.stmt] = list(tree.body)
-    while stack:
-        node = stack.pop()
-        found.append(node)
-        if isinstance(node, _NESTED_SCOPES):
-            continue
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.stmt):
-                stack.append(child)
-            elif isinstance(child, ast.excepthandler | ast.match_case):
-                stack.extend(child.body)
-    return found
+    def __init__(self, constants: Mapping[str, Values]) -> None:
+        self.constants = constants
+        self.sites: dict[str, list[_Site]] = {}
+        self.paths: dict[str, Values] = {}
 
+    def bind(
+        self, scope: str, declared: frozenset[str], name: str, site: _Site
+    ) -> None:
+        if scope == "module" or name in declared:
+            self.sites.setdefault(name, []).append(site)
 
-def _module_strings(tree: ast.Module, constants: dict[str, str]) -> dict[str, str]:
-    """Module-level names bound to a constant string, ``const`` imports resolved.
+    def visit(self, node: ast.AST, scope: str, declared: frozenset[str]) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            self._visit_definition(node, scope, declared)
+        elif isinstance(node, ast.Lambda):
+            for default in [*node.args.defaults, *node.args.kw_defaults]:
+                if default is not None:
+                    self.visit(default, scope, declared)
+            self.visit(node.body, "function", frozenset())
+        elif isinstance(
+            node, ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp
+        ):
+            self._visit_comprehension(node, scope, declared)
+        elif isinstance(node, ast.Assign | ast.AnnAssign):
+            self._visit_assignment(node, scope, declared)
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            self._visit_import(node, scope, declared)
+        else:
+            if isinstance(node, ast.Name) and not isinstance(
+                node.ctx, ast.Load | ast.Del
+            ):
+                self.bind(scope, declared, node.id, _UNKNOWN)
+            for name in _bound_identifiers(node):
+                self.bind(scope, declared, name, _UNKNOWN)
+            for child in ast.iter_child_nodes(node):
+                self.visit(child, scope, declared)
 
-    ``from ..const import X`` binds ``X`` and ``from .. import const`` makes
-    ``const.X`` resolve, both through ``constants``, as does ``a.b.const.X``
-    after ``import a.b.const``; ``K2 = K`` resolves once ``K`` does.
-    """
+    def _visit_definition(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+        scope: str,
+        declared: frozenset[str],
+    ) -> None:
+        self.bind(scope, declared, node.name, _UNKNOWN)
+        outer: list[ast.AST] = list(node.decorator_list)
+        if isinstance(node, ast.ClassDef):
+            outer += [*node.bases, *(keyword.value for keyword in node.keywords)]
+        else:
+            outer += [*node.args.defaults, *(d for d in node.args.kw_defaults if d)]
+        for child in outer:
+            self.visit(child, scope, declared)
+        inner = frozenset(
+            name
+            for statement in node.body
+            for sub in ast.walk(statement)
+            if isinstance(sub, ast.Global)
+            for name in sub.names
+        )
+        kind = "class" if isinstance(node, ast.ClassDef) else "function"
+        for statement in node.body:
+            self.visit(statement, kind, inner)
 
-    statements = _module_level(tree)
-    strings: dict[str, str] = {}
-    for node in statements:
-        if isinstance(node, ast.ImportFrom):
-            from_const = (node.module or "").split(".")[-1] == "const"
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp,
+        scope: str,
+        declared: frozenset[str],
+    ) -> None:
+        self.visit(node.generators[0].iter, scope, declared)
+        inside: list[ast.AST] = (
+            [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+        )
+        for index, generator in enumerate(node.generators):
+            inside += [generator.target, *generator.ifs]
+            if index:
+                inside.append(generator.iter)
+        stack = inside
+        while stack:
+            child = stack.pop()
+            if isinstance(child, ast.NamedExpr) and isinstance(child.target, ast.Name):
+                self.bind(scope, declared, child.target.id, _UNKNOWN)
+                stack.append(child.value)
+            elif isinstance(child, _NESTED_SCOPES) or isinstance(
+                child, ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp
+            ):
+                self.visit(child, "comprehension", frozenset())
+            else:
+                stack.extend(ast.iter_child_nodes(child))
+
+    def _visit_assignment(
+        self, node: ast.Assign | ast.AnnAssign, scope: str, declared: frozenset[str]
+    ) -> None:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = node.value
+        for target in targets:
+            if isinstance(target, ast.Name):
+                # An annotation without a value binds nothing (N7).
+                if value is not None:
+                    site = value if isinstance(value, _FOLDABLE) else _UNKNOWN
+                    self.bind(scope, declared, target.id, site)
+            else:
+                self.visit(target, scope, declared)
+        for child in (value, getattr(node, "annotation", None)):
+            if child is not None:
+                self.visit(child, scope, declared)
+
+    def _visit_import(
+        self, node: ast.Import | ast.ImportFrom, scope: str, declared: frozenset[str]
+    ) -> None:
+        if isinstance(node, ast.Import):
             for alias in node.names:
-                if from_const and alias.name in constants:
-                    strings[alias.asname or alias.name] = constants[alias.name]
-                elif not from_const and alias.name == "const":
-                    bound = alias.asname or alias.name
-                    strings.update(
-                        (f"{bound}.{key}", value) for key, value in constants.items()
-                    )
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                self.bind(scope, declared, bound, frozenset())
                 if alias.name.split(".")[-1] == "const":
-                    bound = alias.asname or alias.name
-                    strings.update(
-                        (f"{bound}.{key}", value) for key, value in constants.items()
-                    )
+                    self._add_paths(alias.asname or alias.name)
+            return
+        from_const = (node.module or "").split(".")[-1] == "const"
+        for alias in node.names:
+            bound = alias.asname or alias.name
+            if alias.name == "*":
+                # Any name may be rebound; ``_copy_is_the_module`` fails the
+                # file, and the keys it reads stay as unknown as they are.
+                continue
+            if from_const:
+                site = self.constants.get(alias.name, frozenset())
+            elif alias.name == "const":
+                site = frozenset()
+                self._add_paths(bound)
+            else:
+                # A name from another module: not a string the guard can see.
+                site = frozenset()
+            self.bind(scope, declared, bound, site)
+
+    def _add_paths(self, bound: str) -> None:
+        for key, value in self.constants.items():
+            self.paths[f"{bound}.{key}"] = value
+
+
+def _bound_identifiers(node: ast.AST) -> list[str]:
+    """Names a node binds by identifier rather than by an ``ast.Name`` target."""
+
+    if isinstance(node, ast.ExceptHandler | ast.MatchAs | ast.MatchStar):
+        return [node.name] if node.name else []
+    if isinstance(node, ast.MatchMapping):
+        return [node.rest] if node.rest else []
+    return []
+
+
+def _module_values(
+    tree: ast.Module, constants: Mapping[str, Values]
+) -> dict[str, Values]:
+    """The values every module name may hold, folded to a fixpoint.
+
+    Flow-insensitive: a name holds every value any of its bindings gives it,
+    in any order (``A = 'fcm_'; K = A + 'credentials'; A = 'x'`` keeps
+    ``K`` the member). A binding that does not fold (``+=``, ``for``, ``:=``,
+    ``with``, ``global`` in a function, a call, ...) makes the name unknown.
+    Each step only grows a set or makes it unknown, and a set over
+    ``_VALUE_LIMIT`` is unknown, so the loop ends.
+    """
+
+    bindings = _ModuleBindings(constants)
+    for statement in tree.body:
+        bindings.visit(statement, "module", frozenset())
+    env: dict[str, Values] = dict(bindings.paths)
+    for name in bindings.sites:
+        env.setdefault(name, frozenset())
     grown = True
-    # Repeat until stable: ``K2 = K`` resolves once ``K`` does.
     while grown:
         grown = False
-        for node in statements:
-            if isinstance(node, ast.Assign):
-                targets, value = list(node.targets), node.value
-            elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                targets, value = [node.target], node.value
-            else:
+        for name, sites in bindings.sites.items():
+            current = env[name]
+            if current is _UNKNOWN:
                 continue
-            folded = _fold(value, strings)
-            if folded is None:
-                continue
-            for target in targets:
-                if not isinstance(target, ast.Name):
-                    continue
-                current = strings.get(target.id)
-                # Monotone, so the loop ends: a name takes its first value and
-                # moves at most once more, to the member. A name rebound to
-                # several strings counts as the member if any of them is.
-                if current is None or (folded == _MEMBER != current):
-                    strings[target.id] = folded
-                    grown = True
-    return strings
+            values: Values = current
+            for site in sites:
+                found = _values(site, env) if isinstance(site, ast.expr) else site
+                if found is _UNKNOWN or values is _UNKNOWN:
+                    values = _UNKNOWN
+                    break
+                values = values | found
+                if len(values) > _VALUE_LIMIT:
+                    values = _UNKNOWN
+                    break
+            if values != current:
+                env[name] = values
+                grown = True
+    return env
 
 
 @functools.cache
-def _project_constants() -> dict[str, str]:
-    """String constants of ``const.py``, as a receiver import would see them."""
+def _project_constants() -> dict[str, Values]:
+    """Values of the names of ``const.py``, as a receiver import would see them."""
 
-    return _module_strings(_parse(_CONST), {})
+    return _module_values(_parse(_CONST), {})
 
 
 def _at_module_level(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
@@ -679,7 +880,7 @@ def _classify(
         kind = (_classify_call_argument(parent, parents), None)
     elif isinstance(parent, ast.Assign | ast.AnnAssign):
         # Only a plain name bound at module level is a module constant (and
-        # resolved as a key by ``_module_strings``); one in a class body is
+        # resolved as a key by ``_module_values``); one in a class body is
         # reached as ``self.NAME`` and an attribute target as ``obj.NAME``, both
         # of which would escape the scan.
         if _at_module_level(parent, parents) and all(
@@ -838,23 +1039,20 @@ def _container_problems(
 
 
 def _is_outermost_key(
-    node: ast.AST, parents: dict[ast.AST, ast.AST], strings: dict[str, str]
+    node: ast.AST, parents: dict[ast.AST, ast.AST], env: Mapping[str, Values]
 ) -> bool:
     """``node`` is not part of a larger expression that folds to the member as well."""
 
     parent = parents.get(node)
     while isinstance(parent, ast.BinOp | ast.JoinedStr | ast.FormattedValue):
-        if (
-            not isinstance(parent, ast.FormattedValue)
-            and _fold(parent, strings) == _MEMBER
-        ):
+        if not isinstance(parent, ast.FormattedValue) and _is_member(parent, env):
             return False
         parent = parents.get(parent)
     return True
 
 
 def _occurrences(
-    tree: ast.Module, parents: dict[ast.AST, ast.AST], strings: dict[str, str]
+    tree: ast.Module, parents: dict[ast.AST, ast.AST], env: Mapping[str, Values]
 ) -> list[ast.AST]:
     found: list[ast.AST] = []
     for node in ast.walk(tree):
@@ -867,15 +1065,49 @@ def _occurrences(
                 isinstance(node, ast.Name | ast.Attribute)
                 and not isinstance(node.ctx, ast.Load)
             )
-            and _fold(node, strings) == _MEMBER
-            and _is_outermost_key(node, parents, strings)
+            and _is_member(node, env)
+            and _is_outermost_key(node, parents, env)
+        ):
+            found.append(node)
+    return found
+
+
+def _unknown_keys(
+    tree: ast.Module, parents: dict[ast.AST, ast.AST], env: Mapping[str, Values]
+) -> list[ast.AST]:
+    """Keys of a write whose value the guard cannot bound.
+
+    A subscript store or ``del``, a dict display key, or the first argument of
+    ``setdefault`` or ``pop``: if it may be the member and nothing bounds it, it
+    fails like an unclassified occurrence. A read keyed so (``list[Any]``,
+    ``x[i]``) is not a write and stays out.
+    """
+
+    found: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, _FOLDABLE) or _values(node, env) is not _UNKNOWN:
+            continue
+        parent = parents.get(node)
+        if (
+            (
+                isinstance(parent, ast.Subscript)
+                and node is parent.slice
+                and not isinstance(parent.ctx, ast.Load)
+            )
+            or (isinstance(parent, ast.Dict) and node in parent.keys)
+            or (
+                isinstance(parent, ast.Call)
+                and isinstance(parent.func, ast.Attribute)
+                and parent.func.attr in {"setdefault", "pop"}
+                and parent.args[:1] == [node]
+            )
         ):
             found.append(node)
     return found
 
 
 def _receiver_problems(
-    tree: ast.Module, constants: dict[str, str] | None = None
+    tree: ast.Module, constants: Mapping[str, Values | str] | None = None
 ) -> tuple[int, list[str], list[str]]:
     """Return ``(mapping writes, unclassified uses, shared writes)`` of ``tree``.
 
@@ -883,10 +1115,15 @@ def _receiver_problems(
     """
 
     parents = _parents(tree)
-    strings = _module_strings(
-        tree, _project_constants() if constants is None else constants
-    )
-    occurrences = _occurrences(tree, parents, strings)
+    if constants is None:
+        known: Mapping[str, Values] = _project_constants()
+    else:
+        known = {
+            name: frozenset({value}) if isinstance(value, str) else value
+            for name, value in constants.items()
+        }
+    env = _module_values(tree, known)
+    occurrences = _occurrences(tree, parents, env)
     kinds = [_classify(node, parents) for node in occurrences]
     writes = [
         (node, value)
@@ -897,12 +1134,19 @@ def _receiver_problems(
         f"line {node.lineno}: {ast.unparse(parents.get(node, node))}"  # type: ignore[attr-defined]
         for node, (kind, _value) in zip(occurrences, kinds, strict=True)
         if kind == "unclassified"
+    ] + [
+        f"line {node.lineno}: unknown key {ast.unparse(node)}"  # type: ignore[attr-defined]
+        for node in _unknown_keys(tree, parents, env)
     ]
     written = {id(value) for _node, value in writes if value is not None}
     targets_per_value = Counter(id(value) for _node, value in writes)
     shared: list[str] = []
     if writes and not _copy_is_the_module(tree):
         shared.append("copy is not only bound by 'import copy' and called as deepcopy")
+    if writes and _copy_reached_another_way(tree):
+        shared.append(
+            "copy or dict is reached other than by its name and may be replaced"
+        )
     if writes and _bindings_anywhere(tree, "dict"):
         shared.append("dict is bound in the module, so dict(x) may not be a new dict")
     for node, value in writes:
@@ -1185,6 +1429,50 @@ _BROKEN: dict[str, tuple[str, ...]] = {
         '        updated_bundle["fcm_credentials"] = registration\n',
         '        bundle["fcm_credentials"] = registration\n',
     ),
+    "key name growing without bound": (
+        "K2 = K\n",
+        "K2 = K\nA = 'a'\nA = A + 'a'\nK3 = A\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[K3] = creds\n",
+    ),
+    "deepcopy replaced through sys.modules": (
+        "import copy\n",
+        "import copy\nimport sys\nsys.modules['copy'].deepcopy = lambda value: value\n",
+    ),
+    "dict replaced through builtins": (
+        "import copy\n",
+        "import copy\nimport builtins\nbuiltins.dict = lambda value: value\n",
+    ),
+    "copy imported under a second name": (
+        "import copy\n",
+        "import copy\nimport copy as c2\nc2.deepcopy = lambda value: value\n",
+    ),
+    # Round 6: a module name takes every value any of its bindings gives it,
+    # and a binding that does not fold makes it unknown; an unknown key fails.
+    "key built from a name rebound later": (
+        "K2 = K\n",
+        "K2 = K\nA = 'fcm_'\nK3 = A + 'credentials'\nA = 'x'\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[K3] = creds\n",
+    ),
+    "key built by augmented assignment": (
+        "K2 = K\n",
+        "K2 = K\nK3 = 'fcm_'\nK3 += 'credentials'\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[K3] = creds\n",
+    ),
+    "key bound by a module-level call": (
+        "K2 = K\n",
+        "K2 = K\nK3 = ''.join(('fcm_', 'credentials'))\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[K3] = creds\n",
+    ),
+    "key bound through global in a function": (
+        "K2 = K\n",
+        "K2 = K\nK3 = 'x'\ndef _set():\n    global K3\n    K3 = 'fcm_credentials'\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[K3] = creds\n",
+    ),
 }
 
 #: Forms that must pass with both writes recognised, each a one-place change to
@@ -1277,3 +1565,195 @@ def test_the_guard_accepts_an_equivalent_form(label: str) -> None:
 
     source = _changed(_ACCEPTED[label], label)
     assert _snippet_problems(source) == (2, [], []), label
+
+
+#: Names the generated module statements bind; ``C`` is the key of the write.
+_ORACLE_NAMES = ("A", "B", "C")
+#: Parts only: a statement that spells the member is already caught as an
+#: unclassified occurrence, so the member must arise at runtime to test anything.
+_ORACLE_PARTS = ("fcm_", "credentials", "x")
+
+#: Every way a module-level statement binds a name (Python reference, "Naming
+#: and binding"), one template each; ``{n}`` is the name, ``{e}`` a string
+#: expression. The key is the binding construct the template must contain.
+_ORACLE_FORMS: dict[str, str] = {
+    "Assign": "{n} = {e}",
+    "Assign/Tuple": "{n}, _unused = {e}, 0",
+    "Assign/Starred": "*{n}, = ({e},)",
+    "AnnAssign": "{n}: str = {e}",
+    "AugAssign": "{n} += {e}",
+    "For": "for {n} in ('x', {e}):\n    pass",
+    "While/If": "if True:\n    {n} = {e}",
+    "With": "with contextlib.nullcontext({e}) as {n}:\n    pass",
+    "NamedExpr": "({n} := {e})",
+    "NamedExpr/comprehension": "[({n} := {e}) for _ in (0,)]",
+    "ExceptHandler": "try:\n    raise ValueError({e})\nexcept ValueError as {n}:\n    pass",
+    "MatchAs": "match {e}:\n    case {n}:\n        pass",
+    "MatchStar": "match [{e}]:\n    case [*{n}]:\n        pass",
+    "MatchMapping": "match {{'k': {e}}}:\n    case {{**{n}}}:\n        pass",
+    "Import": "import string as {n}",
+    "FunctionDef": "def {n}():\n    return {e}",
+    "ClassDef": "class {n}:\n    value = {e}",
+    "TypeAlias": "type {n} = str",
+    "Global": "def _bind():\n    global {n}\n    {n} = {e}\n_bind()",
+    "Delete": "del {n}",
+}
+
+#: Binding constructs the oracle cannot run, with the reason; each has a pinned
+#: ``_BROKEN`` or ``_ACCEPTED`` form instead.
+_ORACLE_EXCLUDED: dict[str, str] = {
+    "ImportFrom": "needs the package; 'name imported from const as key' pins it",
+    "AsyncFor": "not allowed at module level",
+    "AsyncWith": "not allowed at module level",
+}
+
+#: The binding constructs of the grammar, from the language reference.
+_BINDING_CONSTRUCTS = frozenset(
+    {
+        "Assign",
+        "AnnAssign",
+        "AugAssign",
+        "For",
+        "AsyncFor",
+        "With",
+        "AsyncWith",
+        "NamedExpr",
+        "ExceptHandler",
+        "MatchAs",
+        "MatchStar",
+        "MatchMapping",
+        "Import",
+        "ImportFrom",
+        "FunctionDef",
+        "ClassDef",
+        "TypeAlias",
+        "Global",
+        "Delete",
+    }
+)
+
+
+def _oracle_expression() -> st.SearchStrategy[str]:
+    atom = st.one_of(
+        st.sampled_from(_ORACLE_PARTS).map(repr), st.sampled_from(_ORACLE_NAMES)
+    )
+    return st.one_of(
+        atom,
+        st.tuples(atom, atom).map(lambda pair: f"{pair[0]} + {pair[1]}"),
+        st.tuples(atom, atom).map(lambda pair: f"f'{{{pair[0]}}}{{{pair[1]}}}'"),
+    )
+
+
+def _oracle_atom() -> st.SearchStrategy[str]:
+    return st.one_of(
+        st.sampled_from(_ORACLE_PARTS).map(repr), st.sampled_from(_ORACLE_NAMES)
+    )
+
+
+#: Some statements over all names, then one that binds ``C`` from two atoms,
+#: so that about one draw in ten runs to the member at all.
+_ORACLE_STATEMENTS = st.tuples(
+    st.lists(
+        st.tuples(
+            st.sampled_from(sorted(_ORACLE_FORMS)),
+            st.sampled_from(_ORACLE_NAMES),
+            _oracle_expression(),
+        ),
+        max_size=5,
+    ),
+    st.tuples(
+        st.sampled_from(sorted(_ORACLE_FORMS)),
+        st.just("C"),
+        st.tuples(_oracle_atom(), _oracle_atom()).map(
+            lambda pair: f"{pair[0]} + {pair[1]}"
+        ),
+    ),
+).map(lambda drawn: [*drawn[0], drawn[1]])
+
+
+def _oracle_statement(form: str, name: str, expression: str) -> str:
+    return _ORACLE_FORMS[form].format(n=name, e=expression)
+
+
+def _oracle_runs_to_the_member(statements: list[str]) -> bool:
+    """Run ``statements`` one by one; True if ``C`` ever holds the member.
+
+    A statement that raises is skipped; the guard folds every binding in any
+    order, so it covers every subset as well.
+    """
+
+    namespace: dict[str, object] = {"contextlib": contextlib}
+    exec("A = B = C = ''", namespace)  # noqa: S102 - generated test code only
+    for statement in statements:
+        try:
+            exec(statement, namespace)  # noqa: S102 - generated test code only
+        except Exception:  # noqa: BLE001 - a failing statement binds nothing
+            continue
+        if namespace.get("C") == _MEMBER:
+            return True
+    return False
+
+
+def _oracle_source(statements: list[str]) -> str:
+    """``_CLEAN`` with ``statements`` at module level and a write keyed by ``C``."""
+
+    module = "\n".join(["A = B = C = ''", *statements])
+    return _changed(
+        (
+            "K2 = K\n",
+            f"K2 = K\nimport contextlib\n{module}\n",
+            "            updated_data[K2] = copy.deepcopy(registration)\n",
+            "            updated_data[C] = creds\n",
+        ),
+        "oracle",
+    )
+
+
+def test_the_oracle_covers_every_binding_construct() -> None:
+    """Every binding construct is generated or excluded with a reason, and each
+    template contains the construct it is named for."""
+
+    generated = {label.split("/")[0] for label in _ORACLE_FORMS} - {"While"}
+    assert generated | set(_ORACLE_EXCLUDED) >= _BINDING_CONSTRUCTS
+    for label, template in _ORACLE_FORMS.items():
+        tree = ast.parse(template.format(n="C", e="'x'"))
+        names = {type(node).__name__ for node in ast.walk(tree)}
+        wanted = {
+            "While/If": "If",
+            "Assign/Tuple": "Tuple",
+            "Assign/Starred": "Starred",
+        }
+        assert wanted.get(label, label.split("/")[0]) in names, label
+
+
+@pytest.mark.parametrize("form", sorted(_ORACLE_FORMS))
+def test_each_binding_form_of_a_key_part_is_seen(form: str) -> None:
+    """Every form, once, binding the part ``A`` that ``C = A + 'credentials'``
+    turns into the member: the guard must not pass the write keyed by ``C``."""
+
+    statements = [_oracle_statement(form, "A", repr("fcm_")), "C = A + 'credentials'"]
+    if not _oracle_runs_to_the_member(statements):
+        pytest.skip(f"{form} binds no string that outlives the statement")
+    _writes, unclassified, shared = _snippet_problems(_oracle_source(statements))
+    assert unclassified or shared, form
+
+
+@settings(max_examples=1500, deadline=None, derandomize=True)
+@given(_ORACLE_STATEMENTS)
+def test_python_is_the_oracle_for_module_keys(
+    drawn: list[tuple[str, str, str]],
+) -> None:
+    """Whenever running the module binds the key to the member, the guard fails.
+
+    Python itself decides the value, so a form nobody listed is found as well.
+    """
+
+    statements = [_oracle_statement(*item) for item in drawn]
+    for form, _name, _expression in drawn:
+        event(form)
+    reached = _oracle_runs_to_the_member(statements)
+    event(f"reaches the member: {reached}")
+    if not reached:
+        return
+    _writes, unclassified, shared = _snippet_problems(_oracle_source(statements))
+    assert unclassified or shared, statements
