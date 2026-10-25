@@ -111,12 +111,14 @@ bundle, so a cold start keeps its registration (Issue #152). Enforced by
 * **Detached copies.** A credential value that crosses between the FCM
   receiver, the `TokenCache` and `entry.data` is handed over as a deep copy,
   and `TokenCache` stores and returns a copy of every value that is not an
-  immutable scalar, in `all()` as well. Reason: the
-  receiver edits its registration and the nested `gcm` block in place
-  (`_invalidate_fcm_tokens`); a shared container would rewrite `entry.data`
-  without `async_update_entry`, so neither the store nor the update listener
-  would see the change. Enforced by `tests/test_guard_credential_entry_writes.py`
-  (every `fcm_credentials` write in `fcm_receiver_ha.py` is a `copy.deepcopy`),
+  immutable scalar, in `all()` and the module-level sync facades as well.
+  Reason: the receiver edits its registration and the nested `gcm` block in
+  place (`_invalidate_fcm_tokens`); a shared container would rewrite
+  `entry.data` without `async_update_entry`, so neither the store nor the
+  update listener would see the change. Enforced by
+  `tests/test_guard_credential_entry_writes.py` (every `fcm_credentials` write
+  in `fcm_receiver_ha.py` is a `copy.deepcopy` written once, and every other
+  read of it only hashes it or goes through the token cache),
   `tests/test_fcm_registration_entry_sync.py` and
   `tests/test_token_cache_value_isolation.py`.
 * **The entry is the durable store for a renewed registration.** The receiver

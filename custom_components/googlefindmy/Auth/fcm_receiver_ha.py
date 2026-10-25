@@ -3507,11 +3507,8 @@ class FcmReceiverHA:
         # An entry without a bundle records the digest of "no registration", so
         # a bundle that appears later with a registration (a user import whose
         # reload is on its way) counts as a value this receiver did not write.
-        registration = (
-            bundle.get("fcm_credentials") if isinstance(bundle, Mapping) else None
-        )
         self._entry_registration_digest[entry.entry_id] = credential_member_digest(
-            registration
+            bundle.get("fcm_credentials") if isinstance(bundle, Mapping) else None
         )
 
     def _entry_bundle_for_write(
