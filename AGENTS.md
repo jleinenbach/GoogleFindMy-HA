@@ -947,11 +947,13 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   Poetry `dev`/`test` groups in `pyproject.toml`), so they are **not** reproducibly
   pinned either. Only a small **explicitly constrained** subset is exact-pinned and
   must not be relaxed under the Chrome-currency rationale:
-  `custom_components/googlefindmy/requirements-dev.txt` pins `pytest-asyncio==1.3.0`,
+  `custom_components/googlefindmy/requirements-dev.txt` pins `pytest-asyncio==1.4.0`,
   and `custom_components/googlefindmy/constraints-test-stubs.txt` pins
-  `homeassistant==2025.12.1` and `pytest-homeassistant-custom-component==0.13.299`; it
-  also caps `pycares<5` (an upper bound, not an exact pin; the runtime floor
-  `pycares>=4.4.0` lives in `requirements-dev.txt`).
+  `homeassistant==2026.10.3` and `pytest-homeassistant-custom-component==0.13.374`
+  (the `poetry.lock` versions; bump both together, since each plugin release
+  requires one exact Home Assistant release). The `test_legacy_python` job adds
+  the cap `pycares<5` for its Python 3.13 axes (an upper bound, not an exact pin;
+  the runtime floor `pycares>=4.4.0` lives in `requirements-dev.txt`).
 * Actual coverage today (each claim cites the workflow proving its *effective*
   behaviour):
   * **PR CI passes an approval gate.** In
@@ -1154,7 +1156,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs redact tokens, PII, coordinates and class (c) identifiers (section 5) at every level, and derived identifiers (user-provided names, `entity_id`) from records that can repeat unattended at INFO and above; diagnostics redact device, canonical and EID keys through `TO_REDACT` (the instance's own `entry_id` is class (b) and stays).
-* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the `test` job (behind the required `CI Success` check of the `main` ruleset) enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); CodeQL scans the full tree (PR merge ref, push to `main`, weekly) and blocks merges into `main` via the ruleset's `code_scanning` rule; not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
+* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.4.0`, `constraints-test-stubs.txt`); the `test` job (behind the required `CI Success` check of the `main` ruleset) enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); CodeQL scans the full tree (PR merge ref, push to `main`, weekly) and blocks merges into `main` via the ruleset's `code_scanning` rule; not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.

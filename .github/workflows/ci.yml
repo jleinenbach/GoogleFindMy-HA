@@ -588,8 +588,9 @@ jobs:
       matrix:
         include:
           # The floor hacs.json actually declares. The stub constraints in the
-          # repository pin 2025.12.1, which is a speed-up for local runs and not
-          # a compatibility claim; testing there would leave the pre-2025.11
+          # repository pin the poetry.lock release (2026.10.3, Python 3.14 only),
+          # which is a speed-up for local runs and not a compatibility claim;
+          # testing there would leave the pre-2025.11
           # paths -- such as the `EntityCategory` import fallback in button.py --
           # unexercised by every axis. 0.13.278 is the plugin release that
           # carries Home Assistant 2025.9.1.
@@ -599,7 +600,7 @@ jobs:
           # The last Home Assistant line that still supports Python 3.13
           # (2026.2.3). Without this axis the final three 3.13-era releases go
           # untested. Both pins are dropped so pip resolves the newest release
-          # that satisfies the interpreter; `pycares<5` in the same file stays.
+          # that satisfies the interpreter; the step below adds `pycares<5`.
           - label: "last 3.13 line"
             ha_pin: ""
             plugin_pin: ""
@@ -641,17 +642,25 @@ jobs:
           set -euo pipefail
           constraints=custom_components/googlefindmy/constraints-test-stubs.txt
           sed -i -E '/^(homeassistant|pytest-homeassistant-custom-component)==/d' "$constraints"
+          # The plugin release that carries an older Home Assistant also
+          # carries the pytest stack of its own era: 0.13.278 requires
+          # pytest-asyncio==1.1.0 and 0.13.316, the last release for Python
+          # 3.13, requires 1.3.0, while requirements-dev.txt pins the poetry.lock
+          # version (1.4.0). Keeping both makes the resolution impossible.
+          # Testing an old Home Assistant line means testing it with the test
+          # tooling that line shipped with, so the local pin steps aside on
+          # every axis of this job.
+          sed -i -E '/^pytest-asyncio==/d' \
+            custom_components/googlefindmy/requirements-dev.txt
+          # Home Assistant 2025.9.1 pulls aiodns 3.5.0, which annotates with
+          # pycares 4 result types but sets no upper bound on pycares, so this
+          # job caps it. The repository file no longer does, because the
+          # poetry.lock Home Assistant release (Python 3.14 only) pulls
+          # aiodns 4, which requires pycares>=5.
+          printf 'pycares<5\n' >> "$constraints"
           if [ -n "${{ matrix.ha_pin }}" ]; then
             printf 'homeassistant==%s\n' "${{ matrix.ha_pin }}" >> "$constraints"
             printf 'pytest-homeassistant-custom-component==%s\n' "${{ matrix.plugin_pin }}" >> "$constraints"
-            # The plugin release that carries an older Home Assistant also
-            # carries the pytest stack of its own era: 0.13.278 requires
-            # pytest-asyncio==1.1.0, while requirements-dev.txt pins 1.3.0.
-            # Keeping both makes the resolution impossible. Testing an old
-            # Home Assistant line means testing it with the test tooling that
-            # line shipped with, so the local pin steps aside on this axis.
-            sed -i -E '/^pytest-asyncio==/d' \
-              custom_components/googlefindmy/requirements-dev.txt
           fi
           echo "Constraints for this axis:"
           cat "$constraints"
