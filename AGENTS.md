@@ -231,14 +231,21 @@ Always keep any `from __future__` imports immediately after the module docstring
   supported core at all because that rename predates our minimum; see
   `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
 
-  **Raising the floor: CI consequences.** The declared minimum is tested in
-  exactly one place: the `declared floor` axis of the `test_legacy_python` job in
-  `.github/workflows/ci.yml`, with its step `Verify the pinned floor still matches
-  hacs.json`. The `test` job installs only what `poetry.lock` resolves and never
-  sees the minimum. Core `2026.8.0` requires Python `>=3.14.2`, so the raise makes
-  the Python 3.13 job look obsolete; deleting it together with its entries in the
-  `CI Success` job removes the only floor test, and no check turns red. When the
-  minimum is raised to `2026.8.0`, do all of the following in the same PR:
+  **Raising the floor: CI consequences.** The test suite runs against the
+  declared minimum in exactly one place: the `declared floor` axis of the
+  `test_legacy_python` job in `.github/workflows/ci.yml`, with its step `Verify
+  the pinned floor still matches hacs.json`. The `test` job installs only what
+  `poetry.lock` resolves. The `check-declared-minimum` job in
+  `.github/workflows/ha-dependency-check.yml` and
+  `tests/test_pip_audit_security.py` read the minimum, but neither runs the suite
+  against it. Core `2026.8.0` requires Python `>=3.14.2`, so the raise makes the
+  Python 3.13 job look obsolete. Deleting it removes the only run of the suite on
+  the minimum, and the only check that notices is the job count in
+  `test_every_job_requires_its_needs_explicitly`
+  (`tests/test_ci_approval_gate.py`), which does not know which job carried the
+  floor. Do not lower that count to make the deletion pass; move the axis
+  instead. When the minimum is raised to `2026.8.0`, do all of the following in
+  the same PR:
 
   * Move the `declared floor` axis, with its label unchanged, into a lock-free
     Python 3.14 job. Carry over the `hacs.json` check and the step `Report and
@@ -249,14 +256,17 @@ Always keep any `from __future__` imports immediately after the module docstring
     both pins on PyPI before committing.
   * Raise `hacs.json`, `pyproject.toml`, the axis pin and the plugin pin
     together. The `hacs.json` check compares only `hacs.json` with the axis pin,
-    so a stale `pyproject.toml` passes CI.
+    so it does not catch a stale `pyproject.toml`. Add the snapshot
+    `tests/fixtures/pip_audit/ha_package_constraints_2026.8.0.txt` in the same
+    PR; `tests/test_pip_audit_security.py` fails without it and names its source.
   * Drop the `last 3.13 line` axis and the `pycares<5` cap in `Rewrite the stub
     constraints for this axis`. Core `2026.8.0` requires `aiodns==4.0.4`, which
     requires `pycares>=5`, so the cap would make the floor axis unresolvable.
   * Keep the `CI Success` job in step with the job list: its `needs`, the result
-    check in `Check all jobs passed` and the row in `Write CI summary`. A job
-    missing from `needs` can fail without that failure reaching `CI Success`, and
-    no test guards this list.
+    check in `Check all jobs passed` and the row in `Write CI summary`.
+    `test_ci_success_includes_the_gate` requires every job in `needs`, but no
+    test checks the per-job result checks, so a job without one can fail without
+    failing `CI Success`.
   * Before deleting `custom_components/googlefindmy/constraints-test-stubs.txt`,
     list its readers with `git grep -n constraints-test-stubs` and update or
     remove each one.
