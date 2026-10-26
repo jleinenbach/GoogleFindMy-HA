@@ -248,17 +248,31 @@ Always keep any `from __future__` imports immediately after the module docstring
   the same PR:
 
   * Move the `declared floor` axis, with its label unchanged, into a lock-free
-    Python 3.14 job. Carry over the `hacs.json` check and the step `Report and
-    verify the resolved Home Assistant and plugin versions`. Pin
+    Python 3.14 job. Carry over everything the axis depends on: its matrix key
+    `floor: true`, the `hacs.json` check, `Rewrite the stub constraints for this
+    axis`, `Install dependencies without the Poetry lock` and `Report and verify
+    the resolved Home Assistant and plugin versions`. The `hacs.json` check runs
+    only under `if: matrix.floor`, so dropping the key together with the
+    `pycares<5` cap would skip that check without failing. Pin
     `homeassistant==2026.8.0` and `pytest-homeassistant-custom-component==0.13.354`,
     the plugin release that requires exactly `2026.8.0`; releases `0.13.349` to
     `0.13.353` require the betas `2026.8.0b0` to `2026.8.0b5` instead. Confirm
     both pins on PyPI before committing.
-  * Raise `hacs.json`, `pyproject.toml`, the axis pin and the plugin pin
-    together. The `hacs.json` check compares only `hacs.json` with the axis pin,
-    so it does not catch a stale `pyproject.toml`. Add the snapshot
+  * Raise `hacs.json`, `pyproject.toml`, the `homeassistant>=` line in
+    `custom_components/googlefindmy/requirements-dev.txt`, the axis pin and the
+    plugin pin together. The `hacs.json` check compares only `hacs.json` with the
+    axis pin, so it catches neither of the other two. Find every other mention of
+    the old minimum with `git grep -n -F 2025.9.1`. Guards that pin it, such as
+    `test_the_declared_minimum_is_still_the_one_this_guard_assumes` in
+    `tests/test_guard_config_flow_reload_deprecation.py`, fail on purpose:
+    re-check the premise their message names instead of only updating the
+    version string.
+  * Add the snapshot
     `tests/fixtures/pip_audit/ha_package_constraints_2026.8.0.txt` in the same
     PR; `tests/test_pip_audit_security.py` fails without it and names its source.
+    That test audits every other `ha_package_constraints_*.txt` as an additional
+    supported release, so remove the snapshots below the new minimum or keep
+    them on purpose.
   * Drop the `last 3.13 line` axis and the `pycares<5` cap in `Rewrite the stub
     constraints for this axis`. Core `2026.8.0` requires `aiodns==4.0.4`, which
     requires `pycares>=5`, so the cap would make the floor axis unresolvable.
