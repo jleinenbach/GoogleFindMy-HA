@@ -27,9 +27,14 @@ they cannot classify:
 * Every occurrence of the member key in ``Auth/fcm_receiver_ha.py`` is
   classified. The guard knows a key in four spellings only: a string constant
   (``"fcm_credentials"``), a keyword argument, a constant of ``const.py``
-  reached by import (``from ..const import X``, ``const.X``) and a module name
-  every binding of which in module scope is a single assignment of one of
-  these (``K = "fcm_credentials"``, ``K2 = K``). Allowed kinds are a
+  reached by import (``from ..const import X``, ``const.X``, also behind a
+  module alias ``C2 = const``) and a module name every binding of which in
+  module scope is an assignment of one of these (``K = "fcm_credentials"``,
+  ``K2 = K``). A constant of ``const.py`` that holds the member and is reached
+  any other way fails (``except ImportError: FC = None``, ``del FC``,
+  ``from ..const import *``, an import inside a function,
+  ``import custom_components.googlefindmy``), and so does a known key that
+  flows into a name the guard does not resolve (``K3 = K``). Allowed kinds are a
   hash read (``.get`` or subscript load whose value goes straight into
   ``credential_member_digest``), an ``in`` test, a token cache read or write
   (``.get``/``.set`` on a receiver named in ``_CACHE_RECEIVERS``; ``TokenCache``
@@ -79,9 +84,8 @@ contributor who adds a write of the member without a copy; it is not built
 against deliberate disguise. Not seen as a key, so a write keyed so is neither
 checked nor counted: a key computed in any way (``+``, an f-string, a format, a
 call, a subscript or slice, a class attribute), a module name with any binding
-other than a single assignment of a known key (``+=``, ``for``, ``global`` in a
-function, an annotation without a value),
-a name bound in a class body, a name Python binds implicitly (``__doc__``),
+other than an assignment of a known key (``+=``, ``for``, ``global`` in a
+function), a name bound in a class body, a name Python binds implicitly (``__doc__``),
 and a key computed at runtime from a local or a parameter inside a function; a
 local name bound to a module key is not followed, and a name imported from a
 module other than ``const.py`` holds no value the guard sees. A t-string is not a
@@ -286,6 +290,14 @@ def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
 def _binds(node: ast.AST, name: str) -> bool:
     """Whether ``node`` binds ``name`` by itself, in one grammar form."""
 
+    bound = _bound_by(node)
+    # ``from x import *`` may bind any name.
+    return name in bound or bound == ("*",)
+
+
+def _bound_by(node: ast.AST) -> tuple[str, ...]:
+    """The names ``node`` binds by itself; a star import binds the name star."""
+
     bound: tuple[str | None, ...] = ()
     if isinstance(node, ast.Name):
         if isinstance(node.ctx, ast.Store | ast.Del):
@@ -305,11 +317,10 @@ def _binds(node: ast.AST, name: str) -> bool:
     elif isinstance(node, ast.MatchMapping):
         bound = (node.rest,)
     elif isinstance(node, ast.alias):
-        # ``from x import *`` may bind any name.
-        bound = (name if node.name == "*" else node.asname or node.name.split(".")[0],)
+        bound = ("*" if node.name == "*" else node.asname or node.name.split(".")[0],)
     elif isinstance(node, ast.Global | ast.Nonlocal):
         bound = tuple(node.names)
-    return name in bound
+    return tuple(name for name in bound if name is not None)
 
 
 def _outer_parts(node: ast.AST) -> list[ast.AST]:
@@ -635,16 +646,31 @@ KeysFactory = Callable[
 ]
 
 
-def _module_scope_names(tree: ast.Module) -> set[str]:
-    """Every name some node of module scope binds."""
+def _module_binding_sites(tree: ast.Module) -> dict[str, list[ast.AST]]:
+    """Every binding site of every module name, collected in one walk.
 
-    names: set[str] = set()
+    The same sites as ``_binding_sites(tree, name)``, but a ``nonlocal`` in a
+    nested scope is left out, because it never names a module variable, and a
+    star import is a site of every name.
+    """
+
+    sites: dict[str, list[ast.AST]] = {}
+    stars: list[ast.AST] = []
     for node in _scope_nodes(tree):
-        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
-            names.add(node.id)
-        elif isinstance(node, ast.alias) and node.name != "*":
-            names.add(node.asname or node.name.split(".")[0])
-    return names
+        bound = _bound_by(node)
+        if bound == ("*",):
+            stars.append(node)
+            continue
+        for name in bound:
+            sites.setdefault(name, []).append(node)
+        if isinstance(node, _NESTED_SCOPES):
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Global):
+                    for name in inner.names:
+                        sites.setdefault(name, []).append(inner)
+    for found in sites.values():
+        found.extend(stars)
+    return sites
 
 
 def _import_site(
@@ -670,12 +696,13 @@ def _import_site(
 
 
 def _assigned_site(site: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.expr | None:
-    """The value of a single-target assignment at module level that binds ``site``."""
+    """The value of an assignment at module level that binds ``site`` as one of
+    its targets (``K = K2 = "fcm_credentials"`` gives both names the string)."""
 
     statement = parents.get(site)
     if not isinstance(site, ast.Name) or not _at_module_level(site, parents):
         return None
-    if isinstance(statement, ast.Assign) and statement.targets == [site]:
+    if isinstance(statement, ast.Assign) and site in statement.targets:
         return statement.value
     if isinstance(statement, ast.AnnAssign) and statement.target is site:
         return statement.value
@@ -684,9 +711,11 @@ def _assigned_site(site: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.expr |
 
 class _LiteralKeys:
     """``V-10`` (c): a key is a string constant, a ``const.py`` constant reached
-    by import, or a module name every module-scope binding of which is a single
+    by import, or a module name every module-scope binding of which is an
     assignment of one of these. Nothing is folded; any other expression is no
-    key the guard sees."""
+    key the guard sees. A ``const.py`` constant that holds the member must be
+    reached in one of these spellings; ``unknown_keys`` reports every other
+    place."""
 
     key_nodes: tuple[type[ast.AST], ...] = (ast.Constant, ast.Name, ast.Attribute)
 
@@ -698,13 +727,15 @@ class _LiteralKeys:
         constants: Mapping[str, Values],
     ) -> None:
         self.local = local
+        self.parents = parents
         self.handles: set[str] = set()
         self.constants = constants
+        bindings = _module_binding_sites(tree)
         sites: dict[str, list[ast.expr | Values | None]] = {}
         rebound: set[str] = set()
-        for name in _module_scope_names(tree):
+        for name, found_sites in bindings.items():
             found: list[ast.expr | Values | None] = []
-            for site in _binding_sites(tree, name):
+            for site in found_sites:
                 values, handle = _import_site(site, parents, constants)
                 if handle is not None:
                     self.handles.add(handle)
@@ -714,15 +745,34 @@ class _LiteralKeys:
                 else:
                     found.append(_assigned_site(site, parents))
             sites[name] = found
-            if not all(
-                isinstance(site, ast.alias) for site in _binding_sites(tree, name)
-            ):
+            if not all(isinstance(site, ast.alias) for site in found_sites):
                 rebound.add(name)
         # A handle whose root is bound other than by an import may be anything.
         self.handles = {h for h in self.handles if h.split(".")[0] not in rebound}
+        self._alias_handles(bindings, parents)
         self.names: dict[str, Values] = {}
         for name in sites:
             self._resolve(name, sites, set())
+
+    def _alias_handles(
+        self, bindings: Mapping[str, list[ast.AST]], parents: dict[ast.AST, ast.AST]
+    ) -> None:
+        """A module name every binding of which assigns a handle is a handle too
+        (``C2 = const``)."""
+
+        changed = True
+        while changed:
+            changed = False
+            for name, found_sites in bindings.items():
+                if name in self.handles:
+                    continue
+                values = [_assigned_site(site, parents) for site in found_sites]
+                if values and all(
+                    value is not None and _dotted(value) in self.handles
+                    for value in values
+                ):
+                    self.handles.add(name)
+                    changed = True
 
     def _resolve(
         self,
@@ -792,9 +842,38 @@ class _LiteralKeys:
         return values is not None and _MEMBER in values
 
     def unknown_keys(self, tree: ast.Module) -> list[ast.AST]:
-        """Under ``V-10`` (c) no key is unknown: what is not known is not seen."""
+        """Places where a ``const.py`` constant holding the member is reached in
+        a way this resolver does not follow; each fails the scan, so such a
+        constant is seen or reported, never silent: an import into a name that
+        is no key (``except ImportError: FC = None``, ``del FC``), an import
+        inside a function, a star import (``from ..const import *``), and an
+        attribute of that name other than ``const.X`` behind a resolved handle
+        (``import custom_components.googlefindmy``)."""
 
-        return []
+        members = {name for name, values in self.constants.items() if _MEMBER in values}
+        if not members:
+            return []
+        found: list[ast.AST] = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "").split(".")[-1] == "const"
+            ):
+                for alias in node.names:
+                    if alias.name == "*":
+                        found.append(node)
+                    elif alias.name in members and not (
+                        _at_module_level(alias, self.parents)
+                        and _MEMBER in self.names.get(alias.asname or alias.name, ())
+                    ):
+                        found.append(alias)
+            elif (
+                isinstance(node, ast.Attribute)
+                and node.attr in members
+                and not (isinstance(node.ctx, ast.Load) and self.is_member(node))
+            ):
+                found.append(node)
+        return found
 
 
 def _module_root(node: ast.AST) -> ast.Name | None:
@@ -904,7 +983,7 @@ def _classify(
         kind = (_classify_call_argument(parent, parents), None)
     elif isinstance(parent, ast.Assign | ast.AnnAssign):
         # Only a plain name bound at module level is a module constant (and
-        # resolved as a key by ``_module_values``); one in a class body is
+        # resolved as a key by ``_LiteralKeys``); one in a class body is
         # reached as ``self.NAME`` and an attribute target as ``obj.NAME``, both
         # of which would escape the scan.
         if _at_module_level(parent, parents) and all(
@@ -1492,6 +1571,81 @@ _BROKEN: dict[str, tuple[str, ...]] = {
         '        updated_bundle["fcm_credentials"] = registration\n',
         '        updated_bundle[t"fcm_credentials"] = registration\n',
     ),
+    "const constant imported with a fallback that is no key": (
+        "from custom_components.googlefindmy.const import FCM_CREDENTIALS\n",
+        "try:\n"
+        "    from custom_components.googlefindmy.const import FCM_CREDENTIALS as FC\n"
+        "except ImportError:\n    FC = None\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[FC] = creds\n",
+    ),
+    "const constant deleted and imported again": (
+        "from custom_components.googlefindmy.const import FCM_CREDENTIALS\n",
+        "from custom_components.googlefindmy.const import FCM_CREDENTIALS\n"
+        "del FCM_CREDENTIALS\n"
+        "from custom_components.googlefindmy.const import FCM_CREDENTIALS\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[FCM_CREDENTIALS] = creds\n",
+    ),
+    "const handle deleted and imported again": (
+        "from custom_components.googlefindmy import const\n",
+        "from custom_components.googlefindmy import const\ndel const\n"
+        "from custom_components.googlefindmy import const\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[const.FCM_CREDENTIALS] = creds\n",
+    ),
+    "star import from const": (
+        "from custom_components.googlefindmy.const import FCM_CREDENTIALS\n",
+        "from custom_components.googlefindmy.const import *\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[FCM_CREDENTIALS] = creds\n",
+    ),
+    "const imported inside a function": (
+        "        registration = copy.deepcopy(dict(creds))\n",
+        "        from custom_components.googlefindmy import const as c2\n"
+        "        registration = copy.deepcopy(dict(creds))\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[c2.FCM_CREDENTIALS] = creds\n",
+    ),
+    "const constant imported inside a function": (
+        "        registration = copy.deepcopy(dict(creds))\n",
+        "        from custom_components.googlefindmy.const import FCM_CREDENTIALS as F2\n"
+        "        registration = copy.deepcopy(dict(creds))\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[F2] = creds\n",
+    ),
+    "const constant imported again inside a function under its name": (
+        "        registration = copy.deepcopy(dict(creds))\n",
+        "        from custom_components.googlefindmy.const import FCM_CREDENTIALS\n"
+        "        registration = copy.deepcopy(dict(creds))\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[FCM_CREDENTIALS] = creds\n",
+    ),
+    "shared write through an alias of the const handle": (
+        "K2 = K\n",
+        "K2 = K\nC2 = const\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[C2.FCM_CREDENTIALS] = creds\n",
+    ),
+    "const reached through the package path": (
+        "import copy\n",
+        "import copy\nimport custom_components.googlefindmy\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[custom_components.googlefindmy.const.FCM_CREDENTIALS]"
+        " = copy.deepcopy(registration)\n",
+    ),
+    "const constant rebound through its handle": (
+        "K2 = K\n",
+        "K2 = K\nconst.FCM_CREDENTIALS = 'x'\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[const.FCM_CREDENTIALS] = copy.deepcopy(registration)\n",
+    ),
+    "const handle rebound in the module": (
+        "K2 = K\n",
+        "K2 = K\nclass const:\n    FCM_CREDENTIALS = 'x'\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[const.FCM_CREDENTIALS] = creds\n",
+    ),
 }
 
 #: Forms that must pass with both writes recognised, each a one-place change to
@@ -1577,6 +1731,29 @@ _ACCEPTED: dict[str, tuple[str, ...]] = {
         '        updated_data["bundle"] = updated_bundle\n'
         "        key = 'other'\n        updated_data[key] = creds\n",
     ),
+    "write through an alias of the const handle": (
+        "K2 = K\n",
+        "K2 = K\nC2 = const\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[C2.FCM_CREDENTIALS] = copy.deepcopy(registration)\n",
+    ),
+    "const import with a literal fallback": (
+        "from custom_components.googlefindmy.const import FCM_CREDENTIALS\n",
+        "try:\n"
+        "    from custom_components.googlefindmy.const import FCM_CREDENTIALS as FC\n"
+        "except ImportError:\n    FC = 'fcm_credentials'\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[FC] = copy.deepcopy(registration)\n",
+    ),
+    "one literal bound to two module names": (
+        'K = "fcm_credentials"\nK2 = K\n',
+        'K = K2 = "fcm_credentials"\n',
+    ),
+    "nonlocal of a function local that shadows a module key": (
+        "K2 = K\n",
+        "K2 = K\ndef _outer():\n    K2 = 1\n    def _inner():\n"
+        "        nonlocal K2\n        K2 = 2\n",
+    ),
 }
 
 
@@ -1606,6 +1783,13 @@ def test_the_guard_rejects_a_shared_or_unknown_form(label: str) -> None:
 
     _writes, unclassified, shared = _snippet_problems(_changed(_BROKEN[label], label))
     assert unclassified or shared, label
+
+
+def test_a_star_import_from_const_fails_on_its_own() -> None:
+    """A star import from ``const`` is reported even where no write is seen."""
+
+    source = "from custom_components.googlefindmy.const import *\n"
+    assert _snippet_problems(source)[1], source
 
 
 @pytest.mark.parametrize("label", sorted(_ACCEPTED))
@@ -1646,10 +1830,6 @@ _NOT_SEEN: dict[str, tuple[str, ...]] = {
         "K2 = K\n", "K2 = K\nclass NS:\n    A = 'fcm_' + 'credentials'\n",
         _K2_WRITE, "            updated_data[NS.A] = copy.deepcopy(registration)\n",
     ),
-    "const handle rebound in the module": (
-        "K2 = K\n", "K2 = K\nclass const:\n    FCM_CREDENTIALS = 'x'\n",
-        _K2_WRITE, "            updated_data[const.FCM_CREDENTIALS] = creds\n",
-    ),
     "key imported from a module other than const": (
         "K2 = K\n", "K2 = K\nfrom custom_components.googlefindmy.other import K3\n",
         _K2_WRITE, "            updated_data[K3] = copy.deepcopy(registration)\n",
@@ -1678,8 +1858,7 @@ _FORM_TOKENS = (
 _PATH_ENDINGS = (".py", ".md", ".toml")
 
 #: Every form a docstring of this file names, mapped to the label in
-#: ``_BROKEN``, ``_ACCEPTED``, ``_ORACLE_FORMS`` or ``_ORACLE_FAMILIES``, or to
-#: the test that pins it.
+#: ``_BROKEN``, ``_ACCEPTED`` or ``_NOT_SEEN``, or to the test that pins it.
 _DOCUMENTED_FORMS: dict[str, str] = {
     "del": "test_the_fingerprint_filters_no_member",
     "pop": "test_the_fingerprint_filters_no_member",
@@ -1721,10 +1900,15 @@ _DOCUMENTED_FORMS: dict[str, str] = {
     "_BROKEN": "test_the_guard_rejects_a_shared_or_unknown_form",
     "+": "key built by concatenation",
     "+=": "key bound by augmented assignment",
-    "for": "key constant bound in a module-level for block",
+    "for": "key bound in a module-level for block",
     "global": "key bound through global in a function",
     "import": "name imported from const as key",
     "K3 = K": "known key copied to a name with another binding",
+    "C2 = const": "write through an alias of the const handle",
+    "except ImportError: FC = None": "const constant imported with a fallback that is no key",
+    "del FC": "const constant deleted and imported again",
+    "from ..const import *": "star import from const",
+    "import custom_components.googlefindmy": "const reached through the package path",
     'K = "fcm_credentials"': "write through a module alias of the key",
     "K2 = K": "write through a module alias of the key",
     "_NOT_SEEN": "test_a_key_form_outside_the_four_spellings_is_not_seen",
