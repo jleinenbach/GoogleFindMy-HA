@@ -260,12 +260,14 @@ Always keep any `from __future__` imports immediately after the module docstring
   * Before deleting `custom_components/googlefindmy/constraints-test-stubs.txt`,
     list its readers with `git grep -n constraints-test-stubs` and update or
     remove each one.
-  * Update every text that describes the Python 3.13 axes: the `Pinned stub
-    constraints` bullet, the "Two separate axes" note at the start of section 11,
-    the `test_legacy_python` pin paragraph in section 11.2, the header comment of
-    `constraints-test-stubs.txt` and the matrix comment of the `test` job. The
-    language level (`py313` for ruff and mypy) is a separate decision, as that
-    section 11 note states.
+  * Update every text that describes the Python 3.13 axes. Find them with
+    `git grep -n -E 'test_legacy_python|3\.13'`, which also lists mentions of
+    the language level that stay; among the axis texts are the CI paragraph in
+    `README.md`, the `Pinned stub constraints` bullet, the "Two separate axes"
+    note at the start of section 11, the `test_legacy_python` pin paragraph in
+    section 11.2, the header comment of `constraints-test-stubs.txt` and the
+    matrix comment of the `test` job. The language level (`py313` for ruff and
+    mypy) is a separate decision, as that section 11 note states.
 
   **Before and after.**
 
