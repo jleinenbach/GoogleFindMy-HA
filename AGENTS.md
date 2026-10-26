@@ -231,6 +231,42 @@ Always keep any `from __future__` imports immediately after the module docstring
   supported core at all because that rename predates our minimum; see
   `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
 
+  **Raising the floor: CI consequences.** The declared minimum is tested in
+  exactly one place: the `declared floor` axis of the `test_legacy_python` job in
+  `.github/workflows/ci.yml`, with its step `Verify the pinned floor still matches
+  hacs.json`. The `test` job installs only what `poetry.lock` resolves and never
+  sees the minimum. Core `2026.8.0` requires Python `>=3.14.2`, so the raise makes
+  the Python 3.13 job look obsolete; deleting it together with its entries in the
+  `CI Success` job removes the only floor test, and no check turns red. When the
+  minimum is raised to `2026.8.0`, do all of the following in the same PR:
+
+  * Move the `declared floor` axis, with its label unchanged, into a lock-free
+    Python 3.14 job. Carry over the `hacs.json` check and the step `Report and
+    verify the resolved Home Assistant and plugin versions`. Pin
+    `homeassistant==2026.8.0` and `pytest-homeassistant-custom-component==0.13.354`,
+    the plugin release that requires exactly `2026.8.0`; releases `0.13.349` to
+    `0.13.353` require the betas `2026.8.0b0` to `2026.8.0b5` instead. Confirm
+    both pins on PyPI before committing.
+  * Raise `hacs.json`, `pyproject.toml`, the axis pin and the plugin pin
+    together. The `hacs.json` check compares only `hacs.json` with the axis pin,
+    so a stale `pyproject.toml` passes CI.
+  * Drop the `last 3.13 line` axis and the `pycares<5` cap in `Rewrite the stub
+    constraints for this axis`. Core `2026.8.0` requires `aiodns==4.0.4`, which
+    requires `pycares>=5`, so the cap would make the floor axis unresolvable.
+  * Keep the `CI Success` job in step with the job list: its `needs`, the result
+    check in `Check all jobs passed` and the row in `Write CI summary`. A job
+    missing from `needs` can fail without that failure reaching `CI Success`, and
+    no test guards this list.
+  * Before deleting `custom_components/googlefindmy/constraints-test-stubs.txt`,
+    list its readers with `git grep -n constraints-test-stubs` and update or
+    remove each one.
+  * Update every text that describes the Python 3.13 axes: the `Pinned stub
+    constraints` bullet, the "Two separate axes" note at the start of section 11,
+    the `test_legacy_python` pin paragraph in section 11.2, the header comment of
+    `constraints-test-stubs.txt` and the matrix comment of the `test` job. The
+    language level (`py313` for ruff and mypy) is a separate decision, as that
+    section 11 note states.
+
   **Before and after.**
 
   ```python
