@@ -715,7 +715,7 @@ def _module_binding_sites(tree: ast.Module) -> dict[str, list[ast.AST]]:
         if isinstance(node, _NESTED_SCOPES):
             for inner in ast.walk(node):
                 if isinstance(inner, ast.Global):
-                    for name in inner.names:
+                    for name in dict.fromkeys(inner.names):
                         sites.setdefault(name, []).append(inner)
     for found in sites.values():
         found.extend(stars)
@@ -2060,6 +2060,9 @@ def test_the_scope_index_reads_a_nested_parameter_as_its_own() -> None:
     twice = ast.parse("def f():\n    x = 1\n    def g():\n        nonlocal x, x\n")
     sites = _ScopeIndex(twice.body[0]).binding_sites("x")
     assert sorted(type(site).__name__ for site in sites) == ["Name", "Nonlocal"]
+    module = ast.parse("x = 1\ndef g():\n    global x, x\n")
+    found = _module_binding_sites(module)["x"]
+    assert sorted(type(site).__name__ for site in found) == ["Global", "Name"]
 
 
 def _container_chain(links: int, writes: int) -> ast.Module:
@@ -2079,33 +2082,29 @@ def _container_chain(links: int, writes: int) -> ast.Module:
 
 
 class _EventCounter:
-    """The callback of ``_executed_work``: counts the events in one file and
-    turns them off at every place in any other file."""
+    """The callback of ``_executed_work``: counts every event it is given."""
 
-    def __init__(self, path: str) -> None:
-        self.path = path
+    def __init__(self) -> None:
         self.count = 0
 
-    def __call__(self, code: object, *_: object) -> object:
-        if getattr(code, "co_filename", None) != self.path:
-            return sys.monitoring.DISABLE
+    def __call__(self, *_: object) -> None:
         self.count += 1
-        return None
 
 
-def _executed_work(run: Callable[[], object], path: str) -> int:
-    """Lines and loop jumps ``run`` executes in the file ``path``.
+def _executed_work(run: Callable[[], object]) -> int:
+    """Lines and loop jumps ``run`` executes in any Python file.
 
     Counting the calls of one helper missed any loop it did not call (F-F of
-    round 12); a jump counts each pass of a loop, even one inside a single
-    line. A loop inside a builtin, such as a membership test on a list, is
-    not counted.
+    round 12), and counting this file only missed a loop in a module it calls,
+    such as ``ast.walk`` (R13-F3); a jump counts each pass of a loop, even one
+    inside a single line. A loop inside a builtin, such as a membership test
+    on a list, is not counted.
     """
 
     monitoring = sys.monitoring
     tool = next(i for i in range(6) if monitoring.get_tool(i) is None)
     events = (monitoring.events.LINE, monitoring.events.JUMP)
-    counted = _EventCounter(path)
+    counted = _EventCounter()
     monitoring.use_tool_id(tool, "credential guard work")
     try:
         for event in events:
@@ -2127,7 +2126,7 @@ def _work(tree: ast.Module) -> int:
     def scan() -> None:
         assert _receiver_problems(tree, {}) == (_count_writes(tree), [], [])
 
-    return _executed_work(scan, __file__)
+    return _executed_work(scan)
 
 
 def _count_writes(tree: ast.Module) -> int:
@@ -2137,14 +2136,20 @@ def _count_writes(tree: ast.Module) -> int:
     )
 
 
-def test_the_event_counter_counts_this_file_only() -> None:
-    """Code inside a monitoring callback is not traced, so the coverage of
-    ``_EventCounter`` comes from this direct call."""
+def test_the_event_counter_counts_the_loops_of_other_modules() -> None:
+    """R13-F3: a loop in ``ast.walk`` is work of the scan. Code inside a
+    monitoring callback is not traced, so the coverage of ``_EventCounter``
+    comes from the direct call."""
 
-    counter = _EventCounter(__file__)
-    assert counter(_EventCounter.__call__.__code__) is None
-    assert counter(ast.parse.__code__) is sys.monitoring.DISABLE
+    counter = _EventCounter()
+    counter(ast.parse.__code__, 0)
     assert counter.count == 1
+    small, large = ast.parse("x = 1\n" * 100), ast.parse("x = 1\n" * 200)
+    walked = [
+        _executed_work(functools.partial(list, ast.walk(tree)))
+        for tree in (small, large)
+    ]
+    assert 0 < walked[0] < walked[1] <= 2.1 * walked[0], walked
 
 
 def test_a_container_chain_is_followed_in_linear_time() -> None:
@@ -2156,7 +2161,9 @@ def test_a_container_chain_is_followed_in_linear_time() -> None:
     linear chain doubles the added work; a square part quadruples it."""
 
     work = [_work(_container_chain(links, 1)) for links in (100, 200, 400)]
-    assert work[2] - work[1] <= 2.3 * (work[1] - work[0]), work
+    assert 0 < work[1] - work[0], work
+    # Linear doubles the added work, square quadruples it; 3 lies between.
+    assert work[2] - work[1] <= 3 * (work[1] - work[0]), work
     one = _work(_container_chain(60, 1))
     many = _work(_container_chain(60, 20))
     assert many <= 2 * one, (one, many)
