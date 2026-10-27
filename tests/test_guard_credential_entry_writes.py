@@ -1932,10 +1932,31 @@ def test_the_guard_accepts_the_clean_form() -> None:
     assert _snippet_problems(_CLEAN) == (2, [], [])
 
 
+#: Forms whose syntax an older Python does not parse, with the first version
+#: that does. The CI job on Python 3.13 collects this file (R15-F8): a t-string
+#: there is a ``SyntaxError``, not a form the guard has to see.
+_NEWER_SYNTAX: dict[str, tuple[int, int]] = {"t-string spelling the member": (3, 14)}
+
+
+def _skip_newer_syntax(label: str) -> None:
+    """Skip a form the running Python cannot parse."""
+
+    needed = _NEWER_SYNTAX.get(label)
+    if needed is not None and sys.version_info < needed:
+        pytest.skip(f"{label} needs Python {needed[0]}.{needed[1]}")
+
+
+def test_every_form_of_newer_syntax_is_a_known_form() -> None:
+    """A stale entry would skip nothing and hide the rename of a form."""
+
+    assert set(_NEWER_SYNTAX) <= set(_BROKEN) | set(_ACCEPTED)
+
+
 @pytest.mark.parametrize("label", sorted(_BROKEN))
 def test_the_guard_rejects_a_shared_or_unknown_form(label: str) -> None:
     """Each form the reviews found escapes neither classification nor copy check."""
 
+    _skip_newer_syntax(label)
     _writes, unclassified, shared = _snippet_problems(_changed(_BROKEN[label], label))
     assert unclassified or shared, label
 
