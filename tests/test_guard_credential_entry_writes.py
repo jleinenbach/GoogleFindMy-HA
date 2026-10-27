@@ -375,48 +375,76 @@ def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
     return found
 
 
-def _binding_sites(scope: ast.AST, name: str) -> list[ast.AST]:
-    """Every node that binds ``name`` in ``scope`` itself, in any grammar form.
+class _ScopeIndex:
+    """Binding sites and loads of every name of one scope, each built in one walk.
 
-    A nested scope that declares the name ``nonlocal`` or ``global`` counts as a
-    binding too, because it may rebind the local from inside.
+    Following a chain of locals asked the whole function once per name and
+    grew with the square of the chain (CA-GFMY-GUARD-CONTAINER-QUADRATISCH-001);
+    the index answers each name from one walk, with the sites and loads in the
+    order a walk per name would find them. A star import is no site: anywhere
+    in the file it already fails the scan (``_copy_is_the_module``).
     """
 
-    sites: list[ast.AST] = []
-    for node in _scope_nodes(scope):
-        if _binds(node, name):
-            sites.append(node)
-        if isinstance(node, _NESTED_SCOPES):
-            sites.extend(
-                inner
-                for inner in ast.walk(node)
-                if isinstance(inner, ast.Global | ast.Nonlocal) and name in inner.names
-            )
-    return sites
+    def __init__(self, scope: ast.AST) -> None:
+        self._sites: dict[str, list[ast.AST]] = {}
+        self._loads: dict[str, list[ast.Name]] = {}
+        self._index_sites(scope)
+        self._index_loads(scope)
 
+    def _index_sites(self, scope: ast.AST) -> None:
+        for node in _scope_nodes(scope):
+            for name in _bound_by(node):
+                self._sites.setdefault(name, []).append(node)
+            if isinstance(node, _NESTED_SCOPES):
+                # A nested ``nonlocal`` or ``global`` may rebind the local.
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Global | ast.Nonlocal):
+                        for name in inner.names:
+                            self._sites.setdefault(name, []).append(inner)
 
-def _uses(scope: ast.AST, name: str) -> list[ast.Name]:
-    """Loads of ``name`` that read the local of ``scope``.
+    def _index_loads(self, scope: ast.AST) -> None:
+        # A nested def or lambda with a parameter of a name reads its own
+        # parameter: for those names only its outer parts count (``only``), for
+        # all others its whole subtree (the parameters join ``skip``).
+        stack: list[tuple[ast.AST, frozenset[str] | None, frozenset[str]]] = [
+            (child, None, frozenset()) for child in ast.iter_child_nodes(scope)
+        ]
+        while stack:
+            node, only, skip = stack.pop()
+            if isinstance(node, _FUNCTION_SCOPES):
+                params = frozenset(_parameter_names(node.args)) - skip
+                if only is not None:
+                    params &= only
+                if params:
+                    stack.extend((part, params, skip) for part in _outer_parts(node))
+                    skip = skip | params
+            elif (
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and (only is None or node.id in only)
+                and node.id not in skip
+            ):
+                self._loads.setdefault(node.id, []).append(node)
+            stack.extend((child, only, skip) for child in ast.iter_child_nodes(node))
 
-    A nested def or lambda with a parameter of that name reads its own
-    parameter and is skipped; any other nested body is walked, because a closure
-    there reads the local.
-    """
+    def binding_sites(self, name: str) -> list[ast.AST]:
+        """Every node that binds ``name`` in the scope itself, in any grammar form.
 
-    found: list[ast.Name] = []
-    stack = list(ast.iter_child_nodes(scope))
-    while stack:
-        node = stack.pop()
-        if isinstance(
-            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
-        ) and name in _parameter_names(node.args):
-            stack.extend(_outer_parts(node))
-            continue
-        if isinstance(node, ast.Name) and node.id == name:
-            if isinstance(node.ctx, ast.Load):
-                found.append(node)
-        stack.extend(ast.iter_child_nodes(node))
-    return found
+        A nested scope that declares the name ``nonlocal`` or ``global`` counts as
+        a binding too, because it may rebind the local from inside.
+        """
+
+        return self._sites.get(name, [])
+
+    def uses(self, name: str) -> list[ast.Name]:
+        """Loads of ``name`` that read the local of the scope.
+
+        A nested def or lambda with a parameter of that name reads its own
+        parameter and is skipped; any other nested body is walked, because a
+        closure there reads the local.
+        """
+
+        return self._loads.get(name, [])
 
 
 def _bindings_anywhere(tree: ast.Module, name: str) -> list[ast.AST]:
@@ -519,13 +547,13 @@ def _assigned_value(site: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST |
 
 
 def _is_detached(
-    value: ast.AST, function: ast.AST, parents: dict[ast.AST, ast.AST]
+    value: ast.AST, index: _ScopeIndex, parents: dict[ast.AST, ast.AST]
 ) -> bool:
     if _is_deepcopy(value):
         return True
     if not isinstance(value, ast.Name):
         return False
-    sites = _binding_sites(function, value.id)
+    sites = index.binding_sites(value.id)
     if not sites:
         return False
     for site in sites:
@@ -654,7 +682,8 @@ KeysFactory = Callable[
 def _module_binding_sites(tree: ast.Module) -> dict[str, list[ast.AST]]:
     """Every binding site of every module name, collected in one walk.
 
-    The same sites as ``_binding_sites(tree, name)``, but a ``nonlocal`` in a
+    The same sites as ``_ScopeIndex(tree).binding_sites(name)``, but a
+    ``nonlocal`` in a
     nested scope is left out, because it never names a module variable, and a
     star import is a site of every name.
     """
@@ -1054,7 +1083,8 @@ def _has_other_targets(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
 
 def _shared_uses(
     name: str,
-    function: ast.AST,
+    index: _ScopeIndex,
+    parents: dict[ast.AST, ast.AST],
     written: set[int],
 ) -> list[ast.AST]:
     """Uses of a detached local that would share its container.
@@ -1067,8 +1097,7 @@ def _shared_uses(
 
     bad: list[ast.AST] = []
     writes = 0
-    parents = _parents(function)
-    for node in _uses(function, name):
+    for node in index.uses(name):
         parent = parents.get(node)
         if id(node) in written:
             writes += 1
@@ -1122,7 +1151,7 @@ def _escape_step(
 
 def _expression_escapes(
     expr: ast.AST,
-    function: ast.AST,
+    index: _ScopeIndex,
     parents: dict[ast.AST, ast.AST],
     seen: set[str],
 ) -> list[str]:
@@ -1130,13 +1159,13 @@ def _expression_escapes(
 
     problem, local = _escape_step(expr, parents)
     if local is not None:
-        return _name_escapes(local, function, parents, seen)
+        return _name_escapes(local, index, parents, seen)
     return [] if problem is None else [problem]
 
 
 def _name_escapes(
     name: str,
-    function: ast.AST,
+    index: _ScopeIndex,
     parents: dict[ast.AST, ast.AST],
     seen: set[str],
 ) -> list[str]:
@@ -1154,7 +1183,7 @@ def _name_escapes(
         if name in seen:
             return
         seen.add(name)
-        sites = _binding_sites(function, name)
+        sites = index.binding_sites(name)
         problems.extend(
             f"line {getattr(site, 'lineno', 0)}: the container {name} is not a fresh local"
             for site in sites
@@ -1163,7 +1192,7 @@ def _name_escapes(
         )
         if not sites:
             problems.append(f"the container {name} is not bound in the function")
-        stack.append((name, iter(_uses(function, name))))
+        stack.append((name, iter(index.uses(name))))
 
     enter(name)
     while stack:
@@ -1192,24 +1221,31 @@ def _name_escapes(
 
 
 def _container_problems(
-    node: ast.AST, function: ast.AST, parents: dict[ast.AST, ast.AST]
+    node: ast.AST,
+    index: _ScopeIndex,
+    parents: dict[ast.AST, ast.AST],
+    seen: set[str],
 ) -> list[str]:
-    """R4-F2: the container a write goes into must be fresh and reach only the entry."""
+    """R4-F2: the container a write goes into must be fresh and reach only the entry.
+
+    ``seen`` holds the locals already followed in the function. A local's
+    problems do not depend on the write that reached it, so each write of the
+    function shares it and a chain is walked once (R11-F1).
+    """
 
     parent = parents.get(node)
-    seen: set[str] = set()
     if isinstance(node, ast.keyword):
         if isinstance(parent, ast.Call) and _is_fresh(parent):
-            return _expression_escapes(parent, function, parents, seen)
+            return _expression_escapes(parent, index, parents, seen)
         return [f"line {node.lineno}: written into a call that is not a fresh dict"]
     if isinstance(parent, ast.Subscript):
         if isinstance(parent.value, ast.Name):
-            return _name_escapes(parent.value.id, function, parents, seen)
+            return _name_escapes(parent.value.id, index, parents, seen)
         return [
             f"line {parent.lineno}: the container {_describe(parent.value)} is not a local"
         ]
     if isinstance(parent, ast.Dict):
-        return _expression_escapes(parent, function, parents, seen)
+        return _expression_escapes(parent, index, parents, seen)
     return [f"line {getattr(node, 'lineno', 0)}: unknown container"]
 
 
@@ -1321,6 +1357,8 @@ def _receiver_problems(
         )
     if writes and _bindings_anywhere(tree, "dict"):
         shared.append("dict is bound in the module, so dict(x) may not be a new dict")
+    # One index and one set of followed locals per function, shared by its writes.
+    scopes: dict[int, tuple[_ScopeIndex, set[str]]] = {}
     for node, value in writes:
         line = node.lineno  # type: ignore[attr-defined]
         if targets_per_value[id(value)] > 1:
@@ -1330,19 +1368,22 @@ def _receiver_problems(
             shared.append(f"line {line}: one value bound to several targets")
             continue
         function = _enclosing_function(node, parents)
+        if function is not None and id(function) not in scopes:
+            scopes[id(function)] = (_ScopeIndex(function), set())
         if (
             value is None
             or function is None
-            or not _is_detached(value, function, parents)
+            or not _is_detached(value, scopes[id(function)][0], parents)
         ):
             shared.append(f"line {line}: {_describe(parents.get(node, node))}")
             continue
+        index, seen = scopes[id(function)]
         if isinstance(value, ast.Name):
             shared.extend(
                 f"line {use.lineno}: {value.id} is used beside its write"
-                for use in _shared_uses(value.id, function, written)
+                for use in _shared_uses(value.id, index, parents, written)
             )
-        shared.extend(_container_problems(node, function, parents))
+        shared.extend(_container_problems(node, index, parents, seen))
     return len(writes), unclassified, sorted(set(shared))
 
 
@@ -1740,6 +1781,11 @@ _BROKEN: dict[str, tuple[str, ...]] = {
 #: Forms that must pass with both writes recognised, each a one-place change to
 #: ``_CLEAN``. Two writes prove the key is still seen as the member.
 _ACCEPTED: dict[str, tuple[str, ...]] = {
+    "keyword write into a fresh dict call": (
+        "        updated_bundle = dict(bundle)\n"
+        '        updated_bundle["fcm_credentials"] = registration\n',
+        "        updated_bundle = dict(bundle, fcm_credentials=registration)\n",
+    ),
     "container put into a further display": (
         '        updated_data["bundle"] = updated_bundle\n',
         '        updated_data["bundle"] = {"inner": updated_bundle}\n',
@@ -1970,6 +2016,102 @@ def test_a_chain_of_any_length_is_followed(label: str) -> None:
     assert (writes, unclassified, bool(problems)) == (2, [], shared), label
 
 
+_SCOPE_SOURCE = """
+def outer(a, b):
+    x = a
+    def inner(a, k=a):
+        return a + b
+    g = lambda b, m=(lambda b=b: b): b
+    h = lambda b, m=(lambda a=a: a): b
+    def rebinding():
+        nonlocal x
+        x = 1
+    return x, g, inner
+"""
+
+
+def test_the_scope_index_reads_a_nested_parameter_as_its_own() -> None:
+    """A nested def or lambda with a parameter of the name reads its own
+    parameter in its body; only its defaults read the local. A nested
+    ``nonlocal`` is a binding site of the local."""
+
+    outer = ast.parse(_SCOPE_SOURCE).body[0]
+    index = _ScopeIndex(outer)
+    assert sorted(n.lineno for n in index.uses("a")) == [3, 4, 7]
+    assert sorted(n.lineno for n in index.uses("b")) == [5, 6]
+    sites = index.binding_sites("x")
+    assert sorted(type(site).__name__ for site in sites) == ["Name", "Nonlocal"]
+    assert [type(site).__name__ for site in index.binding_sites("a")] == ["arg"]
+
+
+def _container_chain(links: int, writes: int) -> ast.Module:
+    """``writes`` deep copies into ``d0``, wrapped in ``links`` fresh displays."""
+
+    lines = [
+        "import copy",
+        'K = "fcm_credentials"',
+        "class R:",
+        "    def save(self, creds, update, entry):",
+        "        d0 = {}",
+        *(f"        d0[K] = copy.deepcopy(creds{i})" for i in range(writes)),
+        *(f'        d{i + 1} = {{"a": d{i}}}' for i in range(links)),
+        f"        update(entry, data=d{links})",
+    ]
+    return ast.parse("\n".join(lines) + "\n")
+
+
+def _visits(tree: ast.Module, monkeypatch: pytest.MonkeyPatch) -> tuple[int, int]:
+    """``(nodes, steps)``: the nodes the scan of ``tree`` visits
+    (``ast.iter_child_nodes``) and the steps it takes along containers
+    (``_escape_step``)."""
+
+    count = [0, 0]
+    children = ast.iter_child_nodes
+    step = _escape_step
+
+    def counting_children(node: ast.AST) -> Iterator[ast.AST]:
+        count[0] += 1
+        return children(node)
+
+    def counting_step(
+        expr: ast.AST, parents: dict[ast.AST, ast.AST]
+    ) -> tuple[str | None, str | None]:
+        count[1] += 1
+        return step(expr, parents)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ast, "iter_child_nodes", counting_children)
+        patch.setattr(sys.modules[__name__], "_escape_step", counting_step)
+        assert _receiver_problems(tree, {}) == (_count_writes(tree), [], [])
+    return count[0], count[1]
+
+
+def _count_writes(tree: ast.Module) -> int:
+    return sum(
+        isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+        for node in ast.walk(tree)
+    )
+
+
+def test_a_container_chain_is_followed_in_linear_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CA-GFMY-GUARD-CONTAINER-QUADRATISCH-001: each local of a chain is looked
+    up in one index per function, and the writes of a function share the
+    locals already followed. A walk of the function per name grew with the
+    square of the chain (200 links: 3.8 times the visits of 100) and with each
+    write (20 writes: 29 times one write)."""
+
+    short = _visits(_container_chain(100, 1), monkeypatch)
+    long = _visits(_container_chain(200, 1), monkeypatch)
+    assert long[0] <= 2.2 * short[0], (short, long)
+    one = _visits(_container_chain(60, 1), monkeypatch)
+    many = _visits(_container_chain(60, 20), monkeypatch)
+    assert many[0] <= 2 * one[0], (one, many)
+    # Each write steps along a chain the function has not followed yet only.
+    assert many[1] <= 2 * one[1], (one, many)
+
+
 @pytest.mark.parametrize("label", sorted(_ACCEPTED))
 def test_the_guard_accepts_an_equivalent_form(label: str) -> None:
     """An equivalent rewrite keeps both writes recognised and raises nothing."""
@@ -2054,6 +2196,7 @@ _DOCUMENTED_FORMS: dict[str, str] = {
     "def": "deep copy bound only in a nested def",
     "copy.deepcopy(x)": "deepcopy with a memo",
     "import copy": "star import may rebind copy",
+    "_copy_is_the_module": "star import may rebind copy",
     "copy.deepcopy": "copy.deepcopy reassigned",
     "copy.deepcopy = f": "copy.deepcopy reassigned",
     "deepcopy": "copy.deepcopy reassigned",
