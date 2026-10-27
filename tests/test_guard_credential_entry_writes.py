@@ -380,8 +380,8 @@ class _ScopeIndex:
 
     Following a chain of locals asked the whole function once per name and
     grew with the square of the chain (CA-GFMY-GUARD-CONTAINER-QUADRATISCH-001);
-    the index answers each name from one walk, with the sites and loads in the
-    order a walk per name would find them. A star import is no site: anywhere
+    the index answers each name from one walk. The order of the sites and loads
+    is not part of the answer. A star import is no site: anywhere
     in the file it already fails the scan (``_copy_is_the_module``).
     """
 
@@ -399,7 +399,7 @@ class _ScopeIndex:
                 # A nested ``nonlocal`` or ``global`` may rebind the local.
                 for inner in ast.walk(node):
                     if isinstance(inner, ast.Global | ast.Nonlocal):
-                        for name in inner.names:
+                        for name in dict.fromkeys(inner.names):
                             self._sites.setdefault(name, []).append(inner)
 
     def _index_loads(self, scope: ast.AST) -> None:
@@ -623,10 +623,20 @@ def _function_locals(function: ast.AST) -> tuple[frozenset[str], frozenset[str]]
     return frozenset(bound - declared), frozenset(declared)
 
 
-def _in_body(scope: ast.AST, child: ast.AST) -> bool:
+def _body_ids(scope: ast.AST) -> frozenset[int]:
+    """Ids of the statements of a def body or of a lambda body expression."""
+
     if isinstance(scope, ast.Lambda):
-        return child is scope.body
-    return any(child is statement for statement in scope.body)  # type: ignore[attr-defined]
+        return frozenset({id(scope.body)})
+    return frozenset(id(statement) for statement in scope.body)  # type: ignore[attr-defined]
+
+
+def _cached[V](cache: dict[int, V], scope: ast.AST, build: Callable[[ast.AST], V]) -> V:
+    """``build(scope)``, built once per scope."""
+
+    if id(scope) not in cache:
+        cache[id(scope)] = build(scope)
+    return cache[id(scope)]
 
 
 def _local_reads(tree: ast.AST, parents: dict[ast.AST, ast.AST]) -> frozenset[int]:
@@ -638,13 +648,18 @@ def _local_reads(tree: ast.AST, parents: dict[ast.AST, ast.AST]) -> frozenset[in
     """
 
     scopes: dict[int, tuple[frozenset[str], frozenset[str]]] = {}
+    # One set per function: a search of the body per read grew with the square
+    # of a long body (800 statements: 3.9 times the work of 400).
+    bodies: dict[int, frozenset[int]] = {}
     found: set[int] = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)):
             continue
         child, current = node, parents.get(node)
         while current is not None:
-            if isinstance(current, _FUNCTION_SCOPES) and _in_body(current, child):
+            if isinstance(current, _FUNCTION_SCOPES) and id(child) in _cached(
+                bodies, current, _body_ids
+            ):
                 if id(current) not in scopes:
                     scopes[id(current)] = _function_locals(current)
                 bound, declared = scopes[id(current)]
@@ -2042,6 +2057,9 @@ def test_the_scope_index_reads_a_nested_parameter_as_its_own() -> None:
     sites = index.binding_sites("x")
     assert sorted(type(site).__name__ for site in sites) == ["Name", "Nonlocal"]
     assert [type(site).__name__ for site in index.binding_sites("a")] == ["arg"]
+    twice = ast.parse("def f():\n    x = 1\n    def g():\n        nonlocal x, x\n")
+    sites = _ScopeIndex(twice.body[0]).binding_sites("x")
+    assert sorted(type(site).__name__ for site in sites) == ["Name", "Nonlocal"]
 
 
 def _container_chain(links: int, writes: int) -> ast.Module:
@@ -2060,30 +2078,56 @@ def _container_chain(links: int, writes: int) -> ast.Module:
     return ast.parse("\n".join(lines) + "\n")
 
 
-def _visits(tree: ast.Module, monkeypatch: pytest.MonkeyPatch) -> tuple[int, int]:
-    """``(nodes, steps)``: the nodes the scan of ``tree`` visits
-    (``ast.iter_child_nodes``) and the steps it takes along containers
-    (``_escape_step``)."""
+class _EventCounter:
+    """The callback of ``_executed_work``: counts the events in one file and
+    turns them off at every place in any other file."""
 
-    count = [0, 0]
-    children = ast.iter_child_nodes
-    step = _escape_step
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.count = 0
 
-    def counting_children(node: ast.AST) -> Iterator[ast.AST]:
-        count[0] += 1
-        return children(node)
+    def __call__(self, code: object, *_: object) -> object:
+        if getattr(code, "co_filename", None) != self.path:
+            return sys.monitoring.DISABLE
+        self.count += 1
+        return None
 
-    def counting_step(
-        expr: ast.AST, parents: dict[ast.AST, ast.AST]
-    ) -> tuple[str | None, str | None]:
-        count[1] += 1
-        return step(expr, parents)
 
-    with monkeypatch.context() as patch:
-        patch.setattr(ast, "iter_child_nodes", counting_children)
-        patch.setattr(sys.modules[__name__], "_escape_step", counting_step)
+def _executed_work(run: Callable[[], object], path: str) -> int:
+    """Lines and loop jumps ``run`` executes in the file ``path``.
+
+    Counting the calls of one helper missed any loop it did not call (F-F of
+    round 12); a jump counts each pass of a loop, even one inside a single
+    line. A loop inside a builtin, such as a membership test on a list, is
+    not counted.
+    """
+
+    monitoring = sys.monitoring
+    tool = next(i for i in range(6) if monitoring.get_tool(i) is None)
+    events = (monitoring.events.LINE, monitoring.events.JUMP)
+    counted = _EventCounter(path)
+    monitoring.use_tool_id(tool, "credential guard work")
+    try:
+        for event in events:
+            monitoring.register_callback(tool, event, counted)
+        monitoring.set_events(tool, events[0] | events[1])
+        run()
+    finally:
+        monitoring.set_events(tool, 0)
+        for event in events:
+            monitoring.register_callback(tool, event, None)
+        monitoring.free_tool_id(tool)
+        monitoring.restart_events()
+    return counted.count
+
+
+def _work(tree: ast.Module) -> int:
+    """The work of the scan of ``tree`` in this module."""
+
+    def scan() -> None:
         assert _receiver_problems(tree, {}) == (_count_writes(tree), [], [])
-    return count[0], count[1]
+
+    return _executed_work(scan, __file__)
 
 
 def _count_writes(tree: ast.Module) -> int:
@@ -2093,23 +2137,29 @@ def _count_writes(tree: ast.Module) -> int:
     )
 
 
-def test_a_container_chain_is_followed_in_linear_time(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_event_counter_counts_this_file_only() -> None:
+    """Code inside a monitoring callback is not traced, so the coverage of
+    ``_EventCounter`` comes from this direct call."""
+
+    counter = _EventCounter(__file__)
+    assert counter(_EventCounter.__call__.__code__) is None
+    assert counter(ast.parse.__code__) is sys.monitoring.DISABLE
+    assert counter.count == 1
+
+
+def test_a_container_chain_is_followed_in_linear_time() -> None:
     """CA-GFMY-GUARD-CONTAINER-QUADRATISCH-001: each local of a chain is looked
     up in one index per function, and the writes of a function share the
     locals already followed. A walk of the function per name grew with the
-    square of the chain (200 links: 3.8 times the visits of 100) and with each
-    write (20 writes: 29 times one write)."""
+    square of the chain and with each write (20 writes: 29 times one write);
+    so did a search of the function body per read (``_body_ids``). Doubling a
+    linear chain doubles the added work; a square part quadruples it."""
 
-    short = _visits(_container_chain(100, 1), monkeypatch)
-    long = _visits(_container_chain(200, 1), monkeypatch)
-    assert long[0] <= 2.2 * short[0], (short, long)
-    one = _visits(_container_chain(60, 1), monkeypatch)
-    many = _visits(_container_chain(60, 20), monkeypatch)
-    assert many[0] <= 2 * one[0], (one, many)
-    # Each write steps along a chain the function has not followed yet only.
-    assert many[1] <= 2 * one[1], (one, many)
+    work = [_work(_container_chain(links, 1)) for links in (100, 200, 400)]
+    assert work[2] - work[1] <= 2.3 * (work[1] - work[0]), work
+    one = _work(_container_chain(60, 1))
+    many = _work(_container_chain(60, 20))
+    assert many <= 2 * one, (one, many)
 
 
 @pytest.mark.parametrize("label", sorted(_ACCEPTED))
