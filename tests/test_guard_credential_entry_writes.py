@@ -30,11 +30,14 @@ they cannot classify:
   reached by import (``from ..const import X``, ``const.X``, also behind a
   module alias ``C2 = const``) and a module name every binding of which in
   module scope is an assignment of one of these (``K = "fcm_credentials"``,
-  ``K2 = K``). A constant of ``const.py`` that holds the member and is reached
-  any other way fails (``except ImportError: FC = None``, ``del FC``,
-  ``from ..const import *``, an import inside a function,
-  ``import custom_components.googlefindmy``), and so does a known key that
-  flows into a name the guard does not resolve (``K3 = K``). Allowed kinds are a
+  ``K2 = K``). A constant of ``const.py`` that holds the member and is
+  imported, or named as an attribute, in any other way fails
+  (``except ImportError: FC = None``, ``del FC``, ``from ..const import *``,
+  an import inside a function, ``import custom_components.googlefindmy``, an
+  attribute of that name on another object such as ``self.FCM_CREDENTIALS``),
+  and so does a known key that flows into a name the guard does not resolve
+  (``K3 = K``); reflection on the module is not followed (see the limits
+  below). Allowed kinds are a
   hash read (``.get`` or subscript load whose value goes straight into
   ``credential_member_digest``), an ``in`` test, a token cache read or write
   (``.get``/``.set`` on a receiver named in ``_CACHE_RECEIVERS``; ``TokenCache``
@@ -102,11 +105,13 @@ member outside the receiver (the config flow, ``TokenCache``) are out of scope.
 from __future__ import annotations
 
 import ast
+import contextlib
 import functools
 import pathlib
 import re
+import sys
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Protocol
 
 import pytest
@@ -751,68 +756,102 @@ class _LiteralKeys:
         self.handles = {h for h in self.handles if h.split(".")[0] not in rebound}
         self._alias_handles(bindings, parents)
         self.names: dict[str, Values] = {}
-        for name in sites:
-            self._resolve(name, sites, set())
+        self._resolve(sites)
 
     def _alias_handles(
         self, bindings: Mapping[str, list[ast.AST]], parents: dict[ast.AST, ast.AST]
     ) -> None:
         """A module name every binding of which assigns a handle is a handle too
-        (``C2 = const``)."""
+        (``C2 = const``).
 
-        changed = True
-        while changed:
-            changed = False
-            for name, found_sites in bindings.items():
-                if name in self.handles:
-                    continue
-                values = [_assigned_site(site, parents) for site in found_sites]
-                if values and all(
-                    value is not None and _dotted(value) in self.handles
-                    for value in values
-                ):
-                    self.handles.add(name)
-                    changed = True
+        A worklist: a name waits for the handles its bindings name and becomes
+        one when the last of them does, so a chain of aliases is resolved in
+        one pass in any order (R10-F2).
+        """
 
-    def _resolve(
-        self,
-        name: str,
-        sites: Mapping[str, list[ast.expr | Values | None]],
-        visiting: set[str],
-    ) -> Values | None:
-        """Union of what every binding gives ``name``; ``None`` if one is no key."""
-
-        if name in self.names:
-            return self.names[name]
-        if name in visiting or name not in sites:
-            return None
-        visiting.add(name)
-        values: Values = frozenset()
-        for site in sites[name]:
-            if site is None:
-                return None
-            if isinstance(site, frozenset):
-                values |= site
+        waiting: dict[str, set[str]] = {}
+        readers: dict[str, list[str]] = {}
+        for name, found_sites in bindings.items():
+            if name in self.handles or not found_sites:
                 continue
-            found = self._expression(site, sites, visiting)
-            if found is None:
-                return None
-            values |= found
-        self.names[name] = values
-        return values
+            paths: set[str] = set()
+            for site in found_sites:
+                value = _assigned_site(site, parents)
+                path = None if value is None else _dotted(value)
+                if path is None:
+                    break
+                paths.add(path)
+            else:
+                needed = paths - self.handles
+                if not needed:
+                    self.handles.add(name)
+                    continue
+                waiting[name] = needed
+                for path in needed:
+                    readers.setdefault(path, []).append(name)
+        # Each handle, an import or an alias found above, releases its readers.
+        ready = list(self.handles)
+        while ready:
+            path = ready.pop()
+            for name in readers.pop(path, ()):
+                needed = waiting[name]
+                needed.discard(path)
+                if not needed and name not in self.handles:
+                    self.handles.add(name)
+                    ready.append(name)
 
-    def _expression(
-        self,
-        node: ast.expr,
-        sites: Mapping[str, list[ast.expr | Values | None]],
-        visiting: set[str],
-    ) -> Values | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return frozenset({node.value})
-        if isinstance(node, ast.Name):
-            return self._resolve(node.id, sites, visiting)
-        if isinstance(node, ast.Attribute):
-            return self._path(node)
+    def _resolve(self, sites: Mapping[str, list[ast.expr | Values | None]]) -> None:
+        """Fill ``names``: the union of what every binding gives a name.
+
+        A name is resolved once every binding is a string constant, a
+        ``const.X`` path or a resolved name; a name with any other binding, or
+        one that reads a name on a cycle (``A = B; B = A``), stays unresolved.
+        The names are resolved in the order of their dependencies with a
+        worklist, not by recursion, so a chain of any length is resolved in one
+        pass (R10-F2).
+        """
+
+        partial: dict[str, Values] = {}
+        waiting: dict[str, set[str]] = {}
+        readers: dict[str, list[str]] = {}
+        ready: list[str] = []
+        for name, found in sites.items():
+            values: Values = frozenset()
+            needed: set[str] = set()
+            for site in found:
+                if isinstance(site, ast.Name) and site.id in sites:
+                    needed.add(site.id)
+                    continue
+                direct = self._direct(site)
+                if direct is None:
+                    break
+                values |= direct
+            else:
+                partial[name] = values
+                waiting[name] = needed
+                for read in needed:
+                    readers.setdefault(read, []).append(name)
+                if not needed:
+                    ready.append(name)
+        while ready:
+            name = ready.pop()
+            self.names[name] = partial[name]
+            for reader in readers.get(name, ()):
+                partial[reader] |= partial[name]
+                waiting[reader].discard(name)
+                if not waiting[reader]:
+                    ready.append(reader)
+
+    def _direct(self, site: ast.expr | Values | None) -> Values | None:
+        """The strings of a binding that reads no module name, ``None`` if it is
+        no key: an import's values, a string constant or ``const.X``."""
+
+        if isinstance(site, frozenset):
+            return site
+        if isinstance(site, ast.Constant) and isinstance(site.value, str):
+            return frozenset({site.value})
+        if isinstance(site, ast.Attribute):
+            return self._path(site)
         return None
 
     def _path(self, node: ast.Attribute) -> Values | None:
@@ -842,13 +881,14 @@ class _LiteralKeys:
         return values is not None and _MEMBER in values
 
     def unknown_keys(self, tree: ast.Module) -> list[ast.AST]:
-        """Places where a ``const.py`` constant holding the member is reached in
-        a way this resolver does not follow; each fails the scan, so such a
-        constant is seen or reported, never silent: an import into a name that
-        is no key (``except ImportError: FC = None``, ``del FC``), an import
-        inside a function, a star import (``from ..const import *``), and an
-        attribute of that name other than ``const.X`` behind a resolved handle
-        (``import custom_components.googlefindmy``)."""
+        """Places where a ``const.py`` constant holding the member is imported,
+        or named as an attribute, in a way this resolver does not follow; each
+        fails the scan: an import into a name that is no key
+        (``except ImportError: FC = None``, ``del FC``), an import inside a
+        function, a star import (``from ..const import *``), and an attribute
+        of that name other than ``const.X`` behind a resolved handle
+        (``import custom_components.googlefindmy``, ``self.FCM_CREDENTIALS``).
+        Reflection on the module is not followed."""
 
         members = {name for name, values in self.constants.items() if _MEMBER in values}
         if not members:
@@ -1045,30 +1085,27 @@ def _shared_uses(
     return bad
 
 
-def _expression_escapes(
-    expr: ast.AST,
-    function: ast.AST,
-    parents: dict[ast.AST, ast.AST],
-    seen: set[str],
-) -> list[str]:
-    """Where a container expression goes; empty when it only reaches the entry.
+def _escape_step(
+    expr: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> tuple[str | None, str | None]:
+    """``(problem, local)`` for one container expression; both ``None`` when it
+    reaches the entry.
 
     It may be handed to a call on ``_WRITER_CALLS``, be a value of a further
     display, or be bound by a single-target assignment to a local name or into
-    a local container, which are then followed in turn.
+    a local container, which is then returned to be followed in turn.
     """
 
     parent = parents.get(expr)
+    while isinstance(parent, ast.Dict) and expr in parent.values:
+        expr, parent = parent, parents.get(parent)
     if isinstance(parent, ast.keyword):
         call = parents.get(parent)
         if isinstance(call, ast.Call) and _dotted(call.func) in _WRITER_CALLS:
-            return []
+            return None, None
     elif isinstance(parent, ast.Call):
         if expr in parent.args and _dotted(parent.func) in _WRITER_CALLS:
-            return []
-    elif isinstance(parent, ast.Dict):
-        if expr in parent.values:
-            return _expression_escapes(parent, function, parents, seen)
+            return None, None
     elif (
         isinstance(parent, ast.Assign)
         and parent.value is expr
@@ -1076,11 +1113,25 @@ def _expression_escapes(
     ):
         target = parent.targets[0]
         if isinstance(target, ast.Name):
-            return _name_escapes(target.id, function, parents, seen)
+            return None, target.id
         if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
-            return _name_escapes(target.value.id, function, parents, seen)
+            return None, target.value.id
     line = getattr(expr, "lineno", 0)
-    return [f"line {line}: the container {_describe(expr)[:60]} is shared"]
+    return f"line {line}: the container {_describe(expr)[:60]} is shared", None
+
+
+def _expression_escapes(
+    expr: ast.AST,
+    function: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+    seen: set[str],
+) -> list[str]:
+    """Where a container expression goes; empty when it only reaches the entry."""
+
+    problem, local = _escape_step(expr, parents)
+    if local is not None:
+        return _name_escapes(local, function, parents, seen)
+    return [] if problem is None else [problem]
 
 
 def _name_escapes(
@@ -1089,33 +1140,54 @@ def _name_escapes(
     parents: dict[ast.AST, ast.AST],
     seen: set[str],
 ) -> list[str]:
-    """Problems of a local container: a binding that is not fresh, or a use that shares it."""
+    """Problems of a local container: a binding that is not fresh, or a use that shares it.
 
-    if name in seen:
-        return []
-    seen.add(name)
-    sites = _binding_sites(function, name)
-    problems = [
-        f"line {getattr(site, 'lineno', 0)}: the container {name} is not a fresh local"
-        for site in sites
-        if (assigned := _assigned_value(site, parents)) is None
-        or not _is_fresh(assigned)
-    ]
-    if not sites:
-        problems.append(f"the container {name} is not bound in the function")
-    for use in _uses(function, name):
+    A local the container is bound to is followed depth first with an explicit
+    stack, not by recursion, so a chain of locals of any length is followed
+    (R10-F2); the problems keep the order of a recursive walk.
+    """
+
+    problems: list[str] = []
+    stack: list[tuple[str, Iterator[ast.Name]]] = []
+
+    def enter(name: str) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        sites = _binding_sites(function, name)
+        problems.extend(
+            f"line {getattr(site, 'lineno', 0)}: the container {name} is not a fresh local"
+            for site in sites
+            if (assigned := _assigned_value(site, parents)) is None
+            or not _is_fresh(assigned)
+        )
+        if not sites:
+            problems.append(f"the container {name} is not bound in the function")
+        stack.append((name, iter(_uses(function, name))))
+
+    enter(name)
+    while stack:
+        current, uses = stack[-1]
+        use = next(uses, None)
+        if use is None:
+            stack.pop()
+            continue
         parent = parents.get(use)
         if isinstance(parent, ast.Subscript) and parent.value is use:
             if isinstance(parent.ctx, ast.Load) and not _feeds_the_digest(
                 parent, parents
             ):
                 problems.append(
-                    f"line {use.lineno}: an element of the container {name} is read back"
+                    f"line {use.lineno}: an element of the container {current} is read back"
                 )
             continue
         if isinstance(parent, ast.Compare):
             continue
-        problems.extend(_expression_escapes(use, function, parents, seen))
+        problem, local = _escape_step(use, parents)
+        if local is not None:
+            enter(local)
+        elif problem is not None:
+            problems.append(problem)
     return problems
 
 
@@ -1594,11 +1666,28 @@ _BROKEN: dict[str, tuple[str, ...]] = {
         "            updated_data[K2] = copy.deepcopy(registration)\n",
         "            updated_data[const.FCM_CREDENTIALS] = creds\n",
     ),
+    # A star import may bind any name, ``copy`` and ``dict`` too, so this form
+    # fails without the star report as well; that report alone is pinned by
+    # ``test_a_star_import_from_const_fails_on_its_own`` (R10-F7).
     "star import from const": (
         "from custom_components.googlefindmy.const import FCM_CREDENTIALS\n",
         "from custom_components.googlefindmy.const import *\n",
         "            updated_data[K2] = copy.deepcopy(registration)\n",
         "            updated_data[FCM_CREDENTIALS] = creds\n",
+    ),
+    "known key copied to a name that also reads a cycle": (
+        "K2 = K\n",
+        "K2 = K\nB = C\nC = B\nK2 = B\n",
+    ),
+    "const handle alias with a binding that is no handle": (
+        "from custom_components.googlefindmy import const\n",
+        "from custom_components.googlefindmy import const\nC2 = const\nC2 = None\n",
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[C2.FCM_CREDENTIALS] = copy.deepcopy(registration)\n",
+    ),
+    "member constant name as an attribute of another object": (
+        "            updated_data[K2] = copy.deepcopy(registration)\n",
+        "            updated_data[self.FCM_CREDENTIALS] = copy.deepcopy(registration)\n",
     ),
     "const imported inside a function": (
         "        registration = copy.deepcopy(dict(creds))\n",
@@ -1651,6 +1740,10 @@ _BROKEN: dict[str, tuple[str, ...]] = {
 #: Forms that must pass with both writes recognised, each a one-place change to
 #: ``_CLEAN``. Two writes prove the key is still seen as the member.
 _ACCEPTED: dict[str, tuple[str, ...]] = {
+    "container put into a further display": (
+        '        updated_data["bundle"] = updated_bundle\n',
+        '        updated_data["bundle"] = {"inner": updated_bundle}\n',
+    ),
     "nested def with a parameter of the same name": (
         "        digest = credential_member_digest(registration)\n",
         "        digest = credential_member_digest(registration)\n"
@@ -1792,6 +1885,91 @@ def test_a_star_import_from_const_fails_on_its_own() -> None:
     assert _snippet_problems(source)[1], source
 
 
+def test_a_problem_names_the_container_it_was_found_in() -> None:
+    """A container followed into a further local is named in that local's own
+    problems, not by the name the walk started from."""
+
+    source = _changed(
+        (
+            '        updated_data["bundle"] = updated_bundle\n',
+            '        updated_data["bundle"] = updated_bundle\n'
+            '        kept = updated_data["bundle"]\n',
+        ),
+        "read back",
+    )
+    read_back = [p for p in _snippet_problems(source)[2] if "read back" in p]
+    assert read_back, source
+    assert all("container updated_data " in p for p in read_back), read_back
+
+
+#: Links of each chain in ``_CHAINS``, more than ``_shallow_stack`` leaves frames.
+_CHAIN_LINKS = 150
+
+
+def _chain(template: str) -> str:
+    return "".join(template.format(i + 1, i) for i in range(_CHAIN_LINKS))
+
+
+#: Chains of names the scan follows (R10-F2): label, changes to ``_CLEAN``, and
+#: whether the result is a copy problem (else the clean result).
+_CHAINS: dict[str, tuple[tuple[str, ...], bool]] = {
+    "module alias chain": (
+        ("K2 = K\n", f"A0 = K\n{_chain('A{} = A{}\n')}K2 = A{_CHAIN_LINKS}\n"),
+        False,
+    ),
+    "const handle alias chain": (
+        (
+            "from custom_components.googlefindmy import const\n",
+            "from custom_components.googlefindmy import const\nH0 = const\n"
+            + _chain("H{} = H{}\n"),
+            "            updated_data[K2] = copy.deepcopy(registration)\n",
+            f"            updated_data[H{_CHAIN_LINKS}.FCM_CREDENTIALS]"
+            " = copy.deepcopy(registration)\n",
+        ),
+        False,
+    ),
+    "local container chain": (
+        (
+            '        updated_data["bundle"] = updated_bundle\n',
+            '        updated_data["bundle"] = updated_bundle\n'
+            "        d0 = updated_data\n" + _chain("        d{} = d{}\n"),
+        ),
+        True,
+    ),
+}
+
+
+@contextlib.contextmanager
+def _shallow_stack(frames: int) -> Iterator[None]:
+    """Leave only ``frames`` frames above the caller, so a walk that recursed
+    once per link of a chain raises ``RecursionError``."""
+
+    depth = 0
+    frame = sys._getframe()
+    while frame is not None:
+        depth += 1
+        frame = frame.f_back
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(depth + frames)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(limit)
+
+
+@pytest.mark.parametrize("label", sorted(_CHAINS))
+def test_a_chain_of_any_length_is_followed(label: str) -> None:
+    """R10-F2: module names, ``const`` handles and local containers are
+    followed with worklists, so a chain longer than the stack still gives the
+    result of a short one instead of a crash."""
+
+    changes, shared = _CHAINS[label]
+    source = _changed(changes, label)
+    with _shallow_stack(120):
+        writes, unclassified, problems = _snippet_problems(source)
+    assert (writes, unclassified, bool(problems)) == (2, [], shared), label
+
+
 @pytest.mark.parametrize("label", sorted(_ACCEPTED))
 def test_the_guard_accepts_an_equivalent_form(label: str) -> None:
     """An equivalent rewrite keeps both writes recognised and raises nothing."""
@@ -1909,6 +2087,7 @@ _DOCUMENTED_FORMS: dict[str, str] = {
     "del FC": "const constant deleted and imported again",
     "from ..const import *": "star import from const",
     "import custom_components.googlefindmy": "const reached through the package path",
+    "self.FCM_CREDENTIALS": "member constant name as an attribute of another object",
     'K = "fcm_credentials"': "write through a module alias of the key",
     "K2 = K": "write through a module alias of the key",
     "_NOT_SEEN": "test_a_key_form_outside_the_four_spellings_is_not_seen",
