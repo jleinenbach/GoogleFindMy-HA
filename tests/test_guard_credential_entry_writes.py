@@ -110,6 +110,7 @@ import functools
 import pathlib
 import re
 import sys
+import threading
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from typing import Protocol
@@ -2082,13 +2083,16 @@ def _container_chain(links: int, writes: int) -> ast.Module:
 
 
 class _EventCounter:
-    """The callback of ``_executed_work``: counts every event it is given."""
+    """The callback of ``_executed_work``: counts the events of the thread that
+    made it. ``sys.monitoring`` reports every thread (R14-F5)."""
 
     def __init__(self) -> None:
         self.count = 0
+        self.thread = threading.get_ident()
 
     def __call__(self, *_: object) -> None:
-        self.count += 1
+        if threading.get_ident() == self.thread:
+            self.count += 1
 
 
 def _executed_work(run: Callable[[], object]) -> int:
@@ -2144,6 +2148,10 @@ def test_the_event_counter_counts_the_loops_of_other_modules() -> None:
     counter = _EventCounter()
     counter(ast.parse.__code__, 0)
     assert counter.count == 1
+    elsewhere = threading.Thread(target=counter, args=(ast.parse.__code__, 0))
+    elsewhere.start()
+    elsewhere.join()
+    assert counter.count == 1
     small, large = ast.parse("x = 1\n" * 100), ast.parse("x = 1\n" * 200)
     walked = [
         _executed_work(functools.partial(list, ast.walk(tree)))
@@ -2152,18 +2160,58 @@ def test_the_event_counter_counts_the_loops_of_other_modules() -> None:
     assert 0 < walked[0] < walked[1] <= 2.1 * walked[0], walked
 
 
+def _second_differences(work: list[int]) -> tuple[list[int], list[int]]:
+    """The added work between equally spaced sizes, and how it changes."""
+
+    first = [b - a for a, b in zip(work, work[1:], strict=False)]
+    return first, [b - a for a, b in zip(first, first[1:], strict=False)]
+
+
+def _is_linear(work: list[int]) -> bool:
+    """Whether the work of four equally spaced sizes grows linearly.
+
+    A linear scan adds the same work per step, so its second differences are
+    zero up to a few events; a square part of ``q`` events per pair adds
+    2 q step^2 to each. A ratio of the added work missed a small square
+    part under a large linear one (R14-F2: 2.34 against a threshold of 3)."""
+
+    first, second = _second_differences(work)
+    return 0 < first[0] and all(abs(d) <= first[0] // 1000 for d in second)
+
+
+def _toy_work(size: int, square: int) -> int:
+    """Linear work plus ``square`` hundredths of a loop step per pair."""
+
+    def run() -> None:
+        for _ in range(300 * size):
+            pass
+        for _ in range(square * size * size // 100):
+            pass
+
+    return _executed_work(run)
+
+
+def test_the_linearity_check_sees_a_small_square_part() -> None:
+    """Positive control: the check tells one hundredth of a step per pair
+    under 300 steps per item from the linear part alone."""
+
+    sizes = (100, 200, 300, 400)
+    assert _is_linear([_toy_work(n, 0) for n in sizes])
+    assert not _is_linear([_toy_work(n, 1) for n in sizes])
+
+
 def test_a_container_chain_is_followed_in_linear_time() -> None:
     """CA-GFMY-GUARD-CONTAINER-QUADRATISCH-001: each local of a chain is looked
     up in one index per function, and the writes of a function share the
     locals already followed. A walk of the function per name grew with the
     square of the chain and with each write (20 writes: 29 times one write);
-    so did a search of the function body per read (``_body_ids``). Doubling a
-    linear chain doubles the added work; a square part quadruples it."""
+    so did a search of the function body per read (``_body_ids``). The added
+    work per hundred links stays the same."""
 
-    work = [_work(_container_chain(links, 1)) for links in (100, 200, 400)]
-    assert 0 < work[1] - work[0], work
-    # Linear doubles the added work, square quadruples it; 3 lies between.
-    assert work[2] - work[1] <= 3 * (work[1] - work[0]), work
+    # The first scan of a run also fills caches (54 to 532 events once).
+    _work(_container_chain(100, 1))
+    work = [_work(_container_chain(links, 1)) for links in (100, 200, 300, 400)]
+    assert _is_linear(work), _second_differences(work)
     one = _work(_container_chain(60, 1))
     many = _work(_container_chain(60, 20))
     assert many <= 2 * one, (one, many)
