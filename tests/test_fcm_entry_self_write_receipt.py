@@ -588,7 +588,10 @@ class _LookupFails:
     def async_get_entry(self, entry_id: str) -> Any:
         raise RuntimeError("lookup-text")
 
-    def async_update_entry(self, entry: Any, **kwargs: Any) -> Any:
+    # Not run: the failing lookup comes first. The AssertionError guards nothing:
+    # if it ran, the handler around the write in _persist_credentials_to_entry
+    # would log it like any other exception.
+    def async_update_entry(self, entry: Any, **kwargs: Any) -> Any:  # pragma: no cover
         raise AssertionError("not reached")
 
 

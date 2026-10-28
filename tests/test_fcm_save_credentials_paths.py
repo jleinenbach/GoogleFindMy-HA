@@ -42,8 +42,7 @@ def _coordinator(entry_id: str | None, cache: Any) -> Any:
 
 def _receiver(creds: Any) -> FcmReceiverHA:
     receiver = FcmReceiverHA()
-    if creds is not None:
-        receiver.creds[ENTRY_ID] = creds
+    receiver.creds[ENTRY_ID] = creds
     return receiver
 
 

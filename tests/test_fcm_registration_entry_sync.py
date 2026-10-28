@@ -67,9 +67,7 @@ class _ConfigEntries:
         self.update_calls.append((entry.entry_id, dict(kwargs)))
         if self._fail_update:
             raise RuntimeError("config-entry store unavailable")
-        data = kwargs.get("data")
-        if data is not None:
-            entry.data = dict(data)
+        entry.data = dict(kwargs["data"])
 
 
 def _integration_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
@@ -80,10 +78,10 @@ def _integration_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     every later test in the session.
     """
 
-    if "homeassistant.loader" not in sys.modules:
-        loader_module = ModuleType("homeassistant.loader")
-        loader_module.async_get_integration = lambda *_args, **_kwargs: None
-        monkeypatch.setitem(sys.modules, "homeassistant.loader", loader_module)
+    stub = ModuleType("homeassistant.loader")
+    stub.async_get_integration = lambda *_args, **_kwargs: None
+    loader_module = sys.modules.get("homeassistant.loader", stub)
+    monkeypatch.setitem(sys.modules, "homeassistant.loader", loader_module)
     return import_module("custom_components.googlefindmy")
 
 
@@ -136,8 +134,8 @@ async def test_a_refreshed_registration_survives_the_next_setup(
 
     # The registration succeeds and the client reports the refreshed creds.
     receiver._on_credentials_updated_for_entry(ENTRY_ID, fresh)
-    if receiver._active_tasks:
-        await asyncio.gather(*list(receiver._active_tasks))
+    assert receiver._active_tasks
+    await asyncio.gather(*list(receiver._active_tasks))
 
     assert cache.data["fcm_credentials"] == fresh
     assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == fresh
@@ -308,8 +306,8 @@ async def test_a_teardown_between_dispatch_and_persist_skips_the_entry_write() -
     receiver._on_credentials_updated_for_entry(ENTRY_ID, fresh)
     # Synchronous teardown lands before the dispatched task runs.
     receiver._unregistered.add(ENTRY_ID)
-    if receiver._active_tasks:
-        await asyncio.gather(*list(receiver._active_tasks))
+    assert receiver._active_tasks
+    await asyncio.gather(*list(receiver._active_tasks))
 
     assert cache.data["fcm_credentials"] == fresh
     assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == stale

@@ -46,7 +46,10 @@ class _Cache:
             raise self.get_error
         return self.stored.get(name)
 
-    async def set(self, name: str, value: Any) -> None:
+    # Not run: no test of this file reaches it; only
+    # test_invalidating_an_entry_without_a_registration_changes_nothing
+    # checks that nothing was stored.
+    async def set(self, name: str, value: Any) -> None:  # pragma: no cover
         self.stored[name] = value
 
 

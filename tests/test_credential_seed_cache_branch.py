@@ -220,7 +220,8 @@ class _ConfigEntries:
     def async_get_entry(self, entry_id: str) -> Any | None:
         return self._entry if entry_id == self._entry.entry_id else None
 
-    def async_update_entry(self, entry: Any, **kwargs: Any) -> bool:
+    # Not run: spy, the test asserts it is never called.
+    def async_update_entry(self, entry: Any, **kwargs: Any) -> bool:  # pragma: no cover
         self.update_calls.append(dict(kwargs))
         return True
 
@@ -251,8 +252,8 @@ async def test_a_regeneration_for_an_entry_without_a_bundle_survives_the_next_se
     receiver._on_credentials_updated_for_entry(
         first.entry.entry_id, _registration("fresh")
     )
-    if receiver._active_tasks:
-        await asyncio.gather(*list(receiver._active_tasks))
+    assert receiver._active_tasks
+    await asyncio.gather(*list(receiver._active_tasks))
 
     # There is no bundle in the entry, so the receiver writes nothing there.
     assert manager.update_calls == []

@@ -195,10 +195,9 @@ def _credential_keys(tree: ast.Module) -> list[str]:
     raise AssertionError("_CREDENTIAL_KEYS not found in __init__.py")
 
 
-def test_the_fingerprint_filters_no_member() -> None:
-    """R2: ``_credential_fingerprint`` hashes every credential key in full."""
+def _fingerprint_problems(function: ast.AST) -> list[str]:
+    """Places in ``function`` that could drop a member from the fingerprint."""
 
-    function = _function(_parse(_INIT), "_credential_fingerprint")
     problems: list[str] = []
     for node in ast.walk(function):
         if isinstance(node, ast.Call):
@@ -206,17 +205,58 @@ def test_the_fingerprint_filters_no_member() -> None:
             if callee not in _FINGERPRINT_CALLS:
                 problems.append(f"line {node.lineno}: call {callee}")
         elif isinstance(node, ast.comprehension) and node.ifs:
-            problems.append(f"line {node.lineno}: filtering comprehension")
+            # A comprehension clause has no position of its own; its target has.
+            problems.append(f"line {node.target.lineno}: filtering comprehension")
         elif isinstance(node, ast.Delete):
             problems.append(f"line {node.lineno}: del")
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
             problems.append(f"line {node.lineno}: subscript assignment")
         elif isinstance(node, ast.Constant) and node.value == _MEMBER:
             problems.append(f"line {node.lineno}: names {_MEMBER!r}")
+    return problems
+
+
+def test_the_fingerprint_filters_no_member() -> None:
+    """R2: ``_credential_fingerprint`` hashes every credential key in full."""
+
+    problems = _fingerprint_problems(
+        _function(_parse(_INIT), "_credential_fingerprint")
+    )
     assert not problems, (
         "_credential_fingerprint may drop a member; tell a writer apart by a "
         f"receipt (entry_self_write) instead: {problems}"
     )
+
+
+#: One function per rule of ``_fingerprint_problems`` that breaks only that rule.
+_FINGERPRINT_BREAKS: dict[str, tuple[str, str]] = {
+    "call": ("def f(c):\n    return helper(c)\n", "line 2: call helper"),
+    "filter": (
+        "def f(c):\n    return [k for k in c if k]\n",
+        "line 2: filtering comprehension",
+    ),
+    "del": ("def f(c):\n    del c\n", "line 2: del"),
+    "store": ("def f(c):\n    c[0] = 1\n", "line 2: subscript assignment"),
+    "member": (
+        "def f(c):\n    return 'fcm_credentials'\n",
+        "line 2: names 'fcm_credentials'",
+    ),
+}
+
+
+@pytest.mark.parametrize("rule", sorted(_FINGERPRINT_BREAKS))
+def test_the_fingerprint_check_sees_each_way_to_drop_a_member(rule: str) -> None:
+    """Each rule of the fingerprint check reports its form, and only that one."""
+
+    source, problem = _FINGERPRINT_BREAKS[rule]
+    assert _fingerprint_problems(ast.parse(source)) == [problem]
+
+
+def test_the_credential_keys_must_be_found() -> None:
+    """A file without ``_CREDENTIAL_KEYS`` raises instead of yielding no key."""
+
+    with pytest.raises(AssertionError, match="_CREDENTIAL_KEYS not found"):
+        _credential_keys(ast.parse("OTHER = ('a',)\n"))
 
 
 def test_the_fingerprint_covers_the_secrets_bundle() -> None:
@@ -339,9 +379,10 @@ def _outer_parts(node: ast.AST) -> list[ast.AST]:
         parts.extend(node.decorator_list)
         if node.returns is not None:
             parts.append(node.returns)
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
-        parts.extend(node.args.defaults)
-        parts.extend(d for d in node.args.kw_defaults if d is not None)
+    # Every caller passes a def, a lambda or a class, so a def or lambda is left.
+    arguments: ast.arguments = node.args  # type: ignore[attr-defined]
+    parts.extend(arguments.defaults)
+    parts.extend(d for d in arguments.kw_defaults if d is not None)
     return parts
 
 
@@ -683,9 +724,11 @@ class _Keys(Protocol):
 
     key_nodes: tuple[type[ast.AST], ...]
 
-    def is_member(self, node: ast.AST) -> bool: ...
+    # Not run: a signature of the protocol.
+    def is_member(self, node: ast.AST) -> bool: ...  # pragma: no cover
 
-    def unknown_keys(self, tree: ast.Module) -> list[ast.AST]: ...
+    # Not run: a signature of the protocol.
+    def unknown_keys(self, tree: ast.Module) -> list[ast.AST]: ...  # pragma: no cover
 
 
 #: Builds the key resolver of one file from its tree, parents, local reads and
@@ -1260,9 +1303,9 @@ def _container_problems(
         return [
             f"line {parent.lineno}: the container {_describe(parent.value)} is not a local"
         ]
-    if isinstance(parent, ast.Dict):
-        return _expression_escapes(parent, index, parents, seen)
-    return [f"line {getattr(node, 'lineno', 0)}: unknown container"]
+    # ``_classify`` yields a write only at a keyword, a subscript or a dict key.
+    assert isinstance(parent, ast.Dict), getattr(node, "lineno", 0)
+    return _expression_escapes(parent, index, parents, seen)
 
 
 def _describe(node: ast.AST) -> str:
@@ -2246,10 +2289,192 @@ def test_the_guard_accepts_an_equivalent_form(label: str) -> None:
     assert _snippet_problems(source) == (2, [], []), label
 
 
+_K2_WRITE = "            updated_data[K2] = copy.deepcopy(registration)\n"
+_BUNDLE_WRITE = '        updated_bundle["fcm_credentials"] = registration\n'
+_CACHE_READ = '        cached = await cache.get("fcm_credentials")\n'
+_ENTRY_UPDATE = "        update(entry, data=updated_data)\n"
+
+#: One-place changes of ``_CLEAN`` that reach a branch of the guard no form of
+#: ``_BROKEN`` or ``_ACCEPTED`` reaches (AP9f), with the exact result
+#: ``(writes, unclassified, shared)``, so a change of the branch shows here.
+_REACHED: dict[str, tuple[tuple[str, ...], tuple[int, list[str], list[str]]]] = {
+    "annotated subscript write": (
+        (
+            _BUNDLE_WRITE,
+            '        updated_bundle["fcm_credentials"]: dict = registration\n',
+        ),
+        (2, [], []),
+    ),
+    "augmented subscript write": (
+        (_BUNDLE_WRITE, '        updated_bundle["fcm_credentials"] |= registration\n'),
+        (1, ["line 18: updated_bundle['fcm_credentials']"], []),
+    ),
+    "key handed to a plain function": (
+        (_CACHE_READ, '        cached = fetch("fcm_credentials")\n'),
+        (2, ["line 13: fetch('fcm_credentials')"], []),
+    ),
+    "key handed to another cache method": (
+        (_CACHE_READ, '        cached = await cache.delete("fcm_credentials")\n'),
+        (2, ["line 13: cache.delete('fcm_credentials')"], []),
+    ),
+    "key compared by equality": (
+        (_CACHE_READ, '        cached = "fcm_credentials" == creds\n'),
+        (2, ["line 13: 'fcm_credentials' == creds"], []),
+    ),
+    "keyword write into a call that is no dict": (
+        (
+            "        updated_bundle = dict(bundle)\n" + _BUNDLE_WRITE,
+            "        updated_bundle = make(bundle, fcm_credentials=registration)\n",
+        ),
+        (2, [], ["line 17: written into a call that is not a fresh dict"]),
+    ),
+    "write into an attribute container": (
+        (_BUNDLE_WRITE, '        self.out["fcm_credentials"] = registration\n'),
+        (2, [], ["line 18: the container self.out is not a local"]),
+    ),
+    "dict display handed to the writer": (
+        (
+            _ENTRY_UPDATE,
+            '        update(entry, data={"fcm_credentials": copy.deepcopy(registration)})\n',
+        ),
+        (3, [], []),
+    ),
+    "dict display handed to another call": (
+        (
+            _ENTRY_UPDATE,
+            '        show({"fcm_credentials": copy.deepcopy(registration)})\n',
+        ),
+        (
+            3,
+            [],
+            [
+                "line 25: the container {'fcm_credentials': "
+                "copy.deepcopy(registration)} is shared"
+            ],
+        ),
+    ),
+    "write into a module container": (
+        (_K2_WRITE, "            CACHE[K2] = copy.deepcopy(registration)\n"),
+        (2, [], ["the container CACHE is not bound in the function"]),
+    ),
+    "member inside a concatenation": (
+        (
+            _K2_WRITE,
+            '            updated_data["fcm_credentials" + ""] = copy.deepcopy(registration)\n',
+        ),
+        (1, ["line 22: 'fcm_credentials' + ''"], []),
+    ),
+    "member inside an f-string": (
+        (
+            _K2_WRITE,
+            "            updated_data[f\"{'fcm_credentials'}\"] = copy.deepcopy(registration)\n",
+        ),
+        (1, ["line 22: {'fcm_credentials'}"], []),
+    ),
+    "key bound to a const path": (
+        ("K2 = K\n", "K2 = const.FCM_CREDENTIALS\n"),
+        (2, [], []),
+    ),
+    "key read as a const path": (
+        (
+            _K2_WRITE,
+            "            updated_data[const.FCM_CREDENTIALS] = copy.deepcopy(registration)\n",
+        ),
+        (2, [], []),
+    ),
+    "handle alias waiting on two handles": (
+        (
+            "K2 = K\n\nclass R:\n",
+            "K2 = K\nC3 = C2\nC3 = C4\nC2 = const\nC4 = const\n\nclass R:\n",
+            _K2_WRITE,
+            "            updated_data[C3.FCM_CREDENTIALS] = copy.deepcopy(registration)\n",
+        ),
+        (2, [], []),
+    ),
+    # The same alias after its handles: one of the two orders waits on both
+    # handles whichever way the bindings are taken.
+    "handle alias bound after its two handles": (
+        (
+            "K2 = K\n\nclass R:\n",
+            "K2 = K\nC2 = const\nC4 = const\nC3 = C2\nC3 = C4\n\nclass R:\n",
+            _K2_WRITE,
+            "            updated_data[C3.FCM_CREDENTIALS] = copy.deepcopy(registration)\n",
+        ),
+        (2, [], []),
+    ),
+    "dict bound by a mapping pattern at module level": (
+        ("K2 = K\n", "K2 = K\nmatch K:\n    case {**dict}:\n        pass\n"),
+        (
+            2,
+            ["line 7: match K:\n    case {**dict}:\n        pass"],
+            ["dict is bound in the module, so dict(x) may not be a new dict"],
+        ),
+    ),
+    "key bound by a mapping pattern in the method": (
+        (
+            _CACHE_READ,
+            _CACHE_READ
+            + "        match data:\n            case {**K2}:\n                pass\n",
+        ),
+        (1, [], []),
+    ),
+    "key declared global in the method": (
+        (_CACHE_READ, _CACHE_READ + "        global K2\n"),
+        (1, ["line 6: K2 = K"], []),
+    ),
+}
+
+
+@pytest.mark.parametrize("label", sorted(_REACHED))
+def test_the_guard_decides_a_rarely_reached_form_as_pinned(label: str) -> None:
+    """Each form reaches its branch and gives the pinned result."""
+
+    changes, expected = _REACHED[label]
+    assert _snippet_problems(_changed(changes, label)) == expected, label
+
+
+class _FoldingKeys:
+    """Keys that take a concatenation of the member as the member, as a resolver
+    that folds strings does; the scan then reports the outermost key only."""
+
+    key_nodes: tuple[type[ast.AST], ...] = (ast.Constant, ast.BinOp)
+
+    def is_member(self, node: ast.AST) -> bool:
+        return isinstance(node, ast.BinOp) or (
+            isinstance(node, ast.Constant) and isinstance(node.value, str)
+        )
+
+    # Not run: required by _Keys, not called by _occurrences.
+    def unknown_keys(self, tree: ast.Module) -> list[ast.AST]:  # pragma: no cover
+        return []
+
+
+def test_a_key_inside_a_larger_key_is_not_counted_again() -> None:
+    tree = ast.parse("d['fcm_' + 'credentials'] = 1\n")
+    found = _occurrences(tree, _parents(tree), _FoldingKeys())
+    assert [ast.unparse(node) for node in found] == ["'fcm_' + 'credentials'"]
+
+
+def test_a_form_of_newer_syntax_is_skipped_on_an_older_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "version_info", (3, 13, 0))
+    with pytest.raises(pytest.skip.Exception, match="needs Python 3.14"):
+        _skip_newer_syntax("t-string spelling the member")
+
+
+def test_a_claim_without_a_pinned_form_is_reported(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "claim.py"
+    path.write_text('"""The guard rejects every shared write."""\n')
+    problems = _docstring_problems(path, {}, set())
+    assert problems == [
+        "claim without a pinned form: The guard rejects every shared write."
+    ]
+
+
 #: Key forms the guard does not see (``V-10`` (c)), each a one-place change of
 #: the second write of ``_CLEAN``. The write stays a deep copy, so a form that
 #: became a key would count a second write; it must stay at one.
-_K2_WRITE = "            updated_data[K2] = copy.deepcopy(registration)\n"
 _NOT_SEEN: dict[str, tuple[str, ...]] = {
     "key built by concatenation": (
         "K2 = K\n", "K2 = K\nK3 = 'fcm_' + 'credentials'\n",
