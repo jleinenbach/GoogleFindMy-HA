@@ -58,6 +58,7 @@ import asyncio
 import base64
 import binascii
 import contextvars
+import copy
 import functools
 import json
 import logging
@@ -88,6 +89,12 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
 from custom_components.googlefindmy.Auth.log_safety import (
     describe_exception,
     exception_origin,
+)
+from custom_components.googlefindmy.entry_self_write import (
+    consume_self_write,
+    credential_member_digest,
+    discard_self_write,
+    note_self_write,
 )
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.location_row_markers import (
@@ -123,6 +130,7 @@ else:
 # Integration-level tunables (safe fallbacks if missing)
 try:
     from custom_components.googlefindmy.const import (
+        DATA_SECRET_BUNDLE,
         DOMAIN,
         FCM_ABORT_ON_SEQ_ERROR_COUNT,
         FCM_CLIENT_HEARTBEAT_INTERVAL_S,
@@ -149,6 +157,7 @@ except ImportError:  # pragma: no cover
     FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S = 60
     FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S = 900
     FCM_ZOMBIE_MAX_RECONNECTS = 5
+    DATA_SECRET_BUNDLE = "secrets_data"
     DOMAIN = "googlefindmy"
     OPT_IGNORED_DEVICES = "ignored_devices"
 
@@ -581,6 +590,14 @@ class FcmReceiverHA:
         # generation) or an out-of-band refresh (no driving generation -> the
         # boolean tombstone window only) still writes.
         self._entry_generation: dict[str, int] = {}
+
+        # Digest of the FCM registration this receiver last knew the entry's
+        # secrets bundle to hold: taken at ``register_coordinator`` and moved on
+        # by each of its own entry writes. A bundle that holds anything else was
+        # changed by someone else (a user import whose reload is still on its
+        # way), and the receiver must not overwrite it (compare-and-swap in
+        # ``_persist_credentials_to_entry``).
+        self._entry_registration_digest: dict[str, str] = {}
 
     def _entry_writes_suppressed(
         self, entry_id: str, generation: int | None = None
@@ -2188,13 +2205,23 @@ class FcmReceiverHA:
                     entry_id,
                 )
 
-            # Persist partial credentials so restarts also trigger re-register
+            # Persist partial credentials so restarts also trigger re-register.
+            # The entry first: an entry with a bundle re-seeds the cache from it
+            # on every setup, so a cache-only invalidation would bring the stale
+            # tokens back on the next start.
+            self._persist_credentials_to_entry_best_effort(entry_id, creds, generation)
             entry_cache = self._entry_caches.get(entry_id)
             if entry_cache is not None:
                 try:
                     await entry_cache.set("fcm_credentials", creds)
-                except Exception:
-                    pass
+                except Exception as err:  # noqa: BLE001 - logged, never raised
+                    _LOGGER.warning(
+                        "[entry=%s] Failed to save the invalidated FCM "
+                        "registration to the entry cache; a restart may reuse "
+                        "the stale tokens: %s",
+                        entry_id,
+                        describe_exception(err),
+                    )
 
     @staticmethod
     def _raise_if_fatal_client_error(entry_id: str, err: ClientError) -> None:
@@ -2442,6 +2469,7 @@ class FcmReceiverHA:
         # the next supervisor reads the post-teardown value and is allowed,
         # while the stale one keeps its old (now mismatched) snapshot.
         self._unregistered.discard(entry.entry_id)
+        self._note_entry_registration(entry)
 
         self._entry_to_tokens.setdefault(entry.entry_id, set())
 
@@ -2568,6 +2596,7 @@ class FcmReceiverHA:
                 # re-creating the state purged below. Cleared by
                 # register_coordinator on the next setup (reload-safe).
                 self._unregistered.add(entry_id)
+                self._entry_registration_digest.pop(entry_id, None)
                 # AP4 (finding 4b): bump the generation BEFORE the tombstone is
                 # later cleared by ``register_coordinator``. ``request_stop()``
                 # only cancels the prior supervisor without awaiting it, so this
@@ -3466,14 +3495,206 @@ class FcmReceiverHA:
         )
 
         self._dispatch_to_hass_loop(
-            self._async_save_credentials_for_entry(entry_id),
+            self._async_save_credentials_for_entry(entry_id, generation),
             label=f"save_credentials_{entry_id}",
         )
         _LOGGER.info("[entry=%s] FCM credentials updated", entry_id)
 
-    async def _async_save_credentials_for_entry(self, entry_id: str) -> None:
-        """Persist current credentials to the entry's TokenCache (best-effort)."""
+    def _note_entry_registration(self, entry: Any) -> None:
+        """Remember the registration the entry's bundle holds at registration."""
+
+        data = getattr(entry, "data", None)
+        bundle = data.get(DATA_SECRET_BUNDLE) if isinstance(data, Mapping) else None
+        # An entry without a bundle records the digest of "no registration", so
+        # a bundle that appears later with a registration (a user import whose
+        # reload is on its way) counts as a value this receiver did not write.
+        self._entry_registration_digest[entry.entry_id] = credential_member_digest(
+            bundle.get("fcm_credentials") if isinstance(bundle, Mapping) else None
+        )
+
+    def _entry_bundle_for_write(
+        self, entry_id: str
+    ) -> tuple[Callable[..., Any], Any, Mapping[str, Any], Mapping[str, Any]] | None:
+        """Return ``(update, entry, data, bundle)`` for an entry write, else ``None``.
+
+        ``None`` covers every case the write must skip: no entry manager, an
+        unknown entry, entry data that is not a mapping, or no secrets bundle.
+        """
+        hass = self._hass
+        entries = getattr(hass, "config_entries", None) if hass is not None else None
+        lookup = getattr(entries, "async_get_entry", None)
+        update = getattr(entries, "async_update_entry", None)
+        if not callable(lookup) or not callable(update):
+            return None
+        entry = lookup(entry_id)
+        data = getattr(entry, "data", None) if entry is not None else None
+        if not isinstance(data, Mapping):
+            return None
+        bundle = data.get(DATA_SECRET_BUNDLE)
+        if not isinstance(bundle, Mapping):
+            return None
+        return update, entry, data, bundle
+
+    def _persist_credentials_to_entry_best_effort(
+        self,
+        entry_id: str,
+        creds: Mapping[str, Any],
+        generation: int | None = None,
+    ) -> None:
+        """Run ``_persist_credentials_to_entry`` without failing the caller.
+
+        The entry write runs before the token cache write, and that cache write
+        ran unconditionally before the entry became the durable store. An
+        exception in the entry lookup, the copy or the digest must not cost it.
+
+        No receipt is dropped here: such an exception is raised before
+        ``note_self_write``, so the receipt of this entry, if any, belongs to an
+        earlier write whose listener has not run yet.
+        """
+        try:
+            self._persist_credentials_to_entry(entry_id, creds, generation)
+        except Exception as err:  # noqa: BLE001 - durability is best-effort
+            _LOGGER.warning(
+                "[entry=%s] Failed to persist the FCM registration to the config "
+                "entry; the next restart may restore the previous one: %s",
+                entry_id,
+                describe_exception(err),
+            )
+
+    def _restore_receipt(self, entry_id: str, earlier: str | None) -> None:
+        """Put back the receipt an unstored write replaced, or drop its own."""
+
+        if earlier is None:
+            discard_self_write(self._hass, entry_id)
+        else:
+            note_self_write(self._hass, entry_id, earlier)
+
+    def _persist_credentials_to_entry(
+        self,
+        entry_id: str,
+        creds: Mapping[str, Any],
+        generation: int | None = None,
+    ) -> None:
+        """Write a refreshed FCM registration back into the config entry.
+
+        The config entry, not the token cache, is the durable source of truth:
+        ``async_setup_entry`` re-seeds the entry's secrets bundle into the cache
+        on every start, so a credential that only lives in the cache is
+        overwritten by the bundle's older copy on the next reload or restart.
+        A registration obtained by a later (re-)registration is exactly such a
+        value, and it is worthless if the next start restores the dead
+        registration it replaced.
+
+        Only the ``fcm_credentials`` member of an existing bundle is rewritten,
+        together with the top-level copy the config flow may have left beside
+        it. A missing bundle is not invented here. An entry without one is
+        seeded from the token cache instead, and that seed keeps a non-empty
+        cached registration rather than restoring the cached bundle's older
+        copy (``_RUNTIME_REFRESHED_BUNDLE_FIELDS`` in the package
+        ``__init__``), so the cache write below is what makes the registration
+        durable there. The payload is the entry data read at write time, so a
+        concurrent change to another key is not rolled back.
+
+        Three guards keep the write from doing harm:
+
+        * ``generation`` is the one the caller resolved for this update; the
+          same ``_entry_writes_suppressed`` check as in
+          ``_on_credentials_updated_for_entry`` runs again here, because the
+          entry may have been torn down or superseded after the dispatch.
+        * Compare-and-swap: when the bundle holds a registration this receiver
+          neither knew at registration nor wrote itself, someone else changed
+          it (a user import whose reload is still on its way); that value wins.
+        * A one-shot receipt (``entry_self_write``) tells the update listener
+          that this write needs no reload. A user change of the same member is
+          not excluded from the fingerprint and still reloads.
+
+        ``async_update_entry`` mutates the in-memory entry and schedules the
+        debounced store write; a reload in between reads the updated entry, so
+        no await is needed here.
+        """
+        if self._entry_writes_suppressed(entry_id, generation):
+            return
+        target = self._entry_bundle_for_write(entry_id)
+        if target is None:
+            return
+        update, entry, data, bundle = target
+        hass = self._hass
+        # Every copy handed to the entry is detached (deep copy): the receiver
+        # edits ``self.creds[entry_id]`` and its nested ``gcm`` block in place
+        # (``_invalidate_fcm_tokens``), and a shared container would rewrite
+        # ``entry.data`` behind Home Assistant's back.
+        registration = copy.deepcopy(dict(creds))
+        digest = credential_member_digest(registration)
+        stored = credential_member_digest(bundle.get("fcm_credentials"))
+        known = self._entry_registration_digest.get(entry_id)
+        if known is not None and stored not in (known, digest):
+            _LOGGER.info(
+                "[entry=%s] The config entry holds an FCM registration this "
+                "receiver did not write; leaving it in place for the reload "
+                "that applies it",
+                entry_id,
+            )
+            return
+        updated_bundle = dict(bundle)
+        updated_bundle["fcm_credentials"] = registration
+        updated_data = dict(data)
+        updated_data[DATA_SECRET_BUNDLE] = updated_bundle
+        # The config flow also stores the same value at the top level of the
+        # entry data. Refresh that copy where it exists so the entry does not
+        # carry two contradictory registrations; a missing copy is not created
+        # here, because the seed reads the bundle and nothing reads this key.
+        if "fcm_credentials" in updated_data:
+            updated_data["fcm_credentials"] = copy.deepcopy(registration)
+        if updated_data == dict(data):
+            self._entry_registration_digest[entry_id] = digest
+            return
+        # The receipt goes in BEFORE the write: Home Assistant creates the
+        # listener task inside ``async_update_entry``. Only a changed bundle
+        # registration moves the fingerprint; a write that only refreshes the
+        # top-level copy reaches the listener without a change and would leave
+        # the receipt unconsumed. A receipt already there belongs to an earlier
+        # write still waiting for its listener: this call replaces it only for
+        # a write that goes through and puts it back when nothing is stored.
+        noted = stored != digest
+        earlier: str | None = None
+        if noted:
+            earlier = consume_self_write(hass, entry_id)
+            note_self_write(hass, entry_id, digest)
+        try:
+            changed = update(entry, data=updated_data)
+        except Exception as err:  # noqa: BLE001 - durability is best-effort
+            if noted:
+                self._restore_receipt(entry_id, earlier)
+            _LOGGER.warning(
+                "[entry=%s] Failed to persist the refreshed FCM registration to "
+                "the config entry; the next restart may restore the previous "
+                "one: %s",
+                entry_id,
+                describe_exception(err),
+            )
+            return
+        if changed is False:
+            # Nothing was stored, so no listener runs to consume the receipt.
+            if noted:
+                self._restore_receipt(entry_id, earlier)
+            return
+        self._entry_registration_digest[entry_id] = digest
+        _LOGGER.info(
+            "[entry=%s] Persisted the refreshed FCM registration to the config entry",
+            entry_id,
+        )
+
+    async def _async_save_credentials_for_entry(
+        self, entry_id: str, generation: int | None = None
+    ) -> None:
+        """Persist current credentials to the entry and its TokenCache.
+
+        ``generation`` is the one ``_on_credentials_updated_for_entry`` resolved
+        for this update; the entry write checks it again when it runs.
+        """
         creds = self.creds.get(entry_id)
+        if isinstance(creds, Mapping):
+            self._persist_credentials_to_entry_best_effort(entry_id, creds, generation)
         cache = self._entry_caches.get(entry_id)
         if cache is not None:
             try:

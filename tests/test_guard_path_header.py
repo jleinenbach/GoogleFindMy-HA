@@ -32,6 +32,7 @@ _TESTS_DIR = _REPO_ROOT / "tests"
 # omission out on the module below before it was added to this set.
 NEW_PRODUCTION_MODULES: set[str] = {
     "custom_components/googlefindmy/coordinator/helpers/locate_clock.py",
+    "custom_components/googlefindmy/entry_self_write.py",
     "custom_components/googlefindmy/location_row_markers.py",
 }
 
