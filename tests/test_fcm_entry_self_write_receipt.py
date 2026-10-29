@@ -544,18 +544,20 @@ async def test_a_teardown_after_the_callback_suppresses_the_queued_entry_write(
     assert len(hass.config_entries.entry_update_calls) == writes_before
 
 
-def test_refreshing_only_the_top_level_copy_leaves_no_receipt() -> None:
-    """The bundle already holds the value; only the stale top-level copy moves.
+def test_the_receiver_leaves_a_top_level_copy_alone() -> None:
+    """The receiver writes the bundle member only, never a top-level copy.
 
-    The credential fingerprint does not include the top-level copy, so the
-    listener sees no change and would never consume a receipt.
+    The bundle already holds the renewed value, so nothing is written, and a
+    copy an older config flow stored at the top level stays as it is until the
+    setup repair removes it.
     """
 
     renewed = _registration("renewed")
+    old_copy = _registration("old")
     entry = make_config_entry(
         entry_id="entry-a",
         data={
-            "fcm_credentials": _registration("old"),
+            "fcm_credentials": old_copy,
             DATA_SECRET_BUNDLE: {"fcm_credentials": renewed},
         },
     )
@@ -565,8 +567,28 @@ def test_refreshing_only_the_top_level_copy_leaves_no_receipt() -> None:
 
     receiver._persist_credentials_to_entry("entry-a", renewed)
 
+    assert hass.config_entries.calls == 0
+    assert entry.data["fcm_credentials"] == old_copy
+    assert _receipts(hass) == {}
+
+
+def test_a_write_the_digest_does_not_see_leaves_no_receipt() -> None:
+    """A registration equal by digest but not by value is written without receipt.
+
+    The digest serializes through JSON, where a tuple and a list are the same;
+    the entry comparison is not. The fingerprint does not move, so the listener
+    sees no change and would never consume a receipt.
+    """
+
+    entry, renewed = _digest_equal_entry()
+    hass = SimpleNamespace(data={}, config_entries=_Manager([entry], True))
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    receiver._persist_credentials_to_entry("entry-a", renewed)
+
     assert hass.config_entries.calls == 1
-    assert entry.data["fcm_credentials"] == renewed
+    assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == renewed
     assert _receipts(hass) == {}
 
 
@@ -667,14 +689,15 @@ def test_a_failing_lookup_keeps_the_receipt_of_an_earlier_write() -> None:
     assert _receipts(hass) == {"entry-a": _EARLIER}
 
 
-def _top_level_only_entry() -> tuple[Any, dict[str, Any]]:
+def _digest_equal_entry() -> tuple[Any, dict[str, Any]]:
+    """Return an entry whose bundle registration equals ``renewed`` only by digest."""
     renewed = _registration("renewed")
+    renewed["gcm"]["scopes"] = ["a", "b"]
+    stored = _registration("renewed")
+    stored["gcm"]["scopes"] = ("a", "b")
     entry = make_config_entry(
         entry_id="entry-a",
-        data={
-            "fcm_credentials": _registration("old"),
-            DATA_SECRET_BUNDLE: {"fcm_credentials": renewed},
-        },
+        data={DATA_SECRET_BUNDLE: {"fcm_credentials": stored}},
     )
     return entry, renewed
 
@@ -682,12 +705,12 @@ def _top_level_only_entry() -> tuple[Any, dict[str, Any]]:
 @pytest.mark.parametrize(
     "result", [RuntimeError("store-text"), False], ids=["raises", "stores-nothing"]
 )
-def test_a_top_level_write_that_fails_keeps_the_receipt_of_an_earlier_write(
+def test_a_write_without_receipt_that_fails_keeps_the_receipt_of_an_earlier_write(
     result: Any,
 ) -> None:
     """Only a receipt this call left is dropped when its write stores nothing."""
 
-    entry, renewed = _top_level_only_entry()
+    entry, renewed = _digest_equal_entry()
     hass = SimpleNamespace(data={}, config_entries=_Manager([entry], result))
     note_self_write(hass, "entry-a", _EARLIER)
     receiver = FcmReceiverHA()

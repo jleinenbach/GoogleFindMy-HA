@@ -3613,9 +3613,9 @@ class FcmReceiverHA:
         value, and it is worthless if the next start restores the dead
         registration it replaced.
 
-        Only the ``fcm_credentials`` member of an existing bundle is rewritten,
-        together with the top-level copy the config flow may have left beside
-        it. A missing bundle is not invented here. An entry without one is
+        Only the ``fcm_credentials`` member of an existing bundle is rewritten;
+        the bundle is the only place in the entry that holds the registration.
+        A missing bundle is not invented here. An entry without one is
         seeded from the token cache instead, and that seed keeps a non-empty
         cached registration rather than restoring the cached bundle's older
         copy (``_RUNTIME_REFRESHED_BUNDLE_FIELDS`` in the package
@@ -3667,20 +3667,19 @@ class FcmReceiverHA:
         updated_bundle["fcm_credentials"] = registration
         updated_data = dict(data)
         updated_data[DATA_SECRET_BUNDLE] = updated_bundle
-        # The config flow also stores the same value at the top level of the
-        # entry data. Refresh that copy where it exists so the entry does not
-        # carry two contradictory registrations; a missing copy is not created
-        # here, because the seed reads the bundle and nothing reads this key.
-        if "fcm_credentials" in updated_data:
-            updated_data["fcm_credentials"] = copy.deepcopy(registration)
+        # The bundle is the only place in the entry that holds the
+        # registration; setup removes the top-level copy older config flows
+        # stored, and nothing writes it any more (Auth/AGENTS.md).
         if updated_data == dict(data):
             self._entry_registration_digest[entry_id] = digest
             return
         # The receipt goes in BEFORE the write: Home Assistant creates the
         # listener task inside ``async_update_entry``. Only a changed bundle
-        # registration moves the fingerprint; a write that only refreshes the
-        # top-level copy reaches the listener without a change and would leave
-        # the receipt unconsumed. A receipt already there belongs to an earlier
+        # registration moves the fingerprint, so only such a write notes a
+        # receipt; a registration that differs from the stored one only in a
+        # form the JSON digest does not see (a tuple where the entry holds a
+        # list) is written without one, because the listener would never
+        # consume it. A receipt already there belongs to an earlier
         # write still waiting for its listener: this call replaces it only for
         # a write that goes through and puts it back when nothing is stored.
         noted = stored != digest
