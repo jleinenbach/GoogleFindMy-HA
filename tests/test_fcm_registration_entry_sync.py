@@ -112,9 +112,6 @@ async def test_a_refreshed_registration_survives_the_next_setup(
         entry_id=ENTRY_ID,
         data={
             CONF_GOOGLE_EMAIL: "user@example.com",
-            # The config flow writes the same value both into the bundle and
-            # beside it, so both copies are faced with the refresh.
-            "fcm_credentials": stale,
             DATA_SECRET_BUNDLE: {
                 "username": "user@example.com",
                 "fcm_credentials": stale,
@@ -139,7 +136,8 @@ async def test_a_refreshed_registration_survives_the_next_setup(
 
     assert cache.data["fcm_credentials"] == fresh
     assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == fresh
-    assert entry.data["fcm_credentials"] == fresh
+    # The registration lives in the bundle only; no top-level copy appears.
+    assert "fcm_credentials" not in entry.data
 
     # Single-write contract: one refresh persists exactly one entry update, so
     # the durability fix does not fan out into repeated writes.
@@ -292,7 +290,6 @@ async def test_a_teardown_between_dispatch_and_persist_skips_the_entry_write() -
         entry_id=ENTRY_ID,
         data={
             CONF_GOOGLE_EMAIL: "user@example.com",
-            "fcm_credentials": stale,
             DATA_SECRET_BUNDLE: {
                 "username": "user@example.com",
                 "fcm_credentials": stale,
@@ -311,7 +308,6 @@ async def test_a_teardown_between_dispatch_and_persist_skips_the_entry_write() -
 
     assert cache.data["fcm_credentials"] == fresh
     assert entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"] == stale
-    assert entry.data["fcm_credentials"] == stale
     assert manager.update_calls == []
 
 
@@ -473,7 +469,6 @@ async def test_the_entry_copy_is_detached_from_the_receiver_state() -> None:
         entry_id=ENTRY_ID,
         data={
             CONF_GOOGLE_EMAIL: "user@example.com",
-            "fcm_credentials": _registration("stale"),
             DATA_SECRET_BUNDLE: {"fcm_credentials": _registration("stale")},
         },
     )
@@ -484,15 +479,11 @@ async def test_the_entry_copy_is_detached_from_the_receiver_state() -> None:
     await receiver._async_save_credentials_for_entry(ENTRY_ID)
     assert len(manager.update_calls) == 1
     bundle_copy = entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"]
-    top_level_copy = entry.data["fcm_credentials"]
     persisted = copy.deepcopy(dict(entry.data))
 
-    # Neither entry copy shares a container with the live state or each other.
+    # The entry copy shares no container with the live state.
     assert bundle_copy is not fresh
     assert bundle_copy["gcm"] is not fresh["gcm"]
-    assert top_level_copy is not fresh
-    assert top_level_copy["gcm"] is not fresh["gcm"]
-    assert top_level_copy["gcm"] is not bundle_copy["gcm"]
 
     await receiver._invalidate_fcm_tokens(ENTRY_ID)
 

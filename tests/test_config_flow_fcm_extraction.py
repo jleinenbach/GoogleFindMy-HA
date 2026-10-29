@@ -26,7 +26,7 @@ from tests.helpers.config_flow import (
 async def test_secrets_json_extracts_fcm_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Config flow should persist fcm_credentials extracted from secrets.json."""
+    """Config flow keeps fcm_credentials from secrets.json inside the bundle."""
 
     secrets_payload = {
         "google_email": "fcm-user@example.com",
@@ -116,4 +116,9 @@ async def test_secrets_json_extracts_fcm_credentials(
     assert data[CONF_OAUTH_TOKEN] == "aas_et/FROM_SECRETS"
     assert data[DATA_AUTH_METHOD] == config_flow._AUTH_METHOD_SECRETS
     assert data[DATA_SECRET_BUNDLE] == secrets_payload
-    assert data["fcm_credentials"] == secrets_payload["fcm_credentials"]
+    # The registration stays inside the bundle; no second copy beside it.
+    assert "fcm_credentials" not in data
+    assert (
+        data[DATA_SECRET_BUNDLE]["fcm_credentials"]
+        == (secrets_payload["fcm_credentials"])
+    )

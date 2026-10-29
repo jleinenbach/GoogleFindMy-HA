@@ -118,6 +118,18 @@ guard over the migration's `pop` calls).
 
 ### Credential ownership across receiver, cache and entry
 
+* **One place for the FCM registration in the entry.** The registration lives
+  in the secrets bundle (`entry.data["secrets_data"]["fcm_credentials"]`) and
+  in the token cache, never as a top-level key of `entry.data`. Earlier config
+  flows stored a second copy there; nothing read it, it went stale after every
+  renewal, and it kept one more exemplar of the device credential in the
+  entry. No flow writes it any more, and a setup-time repair
+  (`_async_strip_entry_fcm_credentials_copy` in `__init__.py`, no version
+  bump, run before the legacy migration) removes a copy an older version
+  stored.
+  Enforced by `tests/test_fcm_credentials_entry_copy.py`, including an AST
+  guard that lets `config_flow.py` name the key only to read it.
+
 * **Detached copies.** A credential value that crosses between the FCM
   receiver, the `TokenCache` and `entry.data` is handed over as a deep copy,
   and `TokenCache` stores and returns a copy of every value that is not an
@@ -132,8 +144,8 @@ guard over the migration's `pop` calls).
   `tests/test_fcm_registration_entry_sync.py` and
   `tests/test_token_cache_value_isolation.py`.
 * **The entry is the durable store for a renewed registration.** The receiver
-  writes only the member it owns, `fcm_credentials` in the secrets bundle (and
-  the top-level copy where the entry already carries one), after leaving a
+  writes only the member it owns, `fcm_credentials` in the secrets bundle,
+  after leaving a
   self-write receipt (`entry_self_write`, see
   `agents/runtime_patterns/AGENTS.md`, "One owner per entry reload"). When the
   bundle holds a registration the receiver neither registered nor wrote
