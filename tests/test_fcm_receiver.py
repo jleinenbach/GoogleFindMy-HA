@@ -706,7 +706,7 @@ async def test_credentials_update_clears_latched_fatal_error(
     async def _persist(entry_arg: str, token_arg: str) -> None:
         token_routes.append((token_arg, {entry_arg}))
 
-    async def _save(entry_arg: str) -> None:
+    async def _save(entry_arg: str, generation: int | None = None) -> None:
         token_routes.append(("save", {entry_arg}))
 
     monkeypatch.setattr(receiver, "_persist_routing_token", _persist)

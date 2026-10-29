@@ -221,6 +221,11 @@ from .const import (
     CONFIG_ENTRY_VERSION as CONFIG_ENTRY_VERSION,
 )
 from .email_utils import normalize_email, unique_account_id
+from .entry_self_write import (
+    consume_self_write,
+    credential_member_digest,
+    discard_self_write,
+)
 from .ha_typing import CloudDiscoveryRuntime, callback
 from .SpotApi.spot_grpc_transport import SPOT_GRPC_TRANSPORT
 
@@ -655,6 +660,36 @@ _LOGGABLE_BUNDLE_FIELDS: tuple[str, ...] = (
     "token",
     "username",
 )
+
+
+# Bundle fields the runtime renews in place after setup. The receiver stores a
+# renewed FCM registration at the top level of the cache, and also in the
+# entry's bundle when the entry carries one. An entry without a bundle is
+# seeded from the cache's bundle copy, which predates the renewal; the seed
+# keeps a non-empty top-level value for these fields instead of restoring it
+# (see ``_bundle_without_fields_refreshed_since``).
+_RUNTIME_REFRESHED_BUNDLE_FIELDS: Final[frozenset[str]] = frozenset({"fcm_credentials"})
+
+
+def _bundle_without_fields_refreshed_since(
+    bundle: Any, cache_snapshot: Mapping[str, Any]
+) -> Any:
+    """Return ``bundle`` without the fields the cache holds a newer value for.
+
+    Only used where the bundle itself was read from the cache: there the
+    top-level value of a runtime-refreshed field is at least as new as the
+    bundle's copy. A field whose top-level value is empty is kept, so a cold
+    start still receives the bundle's registration (Issue #152). A bundle that
+    is not a mapping is returned unchanged for ``_async_save_secrets_data``.
+    """
+    if not isinstance(bundle, Mapping):
+        return bundle
+    return {
+        field: value
+        for field, value in bundle.items()
+        if field not in _RUNTIME_REFRESHED_BUNDLE_FIELDS
+        or not cache_snapshot.get(field)
+    }
 
 
 def _optional_credential_label(key: str) -> str:
@@ -3078,6 +3113,11 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     # given back by a claimant whose scheduling call failed, so a genuinely later
     # change reloads again.
     pending_entry_reloads: set[str]
+    # entry_id -> digest of the FCM registration the receiver is writing into
+    # the entry's secrets bundle (``entry_self_write``). Consumed by the update
+    # listener so the receiver's own write does not reload the entry, while a
+    # user change of the same member still does. Digests only, never values.
+    fcm_self_write_receipts: dict[str, str]
     # In-memory only, NEVER persisted: irreversible cleanup jobs staged by a
     # config or options flow (watched-secrets delete, login-container ack). A
     # FIFO list of per-flow tickets, NOT a mapping keyed by account: two
@@ -5635,6 +5675,38 @@ def _credential_fingerprint(data: Mapping[str, Any] | None) -> str:
         sort_keys=True,
         default=repr,
     )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _bundle_registration(data: Mapping[str, Any] | None) -> Any:
+    """Return the FCM registration stored in the entry's secrets bundle."""
+
+    container: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
+    bundle = container.get(DATA_SECRET_BUNDLE)
+    return bundle.get("fcm_credentials") if isinstance(bundle, Mapping) else None
+
+
+def _credential_fingerprint_without_registration(
+    data: Mapping[str, Any] | None,
+) -> str:
+    """Return the credential fingerprint with the bundle's FCM registration left out.
+
+    Used only to tell a receiver self-write apart from a user change
+    (``entry_self_write``): the full fingerprint above stays the trigger, so a
+    change of the registration alone still reaches the listener. The
+    registration is the one member the receiver writes itself.
+    """
+
+    container: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
+    values: dict[str, Any] = {key: container.get(key) for key in _CREDENTIAL_KEYS}
+    bundle = values.get(DATA_SECRET_BUNDLE)
+    if isinstance(bundle, Mapping):
+        values[DATA_SECRET_BUNDLE] = {
+            field: value
+            for field, value in bundle.items()
+            if field != "fcm_credentials"
+        }
+    material = json.dumps(values, sort_keys=True, default=repr)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -8387,11 +8459,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # make the migration itself look like a credential change and reload the
     # entry on every setup.
     credential_fingerprint = _credential_fingerprint(entry.data)
+    credential_fingerprint_rest = _credential_fingerprint_without_registration(
+        entry.data
+    )
+    # A receipt left by the previous incarnation's receiver belongs to a write
+    # the fingerprint above already includes; it must not excuse a later change.
+    discard_self_write(hass, entry.entry_id)
 
     async def _async_refresh_watch_paths(
         hass_arg: HomeAssistant, updated_entry: MyConfigEntry
     ) -> None:
-        nonlocal credential_fingerprint
+        nonlocal credential_fingerprint, credential_fingerprint_rest
 
         await _async_refresh_discovery_watch_paths(hass_arg)
 
@@ -8419,6 +8497,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         # Advance the fingerprint BEFORE scheduling, so a second notification
         # arriving before the reload takes effect cannot schedule a second one.
         credential_fingerprint = updated_fingerprint
+        previous_rest = credential_fingerprint_rest
+        credential_fingerprint_rest = _credential_fingerprint_without_registration(
+            updated_entry.data
+        )
+
+        # The FCM receiver writing a renewed registration into the bundle is not
+        # a credential change: it already runs on that value. It leaves a
+        # one-shot receipt (the digest of what it stores) before it writes. The
+        # receipt is consumed on every change, and it excuses the reload only
+        # when nothing but the registration changed and the stored registration
+        # is the one the receipt names. A user import of the registration, or
+        # any change beside the receiver's write, reloads as before.
+        receipt = consume_self_write(hass_arg, updated_entry.entry_id)
+        if (
+            receipt is not None
+            and credential_fingerprint_rest == previous_rest
+            and receipt
+            == credential_member_digest(_bundle_registration(updated_entry.data))
+        ):
+            _LOGGER.debug(
+                "Entry %s: stored the receiver's renewed FCM registration; no "
+                "reload needed",
+                updated_entry.entry_id,
+            )
+            return
 
         schedule_reload = getattr(
             getattr(hass_arg, "config_entries", None), "async_schedule_reload", None
@@ -8633,10 +8736,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     #
     # Only the keys the entry mirrors are dropped. Material derived from a
     # bundle (owner_key, shared_key, fcm_credentials) belongs to the same
-    # account, is refreshed in place, and stays.
+    # account, is refreshed in place, and stays. That includes the branch
+    # below that reads the bundle back from the cache: a runtime-refreshed
+    # field the cache already holds a value for is not overwritten by the
+    # bundle's older copy (_RUNTIME_REFRESHED_BUNDLE_FIELDS).
     entry_carries_credentials = bool(secrets_data or oauth_token or aas_token_entry)
 
     cache_snapshot: Mapping[str, Any] | None = None
+    # The cache snapshot the credentials were recovered from, if any.
+    recovered_from: Mapping[str, Any] | None = None
     try:
         cache_snapshot = await cache.all()
     except Exception as err:  # pragma: no cover - defensive cache read
@@ -8671,10 +8779,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         secrets_data = cache_snapshot.get(DATA_SECRET_BUNDLE)
         oauth_token = cache_snapshot.get(CONF_OAUTH_TOKEN)
         aas_token_entry = cache_snapshot.get(DATA_AAS_TOKEN)
+        recovered_from = cache_snapshot
 
     if secrets_data:
+        seed_bundle = secrets_data
+        if recovered_from is not None:
+            seed_bundle = _bundle_without_fields_refreshed_since(
+                secrets_data, recovered_from
+            )
         await _async_save_secrets_data(
-            cache, secrets_data, account_label=_label_entry_for_log(entry)
+            cache, seed_bundle, account_label=_label_entry_for_log(entry)
         )
         _LOGGER.debug("Persisted secrets.json bundle to token cache (entry-scoped)")
         if isinstance(aas_token_entry, str) and aas_token_entry:
@@ -10245,6 +10359,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # Same housekeeping for the reload latch: an entry that is gone will never
     # reach the setup or unload that would otherwise release it.
     discard_pending_entry_reload(hass, entry.entry_id)
+    # And for a receiver self-write receipt the listener never consumed.
+    discard_self_write(hass, entry.entry_id)
 
     # And for the foreign-reading tracker (CX-6): its per-device readings and
     # once-per-device log gates survive reloads by design. Its keys carry the

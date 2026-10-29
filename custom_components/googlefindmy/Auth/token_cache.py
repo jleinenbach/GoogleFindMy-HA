@@ -22,6 +22,7 @@ Key properties:
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -375,7 +376,7 @@ class TokenCache:
 
         Use from synchronous code paths that cannot await.
         """
-        return self._data.get(name)
+        return _detached(self._data.get(name))
 
     def sync_pop(self, name: str, default: Any = None) -> Any:
         """Remove and return a value from the in-memory cache (sync, no lock).
@@ -391,11 +392,14 @@ class TokenCache:
         Note: does not trigger deferred save; call ``set()`` from async code
         when persistence is required.
         """
-        self._data[name] = value
+        self._data[name] = _detached(value)
 
     async def get(self, name: str) -> Any:
-        """Return a value from the in-memory cache (non-blocking)."""
-        return self._data.get(name)
+        """Return a value from the in-memory cache (non-blocking).
+
+        Container values are returned as a detached copy (``_detached``).
+        """
+        return _detached(self._data.get(name))
 
     async def set(self, name: str, value: Any | None) -> None:
         """Set a value, normalize it, validate snapshot, and schedule a deferred save.
@@ -425,7 +429,7 @@ class TokenCache:
                         type(normalized).__name__,
                     )
                     return
-                self._data[name] = normalized
+                self._data[name] = _detached(normalized)
 
         # Only schedule a save if the snapshot is valid JSON.
         if self._is_valid_snapshot():
@@ -440,12 +444,12 @@ class TokenCache:
     ) -> _ValueT:
         """Return existing value or compute/store it, avoiding thundering herds via per-key lock."""
         if (existing := self._data.get(name)) is not None:
-            return cast(_ValueT, existing)
+            return cast(_ValueT, _detached(existing))
 
         lock = self._per_key_locks.setdefault(name, asyncio.Lock())
         async with lock:
             if (existing := self._data.get(name)) is not None:
-                return cast(_ValueT, existing)
+                return cast(_ValueT, _detached(existing))
 
             candidate = generator()
             if asyncio.iscoroutine(candidate):
@@ -456,8 +460,10 @@ class TokenCache:
             return result
 
     async def all(self) -> CacheData:
-        """Return a shallow copy of the entire cache snapshot."""
-        return self._snapshot()
+        """Return a copy of the entire cache with every value detached."""
+        return cast(
+            CacheData, {key: _detached(value) for key, value in self._data.items()}
+        )
 
     # ---------- Coordinator/API compatibility aliases (Protocol-friendly) ----------
 
@@ -576,6 +582,23 @@ _INSTANCES: dict[str, TokenCache] = {}
 _STATE: _GlobalState = {"legacy_migration_done": False, "default_entry_id": None}
 # Legacy migration sentinel retained for backward compatibility with older tests.
 _LEGACY_MIGRATION_DONE: bool = False
+
+
+def _detached(value: Any) -> Any:
+    """Return ``value`` with no container shared with the caller.
+
+    ``set`` skips the write when the stored value equals the new one. A caller
+    that edited the stored object in place would compare that object with
+    itself, the write would be skipped and the edit never saved (the FCM
+    invalidation path did exactly that). Copying container values on the way
+    in and out keeps the stored value and the caller's value apart. Cached
+    values are small JSON documents, so the copy is cheap. Every value that is
+    not an immutable scalar is copied, so a tuple or set holding a container is
+    detached as well.
+    """
+    if value is None or isinstance(value, (str, bytes, int, float)):
+        return value
+    return copy.deepcopy(value)
 
 
 def _legacy_migration_done() -> bool:
@@ -744,7 +767,7 @@ def get_cached_value(name: str) -> Any:
         if not _INSTANCES:
             return None
         cache = _get_default_cache()
-        return cache._data.get(name)
+        return _detached(cache._data.get(name))
     else:
         raise RuntimeError(
             f"Sync `get_cached_value({name!r})` used inside event loop. "
@@ -773,11 +796,12 @@ def set_cached_value(name: str, value: Any | None) -> None:
         return
 
     cache = _get_default_cache()
-    # Direct write to in-memory dict for sync context (CLI/tests). No disk write here.
+    # In-memory write for sync context (CLI/tests), detached like the write
+    # methods of the instance. No disk write here.
     if value is None:
         cache._data.pop(name, None)
     else:
-        cache._data[name] = value
+        cache._data[name] = _detached(value)
 
 
 def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
@@ -808,10 +832,10 @@ def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
 
     cache = _get_default_cache()
     if name in cache._data:
-        return cache._data[name]
+        return _detached(cache._data[name])
 
     value = generator()
-    cache._data[name] = value
+    cache._data[name] = _detached(value)
     return value
 
 
