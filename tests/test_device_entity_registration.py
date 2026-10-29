@@ -78,8 +78,13 @@ async def _patch_integration_runtime(  # noqa: PLR0915
     monkeypatch.setattr(integration, "async_setup", AsyncMock(return_value=True))
     monkeypatch.setattr(integration, "CONFIG_SCHEMA", lambda config: {})
 
+    # A dict-backed cache: the legacy migration stores the bundle here and the
+    # credential seed reads it back through ``all()`` in the same setup.
+    cached: dict[str, Any] = {}
     cache = SimpleNamespace(
-        async_set_cached_value=AsyncMock(), async_get_cached_value=AsyncMock()
+        async_set_cached_value=AsyncMock(side_effect=cached.__setitem__),
+        async_get_cached_value=AsyncMock(side_effect=cached.get),
+        all=AsyncMock(side_effect=lambda: dict(cached)),
     )
     monkeypatch.setattr(integration.TokenCache, "create", AsyncMock(return_value=cache))
     monkeypatch.setattr(integration, "_register_instance", lambda *_: None)

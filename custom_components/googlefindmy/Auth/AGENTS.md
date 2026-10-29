@@ -106,6 +106,16 @@ come back on every setup. An empty top-level value is still filled from the
 bundle, so a cold start keeps its registration (Issue #152). Enforced by
 `tests/test_credential_seed_cache_branch.py`.
 
+The legacy migration in `async_setup_entry` relies on that exception: when it
+moves the bundle into the cache, it removes **every** credential key from the
+entry (`DATA_SECRET_BUNDLE`, `scanned_data`, `CONF_OAUTH_TOKEN` and
+`DATA_AAS_TOKEN`), so the seed that runs right after it sees an entry without
+credentials and reads the cache back. Leaving one of them behind turns the
+migrated entry into "the user replaced the bundle", and the seed would drop the
+bundle the migration just stored, together with the key material derived from
+it. Enforced by `tests/test_legacy_migration_aas_token.py` (behaviour and an AST
+guard over the migration's `pop` calls).
+
 ### Credential ownership across receiver, cache and entry
 
 * **Detached copies.** A credential value that crosses between the FCM

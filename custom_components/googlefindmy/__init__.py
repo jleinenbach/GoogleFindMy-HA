@@ -8251,7 +8251,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             oauth_token_maybe if isinstance(oauth_token_maybe, str) else None
         )
 
-        aas_token_maybe = secrets_bundle.get(DATA_AAS_TOKEN)
+        # Entry first, as for the OAuth token above: the entry holds the token
+        # the config flow validated, which can differ from the bundle's own.
+        aas_token_maybe = entry.data.get(DATA_AAS_TOKEN)
+        if not isinstance(aas_token_maybe, str):
+            aas_token_maybe = secrets_bundle.get(DATA_AAS_TOKEN)
         aas_token_recovered = (
             aas_token_maybe if isinstance(aas_token_maybe, str) else None
         )
@@ -8320,6 +8324,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         updated_data.pop(DATA_SECRET_BUNDLE, None)
         updated_data.pop("scanned_data", None)
         updated_data.pop(CONF_OAUTH_TOKEN, None)
+        # The AAS token leaves the entry together with the bundle. The credential
+        # seed reads an entry without a bundle but with a credential as "the
+        # user replaced the bundle" and drops it from the cache; only an entry
+        # without any credential is the migration gap that reads the cache back
+        # (Auth/AGENTS.md, "HA vs standalone persistence").
+        updated_data.pop(DATA_AAS_TOKEN, None)
         updated_data[CONF_GOOGLE_EMAIL] = normalized_email
         updated_data[DATA_AUTH_METHOD] = auth_method_value
 
