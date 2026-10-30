@@ -59,6 +59,10 @@ class _DummyTokenCache:
     async def async_get_cached_value(self, key: str) -> Any:
         return self._store.get(key)
 
+    async def all(self) -> dict[str, Any]:
+        """Return a snapshot, as the credential seed reads it after the migration."""
+        return dict(self._store)
+
     async def flush(self) -> None:  # pragma: no cover - exercised implicitly
         return None
 

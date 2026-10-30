@@ -670,6 +670,10 @@ _LOGGABLE_BUNDLE_FIELDS: tuple[str, ...] = (
 # (see ``_bundle_without_fields_refreshed_since``).
 _RUNTIME_REFRESHED_BUNDLE_FIELDS: Final[frozenset[str]] = frozenset({"fcm_credentials"})
 
+# Top-level ``entry.data`` key of the FCM registration copy earlier config flows
+# stored next to the bundle. Nothing reads it; setup removes it.
+_ENTRY_FCM_CREDENTIALS_COPY_KEY: Final[str] = "fcm_credentials"
+
 
 def _bundle_without_fields_refreshed_since(
     bundle: Any, cache_snapshot: Mapping[str, Any]
@@ -5845,6 +5849,35 @@ def _async_strip_stray_nested_entry_data(
     hass.config_entries.async_update_entry(entry, data=cleaned)
 
 
+def _async_strip_entry_fcm_credentials_copy(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Drop the top-level FCM registration copy from ``entry.data``; idempotent.
+
+    Earlier config flows stored the registration twice: inside the secrets
+    bundle, where the seed reads it and the receiver renews it, and as a second
+    copy at the top level of the entry, which nothing reads. The copy only went
+    stale and kept one more exemplar of the device credential in the entry.
+
+    Same idiom as ``_async_strip_stray_nested_entry_data``: it runs on every
+    setup instead of from ``async_migrate_entry``, so no version bump is needed
+    and a downgrade stays possible (no released version reads the copy), and it
+    writes only when there is something to remove. The key is not part of the
+    credential fingerprint, so the write does not schedule a reload.
+    """
+
+    if _ENTRY_FCM_CREDENTIALS_COPY_KEY not in entry.data:
+        return
+
+    cleaned = dict(entry.data)
+    del cleaned[_ENTRY_FCM_CREDENTIALS_COPY_KEY]
+    _LOGGER.debug(
+        "[%s] Removing the unused top-level FCM registration copy from the entry",
+        entry.entry_id,
+    )
+    hass.config_entries.async_update_entry(entry, data=cleaned)
+
+
 async def _async_soft_migrate_data_to_options(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
@@ -8133,6 +8166,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # defect. Deliberately first, not down with the other soft migrations, so the
     # cleanup does not depend on the rest of the setup succeeding.
     _async_strip_stray_nested_entry_data(hass, entry)
+    _async_strip_entry_fcm_credentials_copy(hass, entry)
 
     legacy_cache: TokenCache | None = None
     cached_snapshot: Mapping[str, Any] | None = None
@@ -8202,7 +8236,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             oauth_token_maybe if isinstance(oauth_token_maybe, str) else None
         )
 
-        aas_token_maybe = secrets_bundle.get(DATA_AAS_TOKEN)
+        # Entry first, as for the OAuth token above: the entry holds the token
+        # the config flow validated, which can differ from the bundle's own.
+        aas_token_maybe = entry.data.get(DATA_AAS_TOKEN)
+        if not isinstance(aas_token_maybe, str):
+            aas_token_maybe = secrets_bundle.get(DATA_AAS_TOKEN)
         aas_token_recovered = (
             aas_token_maybe if isinstance(aas_token_maybe, str) else None
         )
@@ -8271,6 +8309,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         updated_data.pop(DATA_SECRET_BUNDLE, None)
         updated_data.pop("scanned_data", None)
         updated_data.pop(CONF_OAUTH_TOKEN, None)
+        # The AAS token leaves the entry together with the bundle. The credential
+        # seed reads an entry without a bundle but with a credential as "the
+        # user replaced the bundle" and drops it from the cache; only an entry
+        # without any credential is the migration gap that reads the cache back
+        # (Auth/AGENTS.md, "HA vs standalone persistence").
+        updated_data.pop(DATA_AAS_TOKEN, None)
         updated_data[CONF_GOOGLE_EMAIL] = normalized_email
         updated_data[DATA_AUTH_METHOD] = auth_method_value
 

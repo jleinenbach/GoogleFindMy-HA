@@ -515,26 +515,6 @@ class TestExtractOauthCandidatesFromSecrets:
         assert cf._extract_oauth_candidates_from_secrets({}) == []
 
 
-class TestExtractFcmCredentialsFromSecrets:
-    """Empiricism: returns dict if present, otherwise None; swallows exceptions."""
-
-    def test_returns_dict_when_present(self) -> None:
-        creds = {"installation": {"token": "x"}}
-        assert (
-            cf._extract_fcm_credentials_from_secrets({"fcm_credentials": creds})
-            is creds
-        )
-
-    def test_returns_none_when_absent(self) -> None:
-        assert cf._extract_fcm_credentials_from_secrets({}) is None
-
-    def test_returns_none_when_not_a_dict(self) -> None:
-        assert (
-            cf._extract_fcm_credentials_from_secrets({"fcm_credentials": "string"})
-            is None
-        )
-
-
 # ---------------------------------------------------------------------------
 # Block G: candidate labels + credential interpreters (cf.py lines 1360-1478)
 # ---------------------------------------------------------------------------

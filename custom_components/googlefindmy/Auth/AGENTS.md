@@ -106,7 +106,29 @@ come back on every setup. An empty top-level value is still filled from the
 bundle, so a cold start keeps its registration (Issue #152). Enforced by
 `tests/test_credential_seed_cache_branch.py`.
 
+The legacy migration in `async_setup_entry` relies on that exception: when it
+moves the bundle into the cache, it removes **every** credential key from the
+entry (`DATA_SECRET_BUNDLE`, `scanned_data`, `CONF_OAUTH_TOKEN` and
+`DATA_AAS_TOKEN`), so the seed that runs right after it sees an entry without
+credentials and reads the cache back. Leaving one of them behind turns the
+migrated entry into "the user replaced the bundle", and the seed would drop the
+bundle the migration just stored, together with the key material derived from
+it. Enforced by `tests/test_legacy_migration_aas_token.py` (behaviour and an AST
+guard over the migration's `pop` calls).
+
 ### Credential ownership across receiver, cache and entry
+
+* **One place for the FCM registration in the entry.** The registration lives
+  in the secrets bundle (`entry.data["secrets_data"]["fcm_credentials"]`) and
+  in the token cache, never as a top-level key of `entry.data`. Earlier config
+  flows stored a second copy there; nothing read it, it went stale after every
+  renewal, and it kept one more exemplar of the device credential in the
+  entry. No flow writes it any more, and a setup-time repair
+  (`_async_strip_entry_fcm_credentials_copy` in `__init__.py`, no version
+  bump, run before the legacy migration) removes a copy an older version
+  stored.
+  Enforced by `tests/test_fcm_credentials_entry_copy.py`, including an AST
+  guard that lets `config_flow.py` name the key only to read it.
 
 * **Detached copies.** A credential value that crosses between the FCM
   receiver, the `TokenCache` and `entry.data` is handed over as a deep copy,
@@ -122,8 +144,8 @@ bundle, so a cold start keeps its registration (Issue #152). Enforced by
   `tests/test_fcm_registration_entry_sync.py` and
   `tests/test_token_cache_value_isolation.py`.
 * **The entry is the durable store for a renewed registration.** The receiver
-  writes only the member it owns, `fcm_credentials` in the secrets bundle (and
-  the top-level copy where the entry already carries one), after leaving a
+  writes only the member it owns, `fcm_credentials` in the secrets bundle,
+  after leaving a
   self-write receipt (`entry_self_write`, see
   `agents/runtime_patterns/AGENTS.md`, "One owner per entry reload"). When the
   bundle holds a registration the receiver neither registered nor wrote
