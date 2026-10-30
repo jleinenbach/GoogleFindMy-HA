@@ -1836,20 +1836,6 @@ def _extract_oauth_candidates_from_secrets(
     return cands
 
 
-def _extract_fcm_credentials_from_secrets(
-    data: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Extract fcm_credentials from secrets.json if present."""
-
-    try:
-        fcm_creds = data.get("fcm_credentials")
-        if isinstance(fcm_creds, dict):
-            return fcm_creds
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
 def _persist_secrets_bundle(
     parsed: dict[str, Any],
     token: str,
@@ -1860,9 +1846,10 @@ def _persist_secrets_bundle(
 
     This is the single source of truth for the credential sub-dict written by
     the paste and preflight-import paths across initial setup, reauth and
-    options. Extracting it prevents a further copy-paste divergence -- most
-    notably the ``fcm_credentials`` line, which is the historically
-    divergence-prone one and therefore lives *inside* this helper.
+    options. Extracting it prevents a further copy-paste divergence between
+    those surfaces. The FCM registration stays inside the bundle: it is not
+    copied to the top level of the entry, because nothing reads such a copy and
+    it would only go stale (``Auth/AGENTS.md``).
 
     The helper only builds the bundle-specific keys; it deliberately does NOT
     own the surface-specific concerns that legitimately differ between call
@@ -1885,8 +1872,7 @@ def _persist_secrets_bundle(
 
     Returns:
         A new sub-dict with ``CONF_OAUTH_TOKEN``, ``DATA_SECRET_BUNDLE``,
-        optionally ``fcm_credentials``, optionally ``CONF_GOOGLE_EMAIL`` and
-        optionally ``DATA_AAS_TOKEN``.
+        optionally ``CONF_GOOGLE_EMAIL`` and optionally ``DATA_AAS_TOKEN``.
     """
 
     bundle: dict[str, Any] = {
@@ -1895,9 +1881,6 @@ def _persist_secrets_bundle(
     }
     if email is not None:
         bundle[CONF_GOOGLE_EMAIL] = email
-    fcm_credentials = _extract_fcm_credentials_from_secrets(parsed)
-    if fcm_credentials is not None:
-        bundle["fcm_credentials"] = fcm_credentials
     if isinstance(token, str) and token.startswith("aas_et/"):
         bundle[DATA_AAS_TOKEN] = token
     return bundle
@@ -3748,11 +3731,6 @@ async def _ingest_discovery_credentials(
     secrets_bundle = (
         dict(discovery.secrets_bundle) if discovery.secrets_bundle is not None else None
     )
-    fcm_credentials = (
-        _extract_fcm_credentials_from_secrets(secrets_bundle)
-        if secrets_bundle is not None
-        else None
-    )
 
     hass = cast(HomeAssistant, getattr(flow, "hass", None))
     if hass is None:
@@ -3795,8 +3773,6 @@ async def _ingest_discovery_credentials(
         auth_data[DATA_SECRET_BUNDLE] = secrets_bundle
     else:
         auth_data.pop(DATA_SECRET_BUNDLE, None)
-    if fcm_credentials is not None:
-        auth_data["fcm_credentials"] = fcm_credentials
 
     if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
         auth_data[DATA_AAS_TOKEN] = to_persist
@@ -4269,7 +4245,6 @@ class ConfigFlow(
             CONF_GOOGLE_EMAIL,
             DATA_SECRET_BUNDLE,
             DATA_AAS_TOKEN,
-            "fcm_credentials",
         )
         new_data: dict[str, Any] = {
             key: value
@@ -5928,9 +5903,6 @@ class ConfigFlow(
             }
             if DATA_SECRET_BUNDLE in self._auth_data:
                 data_payload[DATA_SECRET_BUNDLE] = self._auth_data[DATA_SECRET_BUNDLE]
-            fcm_credentials = self._auth_data.get("fcm_credentials")
-            if isinstance(fcm_credentials, Mapping):
-                data_payload["fcm_credentials"] = dict(fcm_credentials)
             aas_token = self._auth_data.get(DATA_AAS_TOKEN)
             if isinstance(aas_token, str) and aas_token:
                 data_payload[DATA_AAS_TOKEN] = aas_token
