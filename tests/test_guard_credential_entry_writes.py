@@ -1450,9 +1450,9 @@ def test_every_receiver_write_of_the_registration_is_a_deep_copy() -> None:
     """R1: ``fcm_credentials`` written by the receiver is never shared state."""
 
     writes, unclassified, shared = _receiver_problems(_parse(_RECEIVER))
-    # Two today: the bundle member and the top-level copy. An empty scan would
-    # pass the checks below silently.
-    assert writes >= 2, f"expected the receiver writes, found {writes}"
+    # One today: the bundle member (the top-level copy is no longer written).
+    # An empty scan would pass the checks below silently.
+    assert writes >= 1, f"expected the receiver writes, found {writes}"
     assert not unclassified, (
         f"unclassified use of {_MEMBER!r}; extend the guard deliberately: "
         f"{unclassified}"
