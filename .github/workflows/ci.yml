@@ -176,7 +176,6 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          ignore: topics issues
 
       # Transient HACS regression guard (hacs/integration#5252): the action
       # intermittently fetches the raw hacs.json / manifest.json as None from
@@ -198,7 +197,7 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          ignore: topics issues hacsjson integration_manifest
+          ignore: hacsjson integration_manifest
 
       - name: Classify HACS result
         id: hacs_verdict
