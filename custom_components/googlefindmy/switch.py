@@ -382,48 +382,56 @@ async def async_setup_entry(
         return
 
     entry_id = getattr(config_entry, "entry_id", None)
-    recovery_identifier = (
-        primary_scope.identifier if primary_scope is not None else None
-    )
-    recovery_subentry_key = (
-        primary_scope.subentry_key
-        if primary_scope is not None
-        else TRACKER_SUBENTRY_KEY
-    )
 
-    def _recovery_unique_id(dev_id: str) -> str:
-        return f"{DOMAIN}_{entry_id}_{recovery_identifier}_{dev_id}_{AUTOMATIC_POLLING_KEY}"
+    def _recovery_scope() -> tuple[str | None, str]:
+        # Read the scope on each call: with a subentry manager the setup defers
+        # ``_add_scope`` until the dispatcher signal, so ``primary_scope`` is
+        # still unset when the callbacks are registered below.
+        scope = primary_scope
+        if scope is None:
+            return None, TRACKER_SUBENTRY_KEY
+        return scope.identifier, scope.subentry_key
 
-    def _recovery_devices() -> list[dict[str, Any]]:
-        if not isinstance(entry_id, str) or not entry_id:
-            return []
-        if not isinstance(recovery_identifier, str) or not recovery_identifier:
-            return []
+    def _recovery_unique_id(identifier: str, dev_id: str) -> str:
+        return f"{DOMAIN}_{entry_id}_{identifier}_{dev_id}_{AUTOMATIC_POLLING_KEY}"
+
+    def _recovery_devices(subentry_key: str) -> list[dict[str, Any]]:
         return [
             device
-            for device in coordinator.get_subentry_snapshot(recovery_subentry_key)
+            for device in coordinator.get_subentry_snapshot(subentry_key)
             if isinstance(device, Mapping)
             and isinstance(device.get("id"), str)
             and device.get("id")
-            and _is_visible(recovery_subentry_key, device["id"])
+            and _is_visible(subentry_key, device["id"])
         ]
 
     def _expected_unique_ids() -> set[str]:
-        return {_recovery_unique_id(device["id"]) for device in _recovery_devices()}
+        identifier, subentry_key = _recovery_scope()
+        if not isinstance(entry_id, str) or not entry_id:
+            return set()
+        if not isinstance(identifier, str) or not identifier:
+            return set()
+        return {
+            _recovery_unique_id(identifier, device["id"])
+            for device in _recovery_devices(subentry_key)
+        }
 
     def _build_missing(missing: set[str]) -> list[SwitchEntity]:
-        if not missing or not isinstance(recovery_identifier, str):
+        identifier, subentry_key = _recovery_scope()
+        if not missing or not isinstance(entry_id, str) or not entry_id:
+            return []
+        if not isinstance(identifier, str) or not identifier:
             return []
         return [
             GoogleFindMyAutomaticPollingSwitch(
                 coordinator,
                 device,
                 _derive_device_label(device),
-                subentry_key=recovery_subentry_key,
-                subentry_identifier=recovery_identifier,
+                subentry_key=subentry_key,
+                subentry_identifier=identifier,
             )
-            for device in _recovery_devices()
-            if _recovery_unique_id(device["id"]) in missing
+            for device in _recovery_devices(subentry_key)
+            if _recovery_unique_id(identifier, device["id"]) in missing
         ]
 
     def _recovery_add_entities(

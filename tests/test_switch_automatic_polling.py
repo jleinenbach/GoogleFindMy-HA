@@ -21,22 +21,23 @@ from typing import Any
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.entity import EntityCategory
 
 from custom_components.googlefindmy import EntityRecoveryManager, button, switch
 from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
     DOMAIN,
+    OPT_ENABLE_STATS_ENTITIES,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from tests.test_button_subentry_setup import (
-    _ConfigEntryStub,
-    _make_add_entities,
-    _make_hass,
-)
+from tests.helpers.config_entries_stub import make_config_entry
+from tests.test_button_subentry_setup import _make_add_entities, _make_hass
 
 _OPT_DISABLED = "automatic_polling_disabled"
 _SUBENTRY_ID = "tracker-subentry"
@@ -48,6 +49,30 @@ _DEVICES = [
 
 def _switch_uid(entry_id: str, dev_id: str) -> str:
     return f"{DOMAIN}_{entry_id}_{_SUBENTRY_ID}_{dev_id}_automatic_location_polling"
+
+
+def _make_entry() -> Any:
+    """Config entry from the canonical factory (tests/AGENTS.md).
+
+    ``subentries`` is an HA attribute outside the factory signature, so it is
+    passed via ``**extra``; ``async_on_unload`` is attached per instance as the
+    factory leaves methods out on purpose.
+    """
+    entry = make_config_entry(
+        entry_id="entry-registry",
+        data={
+            DATA_SECRET_BUNDLE: {"username": "user@example.com"},
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            OPT_ENABLE_STATS_ENTITIES: True,
+        },
+        options={OPT_ENABLE_STATS_ENTITIES: True},
+        title="Registry Alignment",
+        subentries={},
+    )
+    unload_callbacks: list[Callable[[], None]] = []
+    entry._unload_callbacks = unload_callbacks
+    entry.async_on_unload = unload_callbacks.append
+    return entry
 
 
 def _tracker_subentry(features: tuple[str, ...] = ("switch",)) -> ConfigSubentry:
@@ -100,10 +125,11 @@ async def _setup_switches(
     devices: list[dict[str, Any]] = _DEVICES,
     hidden: frozenset[str] = frozenset(),
     recovery: bool = False,
+    deferred: bool = False,
 ) -> tuple[Any, Any, Any, list[tuple[Any, str | None]], list[asyncio.Task[Any]]]:
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _ConfigEntryStub()
+    entry = _make_entry()
     entry.subentries = {_SUBENTRY_ID: _tracker_subentry()}
     coordinator = _coordinator(
         stub_coordinator_factory, hass, entry, devices=devices, hidden=hidden
@@ -113,10 +139,21 @@ async def _setup_switches(
         runtime.entity_recovery_manager = EntityRecoveryManager(
             hass, entry, coordinator
         )
+    if deferred:
+        # A subentry manager makes the setup wait for the dispatcher signal,
+        # as for a parent entry in production.
+        runtime.subentry_manager = SimpleNamespace(
+            managed_subentries=dict(entry.subentries)
+        )
     entry.runtime_data = runtime
     add_entities, added, pending = _make_add_entities(hass, loop)
     await switch.async_setup_entry(hass, entry, add_entities)
     await asyncio.gather(*pending)
+    if deferred:
+        async_dispatcher_send(
+            hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", _SUBENTRY_ID
+        )
+        await asyncio.gather(*pending)
     return hass, entry, coordinator, added, pending
 
 
@@ -330,7 +367,7 @@ async def test_buttons_unchanged_by_the_switch_platform(
     """(d) Button entities keep their number and unique ids (R6)."""
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _ConfigEntryStub()
+    entry = _make_entry()
     entry.subentries = {
         _SUBENTRY_ID: _tracker_subentry(tuple(TRACKER_FEATURE_PLATFORMS))
     }
@@ -383,13 +420,23 @@ async def test_hidden_or_ignored_trackers_get_no_switch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("deferred", [False, True], ids=["direct", "deferred"])
 async def test_recovery_recreates_a_missing_switch(
     stub_coordinator_factory: Callable[..., type[Any]],
+    deferred: bool,
 ) -> None:
-    """(f) A switch missing from the entity registry is built and added again."""
+    """(f) A switch missing from the entity registry is built and added again.
+
+    ``deferred`` covers the production path of a parent entry with a subentry
+    manager, where the tracker scope only exists after the dispatcher signal.
+    """
     hass, entry, _, added, pending = await _setup_switches(
-        stub_coordinator_factory, recovery=True
+        stub_coordinator_factory, recovery=True, deferred=deferred
     )
+    if deferred:
+        assert {entity.unique_id for entity, _ in added} == {
+            _switch_uid(entry.entry_id, dev["id"]) for dev in _DEVICES
+        }
     manager = entry.runtime_data.entity_recovery_manager
     assert manager.expected_unique_ids_for_platform("switch") == {
         _switch_uid(entry.entry_id, dev["id"]) for dev in _DEVICES
