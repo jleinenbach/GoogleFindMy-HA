@@ -31,7 +31,7 @@ import math
 import re
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -935,3 +935,225 @@ def test_dump_counts_and_redacts_the_switch_options(
     rows = payload["coordinator"]["devices"]
     assert [row["automatic_polling"] for row in rows] == [False, True]
     assert rows[0]["automatic_polling_changed_at"] == "2026-11-10T20:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# M0 positive proofs: the writer's guards, unreadable options, canonical
+# options, and two failure paths of the diagnostics dump
+# ---------------------------------------------------------------------------
+
+
+class _OptionsFailingFor(dict):
+    """Entry options whose ``get`` fails for one key, as a corrupt store would."""
+
+    def __init__(self, failing_key: str, **values: Any) -> None:
+        super().__init__(**values)
+        self._failing_key = failing_key
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        if key == self._failing_key:
+            raise RuntimeError("options store unreadable")
+        return super().get(key, default)
+
+
+class _RefusingConfigEntries:
+    """A manager whose ``async_update_entry`` stores nothing and says so."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def async_update_entry(
+        self, _entry: Any, *, options: Any = None, **_kw: Any
+    ) -> bool:
+        self.calls += 1
+        return False
+
+
+def _bare_coordinator(manager: Any, entry: Any) -> GoogleFindMyCoordinator:
+    """The production class without ``__init__`` (needs the HA runtime), as in (s)."""
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord.hass = SimpleNamespace(config_entries=manager)
+    coord.config_entry = entry
+    return coord
+
+
+def _change_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("AUTOMATIC_POLLING_CHANGE")
+    ]
+
+
+def test_unreadable_change_times_are_reported_as_unknown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(o) A failing read of the change times leaves the rows without a time.
+
+    ``options`` is the core's read-only view (tests/AGENTS.md point 10) over a
+    mapping whose ``get`` raises for the change-time key only. The disabled
+    list is still read, so the row reports the switch as off and its change
+    time as unknown, and the coordinator logs the failure at DEBUG.
+    """
+    coordinator = _PerDeviceCoordinator(data=[{"device_id": "dev-a"}])
+    store = _OptionsFailingFor(
+        _OPT_CHANGED_AT,
+        **{
+            _OPT_DISABLED: ["dev-a"],
+            _OPT_CHANGED_AT: {"dev-a": "2026-11-10T20:00:00Z"},
+        },
+    )
+    entry = make_config_entry(entry_id=_ENTRY_ID, options={})
+    entry.options = MappingProxyType(store)
+    coordinator.config_entry = entry
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
+        rows = coordinator.build_per_device_diagnostics()
+
+    assert len(rows) == 1
+    assert rows[0]["automatic_polling"] is False
+    assert rows[0]["automatic_polling_changed_at"] is None
+    assert (
+        "Reading the automatic-polling change times failed; treating them as "
+        "unknown: options store unreadable"
+    ) in [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.parametrize("case", ["no-entry", "non-string-id", "empty-id"])
+def test_switch_write_is_skipped_without_entry_or_device_id(
+    case: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(m) Nothing is written or logged without an entry or a usable device id.
+
+    ``no-entry``: the coordinator has no config entry yet. ``non-string-id``:
+    a pure test way, the parameter is declared ``str``. ``empty-id``: the
+    empty string. On every way the manager sees no update and no change line
+    is logged.
+    """
+    manager = _CoreLikeConfigEntries()
+    entry = make_config_entry(entry_id=_ENTRY_ID, options={_OPT_DISABLED: []})
+    coord = _bare_coordinator(manager, None if case == "no-entry" else entry)
+    device_id: Any = {"no-entry": "dev-off", "non-string-id": 5, "empty-id": ""}[case]
+
+    error: BaseException | None = None
+    with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
+        try:
+            coord.async_set_automatic_polling(device_id, False)
+        except Exception as err:  # noqa: BLE001 - the test asserts on the outcome
+            error = err
+
+    assert error is None
+    assert manager.updates == []
+    assert entry.options == {_OPT_DISABLED: []}
+    assert _change_lines(caplog) == []
+
+
+def test_switch_write_logs_no_change_when_the_manager_stores_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(n) The INFO line follows the manager's answer: ``False`` means no line."""
+    manager = _RefusingConfigEntries()
+    entry = make_config_entry(entry_id=_ENTRY_ID, options={_OPT_DISABLED: []})
+    coord = _bare_coordinator(manager, entry)
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
+        coord.async_set_automatic_polling("dev-off", False)
+
+    assert manager.calls == 1
+    assert entry.options == {_OPT_DISABLED: []}
+    assert _change_lines(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "key", [_OPT_DISABLED, _OPT_CHANGED_AT], ids=["disabled", "changed_at"]
+)
+def test_canonical_switch_options_are_left_alone(key: str) -> None:
+    """(k) Options already in canonical form report no change and keep their objects.
+
+    The migration then has nothing to store: the manager sees no update.
+    """
+    value: Any = (
+        ["dev-a", "dev-b"]
+        if key == _OPT_DISABLED
+        else {"dev-a": "2026-11-10T20:00:00Z"}
+    )
+    options: dict[str, Any] = {key: value}
+
+    changed = integration._normalize_automatic_polling_options(_ENTRY_ID, options)
+
+    assert changed is False
+    assert options == {key: value}
+    assert options[key] is value
+
+    entry = make_config_entry(entry_id=_ENTRY_ID, options={key: value})
+    hass = SimpleNamespace(config_entries=_CoreLikeConfigEntries())
+    integration._migrate_entry_identifier_namespaces(hass, entry)
+    assert hass.config_entries.updates == []
+
+
+class _SnapshotWithoutIds:
+    """Resolver whose snapshot carries events without ``canonical_id``."""
+
+    def uwt_transition_snapshot(self, _entry_id: str) -> Any:
+        event = SimpleNamespace(
+            **{name: None for name in diagnostics._UWT_EVENT_FIELDS}
+        )
+        return SimpleNamespace(
+            capacity=8, dropped=0, info_lines_per_device_hour=None, events=[event]
+        )
+
+
+def _dump_outcome(
+    hass: Any, entry: Any
+) -> tuple[dict[str, Any] | None, BaseException | None]:
+    try:
+        return _run(diagnostics.async_get_config_entry_diagnostics(hass, entry)), None
+    except Exception as err:  # noqa: BLE001 - the test asserts on the outcome
+        return None, err
+
+
+def test_dump_survives_a_snapshot_whose_events_carry_no_id(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(t) An unreadable snapshot leaves the dump intact: no index, no events."""
+    coordinator = _PerDeviceCoordinator(data=[{"device_id": "dev-a"}])
+    entry, hass = _make_entry_and_hass(coordinator)
+    hass.data[DOMAIN][diagnostics.DATA_EID_RESOLVER] = _SnapshotWithoutIds()
+    _patch_registries(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG, logger=diagnostics.__name__):
+        payload, error = _dump_outcome(hass, entry)
+
+    assert error is None
+    assert payload is not None
+    assert payload["uwt_transitions"]["events"] == []
+    assert [row["uwt_device_index"] for row in payload["coordinator"]["devices"]] == [
+        None
+    ]
+    assert "uwt_transitions_block_failed error=AttributeError" in [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+def test_dump_reports_no_counter_start_when_the_reader_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(u) A failing ``locate_requests_counted_since`` reads as ``None`` in the dump.
+
+    The reader is overridden on the test subclass of the coordinator, as
+    ``test_devices_block_empty_when_builder_raises`` does for the row builder.
+    """
+
+    class _FailingSince(_PerDeviceCoordinator):
+        def locate_requests_counted_since(self) -> str | None:
+            raise RuntimeError("counter unavailable")
+
+    coordinator = _FailingSince(data=[])
+    entry, hass = _make_entry_and_hass(coordinator)
+    _patch_registries(monkeypatch)
+
+    payload, error = _dump_outcome(hass, entry)
+
+    assert error is None
+    assert payload is not None
+    assert payload["coordinator"].get("locate_requests_counted_since", "absent") is None

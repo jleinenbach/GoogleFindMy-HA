@@ -216,7 +216,7 @@ async def async_setup_entry(
             return bool(
                 coordinator.is_device_visible_in_subentry(subentry_key, device_id)
             )
-        except Exception:  # pragma: no cover - defensive fallback for stubs
+        except Exception:  # a failing visibility check hides nothing
             return True
 
     added_unique_ids: set[str] = set()

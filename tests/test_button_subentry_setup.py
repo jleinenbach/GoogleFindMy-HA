@@ -507,3 +507,65 @@ async def test_recovery_recreates_missing_buttons(
     assert {entity.unique_id for entity in registration.entity_factory(missing)} == (
         missing
     )
+
+
+@pytest.mark.asyncio
+async def test_recovery_before_the_signal_expects_no_button(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Deferred setup: until the signal arrives the button recovery has no scope.
+
+    It expects no unique id, builds nothing for any set of missing ids and
+    recovers nothing; after the signal it expects the buttons of the scope.
+    The registration is read from the manager because it is the only handle
+    on the factory.
+    """
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    tracker_subentry = ConfigSubentry(
+        data={"group_key": _PB1_GROUP_KEY, "features": ("button",)},
+        subentry_type="tracker",
+        title="Tracker",
+        subentry_id=_PB1_SUBENTRY_ID,
+    )
+    entry = _pb1_make_entry({_PB1_SUBENTRY_ID: tracker_subentry})
+    coordinator_cls = stub_coordinator_factory(
+        data=[{"id": "visible-device", "name": "Visible"}]
+    )
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    manager = EntityRecoveryManager(hass, entry, coordinator)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator,
+        entity_recovery_manager=manager,
+        # A subentry manager makes the setup wait for the dispatcher signal,
+        # as for a parent entry in production.
+        subentry_manager=SimpleNamespace(managed_subentries=dict(entry.subentries)),
+    )
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await button.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    assert added == []
+    assert manager.expected_unique_ids_for_platform("button") == set()
+    registration = manager._platforms[str(Platform.BUTTON)]
+    probe = {
+        f"{DOMAIN}_{entry.entry_id}_{identifier}_visible-device_{action}"
+        for identifier in ("tracker", _PB1_GROUP_KEY, _PB1_SUBENTRY_ID)
+        for action in _PB1_ACTIONS
+    }
+    assert registration.entity_factory(probe) == []
+    hass.data["entity_registry"] = _pb1_registry(entry.entry_id, set())
+    await manager.async_recover_missing_entities()
+    await asyncio.gather(*pending)
+    assert added == []
+
+    async_dispatcher_send(
+        hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", _PB1_SUBENTRY_ID
+    )
+    await asyncio.gather(*pending)
+    assert manager.expected_unique_ids_for_platform("button") == {
+        _pb1_uid(entry.entry_id, "visible-device", action) for action in _PB1_ACTIONS
+    }

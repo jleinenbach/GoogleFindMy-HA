@@ -436,3 +436,47 @@ async def test_recovery_expected_ids_follow_the_service_scope(
     assert recovered == {
         (unique_id, _PB2_SERVICE_ID) for unique_id in expected - {present}
     }
+
+
+@pytest.mark.asyncio
+async def test_recovery_without_a_service_scope_expects_nothing(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Before a service scope exists the recovery expects and builds no sensor.
+
+    Only a tracker subentry is known at setup (W5 before its signal), so the
+    recovery scope is unset: no expected id, nothing built for any set of
+    missing ids, nothing recovered. The registration is read from the manager
+    because it is the only handle on the factory.
+    """
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _pb2_make_entry({_PB2_TRACKER_ID: _pb2_tracker_subentry()})
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    manager = EntityRecoveryManager(hass, entry, coordinator)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, entity_recovery_manager=manager
+    )
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await binary_sensor.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    probe = {
+        f"{entry.entry_id}:{identifier}:{kind}"
+        for identifier in (SERVICE_SUBENTRY_KEY, _PB2_SERVICE_ID)
+        for kind in _PB2_KINDS
+    }
+    assert not probe & {entity.unique_id for entity, _ in added}
+    assert manager.expected_unique_ids_for_platform("binary_sensor") == set()
+    registration = manager._platforms[str(Platform.BINARY_SENSOR)]
+    assert registration.entity_factory(probe) == []
+
+    hass.data["entity_registry"] = _pb2_registry(entry.entry_id, set())
+    before = len(added)
+    await manager.async_recover_missing_entities()
+    await asyncio.gather(*pending)
+    assert added[before:] == []
