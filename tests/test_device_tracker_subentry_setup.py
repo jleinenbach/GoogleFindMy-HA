@@ -1,5 +1,5 @@
 import asyncio
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -7,13 +7,14 @@ from homeassistant.config_entries import ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from custom_components.googlefindmy import device_tracker
+from custom_components.googlefindmy import EntityRecoveryManager, device_tracker
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DATA_SECRET_BUNDLE,
     DOMAIN,
     TRACKER_SUBENTRY_KEY,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _ConfigEntryStub:
@@ -291,3 +292,164 @@ async def test_device_tracker_ignores_non_tracker_subentry(
     await asyncio.gather(*pending)
 
     assert added == []
+
+
+# ---------------------------------------------------------------------------
+# PB-2s (W5t): the recovery covers a tracker scope that arrives by signal
+# ---------------------------------------------------------------------------
+
+_PB2S_SERVICE_ID = "service-subentry"
+_PB2S_TRACKER_ID = "tracker-subentry"
+_PB2S_TRACKER_KEY = "tracker"
+
+
+def _pb2s_make_entry(subentries: dict[str, Any]) -> Any:
+    """Config entry from the canonical factory (tests/AGENTS.md).
+
+    ``subentries`` is an HA attribute outside the factory signature, so it is
+    passed via ``**extra`` as the read-only mapping view the core hands out;
+    the mutable store behind it is kept on ``_subentry_store`` so a test can
+    register a subentry the way the core does before it signals.
+    ``async_on_unload`` is attached per instance as the factory leaves methods
+    out on purpose.
+    """
+    store: dict[str, Any] = dict(subentries)
+    entry = make_config_entry(
+        entry_id="entry-tracker",
+        data={
+            DATA_SECRET_BUNDLE: {"username": "user@example.com"},
+            CONF_GOOGLE_EMAIL: "user@example.com",
+        },
+        subentries=MappingProxyType(store),
+    )
+    entry._subentry_store = store
+    unload_callbacks: list[Any] = []
+    entry._unload_callbacks = unload_callbacks
+    entry.async_on_unload = unload_callbacks.append
+    return entry
+
+
+def _pb2s_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
+    """Entity registry double holding ``present`` device tracker unique ids."""
+    rows = {
+        f"device_tracker.present_{index}": SimpleNamespace(
+            domain="device_tracker",
+            platform=DOMAIN,
+            unique_id=unique_id,
+            config_entry_id=entry_id,
+        )
+        for index, unique_id in enumerate(sorted(present))
+    }
+    return SimpleNamespace(
+        entities=rows,
+        async_entries_for_config_entry=lambda config_entry_id: [
+            row for row in rows.values() if row.config_entry_id == config_entry_id
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_expected_ids_follow_the_tracker_scope_from_the_signal(
+    stub_coordinator_factory: Any,
+) -> None:
+    """W5t: the tracker subentry arrives by signal after a service-only setup.
+
+    The recovery must then expect the main and the last-location tracker of
+    each visible, enabled device of that scope, and none of a hidden device.
+    """
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    service_subentry = ConfigSubentry(
+        data={"group_key": "service", "features": ("sensor",)},
+        subentry_type="service",
+        title="Service",
+        subentry_id=_PB2S_SERVICE_ID,
+    )
+    tracker_subentry = ConfigSubentry(
+        data={"group_key": _PB2S_TRACKER_KEY, "features": ("device_tracker",)},
+        subentry_type="tracker",
+        title="Tracker",
+        subentry_id=_PB2S_TRACKER_ID,
+    )
+    entry = _pb2s_make_entry({_PB2S_SERVICE_ID: service_subentry})
+
+    visible_ids = ["visible-device"]
+
+    def _is_visible(self: Any, subentry_key: str, device_id: str) -> bool:  # noqa: ANN001
+        return device_id in visible_ids
+
+    def _metadata(
+        self: Any, *, key: str | None = None, feature: str | None = None
+    ) -> Any:  # noqa: ANN001
+        # The tracker recovery reads visibility and enablement from the
+        # subentry metadata of the scope's key.
+        return SimpleNamespace(
+            key=key,
+            config_subentry_id=_PB2S_TRACKER_ID,
+            visible_device_ids=list(visible_ids),
+            enabled_device_ids=list(visible_ids),
+        )
+
+    coordinator_cls = stub_coordinator_factory(
+        data=[
+            {"id": "visible-device", "name": "Visible"},
+            {"id": "hidden-device", "name": "Hidden"},
+        ],
+        methods={
+            "is_device_visible_in_subentry": _is_visible,
+            "get_subentry_metadata": _metadata,
+        },
+    )
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+
+    manager = EntityRecoveryManager(hass, entry, coordinator)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, entity_recovery_manager=manager
+    )
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await device_tracker.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    assert added == [], "a service-only setup adds no tracker"
+    assert manager.expected_unique_ids_for_platform("device_tracker") == set()
+
+    # The core registers the subentry, then the integration signals it
+    # (``__init__.py``, ``_async_setup_new_subentries``).
+    entry._subentry_store[_PB2S_TRACKER_ID] = tracker_subentry
+    async_dispatcher_send(
+        hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", tracker_subentry
+    )
+    await asyncio.gather(*pending)
+
+    main_uid = f"{entry.entry_id}:{_PB2S_TRACKER_ID}:visible-device"
+    last_uid = f"{entry.entry_id}:{_PB2S_TRACKER_ID}:visible-device:last_location"
+
+    # Setup observation: the platform exposes the visible device's trackers.
+    # (The setup builds every device of the coordinator snapshot; in
+    # production the snapshot is already visibility-filtered, so the hidden
+    # device is not asserted on here but on the recovery, which reads the
+    # subentry metadata itself.)
+    added_ids = {entity.unique_id for entity, _ in added}
+    assert {main_uid, last_uid} <= added_ids
+
+    # The recovery expects exactly the visible device's trackers; the hidden
+    # device (in the snapshot, not in the metadata) contributes nothing.
+    assert manager.expected_unique_ids_for_platform("device_tracker") == {
+        main_uid,
+        last_uid,
+    }
+
+    # Reconstruction: the main tracker is present, the last-location tracker
+    # is rebuilt and handed to the recorded add_entities with the scope's id.
+    hass.data["entity_registry"] = _pb2s_registry(entry.entry_id, {main_uid})
+    before = len(added)
+
+    await manager.async_recover_missing_entities()
+    await asyncio.gather(*pending)
+
+    recovered = {(entity.unique_id, config) for entity, config in added[before:]}
+    assert recovered == {(last_uid, _PB2S_TRACKER_ID)}

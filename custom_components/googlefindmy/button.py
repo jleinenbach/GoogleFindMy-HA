@@ -737,14 +737,15 @@ async def async_setup_entry(
 
     if isinstance(recovery_manager, EntityRecoveryManager):
         entry_id = getattr(config_entry, "entry_id", None)
-        tracker_identifier = (
-            primary_scope.identifier if primary_scope is not None else None
-        )
-        tracker_subentry_key = (
-            primary_scope.subentry_key
-            if primary_scope is not None
-            else TRACKER_SUBENTRY_KEY
-        )
+
+        def _recovery_scope() -> tuple[str | None, str]:
+            # Read the scope on each call: with a subentry manager the setup defers
+            # ``_add_scope`` until the dispatcher signal, so ``primary_scope`` is
+            # still unset when the callbacks are registered below.
+            scope = primary_scope
+            if scope is None:
+                return None, TRACKER_SUBENTRY_KEY
+            return scope.identifier, scope.subentry_key
 
         def _recovery_add_entities(
             new_entities: Iterable[ButtonEntity],
@@ -754,7 +755,7 @@ async def async_setup_entry(
                 return
             primary_scheduler(new_entities, update_before_add)
 
-        def _is_visible_device(device_id: str) -> bool:
+        def _is_visible_device(tracker_subentry_key: str, device_id: str) -> bool:
             is_visible = getattr(coordinator, "is_device_visible_in_subentry", None)
             if callable(is_visible):
                 try:
@@ -764,6 +765,7 @@ async def async_setup_entry(
             return True
 
         def _expected_unique_ids() -> set[str]:
+            tracker_identifier, tracker_subentry_key = _recovery_scope()
             if not isinstance(entry_id, str) or not entry_id:
                 return set()
             if not isinstance(tracker_identifier, str) or not tracker_identifier:
@@ -775,10 +777,11 @@ async def async_setup_entry(
                 if isinstance(device, Mapping)
                 and isinstance(device.get("id"), str)
                 and device.get("id")
-                and _is_visible_device(device["id"])
+                and _is_visible_device(tracker_subentry_key, device["id"])
             }
 
         def _build_entities(missing: set[str]) -> list[ButtonEntity]:
+            tracker_identifier, tracker_subentry_key = _recovery_scope()
             if not missing:
                 return []
             built: list[ButtonEntity] = []
@@ -791,7 +794,7 @@ async def async_setup_entry(
                 dev_id = device.get("id") if isinstance(device, Mapping) else None
                 if not isinstance(dev_id, str) or not dev_id:
                     continue
-                if not _is_visible_device(dev_id):
+                if not _is_visible_device(tracker_subentry_key, dev_id):
                     continue
                 label = _derive_device_label(device)
                 mapping: dict[str, type[GoogleFindMyButtonEntity]] = {
