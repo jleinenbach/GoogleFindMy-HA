@@ -531,7 +531,7 @@ def test_switch_entity_has_no_name_in_the_change_log() -> None:
 
 
 # ---------------------------------------------------------------------------
-# M0 positive proofs: behaviour of ``switch.py`` no earlier test pinned
+# Positive proofs: behaviour of ``switch.py`` no earlier test pinned
 # ---------------------------------------------------------------------------
 
 _M0_SERVICE_ID = "service-subentry"

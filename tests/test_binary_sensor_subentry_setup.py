@@ -276,15 +276,15 @@ async def test_recovery_registers_connectivity_sensor(
 
 
 # ---------------------------------------------------------------------------
-# PB-2: the recovery covers the service scope on every way it can arise
+# The recovery covers the service scope on every way it can arise
 # ---------------------------------------------------------------------------
 
-_PB2_SERVICE_ID = "service-subentry"
-_PB2_TRACKER_ID = "tracker-subentry"
-_PB2_KINDS = ("polling", "auth_status", "connectivity")
+_RECOVERY_SERVICE_ID = "service-subentry"
+_RECOVERY_TRACKER_ID = "tracker-subentry"
+_RECOVERY_KINDS = ("polling", "auth_status", "connectivity")
 
 
-def _pb2_make_entry(subentries: dict[str, Any] | None) -> Any:
+def _recovery_make_entry(subentries: dict[str, Any] | None) -> Any:
     """Config entry from the canonical factory (tests/AGENTS.md).
 
     ``subentries`` is an HA attribute outside the factory signature, so it is
@@ -313,25 +313,25 @@ def _pb2_make_entry(subentries: dict[str, Any] | None) -> Any:
     return entry
 
 
-def _pb2_service_subentry() -> ConfigSubentry:
+def _recovery_service_subentry() -> ConfigSubentry:
     return ConfigSubentry(
         data={"group_key": SERVICE_SUBENTRY_KEY, "features": ("binary_sensor",)},
         subentry_type=SUBENTRY_TYPE_SERVICE,
         title="Service",
-        subentry_id=_PB2_SERVICE_ID,
+        subentry_id=_RECOVERY_SERVICE_ID,
     )
 
 
-def _pb2_tracker_subentry() -> ConfigSubentry:
+def _recovery_tracker_subentry() -> ConfigSubentry:
     return ConfigSubentry(
         data={"group_key": "tracker", "features": ("binary_sensor",)},
         subentry_type="tracker",
         title="Tracker",
-        subentry_id=_PB2_TRACKER_ID,
+        subentry_id=_RECOVERY_TRACKER_ID,
     )
 
 
-def _pb2_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
+def _recovery_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
     """Entity registry double holding ``present`` binary sensor unique ids."""
     rows = {
         f"binary_sensor.present_{index}": SimpleNamespace(
@@ -369,22 +369,24 @@ async def test_recovery_expected_ids_follow_the_service_scope(
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
 
-    service_subentry = _pb2_service_subentry()
+    service_subentry = _recovery_service_subentry()
     config_subentry_id: str | None = None
     managed: dict[str, Any] | None = None
     if way == "W1":
-        entry = _pb2_make_entry({_PB2_SERVICE_ID: service_subentry})
-        managed = {_PB2_SERVICE_ID: service_subentry}
+        entry = _recovery_make_entry({_RECOVERY_SERVICE_ID: service_subentry})
+        managed = {_RECOVERY_SERVICE_ID: service_subentry}
     elif way == "W2":
-        entry = _pb2_make_entry({_PB2_SERVICE_ID: service_subentry})
+        entry = _recovery_make_entry({_RECOVERY_SERVICE_ID: service_subentry})
     elif way == "W3":
-        entry = _pb2_make_entry({})
-        config_subentry_id = _PB2_SERVICE_ID
+        entry = _recovery_make_entry({})
+        config_subentry_id = _RECOVERY_SERVICE_ID
     elif way == "W4":
-        entry = _pb2_make_entry(None)
-        config_subentry_id = _PB2_SERVICE_ID
+        entry = _recovery_make_entry(None)
+        config_subentry_id = _RECOVERY_SERVICE_ID
     else:
-        entry = _pb2_make_entry({_PB2_TRACKER_ID: _pb2_tracker_subentry()})
+        entry = _recovery_make_entry(
+            {_RECOVERY_TRACKER_ID: _recovery_tracker_subentry()}
+        )
 
     coordinator_cls = stub_coordinator_factory()
     coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
@@ -403,7 +405,9 @@ async def test_recovery_expected_ids_follow_the_service_scope(
     )
     await asyncio.gather(*pending)
 
-    expected = {f"{entry.entry_id}:{_PB2_SERVICE_ID}:{kind}" for kind in _PB2_KINDS}
+    expected = {
+        f"{entry.entry_id}:{_RECOVERY_SERVICE_ID}:{kind}" for kind in _RECOVERY_KINDS
+    }
 
     if way == "W5":
         assert not expected & {entity.unique_id for entity, _ in added}, (
@@ -411,7 +415,7 @@ async def test_recovery_expected_ids_follow_the_service_scope(
         )
         # The core registers the subentry, then the integration signals it
         # (``__init__.py``, ``_async_setup_new_subentries``).
-        entry._subentry_store[_PB2_SERVICE_ID] = service_subentry
+        entry._subentry_store[_RECOVERY_SERVICE_ID] = service_subentry
         async_dispatcher_send(
             hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", service_subentry
         )
@@ -425,8 +429,8 @@ async def test_recovery_expected_ids_follow_the_service_scope(
 
     # Reconstruction: one sensor is present, the two others are rebuilt and
     # handed to the recorded add_entities with the scope's subentry id.
-    present = f"{entry.entry_id}:{_PB2_SERVICE_ID}:polling"
-    hass.data["entity_registry"] = _pb2_registry(entry.entry_id, {present})
+    present = f"{entry.entry_id}:{_RECOVERY_SERVICE_ID}:polling"
+    hass.data["entity_registry"] = _recovery_registry(entry.entry_id, {present})
     before = len(added)
 
     await manager.async_recover_missing_entities()
@@ -434,7 +438,7 @@ async def test_recovery_expected_ids_follow_the_service_scope(
 
     recovered = {(entity.unique_id, config) for entity, config in added[before:]}
     assert recovered == {
-        (unique_id, _PB2_SERVICE_ID) for unique_id in expected - {present}
+        (unique_id, _RECOVERY_SERVICE_ID) for unique_id in expected - {present}
     }
 
 
@@ -452,7 +456,7 @@ async def test_recovery_without_a_service_scope_expects_nothing(
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
 
-    entry = _pb2_make_entry({_PB2_TRACKER_ID: _pb2_tracker_subentry()})
+    entry = _recovery_make_entry({_RECOVERY_TRACKER_ID: _recovery_tracker_subentry()})
     coordinator_cls = stub_coordinator_factory()
     coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
     coordinator.config_entry = entry
@@ -467,15 +471,15 @@ async def test_recovery_without_a_service_scope_expects_nothing(
 
     probe = {
         f"{entry.entry_id}:{identifier}:{kind}"
-        for identifier in (SERVICE_SUBENTRY_KEY, _PB2_SERVICE_ID)
-        for kind in _PB2_KINDS
+        for identifier in (SERVICE_SUBENTRY_KEY, _RECOVERY_SERVICE_ID)
+        for kind in _RECOVERY_KINDS
     }
     assert not probe & {entity.unique_id for entity, _ in added}
     assert manager.expected_unique_ids_for_platform("binary_sensor") == set()
     registration = manager._platforms[str(Platform.BINARY_SENSOR)]
     assert registration.entity_factory(probe) == []
 
-    hass.data["entity_registry"] = _pb2_registry(entry.entry_id, set())
+    hass.data["entity_registry"] = _recovery_registry(entry.entry_id, set())
     before = len(added)
     await manager.async_recover_missing_entities()
     await asyncio.gather(*pending)

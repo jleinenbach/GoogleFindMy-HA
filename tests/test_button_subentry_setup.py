@@ -351,17 +351,17 @@ async def test_button_setup_ignores_non_tracker_subentry(
 
 
 # ---------------------------------------------------------------------------
-# PB-1: the recovery reads the tracker scope at call time
+# The recovery reads the tracker scope at call time
 # ---------------------------------------------------------------------------
 
-_PB1_SUBENTRY_ID = "tracker-subentry"
+_RECOVERY_SUBENTRY_ID = "tracker-subentry"
 # A non-default group key, so a recovery that reads a fixed key instead of the
-# scope's key (M-B3) is visible to the visibility double below.
-_PB1_GROUP_KEY = "fleet"
-_PB1_ACTIONS = ("play_sound", "stop_sound", "locate_device")
+# scope's key is visible to the visibility double below.
+_RECOVERY_GROUP_KEY = "fleet"
+_RECOVERY_ACTIONS = ("play_sound", "stop_sound", "locate_device")
 
 
-def _pb1_make_entry(subentries: dict[str, Any]) -> Any:
+def _recovery_make_entry(subentries: dict[str, Any]) -> Any:
     """Config entry from the canonical factory (tests/AGENTS.md).
 
     ``subentries`` is an HA attribute outside the factory signature, so it is
@@ -383,11 +383,11 @@ def _pb1_make_entry(subentries: dict[str, Any]) -> Any:
     return entry
 
 
-def _pb1_uid(entry_id: str, device_id: str, action: str) -> str:
-    return f"{DOMAIN}_{entry_id}_{_PB1_SUBENTRY_ID}_{device_id}_{action}"
+def _recovery_uid(entry_id: str, device_id: str, action: str) -> str:
+    return f"{DOMAIN}_{entry_id}_{_RECOVERY_SUBENTRY_ID}_{device_id}_{action}"
 
 
-def _pb1_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
+def _recovery_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
     """Entity registry double holding ``present`` button unique ids."""
     rows = {
         f"button.present_{index}": SimpleNamespace(
@@ -422,19 +422,19 @@ async def test_recovery_recreates_missing_buttons(
     hass = _make_hass(loop)
 
     tracker_subentry = ConfigSubentry(
-        data={"group_key": _PB1_GROUP_KEY, "features": ("button",)},
+        data={"group_key": _RECOVERY_GROUP_KEY, "features": ("button",)},
         subentry_type="tracker",
         title="Tracker",
-        subentry_id=_PB1_SUBENTRY_ID,
+        subentry_id=_RECOVERY_SUBENTRY_ID,
     )
-    entry = _pb1_make_entry({_PB1_SUBENTRY_ID: tracker_subentry})
+    entry = _recovery_make_entry({_RECOVERY_SUBENTRY_ID: tracker_subentry})
 
     visible_ids = {"visible-device"}
 
     def _is_visible(self: Any, subentry_key: str, device_id: str) -> bool:  # noqa: ANN001
         # Only the scope's own key decides; any other key answers "visible",
         # so a recovery that asks with a fixed key exposes the hidden device.
-        if subentry_key in {_PB1_GROUP_KEY, _PB1_SUBENTRY_ID}:
+        if subentry_key in {_RECOVERY_GROUP_KEY, _RECOVERY_SUBENTRY_ID}:
             return device_id in visible_ids
         return True
 
@@ -466,15 +466,17 @@ async def test_recovery_recreates_missing_buttons(
     if deferred:
         assert added == [], "deferred setup must add nothing before the signal"
         async_dispatcher_send(
-            hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", _PB1_SUBENTRY_ID
+            hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", _RECOVERY_SUBENTRY_ID
         )
         await asyncio.gather(*pending)
 
     expected_visible = {
-        _pb1_uid(entry.entry_id, "visible-device", action) for action in _PB1_ACTIONS
+        _recovery_uid(entry.entry_id, "visible-device", action)
+        for action in _RECOVERY_ACTIONS
     }
     hidden = {
-        _pb1_uid(entry.entry_id, "hidden-device", action) for action in _PB1_ACTIONS
+        _recovery_uid(entry.entry_id, "hidden-device", action)
+        for action in _RECOVERY_ACTIONS
     }
 
     # Setup observation: the platform itself exposes the visible buttons only.
@@ -485,8 +487,8 @@ async def test_recovery_recreates_missing_buttons(
 
     # (b) Reconstruction: one button is present, the two others are rebuilt
     # and handed to the recorded add_entities with the scope's subentry id.
-    present = _pb1_uid(entry.entry_id, "visible-device", "play_sound")
-    hass.data["entity_registry"] = _pb1_registry(entry.entry_id, {present})
+    present = _recovery_uid(entry.entry_id, "visible-device", "play_sound")
+    hass.data["entity_registry"] = _recovery_registry(entry.entry_id, {present})
     before = len(added)
 
     await manager.async_recover_missing_entities()
@@ -494,13 +496,13 @@ async def test_recovery_recreates_missing_buttons(
 
     recovered = {(entity.unique_id, config) for entity, config in added[before:]}
     assert recovered == {
-        (unique_id, _PB1_SUBENTRY_ID) for unique_id in expected_visible - {present}
+        (unique_id, _RECOVERY_SUBENTRY_ID) for unique_id in expected_visible - {present}
     }
     assert not hidden & {unique_id for unique_id, _ in recovered}
 
     # (c) The registered factory builds only what is missing. The manager
     # filters its result by ``missing`` itself, so a factory that ignores
-    # ``missing`` (M-B2) is invisible on the public path; the registration is
+    # ``missing`` is invisible on the public path; the registration is
     # the only place where that property can be observed.
     registration = manager._platforms[str(Platform.BUTTON)]
     missing = expected_visible - {present}
@@ -524,12 +526,12 @@ async def test_recovery_before_the_signal_expects_no_button(
     hass = _make_hass(loop)
 
     tracker_subentry = ConfigSubentry(
-        data={"group_key": _PB1_GROUP_KEY, "features": ("button",)},
+        data={"group_key": _RECOVERY_GROUP_KEY, "features": ("button",)},
         subentry_type="tracker",
         title="Tracker",
-        subentry_id=_PB1_SUBENTRY_ID,
+        subentry_id=_RECOVERY_SUBENTRY_ID,
     )
-    entry = _pb1_make_entry({_PB1_SUBENTRY_ID: tracker_subentry})
+    entry = _recovery_make_entry({_RECOVERY_SUBENTRY_ID: tracker_subentry})
     coordinator_cls = stub_coordinator_factory(
         data=[{"id": "visible-device", "name": "Visible"}]
     )
@@ -553,19 +555,20 @@ async def test_recovery_before_the_signal_expects_no_button(
     registration = manager._platforms[str(Platform.BUTTON)]
     probe = {
         f"{DOMAIN}_{entry.entry_id}_{identifier}_visible-device_{action}"
-        for identifier in ("tracker", _PB1_GROUP_KEY, _PB1_SUBENTRY_ID)
-        for action in _PB1_ACTIONS
+        for identifier in ("tracker", _RECOVERY_GROUP_KEY, _RECOVERY_SUBENTRY_ID)
+        for action in _RECOVERY_ACTIONS
     }
     assert registration.entity_factory(probe) == []
-    hass.data["entity_registry"] = _pb1_registry(entry.entry_id, set())
+    hass.data["entity_registry"] = _recovery_registry(entry.entry_id, set())
     await manager.async_recover_missing_entities()
     await asyncio.gather(*pending)
     assert added == []
 
     async_dispatcher_send(
-        hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", _PB1_SUBENTRY_ID
+        hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", _RECOVERY_SUBENTRY_ID
     )
     await asyncio.gather(*pending)
     assert manager.expected_unique_ids_for_platform("button") == {
-        _pb1_uid(entry.entry_id, "visible-device", action) for action in _PB1_ACTIONS
+        _recovery_uid(entry.entry_id, "visible-device", action)
+        for action in _RECOVERY_ACTIONS
     }

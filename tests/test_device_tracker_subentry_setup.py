@@ -295,15 +295,15 @@ async def test_device_tracker_ignores_non_tracker_subentry(
 
 
 # ---------------------------------------------------------------------------
-# PB-2s (W5t): the recovery covers a tracker scope that arrives by signal
+# The recovery covers a tracker scope that arrives by signal
 # ---------------------------------------------------------------------------
 
-_PB2S_SERVICE_ID = "service-subentry"
-_PB2S_TRACKER_ID = "tracker-subentry"
-_PB2S_TRACKER_KEY = "tracker"
+_RECOVERY_SERVICE_ID = "service-subentry"
+_RECOVERY_TRACKER_ID = "tracker-subentry"
+_RECOVERY_TRACKER_KEY = "tracker"
 
 
-def _pb2s_make_entry(subentries: dict[str, Any]) -> Any:
+def _recovery_make_entry(subentries: dict[str, Any]) -> Any:
     """Config entry from the canonical factory (tests/AGENTS.md).
 
     ``subentries`` is an HA attribute outside the factory signature, so it is
@@ -329,7 +329,7 @@ def _pb2s_make_entry(subentries: dict[str, Any]) -> Any:
     return entry
 
 
-def _pb2s_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
+def _recovery_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
     """Entity registry double holding ``present`` device tracker unique ids."""
     rows = {
         f"device_tracker.present_{index}": SimpleNamespace(
@@ -364,15 +364,15 @@ async def test_recovery_expected_ids_follow_the_tracker_scope_from_the_signal(
         data={"group_key": "service", "features": ("sensor",)},
         subentry_type="service",
         title="Service",
-        subentry_id=_PB2S_SERVICE_ID,
+        subentry_id=_RECOVERY_SERVICE_ID,
     )
     tracker_subentry = ConfigSubentry(
-        data={"group_key": _PB2S_TRACKER_KEY, "features": ("device_tracker",)},
+        data={"group_key": _RECOVERY_TRACKER_KEY, "features": ("device_tracker",)},
         subentry_type="tracker",
         title="Tracker",
-        subentry_id=_PB2S_TRACKER_ID,
+        subentry_id=_RECOVERY_TRACKER_ID,
     )
-    entry = _pb2s_make_entry({_PB2S_SERVICE_ID: service_subentry})
+    entry = _recovery_make_entry({_RECOVERY_SERVICE_ID: service_subentry})
 
     visible_ids = ["visible-device"]
 
@@ -386,7 +386,7 @@ async def test_recovery_expected_ids_follow_the_tracker_scope_from_the_signal(
         # subentry metadata of the scope's key.
         return SimpleNamespace(
             key=key,
-            config_subentry_id=_PB2S_TRACKER_ID,
+            config_subentry_id=_RECOVERY_TRACKER_ID,
             visible_device_ids=list(visible_ids),
             enabled_device_ids=list(visible_ids),
         )
@@ -419,14 +419,14 @@ async def test_recovery_expected_ids_follow_the_tracker_scope_from_the_signal(
 
     # The core registers the subentry, then the integration signals it
     # (``__init__.py``, ``_async_setup_new_subentries``).
-    entry._subentry_store[_PB2S_TRACKER_ID] = tracker_subentry
+    entry._subentry_store[_RECOVERY_TRACKER_ID] = tracker_subentry
     async_dispatcher_send(
         hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", tracker_subentry
     )
     await asyncio.gather(*pending)
 
-    main_uid = f"{entry.entry_id}:{_PB2S_TRACKER_ID}:visible-device"
-    last_uid = f"{entry.entry_id}:{_PB2S_TRACKER_ID}:visible-device:last_location"
+    main_uid = f"{entry.entry_id}:{_RECOVERY_TRACKER_ID}:visible-device"
+    last_uid = f"{entry.entry_id}:{_RECOVERY_TRACKER_ID}:visible-device:last_location"
 
     # Setup observation: the platform exposes the visible device's trackers.
     # (The setup builds every device of the coordinator snapshot; in
@@ -445,11 +445,11 @@ async def test_recovery_expected_ids_follow_the_tracker_scope_from_the_signal(
 
     # Reconstruction: the main tracker is present, the last-location tracker
     # is rebuilt and handed to the recorded add_entities with the scope's id.
-    hass.data["entity_registry"] = _pb2s_registry(entry.entry_id, {main_uid})
+    hass.data["entity_registry"] = _recovery_registry(entry.entry_id, {main_uid})
     before = len(added)
 
     await manager.async_recover_missing_entities()
     await asyncio.gather(*pending)
 
     recovered = {(entity.unique_id, config) for entity, config in added[before:]}
-    assert recovered == {(last_uid, _PB2S_TRACKER_ID)}
+    assert recovered == {(last_uid, _RECOVERY_TRACKER_ID)}

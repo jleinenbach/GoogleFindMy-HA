@@ -372,7 +372,7 @@ async def test_switched_off_mid_cycle_does_not_hide_the_cycle_verdict(
     key: str,
     placeholders: dict[str, str],
 ) -> None:
-    """(e2) A tracker skipped mid-cycle leaves the cycle's denominator (AP5-F1).
+    """(e2) A tracker skipped mid-cycle leaves the cycle's denominator.
 
     Both trackers were planned; the one that is on is refused, and the other
     goes off at that moment and is skipped at its turn. Every tracker that was
@@ -938,7 +938,7 @@ def test_dump_counts_and_redacts_the_switch_options(
 
 
 # ---------------------------------------------------------------------------
-# M0 positive proofs: the writer's guards, unreadable options, canonical
+# Positive proofs: the writer's guards, unreadable options, canonical
 # options, and two failure paths of the diagnostics dump
 # ---------------------------------------------------------------------------
 
