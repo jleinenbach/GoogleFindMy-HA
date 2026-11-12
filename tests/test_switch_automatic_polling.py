@@ -16,7 +16,7 @@ import asyncio
 import logging
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -53,13 +53,18 @@ def _switch_uid(entry_id: str, dev_id: str) -> str:
     return f"{DOMAIN}_{entry_id}_{_SUBENTRY_ID}_{dev_id}_automatic_location_polling"
 
 
-def _make_entry() -> Any:
+def _make_entry(subentries: Mapping[str, ConfigSubentry] | None = None) -> Any:
     """Config entry from the canonical factory (tests/AGENTS.md).
 
     ``subentries`` is an HA attribute outside the factory signature, so it is
-    passed via ``**extra``; ``async_on_unload`` is attached per instance as the
-    factory leaves methods out on purpose.
+    passed via ``**extra``. Home Assistant hands ``ConfigEntry.subentries`` out
+    as a ``MappingProxyType``, never as a ``dict``; the entry therefore keeps
+    the mutable store private (``_subentry_store``) and exposes only the
+    read-only view, so a production guard narrowed to ``isinstance(..., dict)``
+    fails here as it would on a real entry. ``async_on_unload`` is attached per
+    instance as the factory leaves methods out on purpose.
     """
+    subentry_store: dict[str, ConfigSubentry] = dict(subentries or {})
     entry = make_config_entry(
         entry_id="entry-registry",
         data={
@@ -69,8 +74,9 @@ def _make_entry() -> Any:
         },
         options={OPT_ENABLE_STATS_ENTITIES: True},
         title="Registry Alignment",
-        subentries={},
+        subentries=types.MappingProxyType(subentry_store),
     )
+    entry._subentry_store = subentry_store
     unload_callbacks: list[Callable[[], None]] = []
     entry._unload_callbacks = unload_callbacks
     entry.async_on_unload = unload_callbacks.append
@@ -131,8 +137,7 @@ async def _setup_switches(
 ) -> tuple[Any, Any, Any, list[tuple[Any, str | None]], list[asyncio.Task[Any]]]:
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _make_entry()
-    entry.subentries = {_SUBENTRY_ID: _tracker_subentry()}
+    entry = _make_entry({_SUBENTRY_ID: _tracker_subentry()})
     coordinator = _coordinator(
         stub_coordinator_factory, hass, entry, devices=devices, hidden=hidden
     )
@@ -369,10 +374,9 @@ async def test_buttons_unchanged_by_the_switch_platform(
     """(d) Button entities keep their number and unique ids (R6)."""
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _make_entry()
-    entry.subentries = {
-        _SUBENTRY_ID: _tracker_subentry(tuple(TRACKER_FEATURE_PLATFORMS))
-    }
+    entry = _make_entry(
+        {_SUBENTRY_ID: _tracker_subentry(tuple(TRACKER_FEATURE_PLATFORMS))}
+    )
     coordinator = _coordinator(stub_coordinator_factory, hass, entry, devices=_DEVICES)
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
 
@@ -534,12 +538,14 @@ def test_switch_entity_has_no_name_in_the_change_log() -> None:
 # Positive proofs: behaviour of ``switch.py`` no earlier test pinned
 # ---------------------------------------------------------------------------
 
-_M0_SERVICE_ID = "service-subentry"
-_M0_SECOND_ID = "second-subentry"
-_M0_SIGNAL_LOGGER = "custom_components.googlefindmy"
+_EDGE_SERVICE_ID = "service-subentry"
+_EDGE_SECOND_ID = "second-subentry"
+_EDGE_SIGNAL_LOGGER = "custom_components.googlefindmy"
 
 
-def _m0_entry(subentries: dict[str, Any] | None, *, entry_id: str = "entry-m0") -> Any:
+def _edge_entry(
+    subentries: dict[str, Any] | None, *, entry_id: str = "entry-edge"
+) -> Any:
     """Config entry from the canonical factory (tests/AGENTS.md).
 
     ``subentries`` is an HA attribute outside the factory signature, so it is
@@ -565,11 +571,11 @@ def _m0_entry(subentries: dict[str, Any] | None, *, entry_id: str = "entry-m0") 
     return entry
 
 
-def _m0_uid(entry_id: str, identifier: str, dev_id: str) -> str:
+def _edge_uid(entry_id: str, identifier: str, dev_id: str) -> str:
     return f"{DOMAIN}_{entry_id}_{identifier}_{dev_id}_automatic_location_polling"
 
 
-def _m0_add_entities(
+def _edge_add_entities(
     hass: Any, loop: asyncio.AbstractEventLoop
 ) -> tuple[Any, list[tuple[Any, str | None]], list[asyncio.Task[Any]], list[int]]:
     """``_make_add_entities`` plus the size of every call.
@@ -588,16 +594,16 @@ def _m0_add_entities(
     return _add, added, pending, calls
 
 
-def _m0_service_subentry() -> ConfigSubentry:
+def _edge_service_subentry() -> ConfigSubentry:
     return ConfigSubentry(
         data={"group_key": SERVICE_SUBENTRY_KEY, "features": ("binary_sensor",)},
         subentry_type="service",
         title="Service",
-        subentry_id=_M0_SERVICE_ID,
+        subentry_id=_EDGE_SERVICE_ID,
     )
 
 
-def _m0_tracker_subentry(
+def _edge_tracker_subentry(
     subentry_id: str,
     *,
     group_key: str = TRACKER_SUBENTRY_KEY,
@@ -611,7 +617,7 @@ def _m0_tracker_subentry(
     )
 
 
-def _m0_coordinator(
+def _edge_coordinator(
     stub_coordinator_factory: Callable[..., type[Any]],
     hass: Any,
     entry: Any,
@@ -651,7 +657,7 @@ def _m0_coordinator(
     return coordinator
 
 
-def _m0_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
+def _edge_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
     """Entity registry double holding ``present`` switch unique ids."""
     rows = {
         f"switch.present_{index}": SimpleNamespace(
@@ -670,7 +676,7 @@ def _m0_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
     )
 
 
-async def _m0_setup(
+async def _edge_setup(
     hass: Any, entry: Any, add_entities: Any, *, config_subentry_id: str | None = None
 ) -> BaseException | None:
     """Run the platform setup and return the exception it raised, if any."""
@@ -683,7 +689,7 @@ async def _m0_setup(
     return None
 
 
-def _m0_signal(entry: Any) -> str:
+def _edge_signal(entry: Any) -> str:
     return f"{DOMAIN}_subentry_setup_{entry.entry_id}"
 
 
@@ -703,20 +709,20 @@ async def test_setup_without_subentries_uses_the_coordinator_fallback_scope(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({} if way == "empty" else None)
-    coordinator = _m0_coordinator(stub_coordinator_factory, hass, entry)
+    entry = _edge_entry({} if way == "empty" else None)
+    coordinator = _edge_coordinator(stub_coordinator_factory, hass, entry)
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, calls = _edge_add_entities(hass, loop)
 
-    with caplog.at_level(logging.DEBUG, logger=_M0_SIGNAL_LOGGER):
-        error = await _m0_setup(hass, entry, add_entities)
+    with caplog.at_level(logging.DEBUG, logger=_EDGE_SIGNAL_LOGGER):
+        error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
     assert error is None
     fallback = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
     assert fallback == f"stable:{TRACKER_SUBENTRY_KEY}"
     assert {(entity.unique_id, config) for entity, config in added} == {
-        (_m0_uid(entry.entry_id, fallback, dev["id"]), fallback) for dev in _DEVICES
+        (_edge_uid(entry.entry_id, fallback, dev["id"]), fallback) for dev in _DEVICES
     }
     assert calls == [len(_DEVICES)]
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -738,13 +744,13 @@ async def test_setup_hands_the_entry_to_a_coordinator_without_one(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({_SUBENTRY_ID: _tracker_subentry()})
+    entry = _edge_entry({_SUBENTRY_ID: _tracker_subentry()})
     coordinator = _coordinator(stub_coordinator_factory, hass, entry, devices=_DEVICES)
     coordinator.config_entry = None
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
     add_entities, added, pending = _make_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
 
     assert error is None
     assert coordinator.config_entry is entry
@@ -766,24 +772,24 @@ async def test_signalled_subentry_type_falls_back_to_its_data(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({_M0_SERVICE_ID: _m0_service_subentry()})
-    coordinator = _m0_coordinator(stub_coordinator_factory, hass, entry)
+    entry = _edge_entry({_EDGE_SERVICE_ID: _edge_service_subentry()})
+    coordinator = _edge_coordinator(stub_coordinator_factory, hass, entry)
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
     assert error is None
     assert added == []
 
     for payload in (
-        _m0_service_subentry(),
+        _edge_service_subentry(),
         SimpleNamespace(
             subentry_id="service-by-key", data={"subentry_type": "service"}
         ),
         SimpleNamespace(subentry_id="service-by-type", data={"type": "service"}),
     ):
-        async_dispatcher_send(hass, _m0_signal(entry), payload)
+        async_dispatcher_send(hass, _edge_signal(entry), payload)
         await asyncio.gather(*pending)
     assert added == []
     assert calls == []
@@ -792,10 +798,10 @@ async def test_signalled_subentry_type_falls_back_to_its_data(
         SimpleNamespace(subentry_id="untyped-number", data={"type": 7}),
         SimpleNamespace(subentry_id="untyped-nodata"),
     ):
-        async_dispatcher_send(hass, _m0_signal(entry), payload)
+        async_dispatcher_send(hass, _edge_signal(entry), payload)
         await asyncio.gather(*pending)
     assert {(entity.unique_id, config) for entity, config in added} == {
-        (_m0_uid(entry.entry_id, identifier, dev["id"]), identifier)
+        (_edge_uid(entry.entry_id, identifier, dev["id"]), identifier)
         for identifier in ("untyped-number", "untyped-nodata")
         for dev in _DEVICES
     }
@@ -817,35 +823,35 @@ async def test_repeated_and_foreign_signals_add_no_switch_twice(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry(
-        {_SUBENTRY_ID: _tracker_subentry(), _M0_SERVICE_ID: _m0_service_subentry()}
+    entry = _edge_entry(
+        {_SUBENTRY_ID: _tracker_subentry(), _EDGE_SERVICE_ID: _edge_service_subentry()}
     )
-    coordinator = _m0_coordinator(stub_coordinator_factory, hass, entry)
+    coordinator = _edge_coordinator(stub_coordinator_factory, hass, entry)
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, calls = _edge_add_entities(hass, loop)
     expected = {
-        (_m0_uid(entry.entry_id, _SUBENTRY_ID, dev["id"]), _SUBENTRY_ID)
+        (_edge_uid(entry.entry_id, _SUBENTRY_ID, dev["id"]), _SUBENTRY_ID)
         for dev in _DEVICES
     }
 
-    with caplog.at_level(logging.DEBUG, logger=_M0_SIGNAL_LOGGER):
-        error = await _m0_setup(hass, entry, add_entities)
+    with caplog.at_level(logging.DEBUG, logger=_EDGE_SIGNAL_LOGGER):
+        error = await _edge_setup(hass, entry, add_entities)
         await asyncio.gather(*pending)
         assert error is None
         assert {(entity.unique_id, config) for entity, config in added} == expected
         assert calls == [len(_DEVICES)]
 
-        async_dispatcher_send(hass, _m0_signal(entry), _SUBENTRY_ID)
+        async_dispatcher_send(hass, _edge_signal(entry), _SUBENTRY_ID)
         await asyncio.gather(*pending)
         assert calls == [len(_DEVICES)]
 
-        async_dispatcher_send(hass, _m0_signal(entry), _M0_SERVICE_ID)
+        async_dispatcher_send(hass, _edge_signal(entry), _EDGE_SERVICE_ID)
         await asyncio.gather(*pending)
 
     assert {(entity.unique_id, config) for entity, config in added} == expected
     assert calls == [len(_DEVICES), 0]
     assert (
-        f"Switch setup: skipping subentry '{_M0_SERVICE_ID}' because the "
+        f"Switch setup: skipping subentry '{_EDGE_SERVICE_ID}' because the "
         "config_subentry_id is unknown"
     ) in [r.getMessage() for r in caplog.records]
 
@@ -863,8 +869,8 @@ async def test_recovery_before_the_signal_expects_and_builds_nothing(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({_SUBENTRY_ID: _tracker_subentry()})
-    coordinator = _m0_coordinator(stub_coordinator_factory, hass, entry)
+    entry = _edge_entry({_SUBENTRY_ID: _tracker_subentry()})
+    coordinator = _edge_coordinator(stub_coordinator_factory, hass, entry)
     manager = EntityRecoveryManager(hass, entry, coordinator)
     entry.runtime_data = SimpleNamespace(
         coordinator=coordinator,
@@ -873,9 +879,9 @@ async def test_recovery_before_the_signal_expects_and_builds_nothing(
         # as for a parent entry in production.
         subentry_manager=SimpleNamespace(managed_subentries=dict(entry.subentries)),
     )
-    add_entities, added, pending, calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
     assert error is None
     assert added == []
@@ -883,7 +889,7 @@ async def test_recovery_before_the_signal_expects_and_builds_nothing(
 
     registration = manager._platforms["switch"]
     probe = {
-        _m0_uid(entry.entry_id, identifier, dev["id"])
+        _edge_uid(entry.entry_id, identifier, dev["id"])
         for identifier in (TRACKER_SUBENTRY_KEY, _SUBENTRY_ID)
         for dev in _DEVICES
     }
@@ -897,16 +903,16 @@ async def test_recovery_before_the_signal_expects_and_builds_nothing(
         subentry_identifier=_SUBENTRY_ID,
     )
     registration.add_entities([stray])
-    hass.data["entity_registry"] = _m0_registry(entry.entry_id, set())
+    hass.data["entity_registry"] = _edge_registry(entry.entry_id, set())
     await manager.async_recover_missing_entities()
     await asyncio.gather(*pending)
     assert added == []
     assert calls == [0]
 
-    async_dispatcher_send(hass, _m0_signal(entry), _SUBENTRY_ID)
+    async_dispatcher_send(hass, _edge_signal(entry), _SUBENTRY_ID)
     await asyncio.gather(*pending)
     assert manager.expected_unique_ids_for_platform("switch") == {
-        _m0_uid(entry.entry_id, _SUBENTRY_ID, dev["id"]) for dev in _DEVICES
+        _edge_uid(entry.entry_id, _SUBENTRY_ID, dev["id"]) for dev in _DEVICES
     }
 
 
@@ -921,16 +927,16 @@ async def test_recovery_expects_nothing_for_an_entry_without_id(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({_SUBENTRY_ID: _tracker_subentry()}, entry_id="placeholder")
+    entry = _edge_entry({_SUBENTRY_ID: _tracker_subentry()}, entry_id="placeholder")
     entry.entry_id = ""
-    coordinator = _m0_coordinator(stub_coordinator_factory, hass, entry)
+    coordinator = _edge_coordinator(stub_coordinator_factory, hass, entry)
     manager = EntityRecoveryManager(hass, entry, coordinator)
     entry.runtime_data = SimpleNamespace(
         coordinator=coordinator, entity_recovery_manager=manager
     )
-    add_entities, added, pending, _calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, _calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
     assert error is None
@@ -940,7 +946,7 @@ async def test_recovery_expects_nothing_for_an_entry_without_id(
     }
     assert manager.expected_unique_ids_for_platform("switch") == set()
     registration = manager._platforms["switch"]
-    probe = {_m0_uid("", _SUBENTRY_ID, dev["id"]) for dev in _DEVICES} | {
+    probe = {_edge_uid("", _SUBENTRY_ID, dev["id"]) for dev in _DEVICES} | {
         entity.unique_id for entity, _ in added
     }
     assert registration.entity_factory(probe) == []
@@ -953,18 +959,18 @@ async def test_listener_adds_only_devices_new_to_the_scope(
     """The coordinator listener adds a switch for a new device, none for known ones."""
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({_SUBENTRY_ID: _tracker_subentry()})
-    coordinator = _m0_coordinator(
+    entry = _edge_entry({_SUBENTRY_ID: _tracker_subentry()})
+    coordinator = _edge_coordinator(
         stub_coordinator_factory, hass, entry, devices=[dict(dev) for dev in _DEVICES]
     )
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
     assert error is None
     assert {entity.unique_id for entity, _ in added} == {
-        _m0_uid(entry.entry_id, _SUBENTRY_ID, dev["id"]) for dev in _DEVICES
+        _edge_uid(entry.entry_id, _SUBENTRY_ID, dev["id"]) for dev in _DEVICES
     }
     assert calls == [len(_DEVICES)]
     # ``_listeners`` is the stub coordinator's record of ``async_add_listener``.
@@ -982,7 +988,7 @@ async def test_listener_adds_only_devices_new_to_the_scope(
     assert calls == [len(_DEVICES), 1]
     assert [
         (entity.unique_id, config) for entity, config in added[len(_DEVICES) :]
-    ] == [(_m0_uid(entry.entry_id, _SUBENTRY_ID, "dev-c"), _SUBENTRY_ID)]
+    ] == [(_edge_uid(entry.entry_id, _SUBENTRY_ID, "dev-c"), _SUBENTRY_ID)]
 
 
 @pytest.mark.asyncio
@@ -997,31 +1003,31 @@ async def test_recovery_keeps_the_first_tracker_scope_with_two_subentries(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry(
+    entry = _edge_entry(
         {
             _SUBENTRY_ID: _tracker_subentry(),
-            _M0_SECOND_ID: _m0_tracker_subentry(_M0_SECOND_ID),
+            _EDGE_SECOND_ID: _edge_tracker_subentry(_EDGE_SECOND_ID),
         }
     )
-    coordinator = _m0_coordinator(stub_coordinator_factory, hass, entry)
+    coordinator = _edge_coordinator(stub_coordinator_factory, hass, entry)
     manager = EntityRecoveryManager(hass, entry, coordinator)
     entry.runtime_data = SimpleNamespace(
         coordinator=coordinator, entity_recovery_manager=manager
     )
-    add_entities, added, pending, _calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, _calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
     assert error is None
 
-    first = {_m0_uid(entry.entry_id, _SUBENTRY_ID, dev["id"]) for dev in _DEVICES}
-    second = {_m0_uid(entry.entry_id, _M0_SECOND_ID, dev["id"]) for dev in _DEVICES}
+    first = {_edge_uid(entry.entry_id, _SUBENTRY_ID, dev["id"]) for dev in _DEVICES}
+    second = {_edge_uid(entry.entry_id, _EDGE_SECOND_ID, dev["id"]) for dev in _DEVICES}
     assert {(entity.unique_id, config) for entity, config in added} == {
         (unique_id, _SUBENTRY_ID) for unique_id in first
-    } | {(unique_id, _M0_SECOND_ID) for unique_id in second}
+    } | {(unique_id, _EDGE_SECOND_ID) for unique_id in second}
     assert manager.expected_unique_ids_for_platform("switch") == first
 
-    hass.data["entity_registry"] = _m0_registry(entry.entry_id, set())
+    hass.data["entity_registry"] = _edge_registry(entry.entry_id, set())
     before = len(added)
     await manager.async_recover_missing_entities()
     await asyncio.gather(*pending)
@@ -1030,7 +1036,9 @@ async def test_recovery_keeps_the_first_tracker_scope_with_two_subentries(
     }
 
 
-def _m0_metadata(key: str, config_subentry_id: str, *features: str) -> SubentryMetadata:
+def _edge_metadata(
+    key: str, config_subentry_id: str, *features: str
+) -> SubentryMetadata:
     return SubentryMetadata(
         key=key,
         config_subentry_id=config_subentry_id,
@@ -1056,9 +1064,9 @@ async def test_coordinator_metadata_provides_the_tracker_scopes(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({})
+    entry = _edge_entry({})
     by_key = {"fleet": [dict(_DEVICES[0])], "other": [dict(_DEVICES[1])]}
-    coordinator = _m0_coordinator(
+    coordinator = _edge_coordinator(
         stub_coordinator_factory,
         hass,
         entry,
@@ -1066,18 +1074,18 @@ async def test_coordinator_metadata_provides_the_tracker_scopes(
     )
     # The coordinator's metadata index; a private attribute of the double.
     coordinator._subentry_metadata = {
-        "fleet": _m0_metadata("fleet", "cfg-fleet", "switch"),
-        "other": _m0_metadata("other", "cfg-other", "button"),
+        "fleet": _edge_metadata("fleet", "cfg-fleet", "switch"),
+        "other": _edge_metadata("other", "cfg-other", "button"),
     }
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
     assert error is None
     assert {(entity.unique_id, config) for entity, config in added} == {
-        (_m0_uid(entry.entry_id, "cfg-fleet", _DEVICES[0]["id"]), "cfg-fleet")
+        (_edge_uid(entry.entry_id, "cfg-fleet", _DEVICES[0]["id"]), "cfg-fleet")
     }
     assert calls == [1]
 
@@ -1093,18 +1101,18 @@ async def test_subentry_without_id_or_data_leaves_the_fallback_scope(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({"odd": SimpleNamespace(subentry_type="tracker", data=None)})
-    coordinator = _m0_coordinator(stub_coordinator_factory, hass, entry)
+    entry = _edge_entry({"odd": SimpleNamespace(subentry_type="tracker", data=None)})
+    coordinator = _edge_coordinator(stub_coordinator_factory, hass, entry)
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, _calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, _calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
     assert error is None
     fallback = f"stable:{TRACKER_SUBENTRY_KEY}"
     assert {(entity.unique_id, config) for entity, config in added} == {
-        (_m0_uid(entry.entry_id, fallback, dev["id"]), fallback) for dev in _DEVICES
+        (_edge_uid(entry.entry_id, fallback, dev["id"]), fallback) for dev in _DEVICES
     }
 
 
@@ -1120,30 +1128,35 @@ async def test_tracker_subentry_without_the_switch_feature_gets_no_switch(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry(
+    entry = _edge_entry(
         {
-            "fleet-subentry": _m0_tracker_subentry("fleet-subentry", group_key="fleet"),
-            "fleet-b-subentry": _m0_tracker_subentry(
+            "fleet-subentry": _edge_tracker_subentry(
+                "fleet-subentry", group_key="fleet"
+            ),
+            "fleet-b-subentry": _edge_tracker_subentry(
                 "fleet-b-subentry", group_key="fleet-b", features=("button",)
             ),
         }
     )
     by_key = {"fleet": [dict(_DEVICES[0])], "fleet-b": [dict(_DEVICES[1])]}
-    coordinator = _m0_coordinator(
+    coordinator = _edge_coordinator(
         stub_coordinator_factory,
         hass,
         entry,
         snapshot_callback=lambda key, _feature: list(by_key.get(key or "", [])),
     )
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, _calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, _calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
     assert error is None
     assert {(entity.unique_id, config) for entity, config in added} == {
-        (_m0_uid(entry.entry_id, "fleet-subentry", _DEVICES[0]["id"]), "fleet-subentry")
+        (
+            _edge_uid(entry.entry_id, "fleet-subentry", _DEVICES[0]["id"]),
+            "fleet-subentry",
+        )
     }
 
 
@@ -1158,13 +1171,13 @@ async def test_availability_follows_visibility_and_a_failing_check_hides_nothing
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({_SUBENTRY_ID: _tracker_subentry()})
+    entry = _edge_entry({_SUBENTRY_ID: _tracker_subentry()})
     devices = [
         {"id": "dev-a", "name": "Keys"},
         {"id": "dev-b", "name": "Backpack"},
         {"id": "dev-c", "name": "Bike"},
     ]
-    coordinator = _m0_coordinator(
+    coordinator = _edge_coordinator(
         stub_coordinator_factory,
         hass,
         entry,
@@ -1173,14 +1186,14 @@ async def test_availability_follows_visibility_and_a_failing_check_hides_nothing
         failing=frozenset({"dev-c"}),
     )
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, _calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, _calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
     assert error is None
     assert {entity.unique_id for entity, _ in added} == {
-        _m0_uid(entry.entry_id, _SUBENTRY_ID, dev_id) for dev_id in ("dev-a", "dev-c")
+        _edge_uid(entry.entry_id, _SUBENTRY_ID, dev_id) for dev_id in ("dev-a", "dev-c")
     }
     assert [entity.available for entity, _ in added] == [True, True]
     hidden = switch.GoogleFindMyAutomaticPollingSwitch(
@@ -1203,7 +1216,7 @@ async def test_devices_without_a_string_id_get_no_switch(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({_SUBENTRY_ID: _tracker_subentry()})
+    entry = _edge_entry({_SUBENTRY_ID: _tracker_subentry()})
     devices: list[dict[str, Any]] = [
         {"id": "dev-a", "name": "Keys"},
         {"name": "no id"},
@@ -1211,18 +1224,18 @@ async def test_devices_without_a_string_id_get_no_switch(
         {"id": "", "name": "empty"},
         {"id": "dev-d"},
     ]
-    coordinator = _m0_coordinator(
+    coordinator = _edge_coordinator(
         stub_coordinator_factory, hass, entry, devices=devices
     )
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
     assert error is None
     assert {entity.unique_id for entity, _ in added} == {
-        _m0_uid(entry.entry_id, _SUBENTRY_ID, dev_id) for dev_id in ("dev-a", "dev-d")
+        _edge_uid(entry.entry_id, _SUBENTRY_ID, dev_id) for dev_id in ("dev-a", "dev-d")
     }
     assert calls == [2]
     assert {entity.device_label() for entity, _ in added} == {"Keys", "dev-d"}
@@ -1241,18 +1254,18 @@ async def test_device_with_only_blank_fields_gets_a_switch_without_a_name(
     """
     loop = asyncio.get_running_loop()
     hass = _make_hass(loop)
-    entry = _m0_entry({_SUBENTRY_ID: _tracker_subentry()})
+    entry = _edge_entry({_SUBENTRY_ID: _tracker_subentry()})
     devices: list[dict[str, Any]] = [
         {"id": "dev-a", "name": "Keys"},
         {"id": "   ", "name": " ", "device_id": "\t"},
     ]
-    coordinator = _m0_coordinator(
+    coordinator = _edge_coordinator(
         stub_coordinator_factory, hass, entry, devices=devices
     )
     entry.runtime_data = SimpleNamespace(coordinator=coordinator)
-    add_entities, added, pending, calls = _m0_add_entities(hass, loop)
+    add_entities, added, pending, calls = _edge_add_entities(hass, loop)
 
-    error = await _m0_setup(hass, entry, add_entities)
+    error = await _edge_setup(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
     assert error is None
