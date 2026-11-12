@@ -968,6 +968,7 @@ def _stub_homeassistant() -> None:
         BUTTON = "button"
         SENSOR = "sensor"
         BINARY_SENSOR = "binary_sensor"
+        SWITCH = "switch"
 
     const_module.EVENT_HOMEASSISTANT_STARTED = "start"
     const_module.EVENT_HOMEASSISTANT_STOP = "stop"
@@ -2147,6 +2148,21 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.components.button"] = button_module
     setattr(components_pkg, "button", button_module)
 
+    switch_module = ModuleType("homeassistant.components.switch")
+
+    class SwitchEntity(_entity_base()):  # pragma: no cover - stub
+        pass
+
+    class SwitchEntityDescription:  # pragma: no cover - stub
+        def __init__(self, **kwargs) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    switch_module.SwitchEntity = SwitchEntity
+    switch_module.SwitchEntityDescription = SwitchEntityDescription
+    sys.modules["homeassistant.components.switch"] = switch_module
+    setattr(components_pkg, "switch", switch_module)
+
     binary_sensor_module = ModuleType("homeassistant.components.binary_sensor")
 
     class BinarySensorEntity(_entity_base()):  # pragma: no cover - stub
@@ -2412,6 +2428,7 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 self._device_last_good_location: dict[str, Any] = {}
                 self._device_caps: dict[str, Any] = {}
                 self._present_last_seen: dict[str, float] = {}
+                self._automatic_polling_off: set[str] = set()
                 self.first_refresh_calls = 0
                 if extra_attributes:
                     for key, value in extra_attributes.items():
@@ -2461,6 +2478,17 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
 
             def purge_device(self, device_id: str) -> None:
                 self._purged.append(device_id)
+
+            def is_automatic_polling_enabled(self, device_id: str) -> bool:
+                return device_id not in self._automatic_polling_off
+
+            def async_set_automatic_polling(
+                self, device_id: str, enabled: bool
+            ) -> None:
+                if enabled:
+                    self._automatic_polling_off.discard(device_id)
+                else:
+                    self._automatic_polling_off.add(device_id)
 
             def stable_subentry_identifier(
                 self, *, key: str | None = None, feature: str | None = None

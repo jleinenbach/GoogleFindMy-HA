@@ -545,14 +545,15 @@ async def async_setup_entry(  # noqa: PLR0915
 
     if isinstance(recovery_manager, EntityRecoveryManager):
         entry_id = getattr(entry, "entry_id", None)
-        service_subentry_identifier = (
-            primary_scope.identifier if primary_scope is not None else None
-        )
-        service_subentry_key = (
-            primary_scope.subentry_key
-            if primary_scope is not None
-            else SERVICE_SUBENTRY_KEY
-        )
+
+        def _recovery_scope() -> tuple[str | None, str]:
+            # Read the scope on each call: a service subentry that arrives through
+            # the dispatcher signal after setup sets ``primary_scope`` only after
+            # the callbacks are registered below.
+            scope = primary_scope
+            if scope is None:
+                return None, SERVICE_SUBENTRY_KEY
+            return scope.identifier, scope.subentry_key
 
         def _recovery_add_entities(
             new_entities: Iterable[BinarySensorEntity],
@@ -563,6 +564,7 @@ async def async_setup_entry(  # noqa: PLR0915
             primary_scheduler(new_entities, update_before_add)
 
         def _expected_unique_ids() -> set[str]:
+            service_subentry_identifier, _ = _recovery_scope()
             if not isinstance(entry_id, str) or not entry_id:
                 return set()
             if (
@@ -577,6 +579,7 @@ async def async_setup_entry(  # noqa: PLR0915
             }
 
         def _build_entities(missing: set[str]) -> list[BinarySensorEntity]:
+            service_subentry_identifier, service_subentry_key = _recovery_scope()
             if not missing:
                 return []
             built: list[BinarySensorEntity] = []

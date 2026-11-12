@@ -872,38 +872,43 @@ async def async_setup_entry(
 
     if isinstance(recovery_manager, EntityRecoveryManager):
         entry_id = getattr(entry, "entry_id", None)
-        service_identifier = next(iter(created_stats.keys()), None)
-        service_scope = (
-            service_scopes.get(service_identifier) if service_identifier else None
-        )
-        tracker_scope = primary_tracker_scope
+        # The callbacks below read ``created_stats``, ``service_scopes`` and
+        # ``primary_tracker_scope`` on each call: a service or tracker subentry
+        # that arrives through the dispatcher signal after setup adds its scope
+        # only after the callbacks are registered.
 
         def _recovery_add_entities(
             new_entities: Iterable[SensorEntity],
             update_before_add: bool = True,
         ) -> None:
-            service_batch: list[SensorEntity] = []
+            stats_batch: list[GoogleFindMyStatsSensor] = []
             tracker_batch: list[SensorEntity] = []
             for entity in new_entities:
                 if isinstance(entity, GoogleFindMyStatsSensor):
-                    service_batch.append(entity)
+                    stats_batch.append(entity)
                 else:
                     tracker_batch.append(entity)
 
-            if service_batch and service_scope is not None:
-                schedule_add_entities(
-                    coordinator.hass,
-                    async_add_entities,
-                    entities=service_batch,
-                    update_before_add=update_before_add,
-                    config_subentry_id=service_scope.config_subentry_id,
-                    log_owner="Sensor setup (service)",
-                    logger=_LOGGER,
-                )
+            for identifier, service_scope in service_scopes.items():
+                service_batch: list[SensorEntity] = [
+                    entity
+                    for entity in stats_batch
+                    if entity.subentry_identifier == identifier
+                ]
+                if service_batch:
+                    schedule_add_entities(
+                        coordinator.hass,
+                        async_add_entities,
+                        entities=service_batch,
+                        update_before_add=update_before_add,
+                        config_subentry_id=service_scope.config_subentry_id,
+                        log_owner="Sensor setup (service)",
+                        logger=_LOGGER,
+                    )
             if tracker_batch and tracker_scheduler is not None:
                 tracker_scheduler(tracker_batch, update_before_add)
 
-        def _is_visible_device(device_id: str) -> bool:
+        def _is_visible_device(tracker_scope: _Scope | None, device_id: str) -> bool:
             if tracker_scope is None:
                 return True
             is_visible = getattr(coordinator, "is_device_visible_in_subentry", None)
@@ -915,15 +920,12 @@ async def async_setup_entry(
             return True
 
         def _expected_unique_ids() -> set[str]:
+            tracker_scope = primary_tracker_scope
             if not isinstance(entry_id, str) or not entry_id:
                 return set()
             expected: set[str] = set()
-            if (
-                service_identifier
-                and isinstance(service_identifier, str)
-                and service_identifier
-            ):
-                for stat_key in created_stats.get(service_identifier, []):
+            for service_identifier, stat_keys in created_stats.items():
+                for stat_key in stat_keys:
                     expected.add(f"{DOMAIN}_{entry_id}_{service_identifier}_{stat_key}")
             if tracker_scope and isinstance(tracker_scope.identifier, str):
                 for device in coordinator.get_subentry_snapshot(
@@ -938,7 +940,7 @@ async def async_setup_entry(
                         or not dev_name
                     ):
                         continue
-                    if not _is_visible_device(dev_id):
+                    if not _is_visible_device(tracker_scope, dev_id):
                         continue
                     expected.add(
                         f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
@@ -955,17 +957,15 @@ async def async_setup_entry(
             return expected
 
         def _build_entities(missing: set[str]) -> list[SensorEntity]:
+            tracker_scope = primary_tracker_scope
             if not missing:
                 return []
             built: list[SensorEntity] = []
             if not isinstance(entry_id, str) or not entry_id:
                 return built
-            if (
-                service_scope
-                and isinstance(service_identifier, str)
-                and service_identifier
-            ):
-                for stat_key in created_stats.get(service_identifier, []):
+            for service_identifier, stat_keys in created_stats.items():
+                service_scope = service_scopes[service_identifier]
+                for stat_key in stat_keys:
                     unique_id = f"{DOMAIN}_{entry_id}_{service_identifier}_{stat_key}"
                     if unique_id not in missing:
                         continue
@@ -994,7 +994,7 @@ async def async_setup_entry(
                         or not dev_name
                     ):
                         continue
-                    if not _is_visible_device(dev_id):
+                    if not _is_visible_device(tracker_scope, dev_id):
                         continue
                     ls_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
                     pc_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"

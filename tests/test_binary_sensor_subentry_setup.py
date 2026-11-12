@@ -1,5 +1,5 @@
 import asyncio
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +16,7 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _ConfigEntryStub:
@@ -272,3 +273,214 @@ async def test_recovery_registers_connectivity_sensor(
 
     recovered = registration.entity_factory(set(expected))
     assert {entity.unique_id for entity in recovered} == expected
+
+
+# ---------------------------------------------------------------------------
+# The recovery covers the service scope on every way it can arise
+# ---------------------------------------------------------------------------
+
+_RECOVERY_SERVICE_ID = "service-subentry"
+_RECOVERY_TRACKER_ID = "tracker-subentry"
+_RECOVERY_KINDS = ("polling", "auth_status", "connectivity")
+
+
+def _recovery_make_entry(subentries: dict[str, Any] | None) -> Any:
+    """Config entry from the canonical factory (tests/AGENTS.md).
+
+    ``subentries`` is an HA attribute outside the factory signature, so it is
+    passed via ``**extra`` as the read-only mapping view the core hands out;
+    the mutable store behind it is kept on ``_subentry_store`` so a test can
+    register a subentry the way the core does before it signals. ``None``
+    leaves the attribute out entirely (W4, a pure test way). ``async_on_unload``
+    is attached per instance as the factory leaves methods out on purpose.
+    """
+    store: dict[str, Any] = dict(subentries or {})
+    extra: dict[str, Any] = {}
+    if subentries is not None:
+        extra["subentries"] = MappingProxyType(store)
+    entry = make_config_entry(
+        entry_id="entry-binary",
+        data={
+            DATA_SECRET_BUNDLE: {"username": "user@example.com"},
+            CONF_GOOGLE_EMAIL: "user@example.com",
+        },
+        **extra,
+    )
+    entry._subentry_store = store
+    unload_callbacks: list[Any] = []
+    entry._unload_callbacks = unload_callbacks
+    entry.async_on_unload = unload_callbacks.append
+    return entry
+
+
+def _recovery_service_subentry() -> ConfigSubentry:
+    return ConfigSubentry(
+        data={"group_key": SERVICE_SUBENTRY_KEY, "features": ("binary_sensor",)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        subentry_id=_RECOVERY_SERVICE_ID,
+    )
+
+
+def _recovery_tracker_subentry() -> ConfigSubentry:
+    return ConfigSubentry(
+        data={"group_key": "tracker", "features": ("binary_sensor",)},
+        subentry_type="tracker",
+        title="Tracker",
+        subentry_id=_RECOVERY_TRACKER_ID,
+    )
+
+
+def _recovery_registry(entry_id: str, present: set[str]) -> SimpleNamespace:
+    """Entity registry double holding ``present`` binary sensor unique ids."""
+    rows = {
+        f"binary_sensor.present_{index}": SimpleNamespace(
+            domain="binary_sensor",
+            platform=DOMAIN,
+            unique_id=unique_id,
+            config_entry_id=entry_id,
+        )
+        for index, unique_id in enumerate(sorted(present))
+    }
+    return SimpleNamespace(
+        entities=rows,
+        async_entries_for_config_entry=lambda config_entry_id: [
+            row for row in rows.values() if row.config_entry_id == config_entry_id
+        ],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", ["W1", "W2", "W3", "W4", "W5"])
+async def test_recovery_expected_ids_follow_the_service_scope(
+    stub_coordinator_factory: Any, way: str
+) -> None:
+    """On every way a service scope arises, the recovery expects its three ids.
+
+    W1: the subentry manager lists the service subentry.
+    W2: ``entry.subentries`` lists it, no manager.
+    W3: ``entry.subentries`` is empty, the id arrives as ``config_subentry_id``.
+    W4: no ``subentries`` attribute at all (not a mapping), id as in W3; a
+        pure test way, no core produces it.
+    W5: only a tracker subentry exists at setup; the service subentry is
+        registered and signalled afterwards, as ``_async_setup_new_subentries``
+        does for a subentry created after the platform loaded.
+    """
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    service_subentry = _recovery_service_subentry()
+    config_subentry_id: str | None = None
+    managed: dict[str, Any] | None = None
+    if way == "W1":
+        entry = _recovery_make_entry({_RECOVERY_SERVICE_ID: service_subentry})
+        managed = {_RECOVERY_SERVICE_ID: service_subentry}
+    elif way == "W2":
+        entry = _recovery_make_entry({_RECOVERY_SERVICE_ID: service_subentry})
+    elif way == "W3":
+        entry = _recovery_make_entry({})
+        config_subentry_id = _RECOVERY_SERVICE_ID
+    elif way == "W4":
+        entry = _recovery_make_entry(None)
+        config_subentry_id = _RECOVERY_SERVICE_ID
+    else:
+        entry = _recovery_make_entry(
+            {_RECOVERY_TRACKER_ID: _recovery_tracker_subentry()}
+        )
+
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+
+    manager = EntityRecoveryManager(hass, entry, coordinator)
+    runtime = SimpleNamespace(coordinator=coordinator, entity_recovery_manager=manager)
+    if managed is not None:
+        runtime.subentry_manager = SimpleNamespace(managed_subentries=managed)
+    entry.runtime_data = runtime
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await binary_sensor.async_setup_entry(
+        hass, entry, add_entities, config_subentry_id=config_subentry_id
+    )
+    await asyncio.gather(*pending)
+
+    expected = {
+        f"{entry.entry_id}:{_RECOVERY_SERVICE_ID}:{kind}" for kind in _RECOVERY_KINDS
+    }
+
+    if way == "W5":
+        assert not expected & {entity.unique_id for entity, _ in added}, (
+            "no service scope may exist before the signal"
+        )
+        # The core registers the subentry, then the integration signals it
+        # (``__init__.py``, ``_async_setup_new_subentries``).
+        entry._subentry_store[_RECOVERY_SERVICE_ID] = service_subentry
+        async_dispatcher_send(
+            hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", service_subentry
+        )
+        await asyncio.gather(*pending)
+
+    # Setup observation: the platform exposes the three service sensors.
+    assert {entity.unique_id for entity, _ in added} == expected
+
+    # The recovery expects exactly the ids of that scope.
+    assert manager.expected_unique_ids_for_platform("binary_sensor") == expected
+
+    # Reconstruction: one sensor is present, the two others are rebuilt and
+    # handed to the recorded add_entities with the scope's subentry id.
+    present = f"{entry.entry_id}:{_RECOVERY_SERVICE_ID}:polling"
+    hass.data["entity_registry"] = _recovery_registry(entry.entry_id, {present})
+    before = len(added)
+
+    await manager.async_recover_missing_entities()
+    await asyncio.gather(*pending)
+
+    recovered = {(entity.unique_id, config) for entity, config in added[before:]}
+    assert recovered == {
+        (unique_id, _RECOVERY_SERVICE_ID) for unique_id in expected - {present}
+    }
+
+
+@pytest.mark.asyncio
+async def test_recovery_without_a_service_scope_expects_nothing(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Before a service scope exists the recovery expects and builds no sensor.
+
+    Only a tracker subentry is known at setup (W5 before its signal), so the
+    recovery scope is unset: no expected id, nothing built for any set of
+    missing ids, nothing recovered. The registration is read from the manager
+    because it is the only handle on the factory.
+    """
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _recovery_make_entry({_RECOVERY_TRACKER_ID: _recovery_tracker_subentry()})
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    manager = EntityRecoveryManager(hass, entry, coordinator)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, entity_recovery_manager=manager
+    )
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await binary_sensor.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    probe = {
+        f"{entry.entry_id}:{identifier}:{kind}"
+        for identifier in (SERVICE_SUBENTRY_KEY, _RECOVERY_SERVICE_ID)
+        for kind in _RECOVERY_KINDS
+    }
+    assert not probe & {entity.unique_id for entity, _ in added}
+    assert manager.expected_unique_ids_for_platform("binary_sensor") == set()
+    registration = manager._platforms[str(Platform.BINARY_SENSOR)]
+    assert registration.entity_factory(probe) == []
+
+    hass.data["entity_registry"] = _recovery_registry(entry.entry_id, set())
+    before = len(added)
+    await manager.async_recover_missing_entities()
+    await asyncio.gather(*pending)
+    assert added[before:] == []

@@ -82,7 +82,11 @@ from .helpers.cache import (
     substitute_zone_accuracy,
 )
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
-from .helpers.locate_clock import ensure_locate_stamps, stamp_on_dispatch
+from .helpers.locate_clock import (
+    ensure_locate_counts,
+    ensure_locate_stamps,
+    stamp_on_dispatch,
+)
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 from .helpers.update import (
@@ -1076,15 +1080,25 @@ class PollingOperations(_MixinBase):
 
     # -------------------- Poll timing prediction --------------------
     def _get_predicted_poll_time(self) -> float | None:
-        """Predict the earliest next update time based on device histories."""
+        """Predict the earliest next update time based on device histories.
+
+        The histories of ignored trackers and of trackers whose automatic
+        location requests are switched off (#242) are skipped. Both sets are read
+        here because this runs before the refresh reads the ignore list. Other
+        trackers the cycle does not poll, such as one disabled in Home
+        Assistant's device registry, still count with their stored history.
+        """
 
         history_store = getattr(self, "_device_update_history", None)
         if not history_store:
             return None
 
+        excluded = self._get_ignored_set() | self._get_automatic_polling_disabled_set()
         predictions: list[float] = []
 
-        for history in history_store.values():
+        for dev_id, history in history_store.items():
+            if dev_id in excluded:
+                continue
             if len(history) < 2:
                 continue
 
@@ -1589,10 +1603,15 @@ class PollingOperations(_MixinBase):
             # Build list of devices to POLL:
             # Poll devices that have at least one enabled DR entry for this config entry;
             # if a device has no DR entry yet, include it to allow initial discovery.
+            # Trackers whose automatic location requests are switched off
+            # (#242) stay out of every automatic path; read once per refresh.
+            automatic_off = self._get_automatic_polling_disabled_set()
             devices_to_poll: list[dict[str, Any]] = []
             for dev in filtered_devices:
                 dev_id = dev["id"]
                 if dev_id in ignored:
+                    continue
+                if dev_id in automatic_off:
                     continue
                 if (
                     dev_id in self._enabled_poll_device_ids
@@ -1976,6 +1995,11 @@ class PollingOperations(_MixinBase):
                 # kept apart so whoever reads the log can tell a configuration
                 # change from an outage.
                 cycle_unaccepted_devices = 0
+                # Trackers skipped at their turn because their automatic
+                # switch went off after the cycle was planned (#242). They were
+                # never asked, so the post-loop guards judge the cycle on the
+                # trackers that were: ``len(devices)`` minus these.
+                cycle_skipped_devices = 0
                 # True once ANY device in this cycle booked a transient auth
                 # failure. A cycle that books none zeroes
                 # `_consecutive_transient_auth_failures` after the loop: that is
@@ -2019,6 +2043,18 @@ class PollingOperations(_MixinBase):
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
+                    # The switch is read live: a tracker switched off after
+                    # the cycle was planned is skipped at its turn (#242).
+                    if not self.is_automatic_polling_enabled(dev_id):
+                        _LOGGER.debug(
+                            "Sequential poll: skipping %s (%d/%d), automatic "
+                            "location requests are switched off",
+                            dev_name,
+                            idx + 1,
+                            len(devices),
+                        )
+                        cycle_skipped_devices += 1
+                        continue
                     _LOGGER.debug(
                         "Sequential poll: requesting location for %s (%d/%d)",
                         dev_name,
@@ -2044,7 +2080,16 @@ class PollingOperations(_MixinBase):
                         self._locate_requested_mono = ensure_locate_stamps(
                             getattr(self, "_locate_requested_mono", None)
                         )
-                        with stamp_on_dispatch(self._locate_requested_mono, dev_id):
+                        # The same POST counts the request as automatic (#242).
+                        self._locate_request_counts = ensure_locate_counts(
+                            getattr(self, "_locate_request_counts", None)
+                        )
+                        with stamp_on_dispatch(
+                            self._locate_requested_mono,
+                            dev_id,
+                            counts=self._locate_request_counts,
+                            kind="auto",
+                        ):
                             location = await asyncio.wait_for(
                                 self.api.async_get_device_location(dev_id, dev_name),
                                 timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
@@ -2839,7 +2884,12 @@ class PollingOperations(_MixinBase):
                     if idx < len(devices) - 1 and self.device_poll_delay > 0:
                         await asyncio.sleep(self.device_poll_delay)
 
-                _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
+                cycle_polled_devices = len(devices) - cycle_skipped_devices
+                _LOGGER.debug(
+                    "Completed polling cycle for %d devices (%d skipped)",
+                    cycle_polled_devices,
+                    cycle_skipped_devices,
+                )
                 if cycle_booked_transient_auth and not cycle_content_proofs:
                     # The cycle rejected and held no proof to the contrary, so the
                     # streak grows by exactly one and the threshold is judged once,
@@ -3067,7 +3117,7 @@ class PollingOperations(_MixinBase):
                 if (
                     cycle_unaccepted_devices
                     and (cycle_unaccepted_devices + cycle_rejected_devices)
-                    == len(devices)
+                    == cycle_polled_devices
                     and last_exception is None
                 ):
                     last_exception = UpdateFailed(
@@ -3089,7 +3139,7 @@ class PollingOperations(_MixinBase):
                 # unaccepted count to be zero for the equality to hold.
                 if (
                     cycle_rejected_devices
-                    and cycle_rejected_devices == len(devices)
+                    and cycle_rejected_devices == cycle_polled_devices
                     and last_exception is None
                 ):
                     last_exception = UpdateFailed(
