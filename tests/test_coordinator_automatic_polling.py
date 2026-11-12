@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -42,6 +42,7 @@ import custom_components.googlefindmy as integration
 from custom_components.googlefindmy import const, diagnostics
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import polling as polling_module
 from custom_components.googlefindmy.coordinator.helpers import locate_clock
 from custom_components.googlefindmy.NovaApi import nova_request as nova_request_module
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -222,9 +223,26 @@ async def _core_request_refresh(coord: GoogleFindMyCoordinator) -> None:
     coord.data = await coord._async_update_data()
 
 
+_RESTART_UPTIME_S = 86_400.0
+
+
+class _ShiftedTime:
+    """The ``time`` module with ``monotonic`` moved forward by a fixed amount."""
+
+    def __init__(self, shift: float) -> None:
+        self._shift = shift
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self._shift
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
 async def _refresh(coord: GoogleFindMyCoordinator, trigger: str) -> None:
     """Run one refresh in the state each automatic trigger produces."""
     now = time.monotonic()
+    clock: contextlib.AbstractContextManager[Any] = contextlib.nullcontext()
     if trigger == "cold_start":
         # First install: never polled, no location for any device.
         coord._last_poll_mono = 0.0
@@ -234,16 +252,28 @@ async def _refresh(coord: GoogleFindMyCoordinator, trigger: str) -> None:
             coord._device_location_data[dev["id"]] = {"last_seen": time.time()}
         if trigger == "restart":
             # First refresh after a restart: locations restored, never polled.
+            # With ``_last_poll_mono`` at 0.0 the poll logic measures the time
+            # since the last poll against the host's monotonic clock, which is
+            # its uptime. A fresh CI runner can be up for less than the poll
+            # interval, and then nothing is due. The poll logic therefore reads
+            # a clock one day ahead, as on a host that has been running. The
+            # device list was fetched on the real clock just now; its stamp
+            # moves with the clock so that the list does not become due too.
             coord._last_poll_mono = 0.0
+            coord._last_list_poll_mono += _RESTART_UPTIME_S
+            clock = patch.object(
+                polling_module, "time", _ShiftedTime(_RESTART_UPTIME_S)
+            )
         elif trigger == "force_poll_due":
             coord._last_poll_mono = now
             coord.force_poll_due()
         else:
             coord._last_poll_mono = now - 1000.0
-    if trigger == "request_refresh":
-        await _core_request_refresh(coord)
-    else:
-        await coord._async_update_data()
+    with clock:
+        if trigger == "request_refresh":
+            await _core_request_refresh(coord)
+        else:
+            await coord._async_update_data()
     await _drain(coord)
 
 
