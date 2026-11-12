@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from homeassistant.components.switch import SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -212,13 +212,12 @@ async def async_setup_entry(
         ]
 
     def _is_visible(subentry_key: str, device_id: str) -> bool:
-        is_visible = getattr(coordinator, "is_device_visible_in_subentry", None)
-        if callable(is_visible):
-            try:
-                return bool(is_visible(subentry_key, device_id))
-            except Exception:  # pragma: no cover - defensive fallback for stubs
-                return True
-        return True
+        try:
+            return bool(
+                coordinator.is_device_visible_in_subentry(subentry_key, device_id)
+            )
+        except Exception:  # pragma: no cover - defensive fallback for stubs
+            return True
 
     added_unique_ids: set[str] = set()
     primary_scope: _TrackerScope | None = None
@@ -293,11 +292,11 @@ async def async_setup_entry(
                     subentry_key=scope.subentry_key,
                     subentry_identifier=tracker_identifier,
                 )
-                unique_id = getattr(entity, "unique_id", None)
-                if isinstance(unique_id, str):
-                    if unique_id in added_unique_ids:
-                        continue
-                    added_unique_ids.add(unique_id)
+                # Set in ``__init__`` from ``build_unique_id``, which returns ``str``.
+                unique_id = cast(str, getattr(entity, "unique_id", None))
+                if unique_id in added_unique_ids:
+                    continue
+                added_unique_ids.add(unique_id)
                 entities.append(entity)
                 known_device_ids.add(dev_id)
             return entities

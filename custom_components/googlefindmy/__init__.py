@@ -5541,8 +5541,6 @@ def _normalize_automatic_polling_options(
         normalized_map: dict[str, str] = {}
         for raw_id, stamp in coerce_changed_at_map(raw_map).items():
             canonical = _strip_entry_namespace(entry_id, raw_id)
-            if not canonical:
-                continue
             previous = normalized_map.get(canonical)
             # ISO-8601 UTC stamps of one fixed form order as strings.
             if previous is None or stamp > previous:
