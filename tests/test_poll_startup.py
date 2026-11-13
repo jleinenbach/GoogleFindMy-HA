@@ -53,7 +53,8 @@ async def test_pending_poll_does_not_block_startup_and_is_cancelled(
     coord.config_entry = entry
     coord._last_device_list = [{"id": "dev-id"}]
     coord._last_list_poll_mono = time.monotonic()
-    coord._last_poll_mono = 0.0
+    # Make the poll due without depending on the host uptime (monotonic clock).
+    coord._last_poll_mono = time.monotonic() - 1000.0
     coord._device_location_data["dev-id"] = {"last_seen": time.time()}
 
     monkeypatch.setattr(coord, "_ensure_service_device_exists", lambda: None)
