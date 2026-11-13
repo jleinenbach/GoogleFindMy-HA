@@ -433,7 +433,7 @@ async def test_callback_parse_failure_redacts_name(
 @pytest.mark.parametrize(
     "decrypt_exc",
     [
-        DecryptionError("own reports predate current identity key"),  # WARNING
+        DecryptionError("all own reports failed authentication"),  # WARNING
         SpotAuthPermanentError("invalid session"),  # ERROR
     ],
 )

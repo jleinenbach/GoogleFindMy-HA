@@ -512,3 +512,24 @@ async def test_t_b4_second_own_report_starts_with_the_promoted_key(
     assert len(result) == 2
     assert all(record["identity_key"] == _GOOD_KEY for record in result)
     assert len(_promotions(caplog)) == 1
+
+
+async def test_t_c1_message_names_only_what_was_measured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-C1: the raised message states no cause and points to the README."""
+
+    _patch_real_crypto(monkeypatch, candidates=[_STALE_KEY, _GOOD_KEY])
+
+    with pytest.raises(decrypt_locations.OwnReportIdentityMismatchError) as exc_info:
+        await decrypt_locations.async_decrypt_location_response_locations(
+            _sealed_update(b"\x77" * 32), cache=object()
+        )
+
+    message = str(exc_info.value)
+    assert message.startswith("All own-report decryptions failed:")
+    assert "cause was not determined" in message
+    assert "debug" in message
+    assert "Own location reports fail to decrypt" in message
+    assert "predate" not in message
+    assert "This clears once" not in message

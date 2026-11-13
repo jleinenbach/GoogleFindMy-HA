@@ -443,13 +443,13 @@ class OwnerKeyInvalidError(DecryptionError):
 class OwnReportIdentityMismatchError(DecryptionError):
     """Raised when a device's OWN server reports all fail authentication.
 
-    Device-local condition: the account keys are healthy (the identity key was
-    derived and siblings decrypt), but THIS device's own reports on the server were
-    encrypted with an identity key the local cache no longer matches -- typically a
-    phone powered off for days whose server-side reports are stale, or a re-paired
-    device. A fresh secrets.json (account-wide re-auth) does NOT fix it, so when a
-    sibling proves the shared key is healthy the coordinator downgrades this to a
-    per-device warning instead of prompting for re-authentication.
+    Device-local condition: none of THIS device's own reports authenticated with
+    the identity key candidates tried, and the same call produced no usable
+    network fix. The cause is not measured; unconfirmed examples are a phone
+    powered off for days or a re-paired device. When a sibling decrypts in the
+    same cycle, the account keys are proven healthy, so the coordinator
+    downgrades this to a per-device warning instead of prompting for
+    re-authentication.
 
     Kept a DISTINCT subclass so the coordinator's sibling-success downgrade applies
     ONLY here. Every OTHER ``DecryptionError`` -- identity-key derivation failures
@@ -2359,9 +2359,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         )
 
     # Diff-Review #1 / Codex (PR #1153): the device HAS its own encrypted reports
-    # and EVERY one failed authentication (no own-report success), so THIS
-    # device's server-side own reports predate the cached identity key (they were
-    # encrypted under a previous key) -- distinct from
+    # and EVERY one failed authentication (no own-report success): none of this
+    # device's own reports authenticated with the keys tried here; the cause is
+    # not measured -- distinct from
     # foreign/crowdsourced failures (which legitimately fail with other accounts'
     # keys and must NOT escalate). Raise the dedicated OwnReportIdentityMismatchError
     # so the escalation machinery (coordinator poll/locate handlers and the FCM push
@@ -2372,10 +2372,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # exact `is_real_location_record` predicate the callers use to clear the reauth
     # budget: a foreign report that merely decrypted to bytes but then failed
     # protobuf parsing / lat-lon validation (or a SEMANTIC network hit with no
-    # coordinate) is NOT a usable fix and must not suppress the escalation. A fresh
-    # secrets.json cannot fix stale own reports of an offline/re-paired device
-    # anyway, and the cache invalidation above still forces own-key re-derivation on
-    # the next poll; when a real network fix exists, suppressing the raise lets that
+    # coordinate) is NOT a usable fix and must not suppress the escalation. The
+    # cache invalidation above still forces own-key re-derivation on the next
+    # poll; when a real network fix exists, suppressing the raise lets that
     # good position flow through the normal return path below. (A sibling device
     # decrypting in the same cycle is handled one layer up, in the sibling-gated
     # coordinator/FCM callers.)
@@ -2398,10 +2397,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         )
         if not has_network_fix:
             raise OwnReportIdentityMismatchError(
-                "All own-report decryptions failed: the server-side own reports "
-                "predate the current identity key (they were encrypted under a "
-                "previous key, so the current key cannot read them). This clears "
-                "once the device uploads a fresh report."
+                "All own-report decryptions failed: none of this device's own "
+                "reports could be decrypted with the available identity key "
+                "candidates. The cause was not determined; enable debug logging "
+                "for this integration to see the [OWN-REPORT-DIAG] line for each "
+                "failed report. See the README, Troubleshooting: "
+                "'Own location reports fail to decrypt'."
             )
 
     if not wrapped:

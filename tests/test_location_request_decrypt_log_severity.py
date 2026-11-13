@@ -75,10 +75,11 @@ def _patch_callback_imports(
         # Per-device decrypt/key failure -> warning (the offline-phone case).
         (
             DecryptionError(
-                "All own-report decryptions failed: the server-side own reports "
-                "predate the current identity key (they were encrypted under a "
-                "previous key, so the current key cannot read them). This clears "
-                "once the device uploads a fresh report."
+                "All own-report decryptions failed: none of this device's own reports "
+                "could be decrypted with the available identity key candidates. The "
+                "cause was not determined; enable debug logging for this integration "
+                "to see the [OWN-REPORT-DIAG] line for each failed report. See the "
+                "README, Troubleshooting: 'Own location reports fail to decrypt'."
             ),
             logging.WARNING,
         ),
