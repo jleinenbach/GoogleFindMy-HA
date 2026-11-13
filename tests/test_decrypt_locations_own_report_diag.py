@@ -16,8 +16,10 @@ the tests attach no meaning to their content.
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Awaitable, Callable
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -165,3 +167,199 @@ async def test_t0_single_candidate_all_own_reports_fail_is_characterized(
     # Today each own report is tried with the first candidate only, once.
     assert offload_keys == [_KEY, _KEY]
     assert len(to_thread_calls) == 0
+
+
+# --- AP1: [OWN-REPORT-DIAG] for an own report that fails authentication ---
+
+_DIAG_TAG = "[OWN-REPORT-DIAG]"
+# Content bytes of the hand-built field 29; none of them may reach the log.
+_F29_CONTENT = bytes(range(0xA0, 0xB0))
+
+
+def _varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def _len_field(number: int, payload: bytes) -> bytes:
+    return _varint(number << 3 | 2) + _varint(len(payload)) + payload
+
+
+def _varint_field(number: int, value: int) -> bytes:
+    return _varint(number << 3) + _varint(value)
+
+
+def _time_bytes(seconds: int) -> bytes:
+    return Common_pb2.Time(seconds=seconds).SerializeToString()
+
+
+def _field29() -> bytes:
+    """Two entries under number 2, each with content, a time and a flag."""
+
+    entry = (
+        _len_field(1, _F29_CONTENT)
+        + _len_field(8, _time_bytes(1_600_000_000))
+        + _varint_field(3, 1)
+    )
+    return _len_field(2, entry) + _len_field(2, entry + _varint_field(4, 7))
+
+
+async def _run_failing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    update: DeviceUpdate_pb2.DeviceUpdate,
+) -> list[str]:
+    """Run one call whose own reports all fail; return the diagnostic lines."""
+
+    def raise_invalid_tag() -> bytes:
+        raise InvalidTag("authentication tag mismatch")
+
+    _patch(monkeypatch, candidates=[_KEY], offload_result=raise_invalid_tag)
+    caplog.set_level("DEBUG", logger=decrypt_locations._LOGGER.name)
+    with pytest.raises(decrypt_locations.OwnReportIdentityMismatchError):
+        await decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
+    return [r.getMessage() for r in caplog.records if _DIAG_TAG in r.getMessage()]
+
+
+async def test_t_a1_diag_line_names_report_time_and_registration_scalars(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-A1: one line per failed own report, with time and scalar fields."""
+
+    update = _build_update(own_reports=2)
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.isShared = True
+    registration.encryptedUserSecrets.ownerKeyVersion = 3
+
+    lines = await _run_failing(monkeypatch, caplog, update)
+
+    assert len(lines) == 2
+    # One line per report; the report order is not part of the contract.
+    times = sorted(line.split("report_time=", 1)[1].split(" ", 1)[0] for line in lines)
+    assert times == ["2023-11-14T22:13:20+00:00", "2023-11-14T22:13:21+00:00"]
+    for line in lines:
+        assert "owner_key_version=3 " in line
+        assert "f14=True " in line
+        assert "keys_tried=1 " in line
+        assert "f29=absent " in line
+        assert "encryptedIdentityKey_len=32" in line
+    # The existing per-report line stays, once per own report (EE-14).
+    auth_lines = [
+        r for r in caplog.records if "Decryption auth failed (InvalidTag)" in r.message
+    ]
+    assert len(auth_lines) == 2
+
+
+async def test_t_a2_field29_shows_structure_one_level_deep_and_no_content(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-A2: field 29 as numbers, wire types and lengths, never a byte."""
+
+    raw = _field29()
+    lines = await _run_failing(
+        monkeypatch, caplog, _build_update(own_reports=1, field29=raw)
+    )
+
+    assert len(lines) == 1
+    # Depth pin: the time inside each entry shows its length only.
+    expected = (
+        f"f29=len={len(raw)}{{2[0]:2:28[1:2:16,8:2:6,3:v],"
+        "2[1]:2:30[1:2:16,8:2:6,3:v,4:v]} "
+    )
+    assert expected in lines[0]
+    text = caplog.text
+    assert _F29_CONTENT.hex() not in text
+    assert _F29_CONTENT[:8].hex() not in text
+    assert base64.b64encode(_F29_CONTENT).decode() not in text
+    assert repr(_F29_CONTENT)[2:12] not in text
+
+
+async def test_t_a3_field33_is_read_as_time_only_when_it_parses(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-A3: a parsable field 33 gives a time; garbage gives None."""
+
+    good = await _run_failing(
+        monkeypatch,
+        caplog,
+        _build_update(own_reports=1, field33=_time_bytes(1_600_000_000)),
+    )
+    assert len(good) == 1
+    assert "f33=len=6{1:v} " in good[0]
+    assert "f33_as_time=2020-09-13T12:26:40+00:00 (meaning unconfirmed)" in good[0]
+
+    caplog.clear()
+    bad = await _run_failing(
+        monkeypatch, caplog, _build_update(own_reports=1, field33=b"\xff\xff\xff")
+    )
+    assert len(bad) == 1
+    assert "f33=unparsable(len=3) " in bad[0]
+    assert "f33_as_time=None (meaning unconfirmed)" in bad[0]
+
+
+async def test_t_a4_secrets_container_shows_structure_without_key_bytes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-A4: the secrets container is one level of structure, no key byte."""
+
+    update = _build_update(own_reports=1)
+    secrets = update.deviceMetadata.information.deviceRegistration.encryptedUserSecrets
+    secrets.ownerKeyVersion = 3
+    # Key bytes that would parse as a message: only a container that is never
+    # opened shows ``1:2:32`` without a bracket.
+    key = b"\x08\x01" * 16
+    secrets.encryptedIdentityKey = key
+
+    lines = await _run_failing(monkeypatch, caplog, update)
+
+    assert len(lines) == 1
+    assert "secrets=len=36{1:2:32,3:v} " in lines[0]
+    assert key.hex()[:16] not in caplog.text
+    assert "\\x08\\x01" not in caplog.text
+
+
+async def test_t_a5_helpers_cover_every_wire_type_and_never_raise() -> None:
+    """T-A5: fixed64, fixed32, group, the entry cap, and broken input."""
+
+    shape = decrypt_locations._wire_shape
+    assert shape(b"\x09" + bytes(8)) == "len=9{1:1:8}"
+    assert shape(b"\x15" + bytes(4)) == "len=5{2:5:4}"
+    assert shape(b"\x1b\x1c") == "len=2{3:3}"
+    capped = shape(b"\x08\x01" * 33)
+    assert capped.endswith(",1[31]:v,+1}")
+    assert "1[32]" not in capped
+    assert shape(b"\xff\xff\xff") == "unparsable(len=3)"
+    assert shape(cast(bytes, _Broken())) == "unparsable(len=0)"
+
+    reading = decrypt_locations._time_reading
+    assert reading(b"") is None
+    assert reading(Common_pb2.Time(nanos=5).SerializeToString()) is None
+    assert reading(cast(bytes, _Broken())) is None
+
+    structure = decrypt_locations._own_report_structure
+    assert structure(object()) == (False, "absent", "absent", None, "absent")
+    container_field = SimpleNamespace(number=19)
+    registration = SimpleNamespace(ListFields=lambda: [(container_field, _Broken())])
+    assert structure(registration)[4] == "absent"
+
+
+class _Broken:
+    """Input that fails every protobuf call, for the never-raise branches."""
+
+    def __len__(self) -> int:
+        return 0
+
+    def __bool__(self) -> bool:
+        return True
+
+    def SerializeToString(self) -> bytes:  # noqa: N802 - protobuf method name
+        raise RuntimeError("broken")
