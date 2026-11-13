@@ -334,6 +334,8 @@ async def test_t_a5_helpers_cover_every_wire_type_and_never_raise() -> None:
     assert shape(b"\x09" + bytes(8)) == "len=9{1:1:8}"
     assert shape(b"\x15" + bytes(4)) == "len=5{2:5:4}"
     assert shape(b"\x1b\x1c") == "len=2{3:3}"
+    # A nested entry that is not a message keeps its length, without brackets.
+    assert shape(b"\x1a\x01\xff") == "len=3{3:2:1}"
     capped = shape(b"\x08\x01" * 33)
     assert capped.endswith(",1[31]:v,+1}")
     assert "1[32]" not in capped
