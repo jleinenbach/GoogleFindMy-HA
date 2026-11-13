@@ -2112,7 +2112,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 # value; field 29 stays in _SECRET_PROTO_FIELDS of the decoder.
                 if own_report_structure is None:
                     own_report_structure = _own_report_structure(device_registration)
-                f14, f29, f33, f33_as_time, secrets_shape = own_report_structure
+                f14, f29, f33, f33_as_time, container_shape = own_report_structure
                 _LOGGER.debug(
                     "[OWN-REPORT-DIAG] Own report did not authenticate: "
                     "report_time=%s owner_key_version=%s f14=%s keys_tried=%d "
@@ -2127,7 +2127,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     f29,
                     f33,
                     f33_as_time,
-                    secrets_shape,
+                    container_shape,
                     len(raw_encrypted_identity_key),
                 )
         except ValueError as ve:

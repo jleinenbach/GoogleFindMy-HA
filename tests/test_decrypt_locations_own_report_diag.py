@@ -171,7 +171,7 @@ async def test_t0_single_candidate_all_own_reports_fail_is_characterized(
     assert len(to_thread_calls) == 0
 
 
-# --- AP1: [OWN-REPORT-DIAG] for an own report that fails authentication ---
+# --- [OWN-REPORT-DIAG] for an own report that fails authentication ---
 
 _DIAG_TAG = "[OWN-REPORT-DIAG]"
 # Content bytes of the hand-built field 29; none of them may reach the log.
@@ -254,7 +254,7 @@ async def test_t_a1_diag_line_names_report_time_and_registration_scalars(
         assert "keys_tried=1 " in line
         assert "f29=absent " in line
         assert "encryptedIdentityKey_len=32" in line
-    # The existing per-report line stays, once per own report (EE-14).
+    # The existing per-report line stays, once per own report.
     auth_lines = [
         r for r in caplog.records if "Decryption auth failed (InvalidTag)" in r.message
     ]
@@ -369,7 +369,7 @@ class _Broken:
         raise RuntimeError("broken")
 
 
-# --- AP2: own reports try every identity key candidate, and promote ---
+# --- Own reports try every identity key candidate, and promote ---
 
 _STALE_KEY = b"\x51" * 32
 _GOOD_KEY = bytes(range(32, 64))
