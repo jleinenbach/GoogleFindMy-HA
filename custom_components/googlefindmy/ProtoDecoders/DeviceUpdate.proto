@@ -228,7 +228,7 @@ message DeviceRegistration {
   bytes canonicId = 1; // Spot@55f87f62 form: CanonicId
   DeviceTypeInformation deviceTypeInformation = 2;
   bytes capabilities = 11; // Spot@55f87f62 form: DeviceCapabilities
-  bool isShared = 14; // Spot@55f87f62
+  bool isShared = 14; // Spot@55f87f62. Name and meaning taken from Spot; not confirmed by an observation.
   EncryptedUserSecrets encryptedUserSecrets = 19;
   string manufacturer = 20;
   string fastPairModelId = 21;
@@ -236,23 +236,23 @@ message DeviceRegistration {
   int32 rotationExponent = 24; // Spot@55f87f62
   bytes ringKey = 25; // Spot@55f87f62, key material
   bytes recoveryKey = 26; // Spot@55f87f62, key material
-  bytes keyRotationInformation = 29; // Spot@55f87f62 form: DeviceRegistration.KeyRotationInformation
+  bytes keyRotationInformation = 29; // Spot@55f87f62 form: DeviceRegistration.KeyRotationInformation; Name and meaning taken from Spot; not confirmed by an observation.
   DeviceEncryptionScheme deviceEncryptionScheme = 30; // Spot@55f87f62
   bytes unwantedTrackingKey = 31; // Spot@55f87f62, key material
   bytes lostModeInformation = 32; // Spot@55f87f62 form: DeviceRegistration.LostModeInformation
-  bytes firstSecretsCreationDate = 33; // Spot@55f87f62 form: Time
+  bytes firstSecretsCreationDate = 33; // Spot@55f87f62 form: Time; Name and meaning taken from Spot; not confirmed by an observation.
   string model = 34;
   bytes registrationField15 = 15; // Meaning unknown, observed 2026-11-10: text, 36 characters
   uint64 registrationField22 = 22; // Meaning unknown, observed 2026-11-10: varint, value 1
   bytes registrationField38 = 38; // Meaning unknown, observed 2026-11-10: text, 7 or 11 characters
   bytes registrationField40 = 40; // Meaning unknown, observed 2026-11-10; form: Time
 
-  // Spot@55f87f62, reverse-engineered, not confirmed by Google.
+  // Spot@55f87f62, reverse-engineered, not confirmed by Google. Name and meaning taken from Spot; not confirmed by an observation.
   message KeyRotationInformation {
     repeated RotatedEIK rotatedEIKs = 2;
     bool keyRotationNeeded = 3;
 
-    // Spot@55f87f62, reverse-engineered, not confirmed by Google.
+    // Spot@55f87f62, reverse-engineered, not confirmed by Google. Name and meaning taken from Spot; not confirmed by an observation.
     message RotatedEIK {
       bytes encryptedEIK = 1;
       Time creationDate = 8;
@@ -272,7 +272,7 @@ message EncryptedUserSecrets {
   bytes encryptedAccountKey = 4;
   bytes sharingKeys = 6; // Spot@55f87f62 form: SharingKeys
   Time creationDate = 8;
-  bytes previousEikDate = 9; // Spot@55f87f62 form: Time
+  bytes previousEikDate = 9; // Spot@55f87f62 form: Time; Name and meaning taken from Spot; not confirmed by an observation. Spot itself notes: "May be wrong, because we never saw UserSecrets with the new EIK encrypted with the old EIK."
   bool encryptedWithSharedSecret = 10; // Spot@55f87f62
   bytes encryptedSha256AccountKeyPublicAddress = 11;
 }
