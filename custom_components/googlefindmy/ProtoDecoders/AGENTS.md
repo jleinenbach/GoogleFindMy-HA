@@ -65,6 +65,14 @@ Scalar fields holding key material or personal data go into `_SECRET_PROTO_FIELD
 
 Messages and fields marked `Spot@55f87f62` come from [leonboe1/Spot](https://github.com/leonboe1/Spot), commit `55f87f62302fae24150188124e8e07d5285568d8` (GPL-3.0). They are reverse-engineered and not confirmed by Google. Messages the integration does not use yet are kept on purpose so the wire format does not have to be guessed later. `docs/FMDN.md` section S8.4 holds the inventory.
 
+## Naming rule for observed fields
+
+Name a field only when its meaning was observed. Otherwise declare it under its number (`<message>Field<N>`, for example `metadataField8`) and put the observation in the comment: what was seen, on how many devices (`n=`) and the date. A name taken from Spot stays when an observation confirms it ("observed and confirmed <date>"); a Spot name without such an observation carries "Name and meaning taken from Spot; not confirmed by an observation." A rename keeps number and wire type and is therefore wire-compatible; a type change needs its own measurement. A rename also renames the key in `_FORM_BY_FIELD` and `_SECRET_PROTO_FIELDS`, the rows in `docs/FMDN.md` S8.5/S8.6 and the tests that pin them. Comments never carry a measured value of a personal field.
+
+## Personal data on the phone record
+
+`DeviceMetadata.phoneInformation` (form `DeviceMetadata.PhoneInformation`) and `PhoneInformation` hold personal data of the phone and the account: `imei` (7), `firstRegistrationDate` (2), `phoneInformationField1` (shape of the GSF Android ID, not confirmed) and the account e-mail address inside `information` (26). `imei`, `firstRegistrationDate` and `phoneInformationField1` are in `_SECRET_PROTO_FIELDS`, and so is `phoneInformation` as a whole. `DeviceMetadata.phoneInformation` is never listed in `_FORM_BY_FIELD`. No log record carries these values, not even truncated (root `AGENTS.md`, section 5).
+
 ## Proto3 scalar presence reminder
 
 Proto3 **non-optional scalar fields do not support `HasField`**. Access them directly and rely on their default values (for example, `0` for integers) instead of calling presence checks that raise `ValueError`.
