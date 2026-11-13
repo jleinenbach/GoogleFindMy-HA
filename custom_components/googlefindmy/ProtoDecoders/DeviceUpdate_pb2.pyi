@@ -57,6 +57,7 @@ class IdentifierInformationType(int, metaclass=EnumTypeWrapper):
     IDENTIFIER_UNKNOWN: _ClassVar[IdentifierInformationType]
     IDENTIFIER_ANDROID: _ClassVar[IdentifierInformationType]
     IDENTIFIER_SPOT: _ClassVar[IdentifierInformationType]
+    IDENTIFIER_FASTPAIR: _ClassVar[IdentifierInformationType]
 
 class SpotDeviceType(int, metaclass=EnumTypeWrapper):
     __slots__ = ()
@@ -119,6 +120,7 @@ DEVICE_COMPONENT_CASE: DeviceComponent
 IDENTIFIER_UNKNOWN: IdentifierInformationType
 IDENTIFIER_ANDROID: IdentifierInformationType
 IDENTIFIER_SPOT: IdentifierInformationType
+IDENTIFIER_FASTPAIR: IdentifierInformationType
 DEVICE_TYPE_UNKNOWN: SpotDeviceType
 DEVICE_TYPE_BEACON: SpotDeviceType
 DEVICE_TYPE_HEADPHONES: SpotDeviceType
@@ -400,7 +402,7 @@ class DeviceMetadata(Message, _MessageProto):
         "metadataField8",
         "metadataField10",
         "metadataField11",
-        "metadataField12",
+        "fetchTime",
         "metadataField13",
     )
     class SupportedActions(Message, _MessageProto):
@@ -417,32 +419,52 @@ class DeviceMetadata(Message, _MessageProto):
 
     class PhoneInformation(Message, _MessageProto):
         __slots__ = (
+            "firstRegistrationDate",
             "modelNumber",
             "manufacturer",
             "codename",
             "carrier",
             "imei",
+            "phoneInformationField10",
+            "phoneInformationField20",
+            "phoneInformationField21",
+            "phoneInformationField23",
             "information",
         )
+        FIRSTREGISTRATIONDATE_FIELD_NUMBER: _ClassVar[int]
         MODELNUMBER_FIELD_NUMBER: _ClassVar[int]
         MANUFACTURER_FIELD_NUMBER: _ClassVar[int]
         CODENAME_FIELD_NUMBER: _ClassVar[int]
         CARRIER_FIELD_NUMBER: _ClassVar[int]
         IMEI_FIELD_NUMBER: _ClassVar[int]
+        PHONEINFORMATIONFIELD10_FIELD_NUMBER: _ClassVar[int]
+        PHONEINFORMATIONFIELD20_FIELD_NUMBER: _ClassVar[int]
+        PHONEINFORMATIONFIELD21_FIELD_NUMBER: _ClassVar[int]
+        PHONEINFORMATIONFIELD23_FIELD_NUMBER: _ClassVar[int]
         INFORMATION_FIELD_NUMBER: _ClassVar[int]
+        firstRegistrationDate: bytes
         modelNumber: str
         manufacturer: str
         codename: str
         carrier: str
-        imei: int
+        imei: bytes
+        phoneInformationField10: bytes
+        phoneInformationField20: int
+        phoneInformationField21: int
+        phoneInformationField23: bytes
         information: DeviceInformation
         def __init__(
             self,
+            firstRegistrationDate: bytes | None = ...,
             modelNumber: str | None = ...,
             manufacturer: str | None = ...,
             codename: str | None = ...,
             carrier: str | None = ...,
-            imei: int | None = ...,
+            imei: bytes | None = ...,
+            phoneInformationField10: bytes | None = ...,
+            phoneInformationField20: int | None = ...,
+            phoneInformationField21: int | None = ...,
+            phoneInformationField23: bytes | None = ...,
             information: DeviceInformation | _Mapping[str, _Any] | None = ...,
         ) -> None: ...
 
@@ -455,7 +477,7 @@ class DeviceMetadata(Message, _MessageProto):
     METADATAFIELD8_FIELD_NUMBER: _ClassVar[int]
     METADATAFIELD10_FIELD_NUMBER: _ClassVar[int]
     METADATAFIELD11_FIELD_NUMBER: _ClassVar[int]
-    METADATAFIELD12_FIELD_NUMBER: _ClassVar[int]
+    FETCHTIME_FIELD_NUMBER: _ClassVar[int]
     METADATAFIELD13_FIELD_NUMBER: _ClassVar[int]
     identifierInformation: IdentitfierInformation
     supportedActions: _containers.RepeatedScalarFieldContainer[bytes]
@@ -466,7 +488,7 @@ class DeviceMetadata(Message, _MessageProto):
     metadataField8: int
     metadataField10: bytes
     metadataField11: bytes
-    metadataField12: bytes
+    fetchTime: bytes
     metadataField13: bytes
     def __init__(
         self,
@@ -481,7 +503,7 @@ class DeviceMetadata(Message, _MessageProto):
         metadataField8: int | None = ...,
         metadataField10: bytes | None = ...,
         metadataField11: bytes | None = ...,
-        metadataField12: bytes | None = ...,
+        fetchTime: bytes | None = ...,
         metadataField13: bytes | None = ...,
     ) -> None: ...
 

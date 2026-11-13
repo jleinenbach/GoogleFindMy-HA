@@ -8,6 +8,7 @@ length-delimited fields on this path are therefore ``bytes``.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 from collections.abc import Callable, Iterator
@@ -84,7 +85,7 @@ _NEW_BYTES_FIELDS: dict[str, tuple[str, ...]] = {
         # Observed on 2026-11-10, meaning unknown.
         "metadataField10",
         "metadataField11",
-        "metadataField12",
+        "fetchTime",
         "metadataField13",
     ),
     "ImageInformation": ("componentImages",),
@@ -665,7 +666,7 @@ _OBSERVED: tuple[tuple[str, int, bytes, str, object], ...] = (
         "metadataField11",
         b"synthetic-text",
     ),
-    ("DeviceMetadata", 12, _len_field(12, _TIME_SHAPE), "metadataField12", _TIME_SHAPE),
+    ("DeviceMetadata", 12, _len_field(12, _TIME_SHAPE), "fetchTime", _TIME_SHAPE),
     ("DeviceMetadata", 13, _len_field(13, b"t" * 32), "metadataField13", b"t" * 32),
     (
         "DeviceRegistration",
@@ -734,7 +735,57 @@ _OBSERVED: tuple[tuple[str, int, bytes, str, object], ...] = (
         "phoneInformationField1",
         2**40 + 7,
     ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        2,
+        _len_field(2, _TIME_SHAPE),
+        "firstRegistrationDate",
+        _TIME_SHAPE,
+    ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        7,
+        _len_field(7, b"350000000000017"),
+        "imei",
+        b"350000000000017",
+    ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        10,
+        _len_field(10, _TIME_SHAPE),
+        "phoneInformationField10",
+        _TIME_SHAPE,
+    ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        20,
+        _varint_field(20, 3),
+        "phoneInformationField20",
+        3,
+    ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        21,
+        _varint_field(21, 4),
+        "phoneInformationField21",
+        4,
+    ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        23,
+        _len_field(23, b"0123456789abcdef" * 2),
+        "phoneInformationField23",
+        b"0123456789abcdef" * 2,
+    ),
 )
+
+
+def _message_class(dotted_name: str) -> type[Message]:
+    """Resolve ``Outer.Inner`` in ``DeviceUpdate_pb2`` (nested messages)."""
+    resolved: type[Message] = functools.reduce(
+        getattr, dotted_name.split("."), DeviceUpdate_pb2
+    )
+    return resolved
 
 
 @pytest.mark.parametrize(
@@ -745,7 +796,7 @@ _OBSERVED: tuple[tuple[str, int, bytes, str, object], ...] = (
 def test_observed_fields_parse_with_live_wire_types(
     message_name: str, number: int, wire: bytes, field_name: str, expected: object
 ) -> None:
-    message_cls = getattr(DeviceUpdate_pb2, message_name)
+    message_cls = _message_class(message_name)
     parsed = message_cls.FromString(wire)
     assert message_cls.DESCRIPTOR.fields_by_name[field_name].number == number
     value = getattr(parsed, field_name)
@@ -761,7 +812,7 @@ def test_observed_fields_leave_no_unknown_field(
     message_name: str, number: int, wire: bytes, field_name: str, expected: object
 ) -> None:
     del field_name, expected
-    parsed = getattr(DeviceUpdate_pb2, message_name).FromString(wire)
+    parsed = _message_class(message_name).FromString(wire)
     assert [f.field_number for f in UnknownFieldSet(parsed)] == [], number
 
 
@@ -815,6 +866,12 @@ def test_component_detail_carries_component_information() -> None:
         "eidResponseField3",
         "eidResponseField5",
         "phoneInformationField1",
+        "firstRegistrationDate",
+        "imei",
+        "phoneInformationField10",
+        "phoneInformationField20",
+        "phoneInformationField21",
+        "phoneInformationField23",
     ],
 )
 def test_observed_text_fields_are_redacted(field_name: str) -> None:
@@ -868,3 +925,96 @@ def test_fmdn_s8_5_lists_every_neutral_field() -> None:
     )
     assert declared
     assert listed == declared
+
+
+# --------------------------------------------------------------------------
+# Phone record and Fast Pair identifier (observed 2026-11-12)
+# --------------------------------------------------------------------------
+
+_PHONE_IMEI = b"350000000000017"  # synthetic, 15 ASCII digits as on the wire
+_PHONE_REGISTRATION_SECONDS = 1_234_567_891
+_PHONE_FIELD23 = b"5e" * 16
+_PHONE_FIELD1 = 2**61 + 12_345
+_PHONE_SECRETS = (
+    "firstRegistrationDate",
+    "imei",
+    "phoneInformationField10",
+    "phoneInformationField20",
+    "phoneInformationField21",
+    "phoneInformationField23",
+)
+
+
+def _phone_record() -> DeviceUpdate_pb2.DeviceMetadata.PhoneInformation:
+    return DeviceUpdate_pb2.DeviceMetadata.PhoneInformation(
+        firstRegistrationDate=_varint_field(1, _PHONE_REGISTRATION_SECONDS),
+        modelNumber="SM-TEST",
+        imei=_PHONE_IMEI,
+        phoneInformationField10=_TIME_SHAPE,
+        phoneInformationField20=987_654_321,
+        phoneInformationField21=123_456_789,
+        phoneInformationField23=_PHONE_FIELD23,
+    )
+
+
+def test_t_p1_phone_record_values_never_reach_developer_output() -> None:
+    """T-P1: every field of the phone record shows its length only."""
+    record = _phone_record()
+    text = decoder.custom_message_formatter(record, "", False)
+    for name in _PHONE_SECRETS:
+        assert f"{name}: <redacted len=" in text
+    leaks = (
+        _PHONE_IMEI.decode(),
+        _PHONE_IMEI.hex(),
+        str(_PHONE_REGISTRATION_SECONDS),
+        _varint_field(1, _PHONE_REGISTRATION_SECONDS).hex(),
+        "987654321",
+        "123456789",
+        _PHONE_FIELD23.decode(),
+        _PHONE_FIELD23.hex(),
+    )
+    for value in leaks:
+        assert value not in text
+    assert "SM-TEST" in text
+
+    redacted = decoder._redacted_copy(record)
+    for name in _PHONE_SECRETS:
+        assert not getattr(redacted, name), name
+    assert redacted.modelNumber == "SM-TEST"
+
+    identifier = DeviceUpdate_pb2.PhoneInformation(phoneInformationField1=_PHONE_FIELD1)
+    identifier_text = decoder.custom_message_formatter(identifier, "", False)
+    assert "phoneInformationField1: <redacted len=1>" in identifier_text
+    assert str(_PHONE_FIELD1) not in identifier_text
+    assert format(_PHONE_FIELD1, "x") not in identifier_text
+
+    device = DeviceUpdate_pb2.DeviceMetadata(
+        phoneInformation=record.SerializeToString()
+    )
+    device_text = decoder.custom_message_formatter(device, "", False)
+    assert "phoneInformation: <redacted len=" in device_text
+    assert _PHONE_IMEI.hex() not in device_text
+
+
+def test_t_p3_fastpair_identifier_type() -> None:
+    """T-P3: type 5 has a name, the same number as Spot's FASTPAIR_DEVICE."""
+    assert DeviceUpdate_pb2.IDENTIFIER_FASTPAIR == 5 == DeviceUpdate_pb2.FASTPAIR_DEVICE
+    device = DeviceUpdate_pb2.DeviceMetadata()
+    device.identifierInformation.type = DeviceUpdate_pb2.IDENTIFIER_FASTPAIR
+    assert decoder._identifier_structure(device)[0] == "IDENTIFIER_FASTPAIR"
+
+
+def test_t_p4_fastpair_identifier_keeps_todays_canonic_id_reading() -> None:
+    """T-P4: naming type 5 changes no ID; field 5 stays unread (follow-up plan)."""
+    device_list = DeviceUpdate_pb2.DevicesList()
+    only_field5 = device_list.deviceMetadata.add(userDefinedDeviceName="buds")
+    only_field5.identifierInformation.type = DeviceUpdate_pb2.IDENTIFIER_FASTPAIR
+    only_field5.identifierInformation.identifierField5 = _len_field(
+        2, _len_field(1, _len_field(1, b"cid-in-field-5"))
+    )
+    assert decoder.get_canonic_ids(device_list) == []
+
+    with_field3 = device_list.deviceMetadata.add(userDefinedDeviceName="buds-3")
+    with_field3.identifierInformation.type = DeviceUpdate_pb2.IDENTIFIER_FASTPAIR
+    with_field3.identifierInformation.canonicIds.canonicId.add(id="cid-3")
+    assert decoder.get_canonic_ids(device_list) == [("buds-3", "cid-3")]

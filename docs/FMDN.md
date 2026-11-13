@@ -310,7 +310,7 @@ encryptedUserSecrets.encryptedIdentityKey:
 | `AccessInformation` | `sharingKeys` (7) | `bytes` | `SharingKeys` |
 | `EncryptedUserSecrets` | `sharingKeys` (6), `previousEikDate` (9) | `bytes` | `SharingKeys`, `Time` |
 | `SemanticLocation` | `semanticLocationIdentifier` (7) | `bytes` | nested message |
-| `DeviceMetadata` | `metadataField10` (10), `metadataField11` (11), `metadataField12` (12), `metadataField13` (13) | `bytes` | not in Spot; observed 2026-11-10: nested blob, text, `Time`, text |
+| `DeviceMetadata` | `metadataField10` (10), `metadataField11` (11), `fetchTime` (12), `metadataField13` (13) | `bytes` | not in Spot; observed 2026-11-10: nested blob, text, `Time`, text |
 | `DeviceRegistration` | `registrationField15` (15), `registrationField38` (38), `registrationField40` (40) | `bytes` | not in Spot; observed 2026-11-10: text, text, `Time` |
 | `IdentitfierInformation` | `identifierField5` (5) | `bytes` | not in Spot; observed 2026-11-10: nested message |
 
@@ -325,7 +325,6 @@ Fields seen on the wire that Spot does not name are declared under neutral names
 | `DeviceMetadata.metadataField8` (8) | varint | 6, 7, 11 | device list | 2026-11-10 |
 | `DeviceMetadata.metadataField10` (10) | length-delimited | nested message, about 800 bytes, key-like shape, never opened | device list | 2026-11-10 |
 | `DeviceMetadata.metadataField11` (11) | length-delimited | text, 19 or 44 characters | device list | 2026-11-10 |
-| `DeviceMetadata.metadataField12` (12) | length-delimited | `Time` form | device list | 2026-11-10 |
 | `DeviceMetadata.metadataField13` (13) | length-delimited | text, 32 characters | device list | 2026-11-10 |
 | `DeviceMetadata.SupportedActions.supportedActionsField2` (2) | varint | 1, 2 | device list | 2026-11-10 |
 | `DeviceRegistration.registrationField15` (15) | length-delimited | text, 36 characters | device list | 2026-11-10 |
@@ -349,6 +348,10 @@ Fields seen on the wire that Spot does not name are declared under neutral names
 | `ExecuteActionType.phoneActionField13` (13) | length-delimited | empty message | phones only, inside `supportedActions` | 2026-11-10 |
 | `ExecuteActionType.phoneActionField14` (14) | length-delimited | empty message | phones only, inside `supportedActions` | 2026-11-10 |
 | `PhoneInformation.phoneInformationField1` (1) | varint | above 255 (value not logged) | phones, once per account | 2026-11-11 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField10` (10) | length-delimited | changes on every fetch, time-like (value not logged) | phone record, n=1 phone | 2026-11-12 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField20` (20) | varint | numbers (value not logged) | phone record, n=1 phone | 2026-11-12 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField21` (21) | varint | numbers (value not logged) | phone record, n=1 phone | 2026-11-12 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField23` (23) | length-delimited | text, 32 hex characters, stability not measured (value not logged) | phone record, n=1 phone | 2026-11-12 |
 
 ---
 

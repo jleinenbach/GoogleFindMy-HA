@@ -17,6 +17,8 @@ import "ProtoDecoders/Common.proto";
 // string. A wrong declared type there raises DecodeError and fails the whole
 // device list. The comment names the Spot form, which stays available as a
 // message; read such a field through a guarded helper only.
+//
+// Fields are named only when their meaning was observed; otherwise the name carries the field number and the comment the observation (ProtoDecoders/AGENTS.md).
 
 message GetEidInfoForE2eeDevicesResponse {
   bytes eidResponseField3 = 3; // Meaning unknown, observed 2026-11-10: length-delimited, 1 byte
@@ -139,11 +141,11 @@ message DeviceMetadata {
   DeviceInformation information = 4;
   string userDefinedDeviceName = 5;
   ImageInformation imageInformation = 6;
-  uint64 metadataField8 = 8; // Meaning unknown, observed 2026-11-10: varint, values 6, 7, 11
-  bytes metadataField10 = 10; // Meaning unknown, observed 2026-11-10: nested message (about 800 bytes, key-like shape), never opened
-  bytes metadataField11 = 11; // Meaning unknown, observed 2026-11-10: text, 19 or 44 characters
-  bytes metadataField12 = 12; // Meaning unknown, observed 2026-11-10; form: Time
-  bytes metadataField13 = 13; // Meaning unknown, observed 2026-11-10: text, 32 characters
+  uint64 metadataField8 = 8; // Meaning unknown, observed 2026-11-10: varint, values 6, 7, 11. 2026-11-12: 7 (moto tag, Trackcard, Insta360), 6 (one moto tag 2), 11 (both Pixel Buds); does not match Spot's SpotDeviceType
+  bytes metadataField10 = 10; // Meaning unknown, observed 2026-11-10: nested message (about 800 bytes, key-like shape), never opened. 2026-11-12: only on one earbud entry (Pixel Buds Pro), a copy of the device entry with name, image and field 2 = 26 (Spot SpotDeviceType 26 = DEVICE_TYPE_EARBUDS)
+  bytes metadataField11 = 11; // Meaning unknown, observed 2026-11-10: text, 19 or 44 characters. 2026-11-12: phone: 19-digit decimal equal to PhoneInformation.phoneInformationField1; trackers: 44 characters URL-safe Base64 (32 bytes), distinct per device
+  bytes fetchTime = 12; // Observed equal to the request time (phones and trackers, 2026-11-12); form: Time
+  bytes metadataField13 = 13; // Meaning unknown, observed 2026-11-10: text, 32 characters. 2026-11-12: 32 hex characters, distinct per device (trackers and the phone); unchanged over one off/on cycle on the phone
 
   // Spot@55f87f62, reverse-engineered, not confirmed by Google. The Spot form matches
   // the wire: `type` is an ExecuteActionType whose set field number names the action.
@@ -154,12 +156,17 @@ message DeviceMetadata {
 
   // Spot@55f87f62, reverse-engineered, not confirmed by Google.
   message PhoneInformation {
-    string modelNumber = 3;
-    string manufacturer = 4;
-    string codename = 5;
-    string carrier = 6;
-    int32 imei = 7;
-    DeviceInformation information = 26;
+    bytes firstRegistrationDate = 2; // Observed 2026-11-12 (n=1 phone): equals the first-registration date shown by the Find Hub app, read in the lists of two accounts; predates every canonical ID of that phone. Personal data, never logged; form: Time
+    string modelNumber = 3; // Spot@55f87f62; observed and confirmed 2026-11-12 (n=1 phone)
+    string manufacturer = 4; // Spot@55f87f62; observed and confirmed 2026-11-12 (n=1 phone)
+    string codename = 5; // Spot@55f87f62; observed and confirmed 2026-11-12 (n=1 phone)
+    string carrier = 6; // Spot@55f87f62; observed and confirmed 2026-11-12 (n=1 phone)
+    bytes imei = 7; // Spot@55f87f62 name; observed and confirmed 2026-11-12 (n=1 phone, matches the IMEI shown on the device). Spot declares int32; the wire carries the field length-delimited (22 of 22 records, 2026-11-12). Personal data, never logged
+    bytes phoneInformationField10 = 10; // Meaning unknown, observed 2026-11-12 (n=1 phone): changes on every fetch, time-like
+    uint64 phoneInformationField20 = 20; // Meaning unknown, observed 2026-11-12 (n=1 phone): numbers
+    uint64 phoneInformationField21 = 21; // Meaning unknown, observed 2026-11-12 (n=1 phone): numbers
+    bytes phoneInformationField23 = 23; // Meaning unknown, observed 2026-11-12 (n=1 phone): text, 32 hex characters, stability not measured
+    DeviceInformation information = 26; // Spot@55f87f62; observed and confirmed 2026-11-12 (n=1 phone): a copy of the account's device entry (canonical ID, name, secrets creation time, account e-mail address). Personal data
   }
 }
 
@@ -178,18 +185,19 @@ message IdentitfierInformation {
   PhoneInformation phoneInformation = 1;
   IdentifierInformationType type = 2;
   CanonicIds canonicIds = 3;
-  bytes identifierField5 = 5; // Meaning unknown, observed 2026-11-10: nested message, 42 bytes
+  bytes identifierField5 = 5; // Meaning unknown, observed 2026-11-10: nested message, 42 bytes. 2026-11-12 (n=1, Pixel Buds Pro, type 5): holds the canonical ID at 5.2.1.1, the shape of PhoneInformation (canonicIds = 2); not read by the integration
 }
 
 enum IdentifierInformationType {
   IDENTIFIER_UNKNOWN = 0;
   IDENTIFIER_ANDROID = 1;
   IDENTIFIER_SPOT = 2;
+  IDENTIFIER_FASTPAIR = 5; // Observed 2026-11-12 on one Pixel Buds Pro entry; number and name follow Spot's DeviceType FASTPAIR_DEVICE = 5
 }
 
 message PhoneInformation {
   CanonicIds canonicIds = 2;
-  uint64 phoneInformationField1 = 1; // Meaning unknown, observed 2026-11-11: varint above 255, once per account on a phone (Spot@55f87f62 names the message PhoneIdentifierInformation)
+  uint64 phoneInformationField1 = 1; // Meaning unknown, observed 2026-11-12 (n=1 phone): 19-digit decimal (62 bit), shape matches the GSF Android ID, not confirmed. Equal to DeviceMetadata.metadataField11 on phones; unchanged before, during and after one off/on cycle of the locate setting and equal in the lists of two accounts (n=1 phone, 2026-11-12). Personal data, never logged (Spot@55f87f62 names the message PhoneIdentifierInformation)
 }
 
 message CanonicIds {
@@ -240,7 +248,7 @@ message DeviceRegistration {
   DeviceEncryptionScheme deviceEncryptionScheme = 30; // Spot@55f87f62
   bytes unwantedTrackingKey = 31; // Spot@55f87f62, key material
   bytes lostModeInformation = 32; // Spot@55f87f62 form: DeviceRegistration.LostModeInformation
-  bytes firstSecretsCreationDate = 33; // Spot@55f87f62 form: Time; Name and meaning taken from Spot; not confirmed by an observation.
+  bytes firstSecretsCreationDate = 33; // Spot@55f87f62 form: Time; Name and meaning taken from Spot; not confirmed by an observation. Observed 2026-11-12 (n=1 phone, two off/on cycles of the locate setting): carried the minute the setting was turned back on; meaning not confirmed.
   string model = 34;
   bytes registrationField15 = 15; // Meaning unknown, observed 2026-11-10: text, 36 characters
   uint64 registrationField22 = 22; // Meaning unknown, observed 2026-11-10: varint, value 1
