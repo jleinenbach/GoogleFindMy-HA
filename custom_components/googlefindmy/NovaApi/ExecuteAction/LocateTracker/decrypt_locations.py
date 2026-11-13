@@ -2090,11 +2090,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             if public_key_random == b"":  # Own-report auth failure
                 _own_auth_failures += 1
             # Per-report detail diagnostics only: a single report failing to
-            # authenticate is not actionable on its own (a stale own report,
-            # an offline device, or a foreign/crowdsourced report keyed to
-            # another account all land here). The user-facing verdict and any
-            # reauth decision belong to the stateful, sibling-aware callers
-            # (coordinator poll verdict / FCM callback), so this stays DEBUG and
+            # authenticate is not actionable on its own (an own report that
+            # no longer decrypts for a cause the code does not determine, or a
+            # foreign/crowdsourced report keyed to another account, lands
+            # here). The user-facing verdict and any reauth decision belong to
+            # the stateful, sibling-aware callers (coordinator poll verdict /
+            # FCM callback), so this stays DEBUG and
             # carries no reauth advice.
             _LOGGER.debug(
                 "Decryption auth failed (InvalidTag) for %s report "

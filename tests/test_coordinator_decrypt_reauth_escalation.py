@@ -312,7 +312,7 @@ def test_note_background_decrypt_success_leaves_unknown_untouched() -> None:
 def test_resolve_mixed_cycle_sibling_success_blocks_spurious_reauth(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The bug: a powered-off device fails to decrypt while siblings succeed.
+    """The bug: one device's own reports fail to decrypt while siblings succeed.
 
     With the account-wide budget one step below the threshold, a mixed cycle
     (``cycle_decrypt_error`` set AND ``cycle_had_successful_decrypt`` True) must
@@ -326,8 +326,8 @@ def test_resolve_mixed_cycle_sibling_success_blocks_spurious_reauth(
     """
     stub = _make_stub()
     stub._consecutive_decrypt_failures = _MAX_DECRYPT_FAILURES - 1
-    # The user's exact error: a powered-off device whose OWN server reports all
-    # fail authentication. decrypt_locations raises the dedicated device-local
+    # The user's exact error: a device whose OWN server reports all fail
+    # authentication. decrypt_locations raises the dedicated device-local
     # subclass here (NOT a plain DecryptionError), which is the only class the
     # sibling-success downgrade applies to.
     err = OwnReportIdentityMismatchError(
@@ -355,6 +355,38 @@ def test_resolve_mixed_cycle_sibling_success_blocks_spurious_reauth(
         and "no re-authentication is required" in rec.message
         for rec in caplog.records
     )
+
+
+def test_t_e1_sibling_downgrade_warning_names_no_cause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T-E1: the sibling-success downgrade warning states no cause.
+
+    The integration does not determine why a device's own reports fail to
+    decrypt, so the user-facing warning must not name one (no "powered off", no
+    "stale"). It keeps the measured part (a sibling proved the account key, no
+    re-authentication) and hands over the exception message, which carries the
+    pointer to the diagnostics.
+    """
+    stub = _make_stub()
+    err = OwnReportIdentityMismatchError("All own-report decryptions failed: test")
+
+    with caplog.at_level(logging.WARNING):
+        stub._resolve_cycle_decrypt_outcome(
+            cycle_decrypt_error=err,
+            cycle_had_successful_decrypt=True,
+            cycle_had_stale_key=False,
+        )
+
+    warnings = [
+        rec.getMessage() for rec in caplog.records if rec.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    message = warnings[0]
+    assert "no re-authentication is required" in message
+    assert message.endswith("Details: All own-report decryptions failed: test")
+    assert "powered off" not in message
+    assert "stale" not in message
 
 
 def test_resolve_account_wide_failure_without_sibling_escalates() -> None:
@@ -575,9 +607,9 @@ def test_account_wide_predicate_without_sibling_is_account_wide() -> None:
 def test_account_wide_predicate_own_report_with_sibling_is_local() -> None:
     """The device-local own-report class, refuted by a sibling, is NOT account-wide.
 
-    ``OwnReportIdentityMismatchError`` (a phone powered off for days) is the ONLY
-    class the sibling-success downgrade applies to: the account keys are proven
-    healthy and a fresh secrets.json cannot fix an offline/re-paired device.
+    ``OwnReportIdentityMismatchError`` (own reports no longer decrypt; cause not
+    measured) is the ONLY class the sibling-success downgrade applies to: the
+    account keys are proven healthy by the sibling.
     """
     stub = _make_stub()
     assert (

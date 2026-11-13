@@ -645,9 +645,7 @@ class PollingOperations(_MixinBase):
             _LOGGER.warning(
                 "Location decryption failed for a device this cycle while other "
                 "devices decrypted successfully; the account shared key is "
-                "healthy, so no re-authentication is required. The affected "
-                "device may be powered off or its own server reports may be "
-                "stale: %s",
+                "healthy, so no re-authentication is required. Details: %s",
                 cycle_decrypt_error,
             )
         if cycle_had_successful_decrypt and not cycle_had_stale_key:
