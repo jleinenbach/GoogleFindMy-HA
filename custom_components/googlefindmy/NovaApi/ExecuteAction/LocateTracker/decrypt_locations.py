@@ -1195,6 +1195,28 @@ async def _offload_decrypt_aes(identity_key: bytes, encrypted_location: bytes) -
     )
 
 
+def _promote_identity_key(
+    key: bytes,
+    candidates: list[bytes],
+    *targets: dict[str, Any],
+) -> tuple[bytes, list[bytes]]:
+    """Move ``key`` to the front of ``candidates`` and record it as the identity key.
+
+    Shared by the own-report and the foreign-report path, so that both promote a
+    candidate that authenticated a report in the same way: ``metadata_update`` and
+    ``metadata`` carry the promoted key to the cache and the payload instead of the
+    stale one, and the remaining reports try it first. Returns the identity key
+    bytes and the reordered candidate list for the payload.
+    """
+    key_bytes = bytes(key)
+    for target in targets:
+        target["identity_key"] = key_bytes
+        target["identityKey"] = key_bytes
+    candidates.remove(key)
+    candidates.insert(0, key)
+    return key_bytes, list(candidates)
+
+
 def _component_keys(
     device_registration: object, identity_keys: Sequence[bytes]
 ) -> list[tuple[bytes, bytes]]:
@@ -1858,14 +1880,42 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     raise ValueError(
                         "No identity key available for own-report decryption"
                     )
-                own_keys_tried += 1
-                decrypted_location_raw = await _offload_decrypt_aes(
-                    active_identity_key, encrypted_location
-                )
+                # Try every candidate in order, like the foreign path does. Only
+                # when all of them fail does the last InvalidTag reach the handler
+                # below, so a report still counts as one own auth failure.
+                own_keys = all_identity_keys or [active_identity_key]
+                last_error: InvalidTag | None = None
+                for own_index, own_key in enumerate(own_keys):
+                    own_keys_tried += 1
+                    try:
+                        decrypted_location_raw = await _offload_decrypt_aes(
+                            own_key, encrypted_location
+                        )
+                    except InvalidTag as err:
+                        last_error = err
+                        continue
+                    break
+                else:
+                    raise last_error or InvalidTag()
                 # Authentication passed: the cached identity key still matches the
                 # server's own reports. One success proves the key is healthy, so
                 # foreign-report failures must not trigger account-wide escalation.
                 _own_report_success = True
+                if own_key != active_identity_key:
+                    # A later candidate authenticated: promote it as the foreign
+                    # path does, so the remaining reports try it first and the
+                    # payload carries the key that actually decrypted.
+                    active_identity_key = own_key
+                    identity_key_bytes, identity_key_candidate_bytes = (
+                        _promote_identity_key(
+                            own_key, all_identity_keys, metadata_update, metadata
+                        )
+                    )
+                    _LOGGER.info(
+                        "Own report authenticated with alternate identity key "
+                        "candidate (index=%d)",
+                        own_index,
+                    )
             else:
                 # FIX #155: Foreign/crowdsourced reports use ECDH + AES-EAX
                 # with a different key derivation path than own reports.
@@ -1908,21 +1958,14 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     # a per-component key.
                     if candidate_key != active_identity_key:
                         active_identity_key = candidate_key
-                        identity_key_bytes = bytes(candidate_key)
-                        # Sync metadata_update and metadata so the
-                        # promoted key persists to cache/payload
-                        # instead of the original stale value.
-                        metadata_update["identity_key"] = identity_key_bytes
-                        metadata_update["identityKey"] = identity_key_bytes
-                        metadata["identity_key"] = identity_key_bytes
-                        metadata["identityKey"] = identity_key_bytes
-                        # Reorder candidates so the promoted key is
-                        # tried first for remaining reports.
-                        all_identity_keys.remove(candidate_key)
-                        all_identity_keys.insert(0, candidate_key)
-                        # Keep payload-facing list in sync so
-                        # persisted candidates reflect the promotion.
-                        identity_key_candidate_bytes = list(all_identity_keys)
+                        identity_key_bytes, identity_key_candidate_bytes = (
+                            _promote_identity_key(
+                                candidate_key,
+                                all_identity_keys,
+                                metadata_update,
+                                metadata,
+                            )
+                        )
                         _LOGGER.info(
                             "Foreign decryption succeeded with alternate "
                             "identity key candidate (index=%d)",

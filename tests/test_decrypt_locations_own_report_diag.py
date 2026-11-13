@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any, cast
@@ -24,6 +25,7 @@ from typing import Any, cast
 import pytest
 from cryptography.exceptions import InvalidTag
 
+from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import encrypt_aes_gcm
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     decrypt_locations,
 )
@@ -365,3 +367,148 @@ class _Broken:
 
     def SerializeToString(self) -> bytes:  # noqa: N802 - protobuf method name
         raise RuntimeError("broken")
+
+
+# --- AP2: own reports try every identity key candidate, and promote ---
+
+_STALE_KEY = b"\x51" * 32
+_GOOD_KEY = bytes(range(32, 64))
+_PROMOTION_TEXT = "Own report authenticated with alternate identity key candidate"
+
+
+def _encrypt_own(key: bytes) -> bytes:
+    """Encrypt the plaintext location the way an own report is sealed."""
+
+    return encrypt_aes_gcm(hashlib.sha256(key).digest(), _plaintext_location())
+
+
+def _patch_real_crypto(
+    monkeypatch: pytest.MonkeyPatch, *, candidates: list[bytes]
+) -> list[bytes]:
+    """Patch key retrieval only; record the keys tried, decrypt for real."""
+
+    offload_keys: list[bytes] = []
+    real_offload = decrypt_locations._offload_decrypt_aes
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return list(candidates)
+
+    async def spy_offload(identity_key: bytes, encrypted: bytes) -> bytes:
+        offload_keys.append(bytes(identity_key))
+        return await real_offload(identity_key, encrypted)
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", spy_offload)
+    return offload_keys
+
+
+def _sealed_update(
+    key: bytes, *, own_reports: int = 1
+) -> DeviceUpdate_pb2.DeviceUpdate:
+    update = _build_update(own_reports=own_reports)
+    reports = (
+        update.deviceMetadata.information.locationInformation.reports
+    ).recentLocationAndNetworkLocations
+    reports.recentLocation.geoLocation.encryptedReport.encryptedLocation = _encrypt_own(
+        key
+    )
+    for location in reports.networkLocations:
+        location.geoLocation.encryptedReport.encryptedLocation = _encrypt_own(key)
+    return update
+
+
+def _promotions(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if _PROMOTION_TEXT in r.getMessage() and r.levelname == "INFO"
+    ]
+
+
+async def test_t_b1_own_report_under_second_candidate_is_decrypted_and_promoted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-B1: the second candidate opens the own report and becomes the key."""
+
+    offload_keys = _patch_real_crypto(monkeypatch, candidates=[_STALE_KEY, _GOOD_KEY])
+    caplog.set_level("INFO", logger=decrypt_locations._LOGGER.name)
+
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        _sealed_update(_GOOD_KEY), cache=object()
+    )
+
+    assert offload_keys == [_STALE_KEY, _GOOD_KEY]
+    assert len(result) == 1
+    assert result[0]["identity_key"] == _GOOD_KEY
+    assert result[0]["is_own_report"] is True
+    assert result[0]["latitude"] == pytest.approx(_LATITUDE_E7 / 1e7)
+    assert _promotions(caplog) == [f"{_PROMOTION_TEXT} (index=1)"]
+
+
+async def test_t_b2_every_candidate_fails_counts_one_failure_per_report(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-B2: both candidates fail; one report, one failure, keys_tried=2."""
+
+    offload_keys = _patch_real_crypto(monkeypatch, candidates=[_STALE_KEY, _GOOD_KEY])
+    caplog.set_level("DEBUG", logger=decrypt_locations._LOGGER.name)
+
+    with pytest.raises(decrypt_locations.OwnReportIdentityMismatchError):
+        await decrypt_locations.async_decrypt_location_response_locations(
+            _sealed_update(b"\x77" * 32), cache=object()
+        )
+
+    assert offload_keys == [_STALE_KEY, _GOOD_KEY]
+    diag = [r.getMessage() for r in caplog.records if _DIAG_TAG in r.getMessage()]
+    assert len(diag) == 1
+    assert "keys_tried=2 " in diag[0]
+    assert _promotions(caplog) == []
+
+
+async def test_t_b3_without_a_32_byte_candidate_the_active_key_is_tried_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-B3: no 32-byte candidate (60-byte wrapper); the unwrapped key alone.
+
+    The candidate list then holds only the wrapped key, so the own path falls
+    back to the unwrapped identity key and tries it exactly once.
+    """
+
+    wrapped = b"\x60" * decrypt_locations.EIK_GCM_TOTAL_LEN
+    offload_keys = _patch_real_crypto(monkeypatch, candidates=[wrapped])
+
+    async def fake_owner_key(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(key=b"\x01" * 32)
+
+    monkeypatch.setattr(decrypt_locations, "async_get_owner_key", fake_owner_key)
+    monkeypatch.setattr(decrypt_locations, "decrypt_eik", lambda *_a: _GOOD_KEY)
+    caplog.set_level("INFO", logger=decrypt_locations._LOGGER.name)
+
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        _sealed_update(_GOOD_KEY), cache=object()
+    )
+
+    assert offload_keys == [_GOOD_KEY]
+    assert len(result) == 1
+    assert result[0]["identity_key"] == _GOOD_KEY
+    assert _promotions(caplog) == []
+
+
+async def test_t_b4_second_own_report_starts_with_the_promoted_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T-B4: after the promotion the next own report tries the good key first."""
+
+    offload_keys = _patch_real_crypto(monkeypatch, candidates=[_STALE_KEY, _GOOD_KEY])
+    caplog.set_level("INFO", logger=decrypt_locations._LOGGER.name)
+
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        _sealed_update(_GOOD_KEY, own_reports=2), cache=object()
+    )
+
+    assert offload_keys == [_STALE_KEY, _GOOD_KEY, _GOOD_KEY]
+    assert len(result) == 2
+    assert all(record["identity_key"] == _GOOD_KEY for record in result)
+    assert len(_promotions(caplog)) == 1
