@@ -247,6 +247,8 @@ class _DecryptLocationsCallable(Protocol):
 # listed here nor explained there. Only scalar fields count: `phoneInformation`
 # on `IdentitfierInformation` is a message that holds the canonical ids, and a
 # message of a listed name shows its fields one by one.
+# The phone record (DeviceMetadata.PhoneInformation) holds the IMEI, the first
+# registration date and the account e-mail address: never logged, not even truncated.
 _SECRET_PROTO_FIELDS: frozenset[str] = frozenset(
     {
         "contactInfo",
@@ -260,6 +262,7 @@ _SECRET_PROTO_FIELDS: frozenset[str] = frozenset(
         "encryptedEIK",
         "infoMessage",
         "encryptedPrivateKeyWrapper",
+        "firstRegistrationDate",
         "identifierField5",
         "imei",
         "inviteeKey",
@@ -268,8 +271,13 @@ _SECRET_PROTO_FIELDS: frozenset[str] = frozenset(
         "metadataField10",
         "metadataField11",
         "metadataField13",
-        # Observed on 2026-11-11, meaning unknown: a varint above 255 on a phone's identifier message.
+        # 19-digit decimal (62 bit) on phones; shape matches the GSF Android ID, not confirmed.
         "phoneInformationField1",
+        # Fields of the phone record, meaning unknown (observed 2026-11-12, n=1 phone).
+        "phoneInformationField10",
+        "phoneInformationField20",
+        "phoneInformationField21",
+        "phoneInformationField23",
         "phoneInformation",
         "phoneNumber",
         "privateKey",
@@ -1234,8 +1242,8 @@ def get_devices_with_location(
         cache: Optional ``TokenCache``; when provided, encrypted payloads are
             decrypted, otherwise sanitized stubs are returned.
         emit_canonicless_diagnostics: Command-Query-Separation gate. The function
-            runs more than once per poll (a capability probe at ``api.py:361`` and
-            the main poll at ``api.py:702``). Only the main poll passes ``True`` and
+            runs more than once per poll (a capability probe in ``_build_can_ring_index`` and
+            the main poll in ``_process_device_list_response``). Only the main poll passes ``True`` and
             is allowed to emit the canonicless drop diagnostics (DEBUG lines, the
             aggregate count WARNING) and to mutate the module-level visibility/count
             guards. The probe pass keeps the default ``False`` and stays silent and

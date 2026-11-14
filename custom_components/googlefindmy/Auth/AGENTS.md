@@ -68,6 +68,21 @@ The supervisor in `fcm_receiver_ha.py` calls `FcmPushClient.stop()` before every
 
 Regression tests: `tests/test_fcmpushclient_stop_task_cleanup.py`.
 
+### Dead push token detector
+
+Google can answer a locate request with HTTP 200 and still never deliver a push to the token named in that request. Measured on 2026-11-14 (issue 224 follow-up, two accounts in one Home Assistant): one account got no push at all over three restarts while every request was accepted; one `async_reregister_fcm` issued a new token (same Android id, about 4 s) and the next requests were answered by push within a second. On the healthy account 10 of 10 accepted requests were answered by push, also for a tracker with no location to report. Before upstream V1.7 all accounts shared one receiver and one token, so a dead token of one account could not show.
+
+`FcmReceiverHA` keeps the detector; keep these rules when changing it:
+
+- Only accepted requests count: the timeout branch of `get_location_data_for_device` calls `note_accepted_without_push(entry_id)` after `LOCATION_REQUEST_TIMEOUT_S` and still returns `[]`. A request that was not accepted (`LocationRequestNotAcceptedError`) never counts. The call is best effort (`getattr`, errors at DEBUG); the method is not part of `FcmReceiverProtocol`.
+- Every push on the entry's channel resets the count, matching a request or not, with or without an FMD payload. The reset is the first statement of `_handle_notification_async`, ahead of every early return. A timeout counts only if no push arrived on the channel since its request started: the request captures `dead_token_push_generation(entry_id)` when its token is ready and hands it back with the timeout, so a push during overlapping requests is not undone by their later timeouts.
+- At `FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD` (3) the entry gets one re-registration through the throttled `Auth/token_refresh.async_regenerate_fcm_token` as its own tracked task, never inline in the locate path and never under `_refresh_lock` there. Its cooldown stays in force; the entry is then locked out for `FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S` (4 h, a setting). A refused re-registration (`False`) logs INFO and keeps the lockout.
+- Logging: one WARNING per trigger with `entry_id` and the count, never a token, e-mail address or device name; the running count only at DEBUG (root `AGENTS.md` section 5).
+- Count and lockout are in-memory and dropped in `_purge_entry_tokens`; a restart starts from zero.
+- It is not the data-starvation watchdog (`_is_data_starved`, `FCM_DATA_STARVATION_S`): after 900 s without data it stops the client and lets the supervisor rebuild it from the stored credentials, which normally keeps the token (a rebuild only re-registers when the stored registration is unusable), so it does not heal a token Google no longer delivers to. Do not merge the two.
+
+Regression tests: `tests/test_fcm_dead_token_detector.py`.
+
 ## Token lifecycle & standalone persistence
 
 ### Token hierarchy

@@ -281,7 +281,7 @@ def build_device_list(devices: int) -> Any:
                 2, secrets.token_bytes(390)
             )
         device.metadataField11 = secrets.token_urlsafe(33).encode()
-        device.metadataField12 = _time_bytes(1_700_000_000 + index, 123_456_789)
+        device.fetchTime = _time_bytes(1_700_000_000 + index, 123_456_789)
         device.metadataField13 = secrets.token_hex(16).encode()
         device.supportedActions.append(_locate_action())
         device.supportedActions.append(_supported_action(31))
@@ -577,7 +577,7 @@ _EXPECTED_FORM_FIELDS = frozenset(
         "DeviceRegistration.capabilities",
         "DeviceRegistration.firstSecretsCreationDate",
         "DeviceRegistration.lostModeInformation",
-        "DeviceMetadata.metadataField12",
+        "DeviceMetadata.fetchTime",
         "DeviceRegistration.registrationField40",
     }
 )
@@ -674,14 +674,43 @@ def test_nested_forms_report_unknown_inside() -> None:
     ]
 
 
-def test_metadata_field12_opened_with_time() -> None:
+def test_fetch_time_opened_with_time() -> None:
     number = _free(Common_pb2.Time, 3)
     device = DeviceUpdate_pb2.DeviceMetadata()
-    device.metadataField12 = _time_bytes(1_700_000_000, 5) + _vf(number, 1)
+    device.fetchTime = _time_bytes(1_700_000_000, 5) + _vf(number, 1)
 
     assert _render(uft.describe_unknown_fields(device)) == [
-        "DeviceMetadata.metadataField12.#3=varint:1"
+        "DeviceMetadata.fetchTime.#3=varint:1"
     ]
+
+
+def test_t_p2_phone_record_stays_closed(caplog: pytest.LogCaptureFixture) -> None:
+    """T-P2: the phone record is never opened, its values never reach the log."""
+    _debug(caplog)
+    imei = b"350000000000017"
+    seconds = 1_234_567_891
+    field23 = b"5e" * 16
+    record = DeviceUpdate_pb2.DeviceMetadata.PhoneInformation(
+        imei=imei,
+        firstRegistrationDate=_time_bytes(seconds, 0),
+        phoneInformationField23=field23,
+    )
+    unknown = _free(DeviceUpdate_pb2.DeviceMetadata.PhoneInformation, 99)
+    device = DeviceUpdate_pb2.DeviceMetadata(
+        phoneInformation=record.SerializeToString() + _vf(unknown, 7)
+    )
+    device.fetchTime = _time_bytes(1_700_000_000, 5) + _vf(_free(Common_pb2.Time, 3), 1)
+
+    entries = uft.describe_unknown_fields(device)
+    assert entries
+    assert not [path for path, _wire, _display in entries if "phoneInformation" in path]
+
+    uft.log_unknown_fields("device_list", secrets.token_hex(16), "Tag", [device])
+
+    assert caplog.records
+    for value in (imei, imei.hex(), str(seconds), field23, field23.hex()):
+        text = value.decode() if isinstance(value, bytes) else value
+        assert text not in caplog.text
 
 
 # --------------------------------------------------------------------------

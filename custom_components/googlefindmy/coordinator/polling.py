@@ -496,12 +496,13 @@ class PollingOperations(_MixinBase):
 
     @staticmethod
     def _is_device_local_decrypt_failure(error: DecryptionError | None) -> bool:
-        """True ONLY for the one provably device-local class: own-report staleness.
+        """True ONLY for the one provably device-local class: own reports all rejected.
 
         Fail-SAFE discriminator: a sibling decrypting proves the account keys are
         healthy, so a device whose OWN server reports all fail authentication
-        (``OwnReportIdentityMismatchError`` -- e.g. a phone powered off for days, or
-        a re-paired device) is device-local and a fresh secrets.json cannot fix it.
+        (``OwnReportIdentityMismatchError`` -- cause not measured; unconfirmed
+        examples are a phone powered off for days or a re-paired device) is
+        device-local.
 
         EVERY other ``DecryptionError`` defaults to the account-wide reauth path:
         the explicit shared-key subclasses (``SharedKeyMissingError`` /
@@ -560,7 +561,8 @@ class PollingOperations(_MixinBase):
           any positive proof the shared key still works.
         - A sibling decrypted, so positive proof dominates, but it refutes ONLY the
           device-local own-report class (:meth:`_is_device_local_decrypt_failure`):
-          ``OwnReportIdentityMismatchError`` (e.g. a phone powered off for days). The
+          ``OwnReportIdentityMismatchError`` (unconfirmed example: a phone powered
+          off for days). The
           shared-key subclasses AND a plain identity-key derivation failure remain
           account-wide -- a sibling decrypting from cached owner/EIK material cannot
           refute them, so they keep their reauth prompt (the Codex finding class).
@@ -593,8 +595,9 @@ class PollingOperations(_MixinBase):
         Positive proof dominates (D7), but ONLY for the device-local own-report
         class: if ANY device produced an authenticated coordinate this cycle
         (``cycle_had_successful_decrypt``), a sibling's
-        ``OwnReportIdentityMismatchError`` -- e.g. a phone powered off for days whose
-        own server reports no longer decrypt -- is a per-device condition that must
+        ``OwnReportIdentityMismatchError`` -- its own server reports no longer
+        decrypt; the cause is not measured, an unconfirmed example is a phone
+        powered off for days -- is a per-device condition that must
         NOT advance the account-wide reauth budget and must NOT trigger reauth. This
         mirrors the per-tracker ``StaleOwnerKeyError`` (``stale=True``) treatment
         ("other devices are unaffected").
@@ -642,9 +645,7 @@ class PollingOperations(_MixinBase):
             _LOGGER.warning(
                 "Location decryption failed for a device this cycle while other "
                 "devices decrypted successfully; the account shared key is "
-                "healthy, so no re-authentication is required. The affected "
-                "device may be powered off or its own server reports may be "
-                "stale: %s",
+                "healthy, so no re-authentication is required. Details: %s",
                 cycle_decrypt_error,
             )
         if cycle_had_successful_decrypt and not cycle_had_stale_key:

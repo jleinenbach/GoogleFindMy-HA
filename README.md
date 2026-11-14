@@ -585,11 +585,31 @@ Location data is fetched **outbound** from Home Assistant to Google (FCM push pl
 
 > **Note on the internal/external URL:** Your Home Assistant internal/external URL only affects the clickable **Map View links** on each device page, not location reception. Changing it can appear to "fix" updates because it triggers a reload or restart, but it is the restart that restores tracking, not the URL value. A configuration such as internal `http://ip-address:8123` plus external `https://your-domain:8123` is perfectly valid.
 
+### Own location reports fail to decrypt
+Symptom: the log shows the warning `All own-report decryptions failed`, and the phone's position no longer updates. In the reported case (#243) the log also showed `Decryption auth failed (InvalidTag)` for each own report. The integration does not determine the cause; with debug logging enabled it writes one `[OWN-REPORT-DIAG]` line per failed report. Please include these lines when you report the problem.
+
+Reported workaround (one confirmed case, #243, 2026-11-13): in the Find Hub app, open the phone's settings, switch off the setting that allows the device to be located (German UI: "Standortermittlung für Gerät zulassen"; English label not verified), wait about five minutes, switch it back on and request a locate. In that case the phone reported its location again.
+
+Side effects:
+- Google gives the phone a new ID (three of three times on one phone, 2026-11-12), so the integration creates a new device; its entity ID may end in `_2`. Update automations, dashboards and scripts that use the old entity. The old device is removed after two consecutive complete device lists no longer show it.
+- The new device's history starts with its first new position. In the reported case no positions from the time without updates appeared afterwards (#243).
+
 ### FCM Connection Problems
-- Extended timeout allows up to 60 seconds for device response
+- The integration waits up to 30 seconds for a device response pushed over FCM
 - Check firewall settings for Firebase Cloud Messaging
 - Review FCM debug logs for connection details
 - Ensure port 5228 is forwarded if you run this behind reverse-proxy, inside KVM or any other virtual environment not directly exposed.
+
+### Locate requests succeed but no location arrives (one account)
+Symptom: with two or more Google accounts configured, the devices of one account stop updating although the log shows no error; with debug logging, its locate requests are accepted and then end with `No location response received`. The Find Hub app still shows current positions.
+
+Cause in the measured case (issue 224 follow-up, 2026-11-14): Google accepted every locate request of that account but no longer delivered pushes to its push token. Each account has its own push token since upstream V1.7; before that all accounts shared one, so the problem could not show.
+
+Self-healing: after three accepted requests in a row without any push on that account's channel, the integration re-registers that account's push token once and logs a warning containing `FCM push channel silent after`, followed by the number of silent requests (3 or more). It does this at most every four hours per account; the count and the four hours start over when Home Assistant restarts or the integration entry is reloaded. The device identity is kept, so devices and entities stay as they are.
+
+Manual fix: press **Regenerate FCM Token** on the service device of that account, then press **Locate now** on one of its devices. In the measured case the next two requests were answered within a second.
+
+Observed values (one Home Assistant, two accounts, 2026-11-14): a new push token was issued about 4 seconds after re-registration; the **Locate now** button stays unavailable for several minutes after a locate; the Google login token expired after 716 minutes, which showed as three HTTP 401 answers that recovered on their own.
 
 ### Authentication Expires Repeatedly
 - Google may revoke tokens when API requests originate from a different IP address or geographic region than where the token was originally created.
