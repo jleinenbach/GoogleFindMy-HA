@@ -316,6 +316,48 @@ async def test_t_t5_without_hass_nothing_is_started(regenerate: list[str]) -> No
     assert regenerate == []
 
 
+@pytest.mark.asyncio
+async def test_t_t4_a_push_during_overlapping_requests_is_not_undone(
+    receiver: tuple[FcmReceiverHA, _Clock], regenerate: list[str]
+) -> None:
+    """Codex review on PR 1455: N requests wait at once, one push arrives.
+
+    The push resets the count, but the N timeouts that follow belong to
+    requests that were pending while the channel delivered; none of them
+    counts.
+    """
+
+    rx, _clock = receiver
+    started = [rx.dead_token_push_generation("entry-b") for _ in range(N)]
+    await rx._handle_notification_async("entry-b", _push(canonic_payload=False))
+    for generation in started:
+        rx.note_accepted_without_push("entry-b", push_generation=generation)
+    await _settle(rx)
+    assert regenerate == []
+
+    current = rx.dead_token_push_generation("entry-b")
+    for _ in range(N):
+        rx.note_accepted_without_push("entry-b", push_generation=current)
+    await _settle(rx)
+    assert regenerate == ["entry-b"]
+
+
+def test_t_t4_push_generation_is_per_entry() -> None:
+    rx = FcmReceiverHA()
+    assert rx.dead_token_push_generation(None) == 0
+    assert rx.dead_token_push_generation("entry-a") == 0
+
+
+@pytest.mark.asyncio
+async def test_t_t4_push_generation_counts_pushes_of_its_channel_only() -> None:
+    rx = FcmReceiverHA()
+    await rx._handle_notification_async("entry-a", _push(canonic_payload=False))
+    await rx._handle_notification_async("entry-a", _push(canonic_payload=False))
+
+    assert rx.dead_token_push_generation("entry-a") == 2
+    assert rx.dead_token_push_generation("entry-b") == 0
+
+
 def test_t_t3_purge_drops_the_detector_state(
     receiver: tuple[FcmReceiverHA, _Clock],
 ) -> None:
@@ -323,11 +365,13 @@ def test_t_t3_purge_drops_the_detector_state(
     for _ in range(N - 1):
         rx.note_accepted_without_push("entry-b")
     rx._dead_token_lockout_until["entry-b"] = 1.0
+    rx._dead_token_push_generation["entry-b"] = 4
 
     rx._purge_entry_tokens("entry-b")
 
     assert "entry-b" not in rx._dead_token_silent_counts
     assert "entry-b" not in rx._dead_token_lockout_until
+    assert "entry-b" not in rx._dead_token_push_generation
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +380,9 @@ def test_t_t3_purge_drops_the_detector_state(
 
 
 class _NotingReceiver:
-    def __init__(self) -> None:
-        self.noted: list[str | None] = []
+    def __init__(self, generation: Any = 7) -> None:
+        self.noted: list[tuple[str | None, int | None]] = []
+        self._generation = generation
 
     async def async_register_for_location_updates(
         self, _device_id: str, _callback: Any
@@ -347,8 +392,13 @@ class _NotingReceiver:
     async def async_unregister_for_location_updates(self, _device_id: str) -> None:
         return None
 
-    def note_accepted_without_push(self, entry_id: str | None) -> None:
-        self.noted.append(entry_id)
+    def dead_token_push_generation(self, _entry_id: str | None) -> Any:
+        return self._generation
+
+    def note_accepted_without_push(
+        self, entry_id: str | None, push_generation: int | None = None
+    ) -> None:
+        self.noted.append((entry_id, push_generation))
 
 
 class _Cache:
@@ -408,7 +458,7 @@ async def test_t_t3_accepted_timeout_signals_the_receiver_of_the_entry(
     _wire(monkeypatch, rx, _accepted)
 
     assert await _locate() == []
-    assert rx.noted == ["entry-b"]
+    assert rx.noted == [("entry-b", 7)]
 
 
 @pytest.mark.asyncio
@@ -427,6 +477,30 @@ async def test_t_t3_a_request_that_was_not_accepted_does_not_count(
     with pytest.raises(location_request_module.LocationRequestNotAcceptedError):
         await _locate()
     assert rx.noted == []
+
+
+@pytest.mark.parametrize(
+    ("receiver_double", "expected"),
+    [
+        (_NotingReceiver(generation=3), 3),
+        (_NotingReceiver(generation="3"), None),
+        (object(), None),
+    ],
+)
+def test_t_t4_push_generation_lookup_is_best_effort(
+    receiver_double: Any, expected: int | None
+) -> None:
+    assert (
+        location_request_module._push_generation(receiver_double, "entry-b") == expected
+    )
+
+
+def test_t_t4_a_raising_generation_lookup_yields_none() -> None:
+    class _Raising(_NotingReceiver):
+        def dead_token_push_generation(self, _entry_id: str | None) -> Any:
+            raise RuntimeError("lookup broke")
+
+    assert location_request_module._push_generation(_Raising(), "entry-b") is None
 
 
 def test_t_t3_a_hostile_receiver_attribute_does_not_escape_the_signal() -> None:
@@ -452,7 +526,9 @@ async def test_t_t3_a_failing_signal_keeps_the_empty_result(
     """Best effort: a receiver whose method raises does not change the outcome."""
 
     class _Raising(_NotingReceiver):
-        def note_accepted_without_push(self, entry_id: str | None) -> None:
+        def note_accepted_without_push(
+            self, entry_id: str | None, push_generation: int | None = None
+        ) -> None:
             raise RuntimeError("detector broke")
 
     async def _accepted(*_a: object, **_k: object) -> bytes:

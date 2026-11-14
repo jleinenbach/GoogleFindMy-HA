@@ -526,8 +526,7 @@ class FcmReceiverHA:
         # push on that channel (head of ``_handle_notification_async``). At
         # ``FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD`` one re-registration starts and the
         # entry is locked out until the monotonic time stored here.
-        self._dead_token_silent_counts: dict[str, int] = {}
-        self._dead_token_lockout_until: dict[str, float] = {}
+        self._init_dead_token_state()
 
         # One-shot first-locate reconnect (#1150) serialization. Concurrent
         # manual locates for different trackers on the *same* entry both enter
@@ -2677,6 +2676,9 @@ class FcmReceiverHA:
         ahead of every early return.
         """
         self._dead_token_silent_counts.pop(entry_id, None)
+        self._dead_token_push_generation[entry_id] = (
+            self._dead_token_push_generation.get(entry_id, 0) + 1
+        )
         try:
             hex_string = self._extract_hex_payload(payload)
             if hex_string is None:
@@ -4004,6 +4006,7 @@ class FcmReceiverHA:
         # without an inherited count or lockout.
         self._dead_token_silent_counts.pop(entry_id, None)
         self._dead_token_lockout_until.pop(entry_id, None)
+        self._dead_token_push_generation.pop(entry_id, None)
         # Data-starvation watchdog state (LC-13): drop the data/locate clocks and
         # the backoff/count/throttle records, and cancel any in-flight watchdog
         # reconnect task so it cannot keep working against the torn-down ``pc``
@@ -4057,11 +4060,32 @@ class FcmReceiverHA:
 
     # -------------------- Dead push token detector --------------------
 
+    def _init_dead_token_state(self) -> None:
+        """Create the per-entry state of the dead push token detector."""
+        self._dead_token_silent_counts: dict[str, int] = {}
+        self._dead_token_lockout_until: dict[str, float] = {}
+        # Pushes seen per entry channel. A locate captures the value when it
+        # starts; a timeout counts only if no push arrived meanwhile, so a push
+        # during overlapping requests is not undone by their later timeouts.
+        self._dead_token_push_generation: dict[str, int] = {}
+
     def _dead_token_now(self) -> float:
         """Monotonic clock of the dead-token detector (patched in tests)."""
         return time.monotonic()
 
-    def note_accepted_without_push(self, entry_id: str | None) -> None:
+    def dead_token_push_generation(self, entry_id: str | None) -> int:
+        """Return how many pushes arrived on ``entry_id``'s channel so far.
+
+        A locate request captures this value when it starts and hands it back
+        to :meth:`note_accepted_without_push` when it times out.
+        """
+        if not entry_id:
+            return 0
+        return self._dead_token_push_generation.get(entry_id, 0)
+
+    def note_accepted_without_push(
+        self, entry_id: str | None, push_generation: int | None = None
+    ) -> None:
         """Count an accepted locate request that timed out with no push at all.
 
         Called by the timeout branch of ``get_location_data_for_device`` after
@@ -4080,11 +4104,26 @@ class FcmReceiverHA:
         ``FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S``. The count lives in memory: a
         restart starts from zero and can cost one extra re-registration.
 
+        A push on the channel while the request waited (also one meant for
+        another request, when requests overlap) proves the token still works:
+        such a timeout is not counted.
+
         Args:
             entry_id: Config entry whose channel stayed silent; ``None`` or an
                 empty string is ignored.
+            push_generation: Value of :meth:`dead_token_push_generation` when
+                the request started; ``None`` counts unconditionally.
         """
         if not entry_id:
+            return
+        if (
+            push_generation is not None
+            and push_generation != self.dead_token_push_generation(entry_id)
+        ):
+            _LOGGER.debug(
+                "[entry=%s] Locate request timed out, but the push channel delivered meanwhile; not counted",
+                entry_id,
+            )
             return
         count = self._dead_token_silent_counts.get(entry_id, 0) + 1
         self._dead_token_silent_counts[entry_id] = count

@@ -321,20 +321,42 @@ def unregister_fcm_receiver_provider() -> None:
     _fcm_receiver_state["getter"] = None
 
 
-def _note_accepted_without_push(
+def _push_generation(
     fcm_receiver: FcmReceiverProtocol, entry_id: str | None
+) -> int | None:
+    """Return the receiver's push count for the entry channel; best effort.
+
+    ``None`` when the receiver does not offer it (test doubles, older
+    providers) or the lookup fails; the timeout then counts unconditionally.
+    """
+    try:
+        getter = getattr(fcm_receiver, "dead_token_push_generation", None)
+        if not callable(getter):
+            return None
+        value = getter(entry_id)
+    except Exception as err:
+        _LOGGER.debug("Silent-channel generation lookup failed: %s", type(err).__name__)
+        return None
+    return value if isinstance(value, int) else None
+
+
+def _note_accepted_without_push(
+    fcm_receiver: FcmReceiverProtocol,
+    entry_id: str | None,
+    push_generation: int | None = None,
 ) -> None:
     """Tell the receiver that an accepted request got no push; best effort.
 
     The method is not part of ``FcmReceiverProtocol``: receivers without it
     (test doubles, older providers) are skipped, and a failing detector never
-    changes the outcome of the locate.
+    changes the outcome of the locate. ``push_generation`` is the value of
+    ``_push_generation`` when the request started.
     """
     try:
         note = getattr(fcm_receiver, "note_accepted_without_push", None)
         if not callable(note):
             return
-        note(entry_id)
+        note(entry_id, push_generation=push_generation)
     except Exception as err:
         _LOGGER.debug("Silent-channel detector signal failed: %s", type(err).__name__)
 
@@ -784,6 +806,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
     # a position in the file (``custom_components/googlefindmy/AGENTS.md``, the
     # paragraph beginning "Where the resolution belongs is measured").
     request_accepted = False
+    push_generation: int | None = None
     ctx = _CallbackContext()
     loop = asyncio.get_running_loop()
 
@@ -947,6 +970,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
                 # attach. The stage marker IS the whole cause here.
                 raise LocationRequestNotAcceptedError(stage="no_fcm_token")
             registered = True
+            push_generation = _push_generation(fcm_receiver, entry_id)
             _LOGGER.debug(
                 "FCM registration ready for %s (length %d)", name, len(fcm_token)
             )
@@ -1076,7 +1100,7 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             _LOGGER.debug(
                 "No location response received for %s (timeout: %ss)", name, timeout
             )
-            _note_accepted_without_push(fcm_receiver, entry_id)
+            _note_accepted_without_push(fcm_receiver, entry_id, push_generation)
             # Deliberately still an empty return: the server ACCEPTED this request
             # and nothing arrived within the window. This is the very outcome
             # LocationRequestNotAcceptedError exists to keep distinguishable from a
