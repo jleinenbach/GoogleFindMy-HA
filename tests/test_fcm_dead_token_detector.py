@@ -77,7 +77,7 @@ async def _settle(rx: FcmReceiverHA | None = None) -> None:
 
     await asyncio.sleep(0)
     if rx is not None and rx._active_tasks:
-        await asyncio.gather(*rx._active_tasks)
+        await asyncio.wait_for(asyncio.gather(*rx._active_tasks), timeout=5)
 
 
 def _push(canonic_payload: bool = True) -> dict[str, Any]:
