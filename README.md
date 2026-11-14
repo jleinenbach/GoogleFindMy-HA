@@ -591,8 +591,8 @@ Symptom: the log shows the warning `All own-report decryptions failed`, and the 
 Reported workaround (one confirmed case, #243, 2026-11-13): in the Find Hub app, open the phone's settings, switch off the setting that allows the device to be located (German UI: "Standortermittlung für Gerät zulassen"; English label not verified), wait about five minutes, switch it back on and request a locate. In that case the phone reported its location again.
 
 Side effects:
-- Google gives the phone a new ID, so the integration creates a new device; its entity ID may end in `_2`. Update automations, dashboards and scripts that use the old entity. The old device is removed once the account no longer lists it.
-- The new device's history starts with its first new position. Google returns only the latest location reports, so positions from the time without updates cannot be fetched afterwards.
+- Google gives the phone a new ID (three of three times on one phone, 2026-11-12), so the integration creates a new device; its entity ID may end in `_2`. Update automations, dashboards and scripts that use the old entity. The old device is removed after two consecutive complete device lists no longer show it.
+- The new device's history starts with its first new position. In the reported case no positions from the time without updates appeared afterwards (#243).
 
 ### FCM Connection Problems
 - Extended timeout allows up to 60 seconds for device response

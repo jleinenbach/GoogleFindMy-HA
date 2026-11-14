@@ -356,6 +356,38 @@ async def test_t_a5_helpers_cover_every_wire_type_and_never_raise() -> None:
     assert structure(registration)[4] == "absent"
 
 
+async def test_t_a6_hostile_field_values_never_raise() -> None:
+    """T-A6: values that fail ``bytes()``, ``bool()`` or ``len()`` do not raise.
+
+    The helpers run inside the ``InvalidTag`` handler; an exception there
+    would leave the handler and abort the whole decryption.
+    """
+
+    def registration(**values: object) -> SimpleNamespace:
+        fields = [(SimpleNamespace(number=int(n[1:])), v) for n, v in values.items()]
+        return SimpleNamespace(ListFields=lambda: fields)
+
+    structure = decrypt_locations._own_report_structure
+    hostile = registration(f14=_RaisingBool(), f29=object(), f33=1.5)
+    assert structure(hostile) == (False, "unreadable", "unreadable", None, "absent")
+    assert structure(registration(f14=True))[0] is True
+    assert decrypt_locations._wire_shape(cast(bytes, _RaisingLen())) == "unparsable"
+
+
+class _RaisingBool:
+    """Value whose truth test raises."""
+
+    def __bool__(self) -> bool:
+        raise RuntimeError("bool")
+
+
+class _RaisingLen(bytes):
+    """Bytes whose length raises."""
+
+    def __len__(self) -> int:
+        raise RuntimeError("len")
+
+
 class _Broken:
     """Input that fails every protobuf call, for the never-raise branches."""
 

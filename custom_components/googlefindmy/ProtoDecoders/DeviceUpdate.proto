@@ -141,11 +141,11 @@ message DeviceMetadata {
   DeviceInformation information = 4;
   string userDefinedDeviceName = 5;
   ImageInformation imageInformation = 6;
-  uint64 metadataField8 = 8; // Meaning unknown, observed 2026-11-10: varint, values 6, 7, 11. 2026-11-12: 7 (moto tag, Trackcard, Insta360), 6 (one moto tag 2), 11 (both Pixel Buds); does not match Spot's SpotDeviceType
-  bytes metadataField10 = 10; // Meaning unknown, observed 2026-11-10: nested message (about 800 bytes, key-like shape), never opened. 2026-11-12: only on one earbud entry (Pixel Buds Pro), a copy of the device entry with name, image and field 2 = 26 (Spot SpotDeviceType 26 = DEVICE_TYPE_EARBUDS)
-  bytes metadataField11 = 11; // Meaning unknown, observed 2026-11-10: text, 19 or 44 characters. 2026-11-12: phone: 19-digit decimal equal to PhoneInformation.phoneInformationField1; trackers: 44 characters URL-safe Base64 (32 bytes), distinct per device
-  bytes fetchTime = 12; // Observed equal to the request time (phones and trackers, 2026-11-12); form: Time
-  bytes metadataField13 = 13; // Meaning unknown, observed 2026-11-10: text, 32 characters. 2026-11-12: 32 hex characters, distinct per device (trackers and the phone); unchanged over one off/on cycle on the phone
+  uint64 metadataField8 = 8; // Meaning unknown, observed 2026-11-10: varint, values 6, 7, 11. 2026-11-12 (n=1 account): 7 (moto tag, Trackcard, Insta360), 6 (one moto tag 2), 11 (both Pixel Buds); does not match Spot's SpotDeviceType
+  bytes metadataField10 = 10; // Meaning unknown, observed 2026-11-10: nested message (about 800 bytes, key-like shape), never opened. 2026-11-12 (n=1 device): only on one earbud entry (Pixel Buds Pro), a copy of the device entry with name, image and field 2 = 26 (Spot SpotDeviceType 26 = DEVICE_TYPE_EARBUDS)
+  bytes metadataField11 = 11; // Meaning unknown, observed 2026-11-10: text, 19 or 44 characters. 2026-11-12: phone (n=1): 19-digit decimal equal to PhoneInformation.phoneInformationField1; trackers (n=1 account): 44 characters URL-safe Base64 (32 bytes), distinct per device
+  bytes fetchTime = 12; // Observed equal to the request time (n=1 phone and the trackers of n=1 account, 2026-11-12); form: Time
+  bytes metadataField13 = 13; // Meaning unknown, observed 2026-11-10: text, 32 characters. 2026-11-12 (n=1 account): 32 hex characters, distinct per device (trackers and the phone); unchanged over one off/on cycle on the phone (n=1)
 
   // Spot@55f87f62, reverse-engineered, not confirmed by Google. The Spot form matches
   // the wire: `type` is an ExecuteActionType whose set field number names the action.
@@ -192,7 +192,7 @@ enum IdentifierInformationType {
   IDENTIFIER_UNKNOWN = 0;
   IDENTIFIER_ANDROID = 1;
   IDENTIFIER_SPOT = 2;
-  IDENTIFIER_FASTPAIR = 5; // Observed 2026-11-12 on one Pixel Buds Pro entry; number and name follow Spot's DeviceType FASTPAIR_DEVICE = 5
+  IDENTIFIER_FASTPAIR = 5; // Observed 2026-11-12 (n=1 device) on one Pixel Buds Pro entry; number and name follow Spot's DeviceType FASTPAIR_DEVICE = 5
 }
 
 message PhoneInformation {

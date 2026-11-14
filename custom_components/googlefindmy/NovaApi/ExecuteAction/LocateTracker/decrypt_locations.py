@@ -323,16 +323,22 @@ def _wire_shape(raw: bytes, *, descend: bool = True) -> str:
     Per entry ``number:wiretype:length``; a varint shows ``v`` and no value.
     A length-delimited entry that parses as a message gets its own entries in
     brackets, one level deep and no deeper; repeated numbers are indexed
-    (``2[0]``, ``2[1]``). Never a value, never a byte. Never raises: bytes
-    that do not parse give ``unparsable(len=N)``.
+    (``2[0]``, ``2[1]``). Never a value, never a byte. Raises no
+    ``Exception``: bytes that do not parse give ``unparsable(len=N)``, input
+    without a length gives ``unparsable``. A ``BaseException`` such as
+    ``KeyboardInterrupt`` propagates.
     """
+    try:
+        size = len(raw)
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        return "unparsable"
     try:
         items = _wire_items(raw, descend=descend)
     except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
         items = None
     if items is None:
-        return f"unparsable(len={len(raw)})"
-    return f"len={len(raw)}{{{items}}}"
+        return f"unparsable(len={size})"
+    return f"len={size}{{{items}}}"
 
 
 def _time_reading(raw: bytes) -> str | None:
@@ -350,6 +356,32 @@ def _time_reading(raw: bytes) -> str | None:
         return None
 
 
+def _field_shape(value: Any) -> str:
+    """Wire structure of one registration field; ``absent`` if not set.
+
+    A value that cannot be read as bytes gives ``unreadable``, so a broken
+    field stays distinguishable from a missing one. Raises no ``Exception``.
+    """
+    if value is None:
+        return "absent"
+    try:
+        raw = bytes(value)
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        return "unreadable"
+    return _wire_shape(raw)
+
+
+def _field_time(value: Any) -> str | None:
+    """Field ``value`` read as ``Common_pb2.Time``; ``None`` otherwise."""
+    if value is None:
+        return None
+    try:
+        raw = bytes(value)
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        return None
+    return _time_reading(raw)
+
+
 def _own_report_structure(
     registration: Any,
 ) -> tuple[bool, str, str, str | None, str]:
@@ -358,6 +390,7 @@ def _own_report_structure(
     Returns ``(f14, f29, f33, f33_as_time, secrets)``. Fields are taken by
     number from ``ListFields()``; a field that is not set reads ``absent``.
     The secrets container holds key material, so it is shown one level only.
+    Raises no ``Exception``; a field that cannot be read shows ``unreadable``.
     """
     try:
         by_number = {fd.number: value for fd, value in registration.ListFields()}
@@ -371,10 +404,11 @@ def _own_report_structure(
     except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
         container_bytes = None
     return (
-        bool(by_number.get(14, False)),
-        _wire_shape(bytes(f29)) if f29 is not None else "absent",
-        _wire_shape(bytes(f33)) if f33 is not None else "absent",
-        _time_reading(bytes(f33)) if f33 is not None else None,
+        # ``is True``: the identity test cannot raise, unlike ``bool(value)``.
+        by_number.get(14) is True,
+        _field_shape(f29),
+        _field_shape(f33),
+        _field_time(f33),
         _wire_shape(container_bytes, descend=False)
         if container_bytes is not None
         else "absent",
@@ -1821,7 +1855,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     )
 
     # Structure for [OWN-REPORT-DIAG], computed once per call on the first
-    # own-report failure at DEBUG (E4).
+    # own-report failure at DEBUG.
     own_report_structure: tuple[bool, str, str, str | None, str] | None = None
 
     if len(network_locations) != len(network_locations_time):
@@ -2108,8 +2142,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             )
             if public_key_random == b"" and _LOGGER.isEnabledFor(logging.DEBUG):
                 # Field numbers, not names: the .proto names of fields 29 and 33
-                # come from Spot and are unconfirmed. Structure only, never a
-                # value; field 29 stays in _SECRET_PROTO_FIELDS of the decoder.
+                # come from Spot and are unconfirmed. Fields 29 and 33 and the
+                # secrets container show structure only, never a value or a
+                # byte; the line also carries the report time, the owner key
+                # version, field 14, the number of keys tried and field 33 read
+                # as a time. Field 29 stays in _SECRET_PROTO_FIELDS of the decoder.
                 if own_report_structure is None:
                     own_report_structure = _own_report_structure(device_registration)
                 f14, f29, f33, f33_as_time, container_shape = own_report_structure

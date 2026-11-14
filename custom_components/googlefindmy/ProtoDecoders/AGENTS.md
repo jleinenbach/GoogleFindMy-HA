@@ -71,7 +71,7 @@ Name a field only when its meaning was observed. Otherwise declare it under its 
 
 ## Personal data on the phone record
 
-`DeviceMetadata.phoneInformation` (form `DeviceMetadata.PhoneInformation`) and `PhoneInformation` hold personal data of the phone and the account: `imei` (7), `firstRegistrationDate` (2), `phoneInformationField1` (shape of the GSF Android ID, not confirmed) and the account e-mail address inside `information` (26). `imei`, `firstRegistrationDate` and `phoneInformationField1` are in `_SECRET_PROTO_FIELDS`, and so is `phoneInformation` as a whole. `DeviceMetadata.phoneInformation` is never listed in `_FORM_BY_FIELD`. No log record carries these values, not even truncated (root `AGENTS.md`, section 5).
+`DeviceMetadata.phoneInformation` (form `DeviceMetadata.PhoneInformation`) and `PhoneInformation` hold personal data of the phone and the account (observed on n=1 phone, 2026-11-12, `docs/FMDN.md` S8.6): `imei` (7), `firstRegistrationDate` (2), `phoneInformationField1` (shape of the GSF Android ID, not confirmed) and the account e-mail address inside `information` (26). `imei`, `firstRegistrationDate` and `phoneInformationField1` are in `_SECRET_PROTO_FIELDS`, and so is `phoneInformation` as a whole. `DeviceMetadata.phoneInformation` is never listed in `_FORM_BY_FIELD`. No log record carries these values, not even truncated (root `AGENTS.md`, section 5).
 
 ## Proto3 scalar presence reminder
 
