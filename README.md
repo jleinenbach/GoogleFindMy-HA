@@ -595,10 +595,21 @@ Side effects:
 - The new device's history starts with its first new position. In the reported case no positions from the time without updates appeared afterwards (#243).
 
 ### FCM Connection Problems
-- Extended timeout allows up to 60 seconds for device response
+- The integration waits up to 30 seconds for a device response pushed over FCM
 - Check firewall settings for Firebase Cloud Messaging
 - Review FCM debug logs for connection details
 - Ensure port 5228 is forwarded if you run this behind reverse-proxy, inside KVM or any other virtual environment not directly exposed.
+
+### Locate requests succeed but no location arrives (one account)
+Symptom: with two or more Google accounts configured, the devices of one account stop updating although the log shows no error; with debug logging, its locate requests are accepted and then end with `No location response received`. The Find Hub app still shows current positions.
+
+Cause in the measured case (issue 224 follow-up, 2026-11-14): Google accepted every locate request of that account but no longer delivered pushes to its push token. Each account has its own push token since upstream V1.7; before that all accounts shared one, so the problem could not show.
+
+Self-healing: after three accepted requests in a row without any push on that account's channel, the integration re-registers that account's push token once and logs the warning `FCM push channel silent after 3 accepted locate requests; re-registering push token once`. It does this at most every four hours per account. The device identity is kept, so devices and entities stay as they are.
+
+Manual fix: press **Regenerate FCM Token** on the service device of that account, then press **Locate now** on one of its devices. In the measured case the next two requests were answered within a second.
+
+Observed values (one Home Assistant, two accounts, 2026-11-14): a new push token was issued about 4 seconds after re-registration; the **Locate now** button stays unavailable for several minutes after a locate; the Google login token expired after 716 minutes, which showed as three HTTP 401 answers that recovered on their own.
 
 ### Authentication Expires Repeatedly
 - Google may revoke tokens when API requests originate from a different IP address or geographic region than where the token was originally created.
