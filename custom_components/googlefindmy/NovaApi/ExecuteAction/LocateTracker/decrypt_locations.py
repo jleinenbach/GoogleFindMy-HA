@@ -359,8 +359,10 @@ def _time_reading(raw: bytes) -> str | None:
 def _field_shape(value: Any) -> str:
     """Wire structure of one registration field; ``absent`` if not set.
 
-    A value that cannot be read as bytes gives ``unreadable``, so a broken
+    A value for which ``bytes(value)`` fails gives ``unreadable``, so a broken
     field stays distinguishable from a missing one. Raises no ``Exception``.
+    From a parsed message the value is exactly ``bytes``; an ``int`` passed
+    directly would be read as ``bytes(n)``, that is ``n`` zero bytes.
     """
     if value is None:
         return "absent"
@@ -390,7 +392,13 @@ def _own_report_structure(
     Returns ``(f14, f29, f33, f33_as_time, secrets)``. Fields are taken by
     number from ``ListFields()``; a field that is not set reads ``absent``.
     The secrets container holds key material, so it is shown one level only.
-    Raises no ``Exception``; a field that cannot be read shows ``unreadable``.
+    Raises no ``Exception`` for a parsed message: ``ListFields()`` then yields
+    ``int`` field numbers and exactly ``bytes`` for fields 29 and 33 (measured
+    with protobuf 7.36.1, implementations ``upb`` and ``python``; root
+    ``AGENTS.md``, section X, "Protobuf runtime"). An object built by hand and
+    passed directly may raise. Fields 29 and 33 show ``unreadable`` when
+    ``bytes(value)`` fails; if ``ListFields()`` itself fails, every field reads
+    ``absent``, and so does the container when it cannot be serialized.
     """
     try:
         by_number = {fd.number: value for fd, value in registration.ListFields()}
@@ -2143,10 +2151,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             if public_key_random == b"" and _LOGGER.isEnabledFor(logging.DEBUG):
                 # Field numbers, not names: the .proto names of fields 29 and 33
                 # come from Spot and are unconfirmed. Fields 29 and 33 and the
-                # secrets container show structure only, never a value or a
-                # byte; the line also carries the report time, the owner key
-                # version, field 14, the number of keys tried and field 33 read
-                # as a time. Field 29 stays in _SECRET_PROTO_FIELDS of the decoder.
+                # secrets container show structure only, never a byte; the one
+                # value taken from them is field 33 read as a time
+                # (f33_as_time). The line also carries the report time, the
+                # owner key version, field 14, the number of keys tried and the
+                # length of encryptedIdentityKey. Field 29 stays in
+                # _SECRET_PROTO_FIELDS of the decoder.
                 if own_report_structure is None:
                     own_report_structure = _own_report_structure(device_registration)
                 f14, f29, f33, f33_as_time, container_shape = own_report_structure
