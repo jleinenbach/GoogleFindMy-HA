@@ -336,7 +336,7 @@ def _note_accepted_without_push(
     try:
         note(entry_id)
     except Exception as err:
-        _LOGGER.debug("Dead-token detector signal failed: %s", type(err).__name__)
+        _LOGGER.debug("Silent-channel detector signal failed: %s", type(err).__name__)
 
 
 def create_location_request(

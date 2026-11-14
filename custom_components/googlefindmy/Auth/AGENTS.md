@@ -79,7 +79,7 @@ Google can answer a locate request with HTTP 200 and still never deliver a push 
 - At `FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD` (3) the entry gets one re-registration through the throttled `Auth/token_refresh.async_regenerate_fcm_token` as its own tracked task, never inline in the locate path and never under `_refresh_lock` there. Its cooldown stays in force; the entry is then locked out for `FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S` (4 h, a setting). A refused re-registration (`False`) logs INFO and keeps the lockout.
 - Logging: one WARNING per trigger with `entry_id` and the count, never a token, e-mail address or device name; the running count only at DEBUG (root `AGENTS.md` section 5).
 - Count and lockout are in-memory and dropped in `_purge_entry_tokens`; a restart starts from zero.
-- It is not the data-starvation watchdog (`_is_data_starved`, `FCM_DATA_STARVATION_S`): that one reconnects with the same token after 900 s without data and so cannot heal a token Google no longer delivers to. Do not merge the two.
+- It is not the data-starvation watchdog (`_is_data_starved`, `FCM_DATA_STARVATION_S`): after 900 s without data it stops the client and lets the supervisor rebuild it from the stored credentials, which keeps the token, so it cannot heal a token Google no longer delivers to. Do not merge the two.
 
 Regression tests: `tests/test_fcm_dead_token_detector.py`.
 

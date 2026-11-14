@@ -4130,7 +4130,7 @@ class FcmReceiverHA:
             started = await async_regenerate_fcm_token(hass=hass, entry_id=entry_id)
         except Exception as err:
             _LOGGER.warning(
-                "[entry=%s] Push token re-registration for a silent channel failed: %s",
+                "[entry=%s] Re-registration for a silent push channel failed: %s",
                 entry_id,
                 describe_exception(err),
             )

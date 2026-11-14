@@ -195,6 +195,30 @@ async def test_t_t6_lockout_blocks_until_it_expires(
     assert regenerate == ["entry-b", "entry-b"]
 
 
+@pytest.mark.asyncio
+async def test_t_t6_count_starts_fresh_for_the_new_token(
+    receiver: tuple[FcmReceiverHA, _Clock], regenerate: list[str]
+) -> None:
+    """Silence before the re-registration belongs to the old token.
+
+    After the lockout, fewer than N silent requests on the new token start
+    nothing, however many there were before the trigger.
+    """
+
+    rx, clock = receiver
+    for _ in range(N):
+        rx.note_accepted_without_push("entry-b")
+    await _settle()
+    assert regenerate == ["entry-b"]
+
+    clock.now += FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S + 1
+    for _ in range(N - 1):
+        rx.note_accepted_without_push("entry-b")
+    await _settle()
+
+    assert regenerate == ["entry-b"]
+
+
 def test_t_t6_lockout_is_four_hours_and_threshold_three() -> None:
     """V-T1 and V-T2 as decided on 2026-11-14."""
 
