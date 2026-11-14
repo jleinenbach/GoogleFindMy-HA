@@ -1068,6 +1068,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         - If no runtime is available at all, fail early with a clear, translated error.
         - Prefer Device Registry mapping from the provided device_id.
         - Fall back to scanning active coordinators for the device's canonical id presence.
+
+        A canonical id shared by several config entries (one device visible in
+        two accounts) is not a registry device id, so it takes the fallback and
+        resolves to the first runtime that knows it. Callers that know which
+        account they act for pass the registry device id instead; the device
+        buttons do (``GoogleFindMyButtonEntity._service_target_id``).
         """
         # Early exit: no active runtimes at all
         runtimes = list(_iter_runtimes(hass))

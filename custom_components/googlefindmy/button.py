@@ -1091,6 +1091,21 @@ class GoogleFindMyButtonEntity(
         self._attr_last_pressed = restored
         self.async_write_ha_state()
 
+    def _service_target_id(self) -> str:
+        """Return the id this button hands to the device services.
+
+        The Google id alone names no account: a device shared into two accounts
+        carries the same canonical id in both, and the service then resolves it
+        to the first coordinator that knows it. The registry device of this
+        entity belongs to exactly this config entry, so it is passed when known;
+        without a registry entry the canonical id is passed as before.
+        """
+        entry = getattr(self, "registry_entry", None)
+        device_id = getattr(entry, "device_id", None)
+        if isinstance(device_id, str) and device_id:
+            return device_id
+        return self.device_id
+
     def _update_last_pressed(self) -> None:
         """Record the current timestamp and push state to Home Assistant."""
 
@@ -1184,7 +1199,7 @@ class GoogleFindMyPlaySoundButton(GoogleFindMyButtonEntity):
             await self.hass.services.async_call(
                 DOMAIN,
                 SERVICE_PLAY_SOUND,
-                {"device_id": device_id},
+                {"device_id": self._service_target_id()},
                 blocking=True,
                 context=self._context,
             )
@@ -1290,7 +1305,7 @@ class GoogleFindMyStopSoundButton(GoogleFindMyButtonEntity):
             await self.hass.services.async_call(
                 DOMAIN,
                 SERVICE_STOP_SOUND,
-                {"device_id": device_id},
+                {"device_id": self._service_target_id()},
                 blocking=True,
                 context=self._context,
             )
@@ -1392,7 +1407,7 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
             await self.hass.services.async_call(
                 DOMAIN,
                 SERVICE_LOCATE_DEVICE,
-                {"device_id": device_id},
+                {"device_id": self._service_target_id()},
                 blocking=False,  # non-blocking: avoid UI stall
                 context=self._context,
             )
