@@ -1187,6 +1187,23 @@ FCM_ABORT_ON_SEQ_ERROR_COUNT: int = 3
 # The MCS session lifetime is ~2h, so 15-minute detection is fast enough.
 FCM_DATA_STARVATION_S: int = 900
 
+# FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD: accepted locate requests in a row that run
+# into LOCATION_REQUEST_TIMEOUT_S without ANY push on the entry's channel before
+# the receiver re-registers that entry's push token once. Measured 2026-11-14
+# (two accounts, one Home Assistant): on a healthy channel 10 of 10 requests
+# were answered by push, including requests for a tracker with no location to
+# report; on a token Google had silently stopped delivering to, every request
+# was answered HTTP 200 and no push arrived (at least 3 in a row per run, over
+# three restarts) until one re-registration issued a new token. Small sample
+# (n = 1 healthy account); the lockout below bounds the cost of a false trigger.
+FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD: int = 3
+
+# FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S: minimum spacing between two automatic
+# re-registrations of the same entry (at most six per day and account). A
+# setting, not a measurement; it sits on top of TOKEN_REFRESH_COOLDOWN_S, which
+# the throttled re-registration path still enforces.
+FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S: int = 4 * 3600
+
 # FCM_ZOMBIE_CHECK_INTERVAL_S: how often the watchdog *evaluates* starvation.
 # The supervisor monitor loop ticks every FCM_MONITOR_INTERVAL_S (1s); evaluating
 # the predicate every tick is wasteful, so the watchdog is throttled to run at
@@ -1432,6 +1449,8 @@ __all__ = [
     "FCM_MONITOR_INTERVAL_S",
     "FCM_ABORT_ON_SEQ_ERROR_COUNT",
     "FCM_DATA_STARVATION_S",
+    "FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD",
+    "FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S",
     "FCM_ZOMBIE_CHECK_INTERVAL_S",
     "FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S",
     "FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S",

@@ -90,6 +90,9 @@ from custom_components.googlefindmy.Auth.log_safety import (
     describe_exception,
     exception_origin,
 )
+from custom_components.googlefindmy.Auth.token_refresh import (
+    async_regenerate_fcm_token,
+)
 from custom_components.googlefindmy.entry_self_write import (
     consume_self_write,
     credential_member_digest,
@@ -136,6 +139,8 @@ try:
         FCM_CLIENT_HEARTBEAT_INTERVAL_S,
         FCM_CONNECTION_RETRY_COUNT,
         FCM_DATA_STARVATION_S,
+        FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S,
+        FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD,
         FCM_IDLE_RESET_AFTER_S,
         FCM_MONITOR_INTERVAL_S,
         FCM_SERVER_HEARTBEAT_INTERVAL_S,
@@ -153,6 +158,8 @@ except ImportError:  # pragma: no cover
     FCM_MONITOR_INTERVAL_S = 1
     FCM_ABORT_ON_SEQ_ERROR_COUNT = 3
     FCM_DATA_STARVATION_S = 900
+    FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD = 3
+    FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S = 4 * 3600
     FCM_ZOMBIE_CHECK_INTERVAL_S = 30
     FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S = 60
     FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S = 900
@@ -509,6 +516,18 @@ class FcmReceiverHA:
         # STARTED pc that only the supervisor's outer loop can build). Cancelled
         # on teardown in ``_purge_entry_tokens``.
         self._zombie_reconnect_tasks: dict[str, asyncio.Task[None]] = {}
+
+        # Dead push token detector (issue 224 follow-up). Google can answer a
+        # locate with HTTP 200 and still never deliver to the token named in the
+        # request; the data-starvation watchdog above reconnects with the SAME
+        # token and so cannot heal that. Counted per entry: accepted requests
+        # that ran into ``LOCATION_REQUEST_TIMEOUT_S`` with no push at all on
+        # the entry's channel (``note_accepted_without_push``); reset by every
+        # push on that channel (head of ``_handle_notification_async``). At
+        # ``FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD`` one re-registration starts and the
+        # entry is locked out until the monotonic time stored here.
+        self._dead_token_silent_counts: dict[str, int] = {}
+        self._dead_token_lockout_until: dict[str, float] = {}
 
         # One-shot first-locate reconnect (#1150) serialization. Concurrent
         # manual locates for different trackers on the *same* entry both enter
@@ -2650,7 +2669,14 @@ class FcmReceiverHA:
     async def _handle_notification_async(
         self, entry_id: str, payload: Mapping[str, Any]
     ) -> None:
-        """Async handler executed in HA loop: parse, route, and schedule downstream work."""
+        """Async handler executed in HA loop: parse, route, and schedule downstream work.
+
+        Any push on an entry's channel, matching a request or not and with or
+        without an FMD payload, proves that Google still delivers to that
+        entry's token, so the dead-token count of the entry is reset first,
+        ahead of every early return.
+        """
+        self._dead_token_silent_counts.pop(entry_id, None)
         try:
             hex_string = self._extract_hex_payload(payload)
             if hex_string is None:
@@ -3974,6 +4000,10 @@ class FcmReceiverHA:
     def _purge_entry_tokens(self, entry_id: str) -> None:
         """Remove all routing references and per-entry runtime state for an entry."""
         self._entry_last_activity_monotonic.pop(entry_id, None)
+        # Dead push token detector: a reload under the same entry_id starts
+        # without an inherited count or lockout.
+        self._dead_token_silent_counts.pop(entry_id, None)
+        self._dead_token_lockout_until.pop(entry_id, None)
         # Data-starvation watchdog state (LC-13): drop the data/locate clocks and
         # the backoff/count/throttle records, and cancel any in-flight watchdog
         # reconnect task so it cannot keep working against the torn-down ``pc``
@@ -4024,6 +4054,93 @@ class FcmReceiverHA:
                 self._token_to_entries[token] = entries
             else:
                 self._token_to_entries.pop(token, None)
+
+    # -------------------- Dead push token detector --------------------
+
+    def _dead_token_now(self) -> float:
+        """Monotonic clock of the dead-token detector (patched in tests)."""
+        return time.monotonic()
+
+    def note_accepted_without_push(self, entry_id: str | None) -> None:
+        """Count an accepted locate request that timed out with no push at all.
+
+        Called by the timeout branch of ``get_location_data_for_device`` after
+        Google accepted the request (HTTP 200) and nothing arrived within
+        ``LOCATION_REQUEST_TIMEOUT_S``. A request that was not accepted
+        (``LocationRequestNotAcceptedError``) never reaches this method.
+
+        On a healthy channel every accepted request was answered by a push in
+        the measurement of 2026-11-14 (10 of 10, n = 1 account), even for a
+        tracker with no location to report. A run of
+        ``FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD`` silent requests on one entry
+        therefore points at a token Google no longer delivers to. The entry
+        gets one re-registration through the throttled
+        ``async_regenerate_fcm_token`` (new token, same Android id) as its own
+        task, never inline in the locate path, and is then locked out for
+        ``FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S``. The count lives in memory: a
+        restart starts from zero and can cost one extra re-registration.
+
+        Args:
+            entry_id: Config entry whose channel stayed silent; ``None`` or an
+                empty string is ignored.
+        """
+        if not entry_id:
+            return
+        count = self._dead_token_silent_counts.get(entry_id, 0) + 1
+        self._dead_token_silent_counts[entry_id] = count
+        _LOGGER.debug(
+            "[entry=%s] Accepted locate request timed out with a silent push channel (%d in a row)",
+            entry_id,
+            count,
+        )
+        if count < FCM_DEAD_TOKEN_TIMEOUT_THRESHOLD:
+            return
+        now = self._dead_token_now()
+        if now < self._dead_token_lockout_until.get(entry_id, 0.0):
+            return
+        hass = self._hass
+        if hass is None:
+            _LOGGER.debug(
+                "[entry=%s] Silent push channel noted, but no Home Assistant handle to re-register",
+                entry_id,
+            )
+            return
+        self._dead_token_lockout_until[entry_id] = (
+            now + FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S
+        )
+        self._dead_token_silent_counts[entry_id] = 0
+        _LOGGER.warning(
+            "[entry=%s] FCM push channel silent after %d accepted locate requests; "
+            "re-registering push token once",
+            entry_id,
+            count,
+        )
+        self._track_task(
+            asyncio.get_running_loop().create_task(
+                self._async_reregister_dead_token(hass, entry_id)
+            ),
+            label=f"fcm-dead-token[{entry_id[:8]}]",
+        )
+
+    async def _async_reregister_dead_token(
+        self, hass: HomeAssistant, entry_id: str
+    ) -> None:
+        """Run the throttled re-registration for a silent channel; never raise."""
+        try:
+            started = await async_regenerate_fcm_token(hass=hass, entry_id=entry_id)
+        except Exception as err:
+            _LOGGER.warning(
+                "[entry=%s] Push token re-registration for a silent channel failed: %s",
+                entry_id,
+                describe_exception(err),
+            )
+            return
+        if not started:
+            _LOGGER.info(
+                "[entry=%s] Push token re-registration for a silent channel not started "
+                "(cooldown or receiver unavailable); next attempt after the lockout",
+                entry_id,
+            )
 
     # -------------------- Public token accessor --------------------
 

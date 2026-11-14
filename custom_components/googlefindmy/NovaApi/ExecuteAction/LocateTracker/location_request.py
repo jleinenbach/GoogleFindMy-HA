@@ -321,6 +321,24 @@ def unregister_fcm_receiver_provider() -> None:
     _fcm_receiver_state["getter"] = None
 
 
+def _note_accepted_without_push(
+    fcm_receiver: FcmReceiverProtocol, entry_id: str | None
+) -> None:
+    """Tell the receiver that an accepted request got no push; best effort.
+
+    The method is not part of ``FcmReceiverProtocol``: receivers without it
+    (test doubles, older providers) are skipped, and a failing detector never
+    changes the outcome of the locate.
+    """
+    note = getattr(fcm_receiver, "note_accepted_without_push", None)
+    if not callable(note):
+        return
+    try:
+        note(entry_id)
+    except Exception as err:
+        _LOGGER.debug("Dead-token detector signal failed: %s", type(err).__name__)
+
+
 def create_location_request(
     canonic_device_id: str,
     fcm_registration_id: str,
@@ -712,9 +730,12 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
 
     Returns:
         A list of dictionaries containing location data, or an empty list when the
-        server ACCEPTED the request and no usable record came back. That is the
-        healthy idle outcome of a BLE tag, but not only that: a failure after the
-        accept line returns empty too -- the unexpected-device mismatch, anything
+        server ACCEPTED the request and no usable record came back. That covers a
+        tag with nothing to report and an accepted request whose push never
+        arrived within ``LOCATION_REQUEST_TIMEOUT_S`` (the receiver counts the
+        latter per entry, see ``note_accepted_without_push``), but not only that:
+        a failure after the accept line returns empty too -- the unexpected-device
+        mismatch, anything
         the outer surfacing handler catches from there on, and every error the FCM
         callback absorbs on its own. What an empty list no longer means is "the
         request never got there"; that is what the exception below is for, and
@@ -1041,17 +1062,23 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
         try:
             await asyncio.wait_for(ctx.event.wait(), timeout=timeout)
         except TimeoutError:
-            # Expected when no reporter is in range to relay the BLE tag's
-            # location within the window; the RPC delivers data asynchronously
-            # via FCM. Returning an empty result is the healthy idle outcome,
-            # not a fault. DEBUG only: the coordinator reports a device that
-            # stays silent once at INFO (Home Assistant quality-scale rule
-            # log-when-unavailable), so this line must not duplicate it.
+            # The RPC delivers data asynchronously via FCM, and nothing arrived
+            # within the window. Not a fault of this request, and not always the
+            # idle tag it was once taken for: on a healthy push channel every
+            # accepted request was answered by a push in the measurement of
+            # 2026-11-14 (10 of 10, n = 1 account), even for a tracker with no
+            # location to report. A run of these on one entry points at a push
+            # token Google no longer delivers to; the receiver counts them and
+            # re-registers the token once (``note_accepted_without_push``).
+            # DEBUG only: the coordinator reports a device that stays silent once
+            # at INFO (Home Assistant quality-scale rule log-when-unavailable),
+            # so this line must not duplicate it.
             _LOGGER.debug(
                 "No location response received for %s (timeout: %ss)", name, timeout
             )
-            # Deliberately still an empty return: the server ACCEPTED this request,
-            # no reporter was in range within the window. This is the very outcome
+            _note_accepted_without_push(fcm_receiver, entry_id)
+            # Deliberately still an empty return: the server ACCEPTED this request
+            # and nothing arrived within the window. This is the very outcome
             # LocationRequestNotAcceptedError exists to keep distinguishable from a
             # request that never got PAST THIS LINE -- raising here would re-merge
             # them. (Past this line, not "never arrived": a 429 and a 5xx did
