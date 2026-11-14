@@ -585,6 +585,15 @@ Location data is fetched **outbound** from Home Assistant to Google (FCM push pl
 
 > **Note on the internal/external URL:** Your Home Assistant internal/external URL only affects the clickable **Map View links** on each device page, not location reception. Changing it can appear to "fix" updates because it triggers a reload or restart, but it is the restart that restores tracking, not the URL value. A configuration such as internal `http://ip-address:8123` plus external `https://your-domain:8123` is perfectly valid.
 
+### Own location reports fail to decrypt
+Symptom: the log shows the warning `All own-report decryptions failed`, and the phone's position no longer updates. In the reported case (#243) the log also showed `Decryption auth failed (InvalidTag)` for each own report. The integration does not determine the cause; with debug logging enabled it writes one `[OWN-REPORT-DIAG]` line per failed report. Please include these lines when you report the problem.
+
+Reported workaround (one confirmed case, #243, 2026-11-13): in the Find Hub app, open the phone's settings, switch off the setting that allows the device to be located (German UI: "Standortermittlung für Gerät zulassen"; English label not verified), wait about five minutes, switch it back on and request a locate. In that case the phone reported its location again.
+
+Side effects:
+- Google gives the phone a new ID (three of three times on one phone, 2026-11-12), so the integration creates a new device; its entity ID may end in `_2`. Update automations, dashboards and scripts that use the old entity. The old device is removed after two consecutive complete device lists no longer show it.
+- The new device's history starts with its first new position. In the reported case no positions from the time without updates appeared afterwards (#243).
+
 ### FCM Connection Problems
 - Extended timeout allows up to 60 seconds for device response
 - Check firewall settings for Firebase Cloud Messaging

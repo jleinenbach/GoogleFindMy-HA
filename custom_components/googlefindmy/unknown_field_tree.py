@@ -64,6 +64,7 @@ _WIRE_FIXED32 = 5
 # Known ``bytes`` fields that carry nested protobuf structure, by full field
 # name, mapped to the full name of the declared form (the ``form:`` comment in
 # ``DeviceUpdate.proto``). Key material and identifiers are never listed.
+# DeviceMetadata.phoneInformation stays closed: it carries personal data.
 _FORM_BY_FIELD: Mapping[str, str] = {
     "DeviceMetadata.supportedActions": "DeviceMetadata.SupportedActions",
     "ImageInformation.componentImages": "ImageInformation.ComponentImage",
@@ -73,7 +74,7 @@ _FORM_BY_FIELD: Mapping[str, str] = {
     "DeviceRegistration.capabilities": "DeviceCapabilities",
     "DeviceRegistration.firstSecretsCreationDate": "Time",
     "DeviceRegistration.lostModeInformation": "DeviceRegistration.LostModeInformation",
-    "DeviceMetadata.metadataField12": "Time",
+    "DeviceMetadata.fetchTime": "Time",
     "DeviceRegistration.registrationField40": "Time",
 }
 

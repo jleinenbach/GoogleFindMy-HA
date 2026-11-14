@@ -310,11 +310,11 @@ encryptedUserSecrets.encryptedIdentityKey:
 | `AccessInformation` | `sharingKeys` (7) | `bytes` | `SharingKeys` |
 | `EncryptedUserSecrets` | `sharingKeys` (6), `previousEikDate` (9) | `bytes` | `SharingKeys`, `Time` |
 | `SemanticLocation` | `semanticLocationIdentifier` (7) | `bytes` | nested message |
-| `DeviceMetadata` | `metadataField10` (10), `metadataField11` (11), `metadataField12` (12), `metadataField13` (13) | `bytes` | not in Spot; observed 2026-11-10: nested blob, text, `Time`, text |
+| `DeviceMetadata` | `metadataField10` (10), `metadataField11` (11), `fetchTime` (12), `metadataField13` (13) | `bytes` | not in Spot; observed 2026-11-10: nested blob, text, `Time`, text |
 | `DeviceRegistration` | `registrationField15` (15), `registrationField38` (38), `registrationField40` (40) | `bytes` | not in Spot; observed 2026-11-10: text, text, `Time` |
 | `IdentitfierInformation` | `identifierField5` (5) | `bytes` | not in Spot; observed 2026-11-10: nested message |
 
-`ProtoDecoders/decoder.py` hides key material and personal data from developer output (`_SECRET_PROTO_FIELDS`, scalar fields by name). Fields observed on 2026-11-10 that are not in Spot are declared under neutral names (`metadataField<N>`, `registrationField<N>`, `typeInformationField14`, `identifierField5`, `reportsField5`, `recentField8`/`recentField11`, `eidResponseField3`/`eidResponseField5`); their meaning is unknown. The text, identifier-like and blob fields among them are in `_SECRET_PROTO_FIELDS`. S8.5 lists every field declared under a neutral name. `DeviceMetadata.SupportedActions` keeps the Spot form: `type` is an `ExecuteActionType` whose set field number names the action (30, 31, 32 on trackers; 1, 2, 4, 5, 6, 7, 13, 14 on phones, declared as empty `ExecuteActionPhoneAction` messages), and field 2 is `supportedActionsField2` (`uint32`), because the wire carried 1 and 2. Unknown fields that remain are reported at DEBUG as `AGENTS.md` describes under **Schema-drift diagnostics**.
+`ProtoDecoders/decoder.py` hides key material and personal data from developer output (`_SECRET_PROTO_FIELDS`, scalar fields by name). Fields observed on 2026-11-10 that are not in Spot are declared under neutral names (`metadataField<N>`, `registrationField<N>`, `typeInformationField14`, `identifierField5`, `reportsField5`, `recentField8`/`recentField11`, `eidResponseField3`/`eidResponseField5`), and so are fields of the phone record observed on 2026-11-11 and 2026-11-12 (`phoneInformationField1`, `phoneInformationField<N>`); their meaning is unknown. `firstRegistrationDate`, `fetchTime` and `IDENTIFIER_FASTPAIR` are named after an observation (S8.6). The text, identifier-like and blob fields among them are in `_SECRET_PROTO_FIELDS`. S8.5 lists every field declared under a neutral name. `DeviceMetadata.SupportedActions` keeps the Spot form: `type` is an `ExecuteActionType` whose set field number names the action (30, 31, 32 on trackers; 1, 2, 4, 5, 6, 7, 13, 14 on phones, declared as empty `ExecuteActionPhoneAction` messages), and field 2 is `supportedActionsField2` (`uint32`), because the wire carried 1 and 2. Unknown fields that remain are reported at DEBUG as `AGENTS.md` describes under **Schema-drift diagnostics**.
 
 ### S8.5 Observed fields, meaning unknown
 
@@ -322,18 +322,17 @@ Fields seen on the wire that Spot does not name are declared under neutral names
 
 | Path (number) | Wire type | Observed values | Circumstance | First seen |
 |---|---|---|---|---|
-| `DeviceMetadata.metadataField8` (8) | varint | 6, 7, 11 | device list | 2026-11-10 |
-| `DeviceMetadata.metadataField10` (10) | length-delimited | nested message, about 800 bytes, key-like shape, never opened | device list | 2026-11-10 |
-| `DeviceMetadata.metadataField11` (11) | length-delimited | text, 19 or 44 characters | device list | 2026-11-10 |
-| `DeviceMetadata.metadataField12` (12) | length-delimited | `Time` form | device list | 2026-11-10 |
-| `DeviceMetadata.metadataField13` (13) | length-delimited | text, 32 characters | device list | 2026-11-10 |
+| `DeviceMetadata.metadataField8` (8) | varint | 6, 7, 11; 2026-11-12: 7 on moto tag, Trackcard and Insta360 entries, 6 on one moto tag 2, 11 on both Pixel Buds; does not match Spot's `SpotDeviceType` | device list | 2026-11-10 |
+| `DeviceMetadata.metadataField10` (10) | length-delimited | nested message, about 800 bytes, key-like shape, never opened; 2026-11-12: only on one earbud entry (Pixel Buds Pro), a copy of the device entry with name, image and field 2 = 26 | device list | 2026-11-10 |
+| `DeviceMetadata.metadataField11` (11) | length-delimited | text, 19 or 44 characters; 2026-11-12: on the phone a 19-digit decimal equal to `phoneInformationField1`, on trackers 44 characters of URL-safe Base64 (32 bytes), distinct per device | device list | 2026-11-10 |
+| `DeviceMetadata.metadataField13` (13) | length-delimited | text, 32 characters; 2026-11-12: 32 hex characters, distinct per device, unchanged over one off/on cycle of the locate setting on the phone (n=1) | device list | 2026-11-10 |
 | `DeviceMetadata.SupportedActions.supportedActionsField2` (2) | varint | 1, 2 | device list | 2026-11-10 |
 | `DeviceRegistration.registrationField15` (15) | length-delimited | text, 36 characters | device list | 2026-11-10 |
 | `DeviceRegistration.registrationField22` (22) | varint | 1 | device list | 2026-11-10 |
 | `DeviceRegistration.registrationField38` (38) | length-delimited | text, 7 or 11 characters | device list | 2026-11-10 |
 | `DeviceRegistration.registrationField40` (40) | length-delimited | `Time` form | device list | 2026-11-10 |
 | `DeviceTypeInformation.typeInformationField14` (14) | varint | 2 | device list | 2026-11-10 |
-| `IdentitfierInformation.identifierField5` (5) | length-delimited | nested message, 42 bytes | device list | 2026-11-10 |
+| `IdentitfierInformation.identifierField5` (5) | length-delimited | nested message, 42 bytes; 2026-11-12 (n=1, Pixel Buds Pro, type 5): holds the canonical ID at 5.2.1.1, see S8.6 | device list | 2026-11-10 |
 | `LocationsAndTimestampsWrapper.reportsField5` (5) | varint | 1 | location reports | 2026-11-10 |
 | `RecentLocationAndNetworkLocations.recentField7` (7) | varint | 4 | only on aggregated reports (2 cases) | 2026-11-11 |
 | `RecentLocationAndNetworkLocations.recentField8` (8) | repeated varint | 1, 2, 3 (one per component on earbuds) | location reports | 2026-11-10 |
@@ -348,7 +347,46 @@ Fields seen on the wire that Spot does not name are declared under neutral names
 | `ExecuteActionType.phoneActionField7` (7) | length-delimited | empty message | phones only, inside `supportedActions` | 2026-11-10 |
 | `ExecuteActionType.phoneActionField13` (13) | length-delimited | empty message | phones only, inside `supportedActions` | 2026-11-10 |
 | `ExecuteActionType.phoneActionField14` (14) | length-delimited | empty message | phones only, inside `supportedActions` | 2026-11-10 |
-| `PhoneInformation.phoneInformationField1` (1) | varint | above 255 (value not logged) | phones, once per account | 2026-11-11 |
+| `PhoneInformation.phoneInformationField1` (1) | varint | above 255 (value not logged); 2026-11-12 (n=1 phone): 19-digit decimal (62 bit), shape of the GSF Android ID, not confirmed; equal to `metadataField11` on the phone | phones, once per account | 2026-11-11 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField10` (10) | length-delimited | changes on every fetch, time-like (value not logged) | phone record, n=1 phone | 2026-11-12 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField20` (20) | varint | numbers (value not logged) | phone record, n=1 phone | 2026-11-12 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField21` (21) | varint | numbers (value not logged) | phone record, n=1 phone | 2026-11-12 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField23` (23) | length-delimited | text, 32 hex characters, stability not measured (value not logged) | phone record, n=1 phone | 2026-11-12 |
+
+### S8.6 Phone and tracker records in the device list (measured 2026-11-12)
+
+Measured on one account with one phone and several trackers, and on a second account that lists the same phone. No value of a personal field is shown here. "Personal data" means the field is hidden from developer output and never logged: by name in `_SECRET_PROTO_FIELDS`, or, for `information` (26), because the enclosing `DeviceMetadata.phoneInformation` is hidden as a whole.
+
+**Phone record** (`DeviceMetadata.phoneInformation`, form `DeviceMetadata.PhoneInformation`):
+
+| Field (number) | Declared name | Observation | n, date | Personal data |
+|---|---|---|---|---|
+| `DeviceMetadata.PhoneInformation` (2) | `firstRegistrationDate` | equals the first-registration date the Find Hub app shows; read in the lists of two accounts; predates every canonical ID of that phone | n=1 phone, 2026-11-12 | yes |
+| `DeviceMetadata.PhoneInformation` (3 to 6) | `modelNumber`, `manufacturer`, `codename`, `carrier` | Spot names, observed and confirmed | n=1 phone, 2026-11-12 | no |
+| `DeviceMetadata.PhoneInformation` (7) | `imei` | matches the IMEI shown on the device; length-delimited on the wire in 22 of 22 records, so declared `bytes` (Spot: `int32`) | n=1 phone, 2026-11-12 | yes |
+| `DeviceMetadata.PhoneInformation` (10) | `phoneInformationField10` | changes on every fetch, time-like | n=1 phone, 2026-11-12 | hidden, meaning unknown |
+| `DeviceMetadata.PhoneInformation` (20, 21) | `phoneInformationField20`, `phoneInformationField21` | numbers | n=1 phone, 2026-11-12 | hidden, meaning unknown |
+| `DeviceMetadata.PhoneInformation` (23) | `phoneInformationField23` | text, 32 hex characters, stability not measured | n=1 phone, 2026-11-12 | hidden, meaning unknown |
+| `DeviceMetadata.PhoneInformation` (26) | `information` | a copy of the account's device entry (canonical ID, name, secrets creation time, account e-mail address) | n=1 phone, 2026-11-12 | yes |
+| `PhoneInformation` (1) | `phoneInformationField1` | 19-digit decimal (62 bit), shape of the GSF Android ID, not confirmed; unchanged before, during and after one off/on cycle; equal in the lists of two accounts | n=1 phone, 2026-11-12 | yes |
+| `DeviceMetadata` (11) | `metadataField11` | 19-digit decimal equal to `phoneInformationField1` | n=1 phone, 2026-11-12 | hidden, meaning unknown |
+| `DeviceMetadata` (12) | `fetchTime` | equal to the request time | n=1 phone, 2026-11-12 | no |
+| `DeviceMetadata` (13) | `metadataField13` | 32 hex characters, unchanged over one off/on cycle | n=1 phone, 2026-11-12 | hidden, meaning unknown |
+
+**Tracker entries:**
+
+| Field (number) | Declared name | Observation | n, date | Personal data |
+|---|---|---|---|---|
+| `DeviceMetadata` (8) | `metadataField8` | 7 (moto tag, Trackcard, Insta360), 6 (one moto tag 2), 11 (both Pixel Buds); does not match Spot's `SpotDeviceType` | n=1 account, 2026-11-12 | no |
+| `DeviceMetadata` (10) | `metadataField10` | only on one earbud entry (Pixel Buds Pro): a copy of the device entry with name, image and field 2 = 26 (Spot `DEVICE_TYPE_EARBUDS`) | n=1 device, 2026-11-12 | hidden, meaning unknown |
+| `DeviceMetadata` (11) | `metadataField11` | 44 characters of URL-safe Base64 (32 bytes), distinct per device | n=1 account, 2026-11-12 | hidden, meaning unknown |
+| `DeviceMetadata` (12) | `fetchTime` | equal to the request time | n=1 account, 2026-11-12 | no |
+| `DeviceMetadata` (13) | `metadataField13` | 32 hex characters, distinct per device | n=1 account, 2026-11-12 | hidden, meaning unknown |
+| `identifierInformation.type` | `IDENTIFIER_FASTPAIR` (5) | on one Pixel Buds Pro entry; number and name follow Spot's `DeviceType.FASTPAIR_DEVICE = 5` | n=1 device, 2026-11-12 | no |
+
+**Effect of the locate setting** (one phone, three off/on cycles, 2026-11-12). While the Find Hub setting that allows the device to be located (German UI: "Standortermittlung für Gerät zulassen"; English label not verified) is off, the device list keeps the phone's entry without a canonical ID, so the integration does not locate it (three cycles). When the setting is turned back on, Google returns a new canonical ID (three cycles, three new IDs). On the one cycle measured before and after, the identity key (EIK) and the ring key changed. `firstSecretsCreationDate` (33) and `registrationField40` (40) carried the minute the setting was turned back on (two cycles). `phoneInformationField1`, `metadataField11` and `metadataField13` kept their values before, during and after one cycle and were equal in the lists of two accounts. `firstRegistrationDate` was read after the third cycle, in the lists of both accounts; it equals the first-registration date the Find Hub app shows, which predates every canonical ID of that phone, so no cycle re-created it (inferred from the date). The first own location report after a cycle decrypted with the new key; the cycle alone did not produce `InvalidTag` (n=1). Today the integration creates a new device for the new canonical ID and removes the old one after two consecutive complete device lists no longer show it (root `AGENTS.md`, stale devices).
+
+**Fast Pair identifier path** (one device, 2026-11-12). One earbud entry (Pixel Buds Pro) carried `identifierInformation.type = 5`, declared as `IDENTIFIER_FASTPAIR` after Spot's `DeviceType.FASTPAIR_DEVICE = 5`. Its canonical ID sits at `identifierInformation` field 5 -> 2 -> 1 -> 1 (`identifierField5`, shaped like `PhoneInformation`), not in field 1 (phones) or field 3, where `get_canonic_ids` reads it (read from the code). Whether the entry also carries field 3 was not measured. The integration does not read field 5.
 
 ---
 

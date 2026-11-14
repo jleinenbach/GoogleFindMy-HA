@@ -568,8 +568,10 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                 ) as err:
                     # A per-device decryption/key failure (DecryptionError incl. its
                     # StaleOwnerKeyError subclass, or InvalidTag) is NOT, on its own,
-                    # an account-wide crisis: a device powered off for days lands
-                    # here while sibling devices decrypt fine. Log those as warnings
+                    # an account-wide crisis: a device whose own reports no longer
+                    # decrypt (cause not measured; a phone powered off for days is
+                    # an unconfirmed example) lands here while sibling devices
+                    # decrypt fine. Log those as warnings
                     # -- the account-wide escalation is decided once per cycle by the
                     # coordinator's positive-proof-gated verdict
                     # (PollingOperations._resolve_cycle_decrypt_outcome), and its

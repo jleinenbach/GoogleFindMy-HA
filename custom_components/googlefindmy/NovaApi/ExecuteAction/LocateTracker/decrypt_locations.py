@@ -17,6 +17,7 @@ from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, cast
 
 from cryptography.exceptions import InvalidTag
+from google.protobuf.unknown_fields import UnknownFieldSet
 
 from custom_components.googlefindmy import get_proto_decoder
 from custom_components.googlefindmy.Auth.adm_token_retrieval import (
@@ -76,7 +77,7 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
 )
 from custom_components.googlefindmy.SpotApi.spot_request import SpotError
 from custom_components.googlefindmy.unknown_field_tree import log_unknown_fields
-from google.protobuf.message import DecodeError
+from google.protobuf.message import DecodeError, Message
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -259,6 +260,169 @@ def _get_common_pb2() -> Any:
     return get_proto_decoder("Common_pb2")
 
 
+# Own-report diagnostics: bytes are read into the field-less ``Empty`` message,
+# the reader ``unknown_field_tree`` uses, so no varint code of our own is
+# needed. Through ``import_module`` because the vendored stubs under
+# ``google/protobuf/`` do not declare ``empty_pb2``.
+_EMPTY_MESSAGE: type[Message] = cast(
+    type[Message], import_module("google.protobuf.empty_pb2").Empty
+)
+# Entries shown per level; a longer level ends in ``+N``. Bounds the DEBUG
+# line for a pathological field, real ones carry a handful of entries.
+_WIRE_SHAPE_MAX_ENTRIES = 32
+_WIRE_TYPE_VARINT = 0
+_WIRE_TYPE_FIXED64 = 1
+_WIRE_TYPE_LEN = 2
+_WIRE_TYPE_FIXED32 = 5
+
+
+def _wire_items(raw: bytes, *, descend: bool) -> str | None:
+    """Entries of one level as ``number:wiretype:length``, ``None`` if unparsable."""
+    holder = _EMPTY_MESSAGE()
+    try:
+        holder.ParseFromString(raw)
+    except DecodeError:
+        return None
+    fields = list(UnknownFieldSet(holder))
+    occurrences: dict[int, int] = {}
+    for field in fields:
+        occurrences[field.field_number] = occurrences.get(field.field_number, 0) + 1
+    seen: dict[int, int] = {}
+    items: list[str] = []
+    for field in fields[:_WIRE_SHAPE_MAX_ENTRIES]:
+        number = field.field_number
+        label = str(number)
+        if occurrences[number] > 1:
+            label = f"{number}[{seen.get(number, 0)}]"
+            seen[number] = seen.get(number, 0) + 1
+        wire_type = field.wire_type
+        if wire_type == _WIRE_TYPE_VARINT:
+            items.append(f"{label}:v")
+        elif wire_type == _WIRE_TYPE_LEN:
+            data = bytes(field.data)
+            item = f"{label}:{wire_type}:{len(data)}"
+            if descend and data:
+                inner = _wire_items(data, descend=False)
+                if inner is not None:
+                    item += f"[{inner}]"
+            items.append(item)
+        elif wire_type == _WIRE_TYPE_FIXED64:
+            items.append(f"{label}:{wire_type}:8")
+        elif wire_type == _WIRE_TYPE_FIXED32:
+            items.append(f"{label}:{wire_type}:4")
+        else:
+            items.append(f"{label}:{wire_type}")
+    if len(fields) > _WIRE_SHAPE_MAX_ENTRIES:
+        items.append(f"+{len(fields) - _WIRE_SHAPE_MAX_ENTRIES}")
+    return ",".join(items)
+
+
+def _wire_shape(raw: bytes, *, descend: bool = True) -> str:
+    """Return the wire structure of ``raw``: total length, then its entries.
+
+    Per entry ``number:wiretype:length``; a varint shows ``v`` and no value.
+    A length-delimited entry that parses as a message gets its own entries in
+    brackets, one level deep and no deeper; repeated numbers are indexed
+    (``2[0]``, ``2[1]``). Never a value, never a byte. Raises no
+    ``Exception``: bytes that do not parse give ``unparsable(len=N)``, input
+    without a length gives ``unparsable``. A ``BaseException`` such as
+    ``KeyboardInterrupt`` propagates.
+    """
+    try:
+        size = len(raw)
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        return "unparsable"
+    try:
+        items = _wire_items(raw, descend=descend)
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        items = None
+    if items is None:
+        return f"unparsable(len={size})"
+    return f"len={size}{{{items}}}"
+
+
+def _time_reading(raw: bytes) -> str | None:
+    """Read ``raw`` as ``Common_pb2.Time``; ISO-8601 UTC only if seconds > 0."""
+    if not raw:
+        return None
+    try:
+        reading = _get_common_pb2().Time()
+        reading.ParseFromString(raw)
+        seconds = int(reading.seconds)
+        if seconds <= 0:
+            return None
+        return datetime.datetime.fromtimestamp(seconds, tz=datetime.UTC).isoformat()
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        return None
+
+
+def _field_shape(value: Any) -> str:
+    """Wire structure of one registration field; ``absent`` if not set.
+
+    A value for which ``bytes(value)`` fails gives ``unreadable``, so a broken
+    field stays distinguishable from a missing one. Raises no ``Exception``.
+    From a parsed message the value is exactly ``bytes``; an ``int`` passed
+    directly would be read as ``bytes(n)``, that is ``n`` zero bytes.
+    """
+    if value is None:
+        return "absent"
+    try:
+        raw = bytes(value)
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        return "unreadable"
+    return _wire_shape(raw)
+
+
+def _field_time(value: Any) -> str | None:
+    """Field ``value`` read as ``Common_pb2.Time``; ``None`` otherwise."""
+    if value is None:
+        return None
+    try:
+        raw = bytes(value)
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        return None
+    return _time_reading(raw)
+
+
+def _own_report_structure(
+    registration: Any,
+) -> tuple[bool, str, str, str | None, str]:
+    """Structure of the registration fields the own-report diagnostics shows.
+
+    Returns ``(f14, f29, f33, f33_as_time, secrets)``. Fields are taken by
+    number from ``ListFields()``; a field that is not set reads ``absent``.
+    The secrets container holds key material, so it is shown one level only.
+    Raises no ``Exception`` for a parsed message: ``ListFields()`` then yields
+    ``int`` field numbers and exactly ``bytes`` for fields 29 and 33 (measured
+    with protobuf 7.36.1, implementations ``upb`` and ``python``; root
+    ``AGENTS.md``, section X, "Protobuf runtime"). An object built by hand and
+    passed directly may raise. Fields 29 and 33 show ``unreadable`` when
+    ``bytes(value)`` fails; if ``ListFields()`` itself fails, every field reads
+    ``absent``, and so does the container when it cannot be serialized.
+    """
+    try:
+        by_number = {fd.number: value for fd, value in registration.ListFields()}
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        by_number = {}
+    f29 = by_number.get(29)
+    f33 = by_number.get(33)
+    container = by_number.get(19)
+    try:
+        container_bytes = container.SerializeToString() if container else None
+    except Exception:  # noqa: BLE001 - a diagnostic must not break decryption
+        container_bytes = None
+    return (
+        # ``is True``: the identity test cannot raise, unlike ``bool(value)``.
+        by_number.get(14) is True,
+        _field_shape(f29),
+        _field_shape(f33),
+        _field_time(f33),
+        _wire_shape(container_bytes, descend=False)
+        if container_bytes is not None
+        else "absent",
+    )
+
+
 def _get_device_update_pb2() -> Any:
     """Return the DeviceUpdate_pb2 module lazily."""
 
@@ -321,13 +485,13 @@ class OwnerKeyInvalidError(DecryptionError):
 class OwnReportIdentityMismatchError(DecryptionError):
     """Raised when a device's OWN server reports all fail authentication.
 
-    Device-local condition: the account keys are healthy (the identity key was
-    derived and siblings decrypt), but THIS device's own reports on the server were
-    encrypted with an identity key the local cache no longer matches -- typically a
-    phone powered off for days whose server-side reports are stale, or a re-paired
-    device. A fresh secrets.json (account-wide re-auth) does NOT fix it, so when a
-    sibling proves the shared key is healthy the coordinator downgrades this to a
-    per-device warning instead of prompting for re-authentication.
+    Device-local condition: none of THIS device's own reports authenticated with
+    the identity key candidates tried, and the same call produced no usable
+    network fix. The cause is not measured; unconfirmed examples are a phone
+    powered off for days or a re-paired device. When a sibling decrypts in the
+    same cycle, the account keys are proven healthy, so the coordinator
+    downgrades this to a per-device warning instead of prompting for
+    re-authentication.
 
     Kept a DISTINCT subclass so the coordinator's sibling-success downgrade applies
     ONLY here. Every OTHER ``DecryptionError`` -- identity-key derivation failures
@@ -1073,6 +1237,28 @@ async def _offload_decrypt_aes(identity_key: bytes, encrypted_location: bytes) -
     )
 
 
+def _promote_identity_key(
+    key: bytes,
+    candidates: list[bytes],
+    *targets: dict[str, Any],
+) -> tuple[bytes, list[bytes]]:
+    """Move ``key`` to the front of ``candidates`` and record it as the identity key.
+
+    Shared by the own-report and the foreign-report path, so that both promote a
+    candidate that authenticated a report in the same way: ``metadata_update`` and
+    ``metadata`` carry the promoted key to the cache and the payload instead of the
+    stale one, and the remaining reports try it first. Returns the identity key
+    bytes and the reordered candidate list for the payload.
+    """
+    key_bytes = bytes(key)
+    for target in targets:
+        target["identity_key"] = key_bytes
+        target["identityKey"] = key_bytes
+    candidates.remove(key)
+    candidates.insert(0, key)
+    return key_bytes, list(candidates)
+
+
 def _component_keys(
     device_registration: object, identity_keys: Sequence[bytes]
 ) -> list[tuple[bytes, bytes]]:
@@ -1676,6 +1862,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         all_identity_keys[0] if all_identity_keys else identity_key
     )
 
+    # Structure for [OWN-REPORT-DIAG], computed once per call on the first
+    # own-report failure at DEBUG.
+    own_report_structure: tuple[bool, str, str, str | None, str] | None = None
+
     if len(network_locations) != len(network_locations_time):
         _LOGGER.debug(
             "Mismatched report arrays: locations=%s timestamps=%s (dropping unmatched entries)",
@@ -1690,6 +1880,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         # Defaults for diagnostic logging in except handlers
         public_key_random = b""
         time_offset = 0
+        ts: float | None = None
+        own_keys_tried = 0
         try:
             ts = _parse_epoch_seconds(time_ts, now_wall)
             if ts is None:
@@ -1730,13 +1922,42 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     raise ValueError(
                         "No identity key available for own-report decryption"
                     )
-                decrypted_location_raw = await _offload_decrypt_aes(
-                    active_identity_key, encrypted_location
-                )
+                # Try every candidate in order, like the foreign path does. Only
+                # when all of them fail does the last InvalidTag reach the handler
+                # below, so a report still counts as one own auth failure.
+                own_keys = all_identity_keys or [active_identity_key]
+                last_error: InvalidTag | None = None
+                for own_index, own_key in enumerate(own_keys):
+                    own_keys_tried += 1
+                    try:
+                        decrypted_location_raw = await _offload_decrypt_aes(
+                            own_key, encrypted_location
+                        )
+                    except InvalidTag as err:
+                        last_error = err
+                        continue
+                    break
+                else:
+                    raise last_error or InvalidTag()
                 # Authentication passed: the cached identity key still matches the
                 # server's own reports. One success proves the key is healthy, so
                 # foreign-report failures must not trigger account-wide escalation.
                 _own_report_success = True
+                if own_key != active_identity_key:
+                    # A later candidate authenticated: promote it as the foreign
+                    # path does, so the remaining reports try it first and the
+                    # payload carries the key that actually decrypted.
+                    active_identity_key = own_key
+                    identity_key_bytes, identity_key_candidate_bytes = (
+                        _promote_identity_key(
+                            own_key, all_identity_keys, metadata_update, metadata
+                        )
+                    )
+                    _LOGGER.info(
+                        "Own report authenticated with alternate identity key "
+                        "candidate (index=%d)",
+                        own_index,
+                    )
             else:
                 # FIX #155: Foreign/crowdsourced reports use ECDH + AES-EAX
                 # with a different key derivation path than own reports.
@@ -1779,21 +2000,14 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     # a per-component key.
                     if candidate_key != active_identity_key:
                         active_identity_key = candidate_key
-                        identity_key_bytes = bytes(candidate_key)
-                        # Sync metadata_update and metadata so the
-                        # promoted key persists to cache/payload
-                        # instead of the original stale value.
-                        metadata_update["identity_key"] = identity_key_bytes
-                        metadata_update["identityKey"] = identity_key_bytes
-                        metadata["identity_key"] = identity_key_bytes
-                        metadata["identityKey"] = identity_key_bytes
-                        # Reorder candidates so the promoted key is
-                        # tried first for remaining reports.
-                        all_identity_keys.remove(candidate_key)
-                        all_identity_keys.insert(0, candidate_key)
-                        # Keep payload-facing list in sync so
-                        # persisted candidates reflect the promotion.
-                        identity_key_candidate_bytes = list(all_identity_keys)
+                        identity_key_bytes, identity_key_candidate_bytes = (
+                            _promote_identity_key(
+                                candidate_key,
+                                all_identity_keys,
+                                metadata_update,
+                                metadata,
+                            )
+                        )
                         _LOGGER.info(
                             "Foreign decryption succeeded with alternate "
                             "identity key candidate (index=%d)",
@@ -1918,11 +2132,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             if public_key_random == b"":  # Own-report auth failure
                 _own_auth_failures += 1
             # Per-report detail diagnostics only: a single report failing to
-            # authenticate is not actionable on its own (a stale own report,
-            # an offline device, or a foreign/crowdsourced report keyed to
-            # another account all land here). The user-facing verdict and any
-            # reauth decision belong to the stateful, sibling-aware callers
-            # (coordinator poll verdict / FCM callback), so this stays DEBUG and
+            # authenticate is not actionable on its own (an own report that
+            # no longer decrypts for a cause the code does not determine, or a
+            # foreign/crowdsourced report keyed to another account, lands
+            # here). The user-facing verdict and any reauth decision belong to
+            # the stateful, sibling-aware callers (coordinator poll verdict /
+            # FCM callback), so this stays DEBUG and
             # carries no reauth advice.
             _LOGGER.debug(
                 "Decryption auth failed (InvalidTag) for %s report "
@@ -1933,6 +2148,35 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 len(active_identity_key) if active_identity_key else 0,
                 len(all_identity_keys),
             )
+            if public_key_random == b"" and _LOGGER.isEnabledFor(logging.DEBUG):
+                # Field numbers, not names: the .proto names of fields 29 and 33
+                # come from Spot and are unconfirmed. Fields 29 and 33 and the
+                # secrets container show structure only, never a byte; the one
+                # value taken from them is field 33 read as a time
+                # (f33_as_time). The line also carries the report time, the
+                # owner key version, field 14, the number of keys tried and the
+                # length of encryptedIdentityKey. Field 29 stays in
+                # _SECRET_PROTO_FIELDS of the decoder.
+                if own_report_structure is None:
+                    own_report_structure = _own_report_structure(device_registration)
+                f14, f29, f33, f33_as_time, container_shape = own_report_structure
+                _LOGGER.debug(
+                    "[OWN-REPORT-DIAG] Own report did not authenticate: "
+                    "report_time=%s owner_key_version=%s f14=%s keys_tried=%d "
+                    "f29=%s f33=%s f33_as_time=%s (meaning unconfirmed) "
+                    "secrets=%s encryptedIdentityKey_len=%d",
+                    datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).isoformat()
+                    if ts is not None
+                    else None,
+                    raw_owner_key_version,
+                    f14,
+                    own_keys_tried,
+                    f29,
+                    f33,
+                    f33_as_time,
+                    container_shape,
+                    len(raw_encrypted_identity_key),
+                )
         except ValueError as ve:
             # Plain ValueError: bad lengths or data outside the foreign-report
             # taxonomy. Authentication failures are typed (InvalidTag above,
@@ -2163,9 +2407,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         )
 
     # Diff-Review #1 / Codex (PR #1153): the device HAS its own encrypted reports
-    # and EVERY one failed authentication (no own-report success), so THIS
-    # device's server-side own reports predate the cached identity key (they were
-    # encrypted under a previous key) -- distinct from
+    # and EVERY one failed authentication (no own-report success): none of this
+    # device's own reports authenticated with the keys tried here; the cause is
+    # not measured -- distinct from
     # foreign/crowdsourced failures (which legitimately fail with other accounts'
     # keys and must NOT escalate). Raise the dedicated OwnReportIdentityMismatchError
     # so the escalation machinery (coordinator poll/locate handlers and the FCM push
@@ -2176,10 +2420,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # exact `is_real_location_record` predicate the callers use to clear the reauth
     # budget: a foreign report that merely decrypted to bytes but then failed
     # protobuf parsing / lat-lon validation (or a SEMANTIC network hit with no
-    # coordinate) is NOT a usable fix and must not suppress the escalation. A fresh
-    # secrets.json cannot fix stale own reports of an offline/re-paired device
-    # anyway, and the cache invalidation above still forces own-key re-derivation on
-    # the next poll; when a real network fix exists, suppressing the raise lets that
+    # coordinate) is NOT a usable fix and must not suppress the escalation. The
+    # cache invalidation above still forces own-key re-derivation on the next
+    # poll; when a real network fix exists, suppressing the raise lets that
     # good position flow through the normal return path below. (A sibling device
     # decrypting in the same cycle is handled one layer up, in the sibling-gated
     # coordinator/FCM callers.)
@@ -2202,10 +2445,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         )
         if not has_network_fix:
             raise OwnReportIdentityMismatchError(
-                "All own-report decryptions failed: the server-side own reports "
-                "predate the current identity key (they were encrypted under a "
-                "previous key, so the current key cannot read them). This clears "
-                "once the device uploads a fresh report."
+                "All own-report decryptions failed: none of this device's own "
+                "reports could be decrypted with the available identity key "
+                "candidates. The cause was not determined; enable debug logging "
+                "for this integration to see the [OWN-REPORT-DIAG] line for each "
+                "failed report. See the README, Troubleshooting: "
+                "'Own location reports fail to decrypt'."
             )
 
     if not wrapped:
