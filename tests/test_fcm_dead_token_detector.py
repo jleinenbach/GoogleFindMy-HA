@@ -72,11 +72,12 @@ def receiver(monkeypatch: pytest.MonkeyPatch) -> tuple[FcmReceiverHA, _Clock]:
     return rx, clock
 
 
-async def _settle() -> None:
-    """Let the scheduled re-registration task run."""
+async def _settle(rx: FcmReceiverHA | None = None) -> None:
+    """Let the scheduled re-registration task run to its end."""
 
-    for _ in range(5):
-        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    if rx is not None and rx._active_tasks:
+        await asyncio.gather(*rx._active_tasks)
 
 
 def _push(canonic_payload: bool = True) -> dict[str, Any]:
@@ -96,7 +97,7 @@ async def test_t_t3_t5_silent_channel_reregisters_once_for_that_entry(
     for _ in range(N):
         rx.note_accepted_without_push("entry-b")
     rx.note_accepted_without_push("entry-a")
-    await _settle()
+    await _settle(rx)
 
     assert regenerate == ["entry-b"]
 
@@ -108,7 +109,7 @@ async def test_t_t3_below_threshold_starts_nothing(
     rx, _clock = receiver
     for _ in range(N - 1):
         rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
 
     assert regenerate == []
 
@@ -133,7 +134,7 @@ async def test_t_t4_any_push_on_the_channel_resets_the_count(
     await rx._handle_notification_async("entry-b", _push())
     for _ in range(N - 1):
         rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
 
     assert regenerate == []
 
@@ -150,7 +151,7 @@ async def test_t_t4_a_push_without_fmd_payload_resets_the_count(
     await rx._handle_notification_async("entry-b", _push(canonic_payload=False))
     for _ in range(N - 1):
         rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
 
     assert regenerate == []
 
@@ -166,7 +167,7 @@ async def test_t_t4_a_push_on_another_channel_does_not_reset(
         rx.note_accepted_without_push("entry-b")
     await rx._handle_notification_async("entry-a", _push(canonic_payload=False))
     rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
 
     assert regenerate == ["entry-b"]
 
@@ -180,18 +181,18 @@ async def test_t_t6_lockout_blocks_until_it_expires(
     rx, clock = receiver
     for _ in range(N):
         rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
     assert regenerate == ["entry-b"]
 
     clock.now += FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S - 1
     for _ in range(N):
         rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
     assert regenerate == ["entry-b"]
 
     clock.now += 2
     rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
     assert regenerate == ["entry-b", "entry-b"]
 
 
@@ -208,13 +209,13 @@ async def test_t_t6_count_starts_fresh_for_the_new_token(
     rx, clock = receiver
     for _ in range(N):
         rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
     assert regenerate == ["entry-b"]
 
     clock.now += FCM_DEAD_TOKEN_REREGISTER_LOCKOUT_S + 1
     for _ in range(N - 1):
         rx.note_accepted_without_push("entry-b")
-    await _settle()
+    await _settle(rx)
 
     assert regenerate == ["entry-b"]
 
@@ -239,7 +240,7 @@ async def test_t_t7_warning_names_the_entry_and_never_the_token(
     with caplog.at_level(logging.DEBUG, logger=fcm_receiver_ha.__name__):
         for _ in range(N):
             rx.note_accepted_without_push("entry-b")
-        await _settle()
+        await _settle(rx)
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
@@ -274,7 +275,7 @@ async def test_t_t5_rejected_reregistration_logs_info_and_keeps_the_lockout(
     with caplog.at_level(logging.INFO, logger=fcm_receiver_ha.__name__):
         for _ in range(2 * N):
             rx.note_accepted_without_push("entry-b")
-        await _settle()
+        await _settle(rx)
 
     assert calls == ["entry-b"]
     assert any(
@@ -298,7 +299,7 @@ async def test_t_t5_a_failing_reregistration_is_logged_not_raised(
     with caplog.at_level(logging.WARNING, logger=fcm_receiver_ha.__name__):
         for _ in range(N):
             rx.note_accepted_without_push("entry-b")
-        await _settle()
+        await _settle(rx)
 
     assert any("RuntimeError" in r.getMessage() for r in caplog.records)
 
@@ -310,7 +311,7 @@ async def test_t_t5_without_hass_nothing_is_started(regenerate: list[str]) -> No
         rx.note_accepted_without_push("entry-b")
     rx.note_accepted_without_push(None)
     rx.note_accepted_without_push("")
-    await _settle()
+    await _settle(rx)
 
     assert regenerate == []
 
@@ -428,6 +429,22 @@ async def test_t_t3_a_request_that_was_not_accepted_does_not_count(
     assert rx.noted == []
 
 
+def test_t_t3_a_hostile_receiver_attribute_does_not_escape_the_signal() -> None:
+    """Best effort also covers an attribute lookup that raises.
+
+    Called directly: through the locate flow the broad outer handler would
+    turn an escaping error into ``[]`` as well and hide the difference.
+    """
+
+    class _Hostile(_NotingReceiver):
+        def __getattribute__(self, name: str) -> Any:
+            if name == "note_accepted_without_push":
+                raise RuntimeError("hostile lookup")
+            return object.__getattribute__(self, name)
+
+    location_request_module._note_accepted_without_push(_Hostile(), "entry-b")
+
+
 @pytest.mark.asyncio
 async def test_t_t3_a_failing_signal_keeps_the_empty_result(
     monkeypatch: pytest.MonkeyPatch,
@@ -458,9 +475,11 @@ def _creds(token: str) -> dict[str, Any]:
 def test_get_fcm_token_falls_back_to_another_entry_token() -> None:
     """Pinned as it is: an entry without a token gets another entry's token.
 
-    The fallback was meant as an emergency path, not the regular one; changing
-    it touches the sound path as well and belongs in its own change. The
-    entry-scoped variant, used by the locate path, never falls back.
+    The fallback was meant as an emergency path, not the regular one. The
+    locate path reaches it too (``_ensure_token_for_entry`` calls
+    ``get_fcm_token``), as does the sound path; changing it belongs in its own
+    change. Only the entry-scoped variant, used by the first-locate reconnect,
+    never falls back.
     """
 
     rx = FcmReceiverHA()

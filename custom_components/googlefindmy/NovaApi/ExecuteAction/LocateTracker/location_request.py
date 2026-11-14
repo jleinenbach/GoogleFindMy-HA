@@ -330,10 +330,10 @@ def _note_accepted_without_push(
     (test doubles, older providers) are skipped, and a failing detector never
     changes the outcome of the locate.
     """
-    note = getattr(fcm_receiver, "note_accepted_without_push", None)
-    if not callable(note):
-        return
     try:
+        note = getattr(fcm_receiver, "note_accepted_without_push", None)
+        if not callable(note):
+            return
         note(entry_id)
     except Exception as err:
         _LOGGER.debug("Silent-channel detector signal failed: %s", type(err).__name__)

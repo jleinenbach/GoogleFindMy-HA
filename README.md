@@ -605,7 +605,7 @@ Symptom: with two or more Google accounts configured, the devices of one account
 
 Cause in the measured case (issue 224 follow-up, 2026-11-14): Google accepted every locate request of that account but no longer delivered pushes to its push token. Each account has its own push token since upstream V1.7; before that all accounts shared one, so the problem could not show.
 
-Self-healing: after three accepted requests in a row without any push on that account's channel, the integration re-registers that account's push token once and logs the warning `FCM push channel silent after 3 accepted locate requests; re-registering push token once`. It does this at most every four hours per account; the count and the four hours start over when Home Assistant restarts. The device identity is kept, so devices and entities stay as they are.
+Self-healing: after three accepted requests in a row without any push on that account's channel, the integration re-registers that account's push token once and logs a warning starting with `FCM push channel silent after`, followed by the number of silent requests (3 or more). It does this at most every four hours per account; the count and the four hours start over when Home Assistant restarts or the integration entry is reloaded. The device identity is kept, so devices and entities stay as they are.
 
 Manual fix: press **Regenerate FCM Token** on the service device of that account, then press **Locate now** on one of its devices. In the measured case the next two requests were answered within a second.
 
