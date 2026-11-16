@@ -170,6 +170,7 @@ _BLIND_FORMS = (
     "req.action.MergeFromString(bytes([0x12, 0x00]))",
     "req.action.ParseFromString(raw)",
     "getattr(a, ''.join(['phoneAction', 'Field2']))",
+    "getattr(a, 'phone' + 'ActionField2')",
     "getattr(a, config['action'])",
 )
 
@@ -211,7 +212,8 @@ def test_the_wire_lock_refuses_what_this_guard_cannot_read(build, number: int) -
         check_phone_action_payload(build(number))
 
 
-def test_the_wire_lock_passes_the_allowed_ring_built_by_number() -> None:
-    """Control: the same construction with action 1 passes, so the refusals above
+@pytest.mark.parametrize("build", [_by_number, _from_bytes])
+def test_the_wire_lock_passes_the_allowed_ring_built_either_way(build) -> None:
+    """Control: both constructions with action 1 pass, so the refusals above
     come from the number and not from the construction."""
-    assert check_phone_action_payload(_by_number(1)) is True
+    assert check_phone_action_payload(build(1)) is True

@@ -16,6 +16,19 @@ at the identifier: a leaf named like an address (`ble_address`, `mac`,
 handled only when a masking helper wraps it (same rule as the account-address
 guard in `test_config_flow_basics.py`); any other wrapper still leaks.
 
+Phone values are recognised the same way: a leaf named like one of the phone
+secrets (`_PHONE_SECRET_NAME`), an `android_id`/`androidId` outside `Auth/`, and
+every field of `decoder._SECRET_PROTO_FIELDS` in schema or snake_case spelling,
+compared on the whole leaf. The set is derived, so a field the decoder hides is
+watched here without an edit.
+
+Blind spots, stated so that a green run is not read as more: a field named by a
+string argument (`data.get("imei")`, `getattr(rec, "imei")`, `data[KEY_IMEI]`),
+a longer name that contains a field name (`device_imei`), and a whole message
+passed to the log (`str(phone_info)`, `MessageToDict(meta)`). Ordinary words in
+the set (`encrypted`, `iv`, `email`) also match harmless uses such as
+`len(iv)`; such a site is masked or listed in `_NOT_AN_ADDRESS` with its reason.
+
 The scan is package-wide and covers all log levels, because a clear-text
 address is equally wrong at DEBUG and at WARNING. Written as an AST walk
 rather than a pin on the sites that were found, because the leak reappears
