@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass, field
-from importlib import import_module
 from typing import Any
 
+from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 from google.protobuf.message import DecodeError
 
 PHONE_BATTERY_MIN_PCT = 0
@@ -54,9 +54,7 @@ class PhoneStatus:
 
 
 def _pb2() -> Any:
-    return import_module(
-        "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"
-    )
+    return DeviceUpdate_pb2
 
 
 def battery_from_field(raw: bytes) -> int | None:

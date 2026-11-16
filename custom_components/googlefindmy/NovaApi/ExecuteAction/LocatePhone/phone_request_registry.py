@@ -31,9 +31,9 @@ import binascii
 import logging
 import time
 from dataclasses import dataclass, field
-from importlib import import_module
 from typing import Any
 
+from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 from google.protobuf.message import DecodeError
 
 from .phone_location_crypto import PhoneFix, decrypt_phone_location, new_locate_key
@@ -85,9 +85,7 @@ class PhoneRequest:
 
 
 def _pb2() -> Any:
-    return import_module(
-        "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"
-    )
+    return DeviceUpdate_pb2
 
 
 def _phone_record_for(push_hex: str, android_id: int) -> Any | None:

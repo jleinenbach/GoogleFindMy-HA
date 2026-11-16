@@ -968,7 +968,7 @@ async def test_push_before_the_post_returns_still_yields_the_fix(
         seen_open.append(len(registry))
         request_uuid, key, android_id = _request_parts(payload)
         await _push(rx, _ENTRY_A, _push_hex(request_uuid, android_id, _envelope(key)))
-        await asyncio.sleep(0.02)  # the POST "returns" after the push
+        await asyncio.sleep(0)  # the POST "returns" after the push was handled
 
     _install_nova(monkeypatch, _Nova(_push_first))
 

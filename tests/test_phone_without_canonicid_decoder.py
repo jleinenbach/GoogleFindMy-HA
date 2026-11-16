@@ -284,6 +284,46 @@ def test_supported_action_numbers_skip_garbage() -> None:
     assert decoder.supported_action_numbers(device) == frozenset({1, 5})
 
 
+def test_supported_action_numbers_skip_an_entry_without_type() -> None:
+    device = _phone("Phone", _random_android_id(), actions=(1,))
+    device.supportedActions.append(
+        DeviceUpdate_pb2.DeviceMetadata.SupportedActions().SerializeToString()
+    )
+    assert decoder.supported_action_numbers(device) == frozenset({1})
+
+
+def test_canonicless_android_id_rejects_unreadable_or_foreign_shapes() -> None:
+    from types import SimpleNamespace
+
+    class _Raising:
+        @property
+        def identifierInformation(self) -> Any:
+            raise AttributeError("identifierInformation")
+
+    def _shaped(value: Any) -> Any:
+        no_ids = SimpleNamespace(canonicIds=SimpleNamespace(canonicId=[]))
+        phone_info = SimpleNamespace(
+            canonicIds=no_ids.canonicIds, phoneInformationField1=value
+        )
+        ident = SimpleNamespace(
+            type=DeviceUpdate_pb2.IDENTIFIER_ANDROID,
+            phoneInformation=phone_info,
+            canonicIds=no_ids.canonicIds,
+        )
+        return SimpleNamespace(identifierInformation=ident)
+
+    assert decoder.canonicless_android_id(_Raising()) is None
+    assert decoder.canonicless_android_id(_shaped(True)) is None
+    assert decoder.canonicless_android_id(_shaped("12345")) is None
+    assert decoder.canonicless_android_id(_shaped(7)) == 7  # the shape itself is valid
+
+
+@pytest.mark.parametrize("phone_id", [None, 42, "no-prefix"])
+def test_phone_row_needs_a_prefixed_string_id(phone_id: Any) -> None:
+    device = _phone("Phone", _random_android_id())
+    assert decoder._build_phone_row(device, "Phone", lambda _aid: phone_id) is None
+
+
 def test_other_rows_are_unchanged_by_phone_id_for() -> None:
     """Snapshot: every other row stays as it was when a phone row joins."""
     listing = _listing(
@@ -566,18 +606,27 @@ async def test_two_overlapping_first_lists_create_one_key(
 ) -> None:
     from custom_components.googlefindmy.api import GoogleFindMyAPI
 
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
     class _Slow(_DictCache):
         async def async_set_cached_value(self, key: str, value: Any) -> None:
-            await asyncio.sleep(0.01)
+            entered.set()
+            await release.wait()
             await super().async_set_cached_value(key, value)
 
     storage: dict[str, Any] = {}
     api = GoogleFindMyAPI(cache=_StubCache())
     monkeypatch.setattr(api, "_decoder_token_cache", lambda: _Slow(storage))
 
-    first, second = await asyncio.gather(
-        api._async_load_phone_id_key(), api._async_load_phone_id_key()
-    )
+    first_task = asyncio.create_task(api._async_load_phone_id_key())
+    await entered.wait()  # the first load is inside the write
+    second_task = asyncio.create_task(api._async_load_phone_id_key())
+    for _ in range(3):
+        await asyncio.sleep(0)  # let the second load reach the lock
+    assert not second_task.done()  # it waits instead of creating a second key
+    release.set()
+    first, second = await asyncio.gather(first_task, second_task)
     assert first is not None and first == second
     assert storage[PHONE_ID_KEY_CACHE_NAME] == first.hex()
 

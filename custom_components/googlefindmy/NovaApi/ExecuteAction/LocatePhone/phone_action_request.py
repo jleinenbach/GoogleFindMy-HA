@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import binascii
 from enum import IntEnum
-from importlib import import_module
 from typing import Any
 
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocatePhone.phone_location_crypto import (
@@ -28,6 +27,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocatePhone.phone_loca
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     _get_client_uuid,
 )
+from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 
 
 class PhoneAction(IntEnum):
@@ -51,10 +51,8 @@ def _expected_action_bytes(number: int, locate_key: bytes | None) -> bytes:
 
 
 def _proto() -> Any:
-    """Load DeviceUpdate_pb2 lazily, like the tracker builders."""
-    return import_module(
-        "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"
-    )
+    """Return DeviceUpdate_pb2; a seam the builder tests replace."""
+    return DeviceUpdate_pb2
 
 
 def build_phone_action_request(  # noqa: PLR0913 - one argument per request field

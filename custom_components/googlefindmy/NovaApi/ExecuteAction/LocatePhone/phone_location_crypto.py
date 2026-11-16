@@ -23,12 +23,12 @@ import logging
 import math
 import secrets
 from dataclasses import dataclass
-from importlib import import_module
 from typing import Any
 
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
 from google.protobuf.message import DecodeError
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,10 +60,7 @@ def new_locate_key() -> bytes:
 
 
 def _pb2() -> tuple[Any, Any]:
-    return (
-        import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"),
-        import_module("custom_components.googlefindmy.ProtoDecoders.Common_pb2"),
-    )
+    return DeviceUpdate_pb2, Common_pb2
 
 
 def _reject(stage: str, length: int) -> None:
