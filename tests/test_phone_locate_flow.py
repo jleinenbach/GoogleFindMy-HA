@@ -9,10 +9,6 @@ or fed a stub session, the receiver is the real ``FcmReceiverHA`` without a
 client, pushes are built from the vendored protobuf classes and encrypted with
 ``cryptography``.
 
-The phone modules are looked up at run time with ``pytest.fail`` instead of
-an import, so that on the state before the feature this module is collected and
-fails test by test rather than erroring at collection.
-
 Privacy: the Android ID and all names here are invented
 (``_ANDROID_ID = 0x1122334455667788``). No record of these tests may carry an
 Android ID (decimal or hex), a key, a payload or coordinates; the log hygiene
@@ -23,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import importlib
 import inspect
 import logging
 import time
@@ -50,6 +45,13 @@ from custom_components.googlefindmy.coordinator.helpers.geo import (
     DEFAULT_ACCURACY_FALLBACK_M,
 )
 from custom_components.googlefindmy.NovaApi import nova_request as nova_module
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocatePhone import (
+    phone_action_request,
+    phone_locate,
+    phone_location_crypto,
+    phone_payload_guard,
+    phone_request_registry,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
     LocationRequestNotAcceptedError,
     create_location_request,
@@ -87,12 +89,18 @@ _LAT, _LON, _ACC = 48.1234, 11.5678, 11.5
 _PAYLOAD_KEY = "com.google.android.apps.adm.FCM_PAYLOAD"
 
 
+_PHONE_MODULES: dict[str, Any] = {
+    "NovaApi.ExecuteAction.LocatePhone.phone_action_request": phone_action_request,
+    "NovaApi.ExecuteAction.LocatePhone.phone_locate": phone_locate,
+    "NovaApi.ExecuteAction.LocatePhone.phone_location_crypto": phone_location_crypto,
+    "NovaApi.ExecuteAction.LocatePhone.phone_payload_guard": phone_payload_guard,
+    "NovaApi.ExecuteAction.LocatePhone.phone_request_registry": phone_request_registry,
+}
+
+
 def _mod(name: str) -> Any:
-    """Return a phone module or fail the test: the feature is not there yet."""
-    try:
-        return importlib.import_module(f"custom_components.googlefindmy.{name}")
-    except ImportError as err:  # pragma: no cover - only before the phone modules exist
-        pytest.fail(f"phone module missing: {name} ({err})")
+    """Return one of the phone modules, imported literally above."""
+    return _PHONE_MODULES[name]
 
 
 def _require(owner: Any, name: str) -> Any:
