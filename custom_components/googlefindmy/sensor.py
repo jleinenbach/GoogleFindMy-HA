@@ -72,9 +72,11 @@ from .entity import (
     subentry_type as _subentry_type,
 )
 from .ha_typing import RestoreSensor, SensorEntity, SensorExtraStoredData, callback
+from .phone_identity import is_phone_id
 
 if TYPE_CHECKING:
     from .eid_resolver import BLEBatteryState, GoogleFindMyEIDResolver
+    from .NovaApi.ExecuteAction.LocatePhone.phone_status import PhoneStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -160,6 +162,26 @@ BLE_BATTERY_DESCRIPTION = SensorEntityDescription(
     suggested_display_precision=0,
     # No icon: SensorDeviceClass.BATTERY provides dynamic icons automatically
     # based on percentage value (mdi:battery, mdi:battery-20, mdi:battery-alert).
+)
+
+# Battery level and Wi-Fi name of a phone listed without a canonical ID.
+# Both come from the push that answers a locate request; they are
+# created like the BLE battery: when the entity registry already holds them, or
+# with the first value. The Wi-Fi sensor is enabled by default.
+PHONE_BATTERY_DESCRIPTION = SensorEntityDescription(
+    key="phone_battery",
+    translation_key="phone_battery",
+    device_class=SensorDeviceClass.BATTERY,
+    native_unit_of_measurement=PERCENTAGE,
+    state_class=SensorStateClass.MEASUREMENT,
+    entity_category=EntityCategory.DIAGNOSTIC,
+    suggested_display_precision=0,
+)
+
+PHONE_WIFI_SSID_DESCRIPTION = SensorEntityDescription(
+    key="phone_wifi_ssid",
+    translation_key="phone_wifi_ssid",
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 # Longest span after the last BLE sighting for which the battery sensor still
@@ -562,6 +584,8 @@ async def async_setup_entry(
 
         known_ids: set[str] = set()
         known_battery_ids: set[str] = set()
+        known_phone_battery_ids: set[str] = set()
+        known_phone_wifi_ids: set[str] = set()
         entities_added = False
 
         def _schedule_tracker_entities(
@@ -720,7 +744,62 @@ async def async_setup_entry(
                                 dev_id,
                             )
 
+                # --- Phone battery and Wi-Fi sensors (phones without a
+                # canonical ID only; when the entity registry already holds
+                # them, or with the first value of the phone's status) ---
+                if is_phone_id(dev_id):
+                    entities.extend(
+                        _build_phone_status_entities(
+                            device, dev_id, tracker_scope, tracker_identifier
+                        )
+                    )
+
             return entities
+
+        def _build_phone_status_entities(
+            device: Mapping[str, Any],
+            dev_id: str,
+            tracker_scope: _Scope,
+            tracker_identifier: str,
+        ) -> list[SensorEntity]:
+            """Return the phone status sensors of ``dev_id`` that are due now."""
+            built: list[SensorEntity] = []
+            status = _phone_status_of(coordinator, dev_id)
+            candidates: tuple[tuple[type[SensorEntity], set[str], bool], ...] = (
+                (
+                    GoogleFindMyPhoneBatterySensor,
+                    known_phone_battery_ids,
+                    status is not None and status.battery_pct is not None,
+                ),
+                (
+                    GoogleFindMyPhoneWifiSensor,
+                    known_phone_wifi_ids,
+                    status is not None and status.wifi_ssid is not None,
+                ),
+            )
+            for entity_cls, known, has_value in candidates:
+                if dev_id in known:
+                    continue
+                entity = entity_cls(  # type: ignore[call-arg]
+                    coordinator,
+                    dict(device),
+                    subentry_key=tracker_scope.subentry_key,
+                    subentry_identifier=tracker_identifier,
+                )
+                uid = getattr(entity, "unique_id", None)
+                if not isinstance(uid, str) or uid in added_unique_ids:
+                    continue
+                in_registry = (
+                    er.async_get(hass).async_get_entity_id("sensor", DOMAIN, uid)
+                    is not None
+                )
+                if not (has_value or in_registry):
+                    continue
+                added_unique_ids.add(uid)
+                known.add(dev_id)
+                built.append(entity)
+                _LOGGER.debug("%s created for device=%s", entity_cls.__name__, dev_id)
+            return built
 
         initial_entities = _build_entities()
         if initial_entities:
@@ -2236,3 +2315,218 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
     def device_info(self) -> DeviceInfo:
         """Expose DeviceInfo using the shared entity helper."""
         return super().device_info
+
+
+# ---------------------------- Phone status sensors ----------------------------
+
+
+def _phone_status_of(coordinator: Any, device_id: str | None) -> PhoneStatus | None:
+    """Return the coordinator's status of a phone, or ``None``.
+
+    Test doubles of the coordinator may lack ``get_phone_status``.
+    """
+    getter = getattr(coordinator, "get_phone_status", None)
+    if device_id is None or not callable(getter):
+        return None
+    status = getter(device_id)
+    return cast("PhoneStatus | None", status)
+
+
+def _fresh_phone_status(coordinator: Any, device_id: str | None) -> PhoneStatus | None:
+    """Return the phone's status if its push is at most 7 days old."""
+    status = _phone_status_of(coordinator, device_id)
+    if status is None or not _sighting_within_limit(status.observed_at):
+        return None
+    return status
+
+
+class GoogleFindMyPhoneBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
+    """Battery level of a phone listed without a canonical ID.
+
+    The value comes from field 32.1 of the push that answers a locate request,
+    in percent; values outside 0 to 100 never reach the coordinator's store.
+    Restored across restarts with the wall-clock time of that push and shown
+    only while the push is at most 7 days old, like the BLE battery
+    (``BLE_BATTERY_RESTORE_MAX_AGE_S``). Without a value the state is
+    ``unknown``. No extra attributes.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    entity_description = PHONE_BATTERY_DESCRIPTION
+    _last_observation_wall: float | None = None
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the phone battery sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            self.entry_id or "default",
+            subentry_identifier,
+            f"{safe_id}_phone_battery",
+            separator="_",
+        )
+        self._attr_native_value: int | None = None
+        self._last_observation_wall = None
+
+    def _fresh_value(self) -> tuple[int | None, float] | None:
+        """Return ``(percent or None, push time)`` of the latest fresh status.
+
+        ``None`` only when there is no status within the age limit. A fresh
+        status without a level yields ``(None, time)``: the newer push says
+        nothing about the battery, and the older value must not show through.
+        """
+        status = _fresh_phone_status(self.coordinator, self._device_id)
+        if status is None:
+            return None
+        return status.battery_pct, status.observed_at
+
+    def _restored_value_if_fresh(self) -> int | None:
+        """Return the cached value if its push is at most 7 days old."""
+        wall = self._last_observation_wall
+        if (
+            self._attr_native_value is None
+            or wall is None
+            or not _sighting_within_limit(wall)
+        ):
+            return None
+        return self._attr_native_value
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the battery level from the latest fresh push, or ``None``."""
+        fresh = self._fresh_value()
+        if fresh is None:
+            return self._restored_value_if_fresh()
+        return fresh[0]
+
+    @property
+    def available(self) -> bool:
+        """Return True while the coordinator knows the phone."""
+        return super().available and self.coordinator_has_device()
+
+    @property
+    def extra_restore_state_data(self) -> BLEBatteryExtraStoredData:
+        """Return value, unit and the time of the push it came from.
+
+        The restore format is the BLE battery's (value plus wall-clock time).
+        """
+        fresh = self._fresh_value()
+        if fresh is not None:
+            return BLEBatteryExtraStoredData(
+                fresh[0], self.native_unit_of_measurement, fresh[1]
+            )
+        return BLEBatteryExtraStoredData(
+            self._restored_value_if_fresh(),
+            self.native_unit_of_measurement,
+            self._last_observation_wall,
+        )
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Keep the label in sync and cache a fresh value for restore."""
+        if self.coordinator_has_device():
+            self.refresh_device_label_from_coordinator(log_prefix="PhoneBattery")
+            fresh = self._fresh_value()
+            if fresh is not None:
+                self._attr_native_value, self._last_observation_wall = fresh
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the battery level stored with the time of its push."""
+        await super().async_added_to_hass()
+        extra = await self.async_get_last_extra_data()
+        if extra is None:
+            return
+        stored = BLEBatteryExtraStoredData.from_dict(extra.as_dict())
+        if stored is None or stored.last_observation_wall is None:
+            return
+        value = stored.native_value
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return
+        restored_pct = int(value)
+        if not 0 <= restored_pct <= 100:  # noqa: PLR2004 - percent bounds
+            return
+        if (
+            self._last_observation_wall is not None
+            and stored.last_observation_wall <= self._last_observation_wall
+        ):
+            return
+        self._attr_native_value = restored_pct
+        self._last_observation_wall = stored.last_observation_wall
+        self.async_write_ha_state()
+
+
+class GoogleFindMyPhoneWifiSensor(GoogleFindMyDeviceEntity, SensorEntity):
+    """Name of the Wi-Fi network a phone without a canonical ID is on.
+
+    The value comes from field 30.1 of the push that answers a locate request,
+    without its enclosing quotes. ``unknown`` when the latest push carried no
+    name (the phone is not on Wi-Fi), when no push arrived yet, and when the
+    latest push is older than 7 days. Not restored after a restart. The name is
+    personal data: it is the state of this entity and nothing else, never an
+    attribute, never logged; diagnostics redact ``phone_wifi_ssid``.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    entity_description = PHONE_WIFI_SSID_DESCRIPTION
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the phone Wi-Fi sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            self.entry_id or "default",
+            subentry_identifier,
+            f"{safe_id}_phone_wifi_ssid",
+            separator="_",
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the Wi-Fi name of the latest fresh push, or ``None``."""
+        status = _fresh_phone_status(self.coordinator, self._device_id)
+        return None if status is None else status.wifi_ssid
+
+    @property
+    def available(self) -> bool:
+        """Return True while the coordinator knows the phone."""
+        return super().available and self.coordinator_has_device()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Keep the label in sync and write the state."""
+        if self.coordinator_has_device():
+            self.refresh_device_label_from_coordinator(log_prefix="PhoneWifi")
+        self.async_write_ha_state()

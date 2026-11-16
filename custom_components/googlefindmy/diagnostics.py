@@ -60,6 +60,7 @@ from .const import (
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_POLL_INTERVAL,
+    PHONE_ID_KEY_CACHE_NAME,
     coerce_changed_at_map,
     coerce_device_id_list,
 )
@@ -85,6 +86,18 @@ TO_REDACT: list[str] = [
     # async_setup_entry; if setup fails in between, it is still there when a user
     # downloads diagnostics for that very failure.
     DATA_SECRET_BUNDLE,
+    # The per-entry key behind the ids of phones without a canonical ID, the
+    # table from their row ids to Android IDs, and the Wi-Fi name such a phone
+    # reports. Today no block of this payload reads either; the entries
+    # keep it that way if one ever does.
+    PHONE_ID_KEY_CACHE_NAME,
+    "phone_targets",
+    "_phone_targets",
+    "phone_status",
+    "_phone_status",
+    "phone_wifi_ssid",
+    "wifi_ssid",
+    "ssid",
     "scanned_data",
     "shared_key",
     "owner_key",

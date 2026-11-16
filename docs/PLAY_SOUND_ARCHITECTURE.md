@@ -402,6 +402,35 @@ during device registration to tell Google the ring key. No code exists to use th
 key for direct BLE GATT writes. The BLE ring protocol was independently attempted by
 community members in GitHub Issue #66.
 
+### Phones without a canonical ID (phone actions 1 and 5)
+
+Some phones appear in the device list without a canonical ID. The integration
+gives them a row id `aphone-…` and reaches them by their Android ID instead of
+the SPOT path above. Ring and stop then use phone actions, not
+`startSound`/`stopSound` (31/32); on one phone, action 1 was measured to ring
+and action 5 was observed to stop the ring:
+
+| Aspect | Tracker / phone with canonical ID | Phone without canonical ID |
+|--------|-----------------------------------|----------------------------|
+| Ring | action 31 `startSound`, scope `device.canonicId` | phone action 1, empty message, scope field 1 = Android ID, type ANDROID |
+| Stop | action 32 `stopSound` with the cancel key | phone action 5, empty message, fresh request UUID, no cancel key |
+| Stop outcome | `CANCELLED` only with our own fresh key, otherwise `UNCORRELATED` | device-scoped: an accepted stop is `CANCELLED`, `classify_stop_correlation` returns `None` |
+| Ring-start hold | `STOP_SOUND_MIN_DELAY_AFTER_PLAY_S` for our own key | not applied |
+| Retries | `NOVA_MAX_RETRIES` | none for 408, 429, 5xx and network failures (`max_retries=0`); after a 401 one token refresh and one resend (`max_auth_resends=1`), no wait longer than 9 s for a refresh elsewhere |
+| Capability | `can_ring` if known, otherwise optimistic | `can_ring` (action 1) and `can_stop_ring` (action 5) from `supportedActions`, never optimistic |
+| Before the POST | the action token | readiness gate of the entry's push channel (`async_ensure_phone_channel`); not ready means `NOT_SENT` |
+
+What stays the same: the classification (`SoundDispatchOutcome`, the same
+ladder in `api.py`), and IRR-CA-NO-RING-CONFIRMATION. An HTTP 200 for action 1
+or 5 says that Nova accepted the request, not that the phone rang or went quiet.
+The phone sends nothing back that this path reads.
+
+Only the actions 1, 4 and 5 are ever sent to such a phone; the builder, the
+payload lock in `async_nova_request` and a guard test hold that (see
+`custom_components/googlefindmy/AGENTS.md`, "Phones without a canonical ID").
+Code: `NovaApi/ExecuteAction/LocatePhone/phone_sound.py`; tests:
+`tests/test_phone_ring_paths.py`.
+
 ### Authentication Chain
 
 ```

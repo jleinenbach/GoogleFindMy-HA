@@ -40,6 +40,19 @@ _PACKAGE_ROOT = Path(googlefindmy.__file__).resolve().parent
 # deliberately not matched.
 _ADDRESS_NAME = re.compile(r"(^|_)mac(_|$)|address|^scanner$", re.IGNORECASE)
 
+# Values of phones listed without a canonical ID: the
+# phone's Wi-Fi name, its SIM name, the per-request locate key, the per-entry
+# key behind the phone row ids, ciphertext and raw pushes. Only names that are
+# unambiguous across the package: a bare `android_id` is the integration's own
+# GSF ID in `Auth/` (logged there by design) and a bare `key` is mostly a dict
+# key, so the phone modules carry their own, stricter guard in
+# `tests/test_phone_log_hygiene.py`.
+_PHONE_SECRET_NAME = re.compile(
+    r"ssid|wifi|sim_display|locate_key|phone_id_key|ciphertext|push_hex"
+    r"|phone_android_id|phone_status",
+    re.IGNORECASE,
+)
+
 # Identifiers that match the pattern but are not addresses. Empty on purpose:
 # an entry is added only when the red probe below reports a false positive,
 # never as a stock of guesses.
@@ -92,7 +105,11 @@ def _leaks(node: ast.AST) -> list[str]:
         leaf = node.attr
     elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
         leaf = str(node.slice.value)
-    if leaf and _ADDRESS_NAME.search(leaf) and leaf not in _NOT_AN_ADDRESS:
+    if (
+        leaf
+        and (_ADDRESS_NAME.search(leaf) or _PHONE_SECRET_NAME.search(leaf))
+        and leaf not in _NOT_AN_ADDRESS
+    ):
         found.append(leaf)
     return found
 
@@ -192,3 +209,14 @@ def test_each_reviewed_site_matches_exactly_one_log_call() -> None:
         "each reviewed site must match exactly one clear-text log call "
         f"(0 = stale entry, >1 = copied site): {wrong}"
     )
+
+
+def test_phone_secret_names_are_caught(tmp_path: Path) -> None:
+    """Red probe for `_PHONE_SECRET_NAME`: each name in a log call is reported."""
+    names = ["wifi_ssid", "locate_key", "phone_id_key", "ciphertext", "push_hex"]
+    lines = ["import logging", "_LOGGER = logging.getLogger(__name__)"]
+    lines += [f'_LOGGER.debug("x %s", {name})' for name in names]
+    (tmp_path / "probe.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    offenders, scanned = scan(root=tmp_path, reviewed=frozenset())
+    assert scanned == len(names)
+    assert sorted(leaf for _p, _l, leaf, _f in offenders) == sorted(names)

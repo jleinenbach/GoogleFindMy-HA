@@ -71,6 +71,18 @@ from .const import (
     SoundDispatchOutcome,
 )
 from .NovaApi import nova_request
+from .NovaApi.ExecuteAction.LocatePhone.phone_action_request import PhoneAction
+from .NovaApi.ExecuteAction.LocatePhone.phone_locate import (
+    PhoneActionObserver,
+    PhoneStatusSink,
+    locate_phone,
+)
+from .NovaApi.ExecuteAction.LocatePhone.phone_request_registry import (
+    PhoneRequestRegistry,
+)
+from .NovaApi.ExecuteAction.LocatePhone.phone_sound import (
+    async_submit_phone_sound_request,
+)
 from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
@@ -98,6 +110,11 @@ from .NovaApi.nova_request import (
     is_credential_rejection,
 )
 from .NovaApi.util import generate_random_uuid
+from .phone_identity import (
+    async_get_or_create_phone_id_key,
+    is_phone_id,
+    phone_id_from_android_id,
+)
 from .ProtoDecoders.decoder import (
     _select_best_location as _decoder_select_best_location,
 )
@@ -620,6 +637,32 @@ class GoogleFindMyAPI:
         # Key: canonical device id, Value: can_ring (bool)
         self._device_capabilities: dict[str, bool] = {}
 
+        # Phones listed without a canonical ID: the per-entry HMAC key
+        # behind their row ids, loaded before the first list is processed, and the
+        # row id -> Android ID table of the latest list. The table lives only in
+        # memory and is replaced by every list; nothing here is ever logged.
+        self._phone_id_key: bytes | None = None
+        self._phone_id_key_lock = asyncio.Lock()
+        self._phone_targets: dict[str, int] = {}
+        # Open locate requests of those phones with their per-request keys,
+        # and the coordinator's counter hook for the measurement channel.
+        self._phone_requests = PhoneRequestRegistry()
+        self._phone_action_observer: PhoneActionObserver | None = None
+        # The coordinator's store for battery level and Wi-Fi name of a phone.
+        self._phone_status_sink: PhoneStatusSink | None = None
+
+    def set_phone_action_observer(self, observer: PhoneActionObserver | None) -> None:
+        """Bind the callback that counts each sent phone action ``(number, trigger)``."""
+        self._phone_action_observer = observer
+
+    def set_phone_status_sink(self, sink: PhoneStatusSink | None) -> None:
+        """Bind the callback that stores a phone's battery level and Wi-Fi name.
+
+        Called with ``(phone_id, status)`` for each answering push that carries
+        either value; the status never travels in the location row.
+        """
+        self._phone_status_sink = sink
+
     async def close(self) -> None:
         """Cleanup local references."""
 
@@ -751,6 +794,37 @@ class GoogleFindMyAPI:
             return None
         return None
 
+    async def _async_load_phone_id_key(self) -> bytes | None:
+        """Load or create this entry's phone identity key (once per instance).
+
+        Only the entry's real TokenCache holds it; flows (ephemeral cache) get no
+        key and therefore no phone rows. A cache error leaves the key unset, so
+        phones without a canonical ID drop as before and the name guard of the
+        stale-device removal keeps their entities.
+        """
+        if self._phone_id_key is not None:
+            return self._phone_id_key
+        cache = self._decoder_token_cache()
+        if cache is None:
+            return None
+        # Two overlapping first lists must not create two keys (one would win in
+        # memory, the other in the store, and the phone would change its id).
+        async with self._phone_id_key_lock:
+            if self._phone_id_key is not None:
+                return self._phone_id_key
+            try:
+                self._phone_id_key = await async_get_or_create_phone_id_key(cache)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - phone rows are optional
+                _LOGGER.debug(
+                    "Phone identity key unavailable; phones without a canonical ID "
+                    "are not shown this time (%s)",
+                    type(err).__name__,
+                )
+                return None
+            return self._phone_id_key
+
     # ------------------------ Internal processing helpers ------------------------
     def _process_device_list_response(self, result_hex: str) -> list[dict[str, Any]]:
         """Parse protobuf, update capability cache, and build basic device list.
@@ -771,11 +845,27 @@ class GoogleFindMyAPI:
             self._device_capabilities.update(cap_index)
 
         devices_by_id: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        phone_targets: dict[str, int] = {}
+        phone_id_for: Callable[[int], str] | None = None
+        if self._phone_id_key is not None:
+            phone_key: bytes = self._phone_id_key
+
+            def _phone_id_for(android_id: int) -> str:
+                phone_id = phone_id_from_android_id(phone_key, android_id)
+                phone_targets[phone_id] = android_id
+                return phone_id
+
+            phone_id_for = _phone_id_for
+
         # Main poll: the single pass per poll that emits the canonicless diagnostics and
         # updates the cross-poll visibility/count guards (CQS, see decoder gate).
         device_rows = get_devices_with_location(
-            parsed, cache=token_cache, emit_canonicless_diagnostics=True
+            parsed,
+            cache=token_cache,
+            emit_canonicless_diagnostics=True,
+            phone_id_for=phone_id_for,
         )
+        self._phone_targets = phone_targets
         if device_rows:
             for device in device_rows:
                 canonical_id = device.get("id")
@@ -886,6 +976,145 @@ class GoogleFindMyAPI:
         if best_record is not None:
             return best_record
         return records[0]
+
+    # ------------------------ Phones without a canonical ID -----------------------
+    def _phone_fcm_receiver(self, entry_id: str) -> Any | None:
+        """Return the shared push receiver for ``entry_id``, or ``None``.
+
+        Same provider as ``_get_fcm_token_for_action``; the token itself is taken
+        by the phone path from ``receiver.get_entry_fcm_token(entry_id)``, which
+        has no cross-entry fallback.
+        """
+        if _FCM_ReceiverGetter is None:
+            return None
+        try:
+            try:
+                return cast(Callable[[str | None], Any], _FCM_ReceiverGetter)(entry_id)
+            except TypeError:
+                return cast(Callable[[], Any], _FCM_ReceiverGetter)()
+        except Exception as err:  # noqa: BLE001 - reported as a stage by the caller
+            _LOGGER.debug(
+                "FCM receiver provider failed for the phone path: %s",
+                type(err).__name__,
+            )
+            return None
+
+    async def _async_phone_channel_ready(
+        self, device_id: str, entry_id: str, receiver: Any
+    ) -> bool:
+        """Ask the push receiver whether ``entry_id``'s channel is listening.
+
+        Fail closed: a receiver without the readiness gate, or a gate that
+        raises, counts as not ready. The gate sets no locate-sent stamp.
+        """
+        ensure = getattr(receiver, "async_ensure_phone_channel", None)
+        if not callable(ensure):
+            return False
+        try:
+            return bool(await ensure(entry_id, cache=self._cache))
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - reported as a stage by the caller
+            _LOGGER.debug(
+                "Phone %s: push channel readiness check failed: %s",
+                device_id,
+                type(err).__name__,
+            )
+            return False
+
+    async def _async_prepare_phone_request(
+        self, device_id: str
+    ) -> tuple[int, str, Any]:
+        """Return ``(android_id, entry_id, receiver)`` for one phone action.
+
+        Shared by locate (4), ring (1) and stop ring (5), and run before any of
+        them is built. Fail closed, nothing is sent, each refusal with its own
+        stage: no entry in ``_phone_targets`` (the id is not in the current
+        device list), no entry scope, no push receiver, or a push channel that
+        is not listening. The row id is class (b) and may be logged; the
+        Android ID stays in the target table.
+
+        Raises:
+            LocationRequestNotAcceptedError: With the stage of the refusal.
+        """
+        android_id = self._phone_targets.get(device_id)
+        if android_id is None:
+            _LOGGER.debug(
+                "Phone %s has no target in the current device list; nothing is sent",
+                device_id,
+            )
+            raise LocationRequestNotAcceptedError(stage="phone_target_unknown")
+        entry_id = self._namespace()
+        if not entry_id:
+            _LOGGER.debug("Phone %s: no entry scope for the push channel", device_id)
+            raise LocationRequestNotAcceptedError(stage="phone_no_fcm_token")
+        receiver = self._phone_fcm_receiver(entry_id)
+        if receiver is None:
+            _LOGGER.debug("Phone %s: no push receiver available", device_id)
+            raise LocationRequestNotAcceptedError(stage="phone_receiver_unavailable")
+        if not await self._async_phone_channel_ready(device_id, entry_id, receiver):
+            _LOGGER.warning(
+                "Phone request for entry %s not sent: the push channel is not "
+                "listening (stage=phone_fcm_not_ready)",
+                entry_id,
+            )
+            raise LocationRequestNotAcceptedError(stage="phone_fcm_not_ready")
+        return android_id, entry_id, receiver
+
+    async def _async_get_phone_location(self, device_id: str) -> list[dict[str, Any]]:
+        """Locate a phone listed without a canonical ID (row id with the prefix).
+
+        Preconditions and the readiness gate run in
+        ``_async_prepare_phone_request``; a refusal there raises
+        ``LocationRequestNotAcceptedError`` before anything is built.
+        """
+        android_id, entry_id, receiver = await self._async_prepare_phone_request(
+            device_id
+        )
+        return await locate_phone(
+            phone_id=device_id,
+            android_id=android_id,
+            entry_id=entry_id,
+            receiver=receiver,
+            registry=self._phone_requests,
+            session=self._session,
+            cache=self._cache,
+            namespace=entry_id,
+            action_observer=self._phone_action_observer,
+            status_sink=self._phone_status_sink,
+        )
+
+    async def _async_phone_sound_target(
+        self, device_id: str, action: PhoneAction
+    ) -> tuple[int, str, str] | None:
+        """Return ``(android_id, entry_id, token)`` for ring or stop, or ``None``.
+
+        ``None`` means nothing may be sent (the caller reports ``NOT_SENT``);
+        the reason is logged once with entry and stage only. The token is the
+        entry's own (``get_entry_fcm_token``), never another entry's.
+        """
+        try:
+            android_id, entry_id, receiver = await self._async_prepare_phone_request(
+                device_id
+            )
+        except LocationRequestNotAcceptedError as err:
+            _LOGGER.debug(
+                "Phone action=%d for %s not sent (stage=%s)",
+                int(action),
+                device_id,
+                err.stage,
+            )
+            return None
+        getter = getattr(receiver, "get_entry_fcm_token", None)
+        token = getter(entry_id) if callable(getter) else None
+        if not isinstance(token, str) or not token.strip():
+            _LOGGER.debug(
+                "Phone action=%d for entry %s not sent (stage=phone_no_fcm_token)",
+                int(action),
+                entry_id,
+            )
+            return None
+        return android_id, entry_id, token
 
     # ------------------------ FCM helper (via provider) --------------------------
     def _get_fcm_token_for_action(self) -> str | None:
@@ -1106,6 +1335,7 @@ class GoogleFindMyAPI:
                 else:
                     result_hex = await legacy_request(username)
 
+            await self._async_load_phone_id_key()
             payload = self._process_device_list_response(result_hex)
             _LOGGER.debug("nbe_list_devices: count=%d", len(payload))
             return payload
@@ -1430,6 +1660,21 @@ class GoogleFindMyAPI:
                 device_name,
                 device_id,
             )
+            if is_phone_id(device_id):
+                # A phone listed without a canonical ID: its own path, inside this
+                # handler so the auth mapping and the pass-through of
+                # LocationRequestNotAcceptedError below apply unchanged. A
+                # prefixed id without a target raises there and nothing is sent.
+                records = await self._async_get_phone_location(device_id)
+                best = self._select_best_location(records)
+                if best:
+                    # A phone fix decrypts with the key of its own request and
+                    # says nothing about the account's shared tracker key, so it
+                    # must not count as a decrypt proof for the reauth budget.
+                    best["_decrypt_proven"] = False
+                    return best
+                _LOGGER.debug("API v3.0 Async: No location data for %s", device_name)
+                return {}
             # Prefer new signature with entry namespace; fall back gracefully.
             try:
                 records = await get_location_data_for_device(
@@ -1968,9 +2213,29 @@ class GoogleFindMyAPI:
             registered for sound, so nothing on this path can observe the ring.
             See IRR-CA-NO-RING-CONFIRMATION in
             docs/PLAY_SOUND_ARCHITECTURE.md.
+
+        Phones listed without a canonical ID (row id ``aphone-…``): the ring is
+        phone action 1 with the Android ID in scope field 1 and an empty action
+        message, sent once without retries and only after the readiness gate
+        of the entry's push channel; every refusal before the POST is
+        ``NOT_SENT``. The cancel key is the request UUID, the classification is
+        the same ladder as for trackers.
         """
-        # Pass cache explicitly for multi-account isolation
-        token = self._get_fcm_token_for_action()
+        # A phone listed without a canonical ID rings through action 1 with its
+        # Android ID, after the readiness gate. Everything after
+        # the submit call -- classification, cancel key -- is shared.
+        phone_target: tuple[int, str, str] | None = None
+        if is_phone_id(device_id):
+            phone_target = await self._async_phone_sound_target(
+                device_id, PhoneAction.RING
+            )
+            if phone_target is None:
+                # PRE-dispatch, same rule as the missing token below.
+                return PlaySoundResult(SoundDispatchOutcome.NOT_SENT)
+            token: str | None = phone_target[2]
+        else:
+            # Pass cache explicitly for multi-account isolation
+            token = self._get_fcm_token_for_action()
         if not token:
             # PRE-dispatch: no transport was used at all, so there is no cancel key
             # to keep and neither the server nor the network may be blamed.
@@ -1995,14 +2260,29 @@ class GoogleFindMyAPI:
             # Delegate payload build + transport to the submitter; provide HA session.
             # NOTE: If Nova later requires an explicit username for action endpoints,
             # extend submitter signatures to accept and forward it consistently.
-            result = await async_submit_start_sound_request(
-                device_id,
-                token,
-                session=self._session,
-                namespace=self._namespace(),
-                cache=cast("TokenCache | None", self._cache),
-                request_uuid=request_uuid,
-            )
+            result: tuple[str, str] | None
+            if phone_target is not None:
+                phone_hex = await async_submit_phone_sound_request(
+                    PhoneAction.RING,
+                    phone_target[0],
+                    token,
+                    request_uuid,
+                    entry_id=phone_target[1],
+                    session=self._session,
+                    cache=self._cache,
+                    namespace=phone_target[1],
+                    action_observer=self._phone_action_observer,
+                )
+                result = None if phone_hex is None else (phone_hex, request_uuid)
+            else:
+                result = await async_submit_start_sound_request(
+                    device_id,
+                    token,
+                    session=self._session,
+                    namespace=self._namespace(),
+                    cache=cast("TokenCache | None", self._cache),
+                    request_uuid=request_uuid,
+                )
             if result is None:
                 _LOGGER.error(
                     "Play Sound (async) submission failed for %s: "
@@ -2215,9 +2495,27 @@ class GoogleFindMyAPI:
             schema exists and no FCM callback is registered for sound, so
             nothing on this path can observe the ring. See
             IRR-CA-NO-RING-CONFIRMATION in docs/PLAY_SOUND_ARCHITECTURE.md.
+
+        Phones listed without a canonical ID (row id ``aphone-…``): device-scoped
+        stop, phone action 5 with an empty action message and a fresh request
+        UUID; ``request_uuid`` is not used, because action 5 silences the phone
+        whatever started the ring. Sent once without retries and only after the
+        readiness gate; every refusal before the POST is ``NOT_SENT``.
         """
-        # Pass cache explicitly for multi-account isolation
-        token = self._get_fcm_token_for_action()
+        # A phone listed without a canonical ID: action 5 is a device-scoped
+        # stop. It carries a fresh request UUID and no cancel key, so the
+        # key passed in is not used; readiness gate first.
+        phone_target: tuple[int, str, str] | None = None
+        if is_phone_id(device_id):
+            phone_target = await self._async_phone_sound_target(
+                device_id, PhoneAction.STOP_RING
+            )
+            if phone_target is None:
+                return SoundDispatchOutcome.NOT_SENT
+            token: str | None = phone_target[2]
+        else:
+            # Pass cache explicitly for multi-account isolation
+            token = self._get_fcm_token_for_action()
         if not token:
             # PRE-dispatch: no transport was used, so neither the server nor the
             # network may be blamed for the missing local token.
@@ -2231,6 +2529,34 @@ class GoogleFindMyAPI:
         # this change set removes.
         request_uuid = (request_uuid or "").strip() or None
         try:
+            if phone_target is not None:
+                _LOGGER.info(
+                    "Submitting Stop Sound (async) for %s (device-scoped phone stop)",
+                    device_id,
+                )
+                result_hex = await async_submit_phone_sound_request(
+                    PhoneAction.STOP_RING,
+                    phone_target[0],
+                    token,
+                    generate_random_uuid(),
+                    entry_id=phone_target[1],
+                    session=self._session,
+                    cache=self._cache,
+                    namespace=phone_target[1],
+                    action_observer=self._phone_action_observer,
+                )
+                if result_hex is None:
+                    _LOGGER.error(
+                        "Stop Sound (async) submission failed for %s: "
+                        "empty response from server (no error details available)",
+                        device_id,
+                    )
+                    return SoundDispatchOutcome.INTERNAL_ERROR
+                _LOGGER.info(
+                    "Stop Sound (async) submitted for %s (device-scoped phone stop)",
+                    device_id,
+                )
+                return SoundDispatchOutcome.ACCEPTED
             if request_uuid:
                 _LOGGER.info(
                     "Submitting Stop Sound (async) for %s (UUID: %s)",

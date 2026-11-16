@@ -76,12 +76,14 @@ message GcmCloudMessagingIdProtobuf {
 }
 
 // The set field number names the action: 30, 31, 32 on trackers; 1, 2, 4, 5, 6, 7,
-// 13, 14 on phones (observed 2026-11-10, each as an empty message, meaning unknown).
+// 13, 14 on phones (observed 2026-11-10, each as an empty message inside
+// `supportedActions`). Actions 1, 4 and 5 were sent to one phone on 2026-11-14 and
+// 2026-11-15 (n=1 phone); the other phone actions have no observed meaning.
 message ExecuteActionType {
-  ExecuteActionPhoneAction phoneActionField1 = 1;
+  ExecuteActionPhoneAction phoneActionField1 = 1; // Observed 2026-11-15 (n=1 phone): sent as an empty message, the phone starts ringing
   ExecuteActionPhoneAction phoneActionField2 = 2;
-  ExecuteActionPhoneAction phoneActionField4 = 4;
-  ExecuteActionPhoneAction phoneActionField5 = 5;
+  ExecuteActionPhoneLocate phoneActionField4 = 4; // Observed 2026-11-14 (n=1 phone): the phone answers with its encrypted location, see ExecuteActionPhoneLocate
+  ExecuteActionPhoneAction phoneActionField5 = 5; // Observed 2026-11-15 (n=1 phone): sent as an empty message, the phone stops ringing
   ExecuteActionPhoneAction phoneActionField6 = 6;
   ExecuteActionPhoneAction phoneActionField7 = 7;
   ExecuteActionPhoneAction phoneActionField13 = 13;
@@ -93,6 +95,11 @@ message ExecuteActionType {
 
 // Observed 2026-11-10 as an empty message; it carries no field yet.
 message ExecuteActionPhoneAction {
+}
+
+// Content of phone action 4. Inside `supportedActions` the field is an empty message.
+message ExecuteActionPhoneLocate {
+  bytes phoneLocateField1 = 1; // Observed 2026-11-14 and 2026-11-15 (n=1 phone): 16 random bytes, new for each request; the phone's answer (DeviceMetadata.PhoneInformation field 36) decrypts with them as AES-128-CBC key. Key material, never logged
 }
 
 message ExecuteActionLocateTrackerType {
@@ -120,6 +127,7 @@ enum DeviceComponent {
 }
 
 message ExecuteActionScope {
+    PhoneInformation phone = 1; // Observed 2026-11-14 (n=1 phone): with `phoneInformationField1` set and type ANDROID, a phone without a canonical ID answered a locate request; `device` stays unset then
     DeviceType type = 2;
     ExecuteActionDeviceIdentifier device = 3;
 }
@@ -167,7 +175,49 @@ message DeviceMetadata {
     uint64 phoneInformationField21 = 21; // Meaning unknown, observed 2026-11-12 (n=1 phone): numbers
     bytes phoneInformationField23 = 23; // Meaning unknown, observed 2026-11-12 (n=1 phone): text, 32 hex characters, stability not measured
     DeviceInformation information = 26; // Spot@55f87f62; observed and confirmed 2026-11-12 (n=1 phone): a copy of the account's device entry (canonical ID, name, secrets creation time, account e-mail address). Personal data
+    bytes wifiInformation = 30; // Observed 2026-11-14 and 2026-11-15 (n=1 phone, 7 pushes answering phone action 4): field 1 equals the name of the Wi-Fi network the phone is connected to, enclosed in double quotes. Personal data, never logged; form: PhoneWifiInformation
+    bytes simInformation = 31; // Observed 2026-11-15 (n=1 phone, 3 pushes): field 1 equals the user-defined name of SIM 1 shown by the phone; behaviour with several SIMs not measured. Personal data, never logged, not read by the integration; form: PhoneSimInformation
+    bytes batteryInformation = 32; // Observed 2026-11-15 (n=1 phone, 6 pushes answering phone action 4, three distinct values): field 1 equals the battery level in percent shown by the phone; form: PhoneBatteryInformation
+    bytes phoneInformationField36 = 36; // Observed 2026-11-14 and 2026-11-15 (n=1 phone, 7 pushes): only in the push answering phone action 4; holds the phone's location, encrypted with the key of that request. Personal data, never logged; form: PhoneLocationEnvelope
   }
+}
+
+// Forms of the phone record fields 30, 31, 32 and 36. They are read only from the
+// `bytes` fields above, never declared on the device-list parse path.
+message PhoneWifiInformation {
+  bytes ssid = 1; // Observed 2026-11-14 and 2026-11-15 (n=1 phone): the network name in double quotes. Personal data, never logged
+  uint64 phoneWifiInformationField2 = 2; // Meaning unknown, observed 2026-11-14 and 2026-11-15 (n=1 phone): small numbers
+}
+
+message PhoneSimInformation {
+  bytes simDisplayName = 1; // Observed 2026-11-15 (n=1 phone): the user-defined name of SIM 1. Personal data, never logged
+  uint64 phoneSimInformationField2 = 2; // Meaning unknown, observed 2026-11-15 (n=1 phone): small numbers; absent on 2026-11-14
+}
+
+message PhoneBatteryInformation {
+  uint64 batteryLevel = 1; // Observed 2026-11-15 (n=1 phone): percent, equal to the level shown by the phone in 6 of 6 pushes
+}
+
+message PhoneLocationEnvelope {
+  bytes encrypted = 2; // Observed 2026-11-14 (n=1 phone): ciphertext and IV. Never logged; form: PhoneLocationCipher
+  uint64 phoneLocationEnvelopeField3 = 3; // Meaning unknown, observed 2026-11-14 and 2026-11-15 (n=1 phone): always 1
+  bytes time = 4; // Observed 2026-11-14 and 2026-11-15 (n=1 phone): the time of the location fix, up to a few minutes before the push; form: Time
+}
+
+message PhoneLocationCipher {
+  bytes ciphertext = 1; // Observed 2026-11-14 (n=1 phone): 32 bytes, AES-128-CBC with PKCS7 padding. Never logged
+  bytes iv = 2; // Observed 2026-11-14 (n=1 phone): 16 bytes. Never logged
+}
+
+// Decrypted content of PhoneLocationCipher.ciphertext (observed 2026-11-14 and 2026-11-15, n=1 phone).
+message PhoneLocationPlaintext {
+  PhoneLocationPosition position = 1;
+  float accuracyMeters = 2; // Observed 2026-11-15 (n=1 phone, 2 fixes): equal to the accuracy in metres reported by the phone for the same fix
+}
+
+message PhoneLocationPosition {
+  double latitude = 1; // Observed 2026-11-14 (n=1 phone): degrees, within a few metres of the phone's location. Never logged
+  double longitude = 2; // Observed 2026-11-14 (n=1 phone): degrees. Never logged
 }
 
 message ImageInformation {

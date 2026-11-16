@@ -73,6 +73,8 @@ Name a field only when its meaning was observed. Otherwise declare it under its 
 
 `DeviceMetadata.phoneInformation` (form `DeviceMetadata.PhoneInformation`) and `PhoneInformation` hold personal data of the phone and the account (observed on n=1 phone, 2026-11-12, `docs/FMDN.md` S8.6): `imei` (7), `firstRegistrationDate` (2), `phoneInformationField1` (shape of the GSF Android ID, not confirmed) and the account e-mail address inside `information` (26). `imei`, `firstRegistrationDate` and `phoneInformationField1` are in `_SECRET_PROTO_FIELDS`, and so is `phoneInformation` as a whole. `DeviceMetadata.phoneInformation` is never listed in `_FORM_BY_FIELD`. No log record carries these values, not even truncated (root `AGENTS.md`, section 5).
 
+The push that answers phone action 4 adds three more personal fields to the phone record (n=1 phone, 2026-11-14/15, `docs/FMDN.md` S8.6): the Wi-Fi name (`wifiInformation.ssid`, field 30), the SIM name (`simInformation.simDisplayName`, field 31) and the encrypted location (`phoneInformationField36`, with `ciphertext` and `iv`); the 16-byte key of the request travels in `phoneLocateField1`. All of them are in `_SECRET_PROTO_FIELDS`. The battery level (`batteryInformation.batteryLevel`, field 32) is not personal. Only `NovaApi/ExecuteAction/LocatePhone/phone_status.py` reads fields 30 and 32, and nothing reads field 31.
+
 ## Proto3 scalar presence reminder
 
 Proto3 **non-optional scalar fields do not support `HasField`**. Access them directly and rely on their default values (for example, `0` for integers) instead of calling presence checks that raise `ValueError`.

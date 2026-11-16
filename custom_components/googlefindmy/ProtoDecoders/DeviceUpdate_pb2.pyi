@@ -309,7 +309,7 @@ class ExecuteActionType(Message, _MessageProto):
     stopSound: ExecuteActionSoundType
     phoneActionField1: ExecuteActionPhoneAction
     phoneActionField2: ExecuteActionPhoneAction
-    phoneActionField4: ExecuteActionPhoneAction
+    phoneActionField4: ExecuteActionPhoneLocate
     phoneActionField5: ExecuteActionPhoneAction
     phoneActionField6: ExecuteActionPhoneAction
     phoneActionField7: ExecuteActionPhoneAction
@@ -324,7 +324,7 @@ class ExecuteActionType(Message, _MessageProto):
         stopSound: ExecuteActionSoundType | _Mapping[str, _Any] | None = ...,
         phoneActionField1: ExecuteActionPhoneAction | _Mapping[str, _Any] | None = ...,
         phoneActionField2: ExecuteActionPhoneAction | _Mapping[str, _Any] | None = ...,
-        phoneActionField4: ExecuteActionPhoneAction | _Mapping[str, _Any] | None = ...,
+        phoneActionField4: ExecuteActionPhoneLocate | _Mapping[str, _Any] | None = ...,
         phoneActionField5: ExecuteActionPhoneAction | _Mapping[str, _Any] | None = ...,
         phoneActionField6: ExecuteActionPhoneAction | _Mapping[str, _Any] | None = ...,
         phoneActionField7: ExecuteActionPhoneAction | _Mapping[str, _Any] | None = ...,
@@ -335,6 +335,12 @@ class ExecuteActionType(Message, _MessageProto):
 class ExecuteActionPhoneAction(Message, _MessageProto):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class ExecuteActionPhoneLocate(Message, _MessageProto):
+    __slots__ = ("phoneLocateField1",)
+    PHONELOCATEFIELD1_FIELD_NUMBER: _ClassVar[int]
+    phoneLocateField1: bytes
+    def __init__(self, phoneLocateField1: bytes | None = ...) -> None: ...
 
 class ExecuteActionLocateTrackerType(Message, _MessageProto):
     __slots__ = ("lastHighTrafficEnablingTime", "contributorType")
@@ -357,13 +363,16 @@ class ExecuteActionSoundType(Message, _MessageProto):
     def __init__(self, component: DeviceComponent | str | None = ...) -> None: ...
 
 class ExecuteActionScope(Message, _MessageProto):
-    __slots__ = ("type", "device")
+    __slots__ = ("phone", "type", "device")
+    PHONE_FIELD_NUMBER: _ClassVar[int]
     TYPE_FIELD_NUMBER: _ClassVar[int]
     DEVICE_FIELD_NUMBER: _ClassVar[int]
+    phone: PhoneInformation
     type: DeviceType
     device: ExecuteActionDeviceIdentifier
     def __init__(
         self,
+        phone: PhoneInformation | _Mapping[str, _Any] | None = ...,
         type: DeviceType | str | None = ...,
         device: ExecuteActionDeviceIdentifier | _Mapping[str, _Any] | None = ...,
     ) -> None: ...
@@ -430,6 +439,10 @@ class DeviceMetadata(Message, _MessageProto):
             "phoneInformationField21",
             "phoneInformationField23",
             "information",
+            "wifiInformation",
+            "simInformation",
+            "batteryInformation",
+            "phoneInformationField36",
         )
         FIRSTREGISTRATIONDATE_FIELD_NUMBER: _ClassVar[int]
         MODELNUMBER_FIELD_NUMBER: _ClassVar[int]
@@ -442,6 +455,10 @@ class DeviceMetadata(Message, _MessageProto):
         PHONEINFORMATIONFIELD21_FIELD_NUMBER: _ClassVar[int]
         PHONEINFORMATIONFIELD23_FIELD_NUMBER: _ClassVar[int]
         INFORMATION_FIELD_NUMBER: _ClassVar[int]
+        WIFIINFORMATION_FIELD_NUMBER: _ClassVar[int]
+        SIMINFORMATION_FIELD_NUMBER: _ClassVar[int]
+        BATTERYINFORMATION_FIELD_NUMBER: _ClassVar[int]
+        PHONEINFORMATIONFIELD36_FIELD_NUMBER: _ClassVar[int]
         firstRegistrationDate: bytes
         modelNumber: str
         manufacturer: str
@@ -453,6 +470,10 @@ class DeviceMetadata(Message, _MessageProto):
         phoneInformationField21: int
         phoneInformationField23: bytes
         information: DeviceInformation
+        wifiInformation: bytes
+        simInformation: bytes
+        batteryInformation: bytes
+        phoneInformationField36: bytes
         def __init__(
             self,
             firstRegistrationDate: bytes | None = ...,
@@ -466,6 +487,10 @@ class DeviceMetadata(Message, _MessageProto):
             phoneInformationField21: int | None = ...,
             phoneInformationField23: bytes | None = ...,
             information: DeviceInformation | _Mapping[str, _Any] | None = ...,
+            wifiInformation: bytes | None = ...,
+            simInformation: bytes | None = ...,
+            batteryInformation: bytes | None = ...,
+            phoneInformationField36: bytes | None = ...,
         ) -> None: ...
 
     IDENTIFIERINFORMATION_FIELD_NUMBER: _ClassVar[int]
@@ -505,6 +530,83 @@ class DeviceMetadata(Message, _MessageProto):
         metadataField11: bytes | None = ...,
         fetchTime: bytes | None = ...,
         metadataField13: bytes | None = ...,
+    ) -> None: ...
+
+class PhoneWifiInformation(Message, _MessageProto):
+    __slots__ = ("ssid", "phoneWifiInformationField2")
+    SSID_FIELD_NUMBER: _ClassVar[int]
+    PHONEWIFIINFORMATIONFIELD2_FIELD_NUMBER: _ClassVar[int]
+    ssid: bytes
+    phoneWifiInformationField2: int
+    def __init__(
+        self,
+        ssid: bytes | None = ...,
+        phoneWifiInformationField2: int | None = ...,
+    ) -> None: ...
+
+class PhoneSimInformation(Message, _MessageProto):
+    __slots__ = ("simDisplayName", "phoneSimInformationField2")
+    SIMDISPLAYNAME_FIELD_NUMBER: _ClassVar[int]
+    PHONESIMINFORMATIONFIELD2_FIELD_NUMBER: _ClassVar[int]
+    simDisplayName: bytes
+    phoneSimInformationField2: int
+    def __init__(
+        self,
+        simDisplayName: bytes | None = ...,
+        phoneSimInformationField2: int | None = ...,
+    ) -> None: ...
+
+class PhoneBatteryInformation(Message, _MessageProto):
+    __slots__ = ("batteryLevel",)
+    BATTERYLEVEL_FIELD_NUMBER: _ClassVar[int]
+    batteryLevel: int
+    def __init__(self, batteryLevel: int | None = ...) -> None: ...
+
+class PhoneLocationEnvelope(Message, _MessageProto):
+    __slots__ = ("encrypted", "phoneLocationEnvelopeField3", "time")
+    ENCRYPTED_FIELD_NUMBER: _ClassVar[int]
+    PHONELOCATIONENVELOPEFIELD3_FIELD_NUMBER: _ClassVar[int]
+    TIME_FIELD_NUMBER: _ClassVar[int]
+    encrypted: bytes
+    phoneLocationEnvelopeField3: int
+    time: bytes
+    def __init__(
+        self,
+        encrypted: bytes | None = ...,
+        phoneLocationEnvelopeField3: int | None = ...,
+        time: bytes | None = ...,
+    ) -> None: ...
+
+class PhoneLocationCipher(Message, _MessageProto):
+    __slots__ = ("ciphertext", "iv")
+    CIPHERTEXT_FIELD_NUMBER: _ClassVar[int]
+    IV_FIELD_NUMBER: _ClassVar[int]
+    ciphertext: bytes
+    iv: bytes
+    def __init__(
+        self, ciphertext: bytes | None = ..., iv: bytes | None = ...
+    ) -> None: ...
+
+class PhoneLocationPlaintext(Message, _MessageProto):
+    __slots__ = ("position", "accuracyMeters")
+    POSITION_FIELD_NUMBER: _ClassVar[int]
+    ACCURACYMETERS_FIELD_NUMBER: _ClassVar[int]
+    position: PhoneLocationPosition
+    accuracyMeters: float
+    def __init__(
+        self,
+        position: PhoneLocationPosition | _Mapping[str, _Any] | None = ...,
+        accuracyMeters: float | None = ...,
+    ) -> None: ...
+
+class PhoneLocationPosition(Message, _MessageProto):
+    __slots__ = ("latitude", "longitude")
+    LATITUDE_FIELD_NUMBER: _ClassVar[int]
+    LONGITUDE_FIELD_NUMBER: _ClassVar[int]
+    latitude: float
+    longitude: float
+    def __init__(
+        self, latitude: float | None = ..., longitude: float | None = ...
     ) -> None: ...
 
 class ImageInformation(Message, _MessageProto):

@@ -136,15 +136,16 @@ class LocationRequestNotAcceptedError(Exception):
       blocks route into the account-wide reauth verdict, but the credentials are
       presumed valid here -- a request that was not accepted says nothing about
       them.
-    * NOT ``NovaError``/``NovaAuthError``: ten ``try`` blocks name
+    * NOT ``NovaError``/``NovaAuthError``: eleven ``try`` blocks name
       ``NovaAuthError`` in a handler (the count ``TestTheDocumentedExtentStaysTrue``
       derives from the AST, and it is that name it counts, not the base
       ``NovaError``, of which there are more). Eight carry a broad
       ``except Exception`` in the same block that would swallow the signal; the
-      two sound-REQUEST handlers catch a fixed tuple with no broad fallback,
-      where it would instead propagate uncaught. Two opposite failure modes in
-      one inheritance choice (AGENTS.md, the two-opposite-failure-modes
-      paragraph).
+      two sound-REQUEST handlers catch a fixed tuple with no broad fallback, and
+      the phone locate sender (``LocatePhone/phone_locate.py``) re-raises it
+      ahead of a narrow ``except NovaError``; at these three it would instead
+      propagate uncaught. Two opposite failure modes in one inheritance choice
+      (AGENTS.md, the two-opposite-failure-modes paragraph).
     * NOT ``HomeAssistantError``: ``exceptions.py`` reserves that base for
       conditions that already ARE a finished user-facing message. Measured,
       ``coordinator/locate.py`` carries no ``except HomeAssistantError`` at all;

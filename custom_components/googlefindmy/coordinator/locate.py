@@ -49,6 +49,7 @@ from ..NovaApi.nova_request import (
     NovaRateLimitError,
     is_credential_rejection,
 )
+from ..phone_identity import is_phone_id
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
 from .helpers.cache import (
@@ -225,9 +226,22 @@ class LocateOperations(_MixinBase):
 
         Returns:
             True if playing a sound is likely possible.
+
+        A phone listed without a canonical ID (``is_phone_id``) is never
+        optimistic: it can ring only when its row carried action 1 in
+        ``supportedActions`` (``can_ring`` is ``True``); an unknown phone row
+        gives ``False``.
         """
         # 1) Use cached capability when available (fast path, no network).
         caps = self._device_caps.get(device_id)
+        if is_phone_id(device_id):
+            res = caps is not None and caps.get("can_ring") is True
+            _LOGGER.debug(
+                "can_play_sound(%s) -> %s (phone, explicit can_ring only)",
+                device_id,
+                res,
+            )
+            return res
         if caps and isinstance(caps.get("can_ring"), bool):
             res = bool(caps["can_ring"])
             _LOGGER.debug(
@@ -265,6 +279,20 @@ class LocateOperations(_MixinBase):
             "can_play_sound(%s) -> True (optimistic final fallback)", device_id
         )
         return True
+
+    def can_stop_sound(self, device_id: str) -> bool:
+        """Return True if 'Stop Sound' should be enabled for the device.
+
+        **No network in availability path.** Trackers and phones with a
+        canonical ID keep the Stop button whenever the device is present (the
+        button's own rule), so this returns ``True`` for them. A phone listed
+        without a canonical ID can stop its ring only when its row carried
+        action 5 in ``supportedActions`` (``can_stop_ring`` is ``True``).
+        """
+        if not is_phone_id(device_id):
+            return True
+        caps = self._device_caps.get(device_id)
+        return caps is not None and caps.get("can_stop_ring") is True
 
     # ---------------------------- Public control / Locate gating ------------
     def _get_device_lock(self, device_id: str) -> asyncio.Lock:
@@ -975,8 +1003,9 @@ class LocateOperations(_MixinBase):
         interleaving below could get past that.
 
         What the restart would cost: the stop button has no availability guard
-        (there is no ``can_stop_sound`` on the coordinator, ``button.py`` only
-        probes for one), so a user pressing Stop during an outage would push the
+        that a running window closes (``can_stop_sound`` returns ``True`` for
+        every tracker and narrows only phones listed without a canonical ID to
+        their ``can_stop_ring``), so a user pressing Stop during an outage would push the
         end of the window forward with every press. The window would still be
         bounded -- it never outlives ``last press + cooldown_s`` -- but it also
         gates manual locate unconditionally (and Play Sound for every device
@@ -1065,6 +1094,9 @@ class LocateOperations(_MixinBase):
         ``async_stop_sound`` with nothing awaited in between: both then read the
         same cache state.
         """
+        if is_phone_id(device_id):
+            # A phone stop (action 5) is device-scoped and needs no key.
+            return None
         key = self._normalize_cancel_key(request_uuid)
         if self._stop_would_be_correlated(device_id, key):
             return None
@@ -1147,6 +1179,14 @@ class LocateOperations(_MixinBase):
         # reason that has nothing to do with what they pin.
         caps_by_device = getattr(self, "_device_caps", None) or {}
         caps = caps_by_device.get(device_id)
+        if is_phone_id(device_id) and not (caps and caps.get("can_ring") is True):
+            # A phone row without action 1 cannot ring, and an unknown phone row
+            # is not guessed at; waiting changes neither.
+            _LOGGER.warning(
+                "Play Sound was refused: the phone does not report the ring "
+                "action. Waiting will not change this."
+            )
+            return PlaySoundOutcome.FAILED
         if caps and caps.get("can_ring") is False:
             # Warning, not debug: the user-facing message for FAILED points at
             # the log as the carrier of the specific cause, and a message that
@@ -1294,6 +1334,74 @@ class LocateOperations(_MixinBase):
             # either is the misclassification IRR-CA-SOUND-FAILURE-CLASS stops.
             return PlaySoundOutcome.FAILED
 
+    async def _async_stop_phone_sound(self, device_id: str) -> StopSoundOutcome:
+        """Stop the ring of a phone listed without a canonical ID (action 5).
+
+        Device-scoped stop: action 5 silences the phone whatever started the
+        ring, so no cancel key is looked up, none is required and the outcome
+        of an accepted submission is ``CANCELLED``. The stop is not held
+        back (the ring-start hold is a tracker property). Push readiness is
+        checked twice. Here globally, with the tracker path's rule for a stop it
+        can correlate: a running push cooldown does not block it (a play that
+        lost its answer arms that window exactly when the phone may be ringing,
+        IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN), any other "not ready"
+        gives ``SUPPRESSED``. Then in the API per entry, where a channel
+        that is not listening gives ``NOT_SENT`` and thus ``FAILED``.
+        """
+        if not self.can_stop_sound(device_id):
+            _LOGGER.warning(
+                "Stop Sound was refused: the phone does not report the stop-ring "
+                "action. Waiting will not change this."
+            )
+            return StopSoundOutcome.FAILED
+        if not self._api_push_ready():
+            if time.monotonic() < self._push_cooldown_until:
+                _LOGGER.debug(
+                    "Push cooldown active for %s, but a phone stop is "
+                    "device-scoped: sending it anyway",
+                    device_id,
+                )
+            else:
+                _LOGGER.debug(
+                    "Suppressing stop_sound call for %s: push not ready", device_id
+                )
+                return StopSoundOutcome.SUPPRESSED
+        try:
+            stop_outcome = await self.api.async_stop_sound(device_id, None)
+        except ConfigEntryAuthFailed as auth_exc:
+            self._set_auth_state(
+                failed=True, reason=f"Auth failed during stop_sound: {auth_exc}"
+            )
+            try:
+                await self.async_request_refresh()
+            except Exception:
+                pass
+            return StopSoundOutcome.FAILED
+        except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
+            _LOGGER.warning(
+                "Connection failed during stop_sound for %s: %s",
+                device_id,
+                conn_err,
+            )
+            self.note_error(conn_err, where="async_stop_sound", device=device_id)
+            self._note_stop_transport_problem_without_extending()
+            return StopSoundOutcome.FAILED
+        except Exception as err:
+            _LOGGER.error(
+                "Unexpected error during stop_sound for %s: %s",
+                device_id,
+                err,
+                exc_info=True,
+            )
+            self.note_error(err, where="async_stop_sound", device=device_id)
+            return StopSoundOutcome.FAILED
+        if stop_outcome is not SoundDispatchOutcome.ACCEPTED:
+            if stop_outcome is SoundDispatchOutcome.TRANSPORT_FAILED:
+                self._note_stop_transport_problem_without_extending()
+            return StopSoundOutcome.FAILED
+        self._set_auth_state(failed=False)
+        return StopSoundOutcome.CANCELLED
+
     async def async_stop_sound(
         self,
         device_id: str,
@@ -1332,6 +1440,8 @@ class LocateOperations(_MixinBase):
         # _normalize_cancel_key, which classify_stop_correlation applies too.
         # Post-condition: request_uuid_to_use is None or non-blank, which is
         # what every `is not None` check below relies on.
+        if is_phone_id(device_id):
+            return await self._async_stop_phone_sound(device_id)
         request_uuid_to_use = self._normalize_cancel_key(request_uuid)
         # True only when the key about to be sent came from our own cache AND
         # was still fresh. An explicitly passed foreign UUID does NOT qualify:

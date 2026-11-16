@@ -83,6 +83,17 @@ Google can answer a locate request with HTTP 200 and still never deliver a push 
 
 Regression tests: `tests/test_fcm_dead_token_detector.py`.
 
+### Phone channel readiness gate
+
+Phones that Google lists without a canonical ID are reached through phone actions 1 (ring), 4 (locate) and 5 (stop ring), addressed by their Android ID. Before any of the three is built, the API asks `FcmReceiverHA.async_ensure_phone_channel(entry_id, cache)`; `False` means nothing is sent. Keep these rules when changing it:
+
+- One set of readiness steps. `_async_ensure_entry_listening` (client, supervisor, token, the wait for `STARTED` within `_max_ready_wait_s()`, the one first-locate reconnect) is shared by the tracker registration `async_register_for_location_updates` and the phone gate. Change the steps there, never in a copy.
+- The phone gate never writes `_entry_last_locate_sent_monotonic` and registers no locate callback, and a phone timeout never calls `note_accepted_without_push`: a silent or switched-off phone says nothing about the push token, so it must feed neither the data-starvation watchdog nor the dead token detector. Only the tracker registration writes the stamp, ahead of the shared steps. Do not route the phone path through `async_register_for_location_updates`.
+- Readiness also requires the entry's own token (`get_entry_fcm_token`, no fallback to another entry). The phone path sends only that token.
+- Logging: entry id and the stage `phone_fcm_not_ready`, never a token or an Android ID (root `AGENTS.md` section 5).
+
+Regression tests: `tests/test_phone_ring_paths.py` (gate, stamp, the shared steps on the tracker side) and `tests/test_phone_locate_flow.py`.
+
 ## Token lifecycle & standalone persistence
 
 ### Token hierarchy

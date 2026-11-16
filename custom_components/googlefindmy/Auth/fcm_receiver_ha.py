@@ -441,6 +441,11 @@ class FcmReceiverHA:
 
         # Per-request callbacks awaiting device responses (entry-agnostic)
         self.location_update_callbacks: dict[str, Callable[[str, str], None]] = {}
+        # Open locate requests of phones listed without a canonical ID, keyed by
+        # (entry_id, requestUuid). Their pushes carry no canonical id and are
+        # matched on the request id of the channel they arrive on; the callback
+        # receives the raw push, the key stays in the caller's register.
+        self._phone_request_callbacks: dict[tuple[str, str], Callable[[str], None]] = {}
 
         # Coordinators eligible to receive background updates
         self.coordinators: list[Any] = []
@@ -2687,6 +2692,11 @@ class FcmReceiverHA:
             # P1 fix: offload protobuf parsing to executor
             canonic_id = await self._extract_canonic_id_async(hex_string)
             if not canonic_id:
+                # A phone without a canonical ID answers a locate request with a
+                # push like this one; it is matched on the request id of this
+                # channel (entry_id) and handed to the waiting request as is.
+                if await self._deliver_phone_push(entry_id, hex_string):
+                    return
                 _LOGGER.debug("FCM response has no canonical id")
                 return
 
@@ -3118,6 +3128,9 @@ class FcmReceiverHA:
 
         Handles the schema difference between Android devices (nested in phoneInformation)
         and Spot/Tracker devices (direct canonicIds), as defined in DeviceUpdate.proto.
+        Returns ``None`` for a phone listed without a canonical ID; the caller
+        offers such a push to ``_deliver_phone_push`` (matched by request UUID and
+        entry) before it gives up on the push.
         """
         try:
             device_update = decoder_module.parse_device_update_protobuf(hex_response)
@@ -3148,6 +3161,57 @@ class FcmReceiverHA:
         return await _call_in_executor(
             self._extract_canonic_id_from_response, hex_response
         )
+
+    def _extract_request_uuid_from_response(self, hex_response: str) -> str | None:
+        """Return ``fcmMetadata.requestUuid`` of the push, or ``None``."""
+        try:
+            device_update = decoder_module.parse_device_update_protobuf(hex_response)
+            request_uuid = device_update.fcmMetadata.requestUuid
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Failed to extract request id from FCM response: %s",
+                describe_exception(err),
+            )
+            return None
+        return request_uuid if isinstance(request_uuid, str) and request_uuid else None
+
+    async def _deliver_phone_push(self, entry_id: str, hex_string: str) -> bool:
+        """Hand a push without canonical id to the open phone request it answers.
+
+        The push is parsed in the executor only while a phone request is open on
+        this entry's channel. The match is ``(entry_id, requestUuid)``: a push on
+        the channel of another entry never reaches a request of this one, so it
+        is never decrypted in the wrong account. Returns ``True`` when a
+        callback took the push.
+        """
+        if not any(key[0] == entry_id for key in self._phone_request_callbacks):
+            return False
+        request_uuid = await _call_in_executor(
+            self._extract_request_uuid_from_response, hex_string
+        )
+        if not request_uuid:
+            return False
+        callback = self._phone_request_callbacks.get((entry_id, request_uuid))
+        if callback is None:
+            _LOGGER.debug(
+                "[entry=%s] FCM push without canonical id matches no open phone request",
+                entry_id,
+            )
+            return False
+        try:
+            callback(hex_string)
+        except Exception as callback_err:  # noqa: BLE001 - never break the push path
+            _LOGGER.error(
+                "[entry=%s] Phone location callback failed (%s at %s)",
+                entry_id,
+                describe_exception(callback_err),
+                exception_origin(callback_err),
+            )
+            return True
+        _LOGGER.debug(
+            "[entry=%s] FCM push delivered to an open phone request", entry_id
+        )
+        return True
 
     async def _run_callback_async(
         self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str
@@ -4231,6 +4295,66 @@ class FcmReceiverHA:
                     return tok
         return None
 
+    def get_entry_fcm_token(self, entry_id: str) -> str | None:
+        """Return the push token that belongs to ``entry_id`` alone, or ``None``.
+
+        Unlike :meth:`get_fcm_token` this never falls back to another entry's
+        token. The phone locate path requires it: a request for a phone of one
+        account must name that account's push channel, or it is not sent.
+        """
+        if not isinstance(entry_id, str) or not entry_id.strip():
+            return None
+        return self._entry_scoped_fcm_token(entry_id)
+
+    # -------------------- Phone locate requests (no canonical id) --------------------
+
+    async def async_ensure_phone_channel(
+        self, entry_id: str, cache: TokenCache | None = None
+    ) -> bool:
+        """Return True when ``entry_id``'s push channel can take a phone request.
+
+        Readiness gate of the phone path, asked before every phone action
+        (1 ring, 4 locate, 5 stop ring): the entry's client is started and
+        listening and the entry has its own push token. It uses the same
+        readiness steps as the tracker locate registration
+        (``_async_ensure_entry_listening``) but sets no locate-sent stamp and
+        registers no callback, so a phone request never feeds the
+        data-starvation watchdog or the dead-token detector. ``False``
+        means: send nothing. Logs carry the entry id only.
+        """
+        if not isinstance(entry_id, str) or not entry_id.strip():
+            return False
+        if cache is None:
+            cache = self._entry_caches.get(entry_id)
+        token = await self._async_ensure_entry_listening(
+            entry_id, cache, purpose="Phone request readiness", strict_token=True
+        )
+        if token is None:
+            return False
+        # The phone path sends only the entry's own token; readiness without it
+        # would let a request go out that the path then refuses anyway.
+        return self.get_entry_fcm_token(entry_id) is not None
+
+    def register_phone_request(
+        self, entry_id: str, request_uuid: str, callback: Callable[[str], None]
+    ) -> None:
+        """Route the push answering ``request_uuid`` on ``entry_id``'s channel.
+
+        ``callback`` receives the raw push (hex) and must not block; it is called
+        in the event loop. Registering must happen before the request is sent.
+        Does not touch the locate-sent stamp of the data-starvation watchdog nor
+        the dead-token detector: a silent phone says nothing about the token.
+        """
+        if not entry_id or not request_uuid:
+            raise ValueError("entry_id and request_uuid must be non-empty")
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        self._phone_request_callbacks[(entry_id, request_uuid)] = callback
+
+    def unregister_phone_request(self, entry_id: str, request_uuid: str) -> None:
+        """Forget the phone request ``request_uuid`` of ``entry_id``, if registered."""
+        self._phone_request_callbacks.pop((entry_id, request_uuid), None)
+
     def set_default_entry_id(self, entry_id: str | None) -> None:
         """Record the preferred entry_id for legacy token lookups."""
 
@@ -4315,6 +4439,19 @@ class FcmReceiverHA:
             return None
 
         return self.get_fcm_token(entry_id)
+
+    async def _ensure_entry_scoped_token(self, entry_id: str) -> str | None:
+        """Return ``entry_id``'s own token, registering one when it is missing.
+
+        Same as :meth:`_ensure_token_for_entry` without the cross-entry fallback
+        of :meth:`get_fcm_token`, before and after the registration.
+        """
+        token = self._entry_scoped_fcm_token(entry_id)
+        if token:
+            return token
+        if not await self._register_for_fcm_entry(entry_id):
+            return None
+        return self._entry_scoped_fcm_token(entry_id)
 
     async def _await_entry_started(
         self,
@@ -4674,7 +4811,12 @@ class FcmReceiverHA:
         )
 
     async def _reconnect_and_refresh_token(
-        self, entry_id: str, previous_token: str, max_wait_s: float
+        self,
+        entry_id: str,
+        previous_token: str,
+        max_wait_s: float,
+        *,
+        purpose: str = "Manual locate registration",
     ) -> str | None:
         """Force the first-locate reconnect, then return the *live* entry token.
 
@@ -4702,9 +4844,10 @@ class FcmReceiverHA:
         if fresh_pc is None:
             _LOGGER.warning(
                 "[entry=%s] Forced reconnect did not reach STARTED after %.1fs; "
-                "aborting manual locate registration (fail-closed)",
+                "aborting %s (fail-closed)",
                 entry_id,
                 max_wait_s,
+                purpose.lower(),
             )
             return None
 
@@ -4712,8 +4855,9 @@ class FcmReceiverHA:
         if not refreshed:
             _LOGGER.warning(
                 "[entry=%s] FCM token unavailable after forced reconnect; "
-                "aborting manual locate registration (fail-closed)",
+                "aborting %s (fail-closed)",
                 entry_id,
+                purpose.lower(),
             )
             return None
 
@@ -4726,6 +4870,107 @@ class FcmReceiverHA:
             self._update_token_routing(refreshed, {entry_id})
             await self._persist_routing_token(entry_id, refreshed)
         return refreshed
+
+    async def _async_ensure_entry_listening(
+        self,
+        entry_id: str,
+        cache: TokenCache | None,
+        *,
+        purpose: str,
+        strict_token: bool = False,
+    ) -> str | None:
+        """Bring ``entry_id``'s push channel to listening and return its token.
+
+        Client, supervisor, token, the wait for ``STARTED`` within the readiness
+        budget and the one first-locate reconnect; ``None`` when any of them
+        fails (fail closed). Shared by the tracker locate registration and the
+        phone readiness gate (``async_ensure_phone_channel``). It deliberately
+        sets no locate-sent stamp and registers no callback: both belong to the
+        tracker path alone. ``purpose`` only names the caller in the log.
+
+        ``strict_token`` (the phone gate) takes the token only from this entry
+        (``_entry_scoped_fcm_token``), registering one when it is missing, and
+        never through ``get_fcm_token``: that falls back to another entry's
+        token, and the routing written below would then hand that entry's pushes
+        to this one. The tracker registration keeps its historical lookup.
+        """
+        client = await self._ensure_client_for_entry(entry_id, cache)
+        if client is None:
+            _LOGGER.warning(
+                "[entry=%s] %s failed: client unavailable",
+                entry_id,
+                purpose,
+            )
+            return None
+
+        await self._start_supervisor_for_entry(entry_id, cache)
+
+        if strict_token:
+            token = await self._ensure_entry_scoped_token(entry_id)
+        else:
+            token = await self._ensure_token_for_entry(entry_id)
+
+        if not token:
+            _LOGGER.warning(
+                "[entry=%s] %s failed: token unavailable",
+                entry_id,
+                purpose,
+            )
+            return None
+
+        self._update_token_routing(token, {entry_id})
+        await self._persist_routing_token(entry_id, token)
+
+        # Wait for the FCM client to be actively listening before sending
+        # the location request.  Without this, the push notification from
+        # Google may arrive before the MCS connection is established.
+        pc = self.pcs.get(entry_id)
+        if pc is not None:
+            # Derive the readiness budget from the library's connection-retry
+            # count instead of a fixed 15.0s.  A brand-new FCM identity's
+            # first MCS connect can take the retry budget of a reachable endpoint
+            # (see the note above _max_ready_wait_s); a hard-coded 15.0s
+            # under-covered that window and let
+            # the gate expire before STARTED on the very first run.  Adding a
+            # small margin keeps a fresh registration from being abandoned
+            # prematurely, which is the root of the deterministic first-run
+            # locate timeout.
+            _MAX_READY_WAIT_S = _max_ready_wait_s()
+            started_pc = await self._await_entry_started(
+                entry_id, pc, _MAX_READY_WAIT_S
+            )
+            if started_pc is None:
+                # Fail closed: the client never started listening, so sending
+                # the location request would hand the token to a dead listener
+                # and the caller would block until an opaque 30s timeout.
+                # Clearing the local token means the function returns None (the
+                # sole caller, location_request.py, then reports a clear error
+                # and returns early) and the finally block pops the manual-
+                # locate callback so no stale registration leaks.
+                _LOGGER.warning(
+                    "[entry=%s] FCM client not in STARTED state after %.1fs; "
+                    "aborting %s (fail-closed)",
+                    entry_id,
+                    _MAX_READY_WAIT_S,
+                    purpose.lower(),
+                )
+                token = None
+            elif self._needs_first_locate_reconnect(started_pc):
+                # First-locate-delivery fix: a fresh, not-yet-delivering
+                # session reached STARTED but empirically will not receive the
+                # very first locate push until it reconnects.  Force exactly
+                # one cooperative reconnect (serialised per entry so concurrent
+                # locates on the same entry share one replacement instead of
+                # tearing down each other's fresh session), then re-read the
+                # token: the reconnect's supervisor rebuild may re-register and
+                # rotate the entry's FCM token after it was captured above.
+                # Fail closed if the replacement never starts or the token
+                # vanished (Codex #1150 follow-ups).
+                token = await self._reconnect_and_refresh_token(
+                    entry_id, token, _MAX_READY_WAIT_S, purpose=purpose
+                )
+
+        return token
 
     async def async_register_for_location_updates(
         self, canonic_id: str, callback: Callable[[str, str], None]
@@ -4758,75 +5003,9 @@ class FcmReceiverHA:
 
         token: str | None = None
         try:
-            client = await self._ensure_client_for_entry(entry_id, cache)
-            if client is None:
-                _LOGGER.warning(
-                    "[entry=%s] Manual locate registration failed: client unavailable",
-                    entry_id,
-                )
-                return None
-
-            await self._start_supervisor_for_entry(entry_id, cache)
-
-            token = await self._ensure_token_for_entry(entry_id)
-
-            if not token:
-                _LOGGER.warning(
-                    "[entry=%s] Manual locate registration failed: token unavailable",
-                    entry_id,
-                )
-                return None
-
-            self._update_token_routing(token, {entry_id})
-            await self._persist_routing_token(entry_id, token)
-
-            # Wait for the FCM client to be actively listening before sending
-            # the location request.  Without this, the push notification from
-            # Google may arrive before the MCS connection is established.
-            pc = self.pcs.get(entry_id)
-            if pc is not None:
-                # Derive the readiness budget from the library's connection-retry
-                # count instead of a fixed 15.0s.  A brand-new FCM identity's
-                # first MCS connect can take the retry budget of a reachable endpoint
-                # (see the note above _max_ready_wait_s); a hard-coded 15.0s
-                # under-covered that window and let
-                # the gate expire before STARTED on the very first run.  Adding a
-                # small margin keeps a fresh registration from being abandoned
-                # prematurely, which is the root of the deterministic first-run
-                # locate timeout.
-                _MAX_READY_WAIT_S = _max_ready_wait_s()
-                started_pc = await self._await_entry_started(
-                    entry_id, pc, _MAX_READY_WAIT_S
-                )
-                if started_pc is None:
-                    # Fail closed: the client never started listening, so sending
-                    # the location request would hand the token to a dead listener
-                    # and the caller would block until an opaque 30s timeout.
-                    # Clearing the local token means the function returns None (the
-                    # sole caller, location_request.py, then reports a clear error
-                    # and returns early) and the finally block pops the manual-
-                    # locate callback so no stale registration leaks.
-                    _LOGGER.warning(
-                        "[entry=%s] FCM client not in STARTED state after %.1fs; "
-                        "aborting manual locate registration (fail-closed)",
-                        entry_id,
-                        _MAX_READY_WAIT_S,
-                    )
-                    token = None
-                elif self._needs_first_locate_reconnect(started_pc):
-                    # AP1 (first-locate-delivery fix): a fresh, not-yet-delivering
-                    # session reached STARTED but empirically will not receive the
-                    # very first locate push until it reconnects.  Force exactly
-                    # one cooperative reconnect (serialised per entry so concurrent
-                    # locates on the same entry share one replacement instead of
-                    # tearing down each other's fresh session), then re-read the
-                    # token: the reconnect's supervisor rebuild may re-register and
-                    # rotate the entry's FCM token after it was captured above.
-                    # Fail closed if the replacement never starts or the token
-                    # vanished (Codex #1150 follow-ups).
-                    token = await self._reconnect_and_refresh_token(
-                        entry_id, token, _MAX_READY_WAIT_S
-                    )
+            token = await self._async_ensure_entry_listening(
+                entry_id, cache, purpose="Manual locate registration"
+            )
 
             if token is not None:
                 _LOGGER.debug(

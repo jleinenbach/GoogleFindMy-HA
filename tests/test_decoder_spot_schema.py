@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
+import struct
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -286,10 +287,13 @@ _NOT_SECRET_NAMES = frozenset(
         "publicKeyId",
         # No personal data of their own.
         "thisAccount",
+        # Always 1 on the phone's location answer (2026-11-14 and 2026-11-15).
+        "phoneLocationEnvelopeField3",
         # Empty action messages of `ExecuteActionType` on phones (2026-11-10):
         # the field number names the action, there is no content to hide.
         "phoneActionField1",
         "phoneActionField2",
+        # Holds `ExecuteActionPhoneLocate`, whose key field is listed as secret.
         "phoneActionField4",
         "phoneActionField5",
         "phoneActionField6",
@@ -298,6 +302,8 @@ _NOT_SECRET_NAMES = frozenset(
         "phoneActionField14",
         # Containers: their leaves are checked one by one.
         "accessInformation",
+        # `ExecuteActionScope.phone`: its only field `phoneInformationField1` is secret.
+        "phone",
         "phoneIdentifierInformation",
         "cookies",
         "e2eePublicKeyRegistration",
@@ -777,6 +783,58 @@ _OBSERVED: tuple[tuple[str, int, bytes, str, object], ...] = (
         "phoneInformationField23",
         b"0123456789abcdef" * 2,
     ),
+    # Answer to phone action 4 (2026-11-14 and 2026-11-15, n=1 phone).
+    (
+        "DeviceMetadata.PhoneInformation",
+        30,
+        _len_field(30, _len_field(1, b'"example-net"') + _varint_field(2, 3)),
+        "wifiInformation",
+        _len_field(1, b'"example-net"') + _varint_field(2, 3),
+    ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        31,
+        _len_field(31, _len_field(1, b"SIM-A") + _varint_field(2, 1)),
+        "simInformation",
+        _len_field(1, b"SIM-A") + _varint_field(2, 1),
+    ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        32,
+        _len_field(32, _varint_field(1, 73)),
+        "batteryInformation",
+        _varint_field(1, 73),
+    ),
+    (
+        "DeviceMetadata.PhoneInformation",
+        36,
+        _len_field(36, _NESTED_SHAPE),
+        "phoneInformationField36",
+        _NESTED_SHAPE,
+    ),
+    (
+        "PhoneWifiInformation",
+        1,
+        _len_field(1, b'"example-net"'),
+        "ssid",
+        b'"example-net"',
+    ),
+    ("PhoneWifiInformation", 2, _varint_field(2, 4), "phoneWifiInformationField2", 4),
+    ("PhoneSimInformation", 1, _len_field(1, b"SIM-A"), "simDisplayName", b"SIM-A"),
+    ("PhoneSimInformation", 2, _varint_field(2, 2), "phoneSimInformationField2", 2),
+    ("PhoneBatteryInformation", 1, _varint_field(1, 77), "batteryLevel", 77),
+    ("PhoneLocationEnvelope", 2, _len_field(2, b"c" * 20), "encrypted", b"c" * 20),
+    ("PhoneLocationEnvelope", 3, _varint_field(3, 1), "phoneLocationEnvelopeField3", 1),
+    ("PhoneLocationEnvelope", 4, _len_field(4, _TIME_SHAPE), "time", _TIME_SHAPE),
+    ("PhoneLocationCipher", 1, _len_field(1, b"x" * 32), "ciphertext", b"x" * 32),
+    ("PhoneLocationCipher", 2, _len_field(2, b"y" * 16), "iv", b"y" * 16),
+    (
+        "ExecuteActionPhoneLocate",
+        1,
+        _len_field(1, b"k" * 16),
+        "phoneLocateField1",
+        b"k" * 16,
+    ),
 )
 
 
@@ -879,9 +937,31 @@ def test_observed_text_fields_are_redacted(field_name: str) -> None:
     assert field_name in decoder._SECRET_PROTO_FIELDS
 
 
+# The only field observed to carry a battery level: the phone record's field 32
+# (2026-11-15, n=1 phone, six measurements against the level the phone showed).
+_BATTERY_LINES = (
+    "bytes batteryInformation = 32;",
+    "message PhoneBatteryInformation {",
+    "uint64 batteryLevel = 1;",
+)
+
+
 def test_no_battery_wording_in_schema() -> None:
-    """No observed field is a cloud battery level (three measurements)."""
-    assert "batter" not in _PROTO_PATH.read_text(encoding="utf-8").lower()
+    """Battery wording only on the phone's measured field 32, never on trackers.
+
+    `recentField11` does not follow the charge state shown in the app (three
+    measurements on trackers), so no tracker field may read like a battery level.
+    """
+    lines = [
+        line.strip()
+        for line in _PROTO_PATH.read_text(encoding="utf-8").splitlines()
+        if "batter" in line.lower()
+    ]
+    assert len(lines) == len(_BATTERY_LINES)
+    for line, start in zip(lines, _BATTERY_LINES, strict=True):
+        assert line.startswith(start), line
+    recent = DeviceUpdate_pb2.RecentLocationAndNetworkLocations.DESCRIPTOR
+    assert "recentField11" in recent.fields_by_name
 
 
 def test_form_comments_are_qualified() -> None:
@@ -1018,3 +1098,150 @@ def test_t_p4_fastpair_identifier_keeps_todays_canonic_id_reading() -> None:
     with_field3.identifierInformation.type = DeviceUpdate_pb2.IDENTIFIER_FASTPAIR
     with_field3.identifierInformation.canonicIds.canonicId.add(id="cid-3")
     assert decoder.get_canonic_ids(device_list) == [("buds-3", "cid-3")]
+
+
+# --------------------------------------------------------------------------
+# Locate answer of a phone without canonical ID (observed 2026-11-14/15, n=1)
+# --------------------------------------------------------------------------
+#
+# Shape of the measured push, rebuilt with synthetic values: field 36 of the phone
+# record holds `{2: {1: ciphertext (32 bytes), 2: IV (16 bytes)}, 3: 1, 4: Time}`;
+# the plaintext is `{1: {1: double, 2: double}, 2: float}` (25 bytes).
+
+_PHONE_LOCATE_NEW_FIELDS = (
+    "wifiInformation",
+    "simInformation",
+    "batteryInformation",
+    "phoneInformationField36",
+)
+
+
+def _double_field(number: int, value: float) -> bytes:
+    return _varint(number << 3 | 1) + struct.pack("<d", value)
+
+
+def _float_field(number: int, value: float) -> bytes:
+    return _varint(number << 3 | 5) + struct.pack("<f", value)
+
+
+def _phone_locate_envelope() -> bytes:
+    cipher = _len_field(1, b"\xc1" * 32) + _len_field(2, b"\x1f" * 16)
+    return _len_field(2, cipher) + _varint_field(3, 1) + _len_field(4, _TIME_SHAPE)
+
+
+def test_phone_locate_envelope_parses_in_the_measured_shape() -> None:
+    record = DeviceUpdate_pb2.DeviceMetadata.PhoneInformation.FromString(
+        _len_field(36, _phone_locate_envelope())
+    )
+    envelope = DeviceUpdate_pb2.PhoneLocationEnvelope.FromString(
+        record.phoneInformationField36
+    )
+    cipher = DeviceUpdate_pb2.PhoneLocationCipher.FromString(envelope.encrypted)
+    assert (len(cipher.ciphertext), len(cipher.iv)) == (32, 16)
+    assert envelope.phoneLocationEnvelopeField3 == 1
+    assert envelope.time == _TIME_SHAPE
+    for message in (record, envelope, cipher):
+        assert list(UnknownFieldSet(message)) == []
+
+    plaintext = _len_field(
+        1, _double_field(1, 1.5) + _double_field(2, -2.25)
+    ) + _float_field(2, 11.5)
+    assert len(plaintext) == 25
+    parsed = DeviceUpdate_pb2.PhoneLocationPlaintext.FromString(plaintext)
+    assert (parsed.position.latitude, parsed.position.longitude) == (1.5, -2.25)
+    assert parsed.accuracyMeters == 11.5
+    assert list(UnknownFieldSet(parsed)) == []
+
+
+@pytest.mark.parametrize("garbage", _GARBAGE)
+def test_foreign_content_in_phone_locate_fields_keeps_the_device_list(
+    garbage: bytes,
+) -> None:
+    """Type rule: a wrong shape in fields 30 to 36 fails neither list nor record."""
+    record = b"".join(
+        _len_field(number, garbage) for number in (30, 31, 32, 36)
+    ) + _varint_field(36, 5)
+    device_list = DeviceUpdate_pb2.DevicesList.FromString(
+        _len_field(2, _len_field(3, record) + _len_field(5, b"phone"))
+    )
+    raw = device_list.deviceMetadata[0].phoneInformation
+    parsed = DeviceUpdate_pb2.DeviceMetadata.PhoneInformation.FromString(raw)
+    assert parsed.wifiInformation == garbage
+    assert parsed.phoneInformationField36 == garbage
+    assert [f.field_number for f in UnknownFieldSet(parsed)] == [36]
+
+
+def test_phone_record_locate_fields_are_bytes() -> None:
+    """The record is read from `bytes`, but its new fields follow the type rule too."""
+    fields = DeviceUpdate_pb2.DeviceMetadata.PhoneInformation.DESCRIPTOR.fields_by_name
+    for name in _PHONE_LOCATE_NEW_FIELDS:
+        assert fields[name].type == _TYPE_BYTES, name
+
+
+def test_phone_locate_values_never_reach_developer_output() -> None:
+    """Wi-Fi name, SIM name, envelope and key show their length only."""
+    ssid, sim, key = b'"example-net"', b"SIM-A", b"\x6b" * 16
+    record = DeviceUpdate_pb2.DeviceMetadata.PhoneInformation(
+        wifiInformation=_len_field(1, ssid) + _varint_field(2, 3),
+        simInformation=_len_field(1, sim) + _varint_field(2, 1),
+        batteryInformation=_varint_field(1, 73),
+        phoneInformationField36=_phone_locate_envelope(),
+    )
+    text = decoder.custom_message_formatter(record, "", False)
+    for name in ("wifiInformation", "simInformation", "phoneInformationField36"):
+        assert f"{name}: <redacted len=" in text
+    for value in (ssid.decode(), ssid.hex(), sim.decode(), sim.hex(), "c1" * 32):
+        assert value not in text
+
+    forms = (
+        DeviceUpdate_pb2.PhoneWifiInformation(ssid=ssid, phoneWifiInformationField2=3),
+        DeviceUpdate_pb2.PhoneSimInformation(
+            simDisplayName=sim, phoneSimInformationField2=1
+        ),
+        DeviceUpdate_pb2.PhoneLocationCipher(ciphertext=b"\xc1" * 32, iv=b"\x1f" * 16),
+        DeviceUpdate_pb2.ExecuteActionPhoneLocate(phoneLocateField1=key),
+    )
+    for form in forms:
+        form_text = decoder.custom_message_formatter(form, "", False)
+        for value in (ssid.decode(), sim.decode(), "c1" * 32, "1f" * 16, key.hex()):
+            assert value not in form_text
+        redacted = decoder._redacted_copy(form)
+        assert all(
+            not getattr(redacted, field.name) for field in form.DESCRIPTOR.fields
+        ), type(form).__name__
+
+    envelope = DeviceUpdate_pb2.PhoneLocationEnvelope.FromString(
+        _phone_locate_envelope()
+    )
+    envelope_text = decoder.custom_message_formatter(envelope, "", False)
+    assert "encrypted: <redacted len=" in envelope_text
+    assert "c1" * 32 not in envelope_text
+    redacted_envelope = decoder._redacted_copy(envelope)
+    assert not redacted_envelope.encrypted
+    assert redacted_envelope.phoneLocationEnvelopeField3 == 1
+
+    battery = DeviceUpdate_pb2.PhoneBatteryInformation(batteryLevel=73)
+    assert "batteryLevel: 73" in decoder.custom_message_formatter(battery, "", False)
+
+
+def test_locate_request_reaches_a_phone_by_its_identifier() -> None:
+    """Scope field 1 and action 4 as sent on 2026-11-14; the identifier stays hidden."""
+    scope = DeviceUpdate_pb2.ExecuteActionScope(
+        phone=DeviceUpdate_pb2.PhoneInformation(phoneInformationField1=_PHONE_FIELD1),
+        type=DeviceUpdate_pb2.ANDROID_DEVICE,
+    )
+    action = DeviceUpdate_pb2.ExecuteActionType(
+        phoneActionField4=DeviceUpdate_pb2.ExecuteActionPhoneLocate(
+            phoneLocateField1=b"\x6b" * 16
+        )
+    )
+    wire = scope.SerializeToString()
+    assert wire.startswith(_len_field(1, _varint_field(1, _PHONE_FIELD1)))
+    assert not DeviceUpdate_pb2.ExecuteActionScope.FromString(wire).HasField("device")
+    assert action.SerializeToString() == _len_field(4, _len_field(1, b"\x6b" * 16))
+    text = decoder.custom_message_formatter(scope, "", False)
+    assert str(_PHONE_FIELD1) not in text
+    field4 = DeviceUpdate_pb2.ExecuteActionType.DESCRIPTOR.fields_by_name[
+        "phoneActionField4"
+    ]
+    assert field4.message_type.name == "ExecuteActionPhoneLocate"

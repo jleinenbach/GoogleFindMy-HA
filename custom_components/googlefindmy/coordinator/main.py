@@ -56,6 +56,7 @@ This module must not log secrets and must keep user-facing strings out of code; 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
 import time
@@ -165,6 +166,7 @@ from ..const import (
     coerce_ignored_mapping,
 )
 from ..ha_typing import DataUpdateCoordinator, callback
+from ..NovaApi.ExecuteAction.LocatePhone.phone_status import PhoneStatus
 from ..ProtoDecoders import decoder
 
 _LOGGER = logging.getLogger(__name__)
@@ -750,6 +752,26 @@ class GoogleFindMyCoordinator(
             contributor_mode=self._contributor_mode,
             contributor_mode_switch_epoch=self._contributor_mode_switch_epoch,
         )
+        # Count each phone action the API sends in ``self.stats`` (test doubles
+        # of the API may lack the hook). The hook is synchronous by contract; an
+        # async attribute (an AsyncMock API) would only leave an unawaited
+        # coroutine behind, so it is not called.
+        bind_phone_observer = getattr(self.api, "set_phone_action_observer", None)
+        if callable(bind_phone_observer) and not inspect.iscoroutinefunction(
+            bind_phone_observer
+        ):
+            bind_phone_observer(self._count_phone_action)
+        # Battery level and Wi-Fi name of phones without a canonical ID:
+        # their own store, next to and never inside the location cache, so a
+        # push whose fix is older than the stored one still refreshes them. Not
+        # copied into any attribute; the phone sensors read it through
+        # ``get_phone_status``. Same synchronous-hook rule as above.
+        self._phone_status: dict[str, PhoneStatus] = {}
+        bind_phone_status = getattr(self.api, "set_phone_status_sink", None)
+        if callable(bind_phone_status) and not inspect.iscoroutinefunction(
+            bind_phone_status
+        ):
+            bind_phone_status(self._store_phone_status)
 
         # Configuration (user options; applied at setup/reload from the config entry)
         self.location_poll_interval = int(location_poll_interval)
@@ -925,6 +947,13 @@ class GoogleFindMyCoordinator(
             "invalid_ts_drop_benign": 0,  # regressed/out-of-order timestamps (expected sub-bucket of invalid_ts_drop_count)
             "fused_updates": 0,  # overlapping fixes fused to stabilize coordinates
             "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
+            # Phone actions sent to phones listed without a canonical ID, split
+            # by the send site (measurement channel): locate (4) from the
+            # poll cycle or a press, ring (1) and stop ring (5) only on a press.
+            "phone_action_4_auto": 0,
+            "phone_action_4_manual": 0,
+            "phone_action_1_manual": 0,
+            "phone_action_5_manual": 0,
             "speed_gate_rejects": 0,  # fixes rejected as physically implausible (#177)
             "round_trip_recoveries": 0,  # gated fixes recovered as legitimate returns (Q2-A)
             # Coarse fixes rejected because a better, reliable and still-fresh
@@ -2473,6 +2502,48 @@ class GoogleFindMyCoordinator(
                 list(self.stats.keys()),
             )
 
+    def _store_phone_status(self, phone_id: str, status: PhoneStatus) -> None:
+        """Keep the latest status of ``phone_id`` and let the sensors re-read it.
+
+        A newer push replaces the whole status: a push without a Wi-Fi name
+        means the phone is not on Wi-Fi, so the old name must not survive it.
+        Hops onto the Home Assistant loop when called from elsewhere. Logs the
+        row id only, never the Wi-Fi name.
+        """
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(self._store_phone_status, phone_id, status)
+            return
+        rows = self.data
+        if isinstance(rows, list) and not any(
+            isinstance(row, dict) and row.get("id") == phone_id for row in rows
+        ):
+            # Purged or no longer listed while its locate request was open.
+            _LOGGER.debug("Phone status for %s dropped: not listed", phone_id)
+            return
+        current = self._phone_status.get(phone_id)
+        if current is not None and current.observed_at > status.observed_at:
+            return
+        self._phone_status[phone_id] = status
+        _LOGGER.debug("Phone status updated for %s", phone_id)
+        self.async_update_listeners()
+
+    def get_phone_status(self, device_id: str) -> PhoneStatus | None:
+        """Return the latest battery level and Wi-Fi name of a phone, if known."""
+        store = getattr(self, "_phone_status", None)
+        if not isinstance(store, dict):
+            return None
+        return store.get(device_id)
+
+    def _count_phone_action(self, action: int, trigger: str) -> None:
+        """Count a phone action the API sent as ``phone_action_<n>_<trigger>``.
+
+        Only the two send sites are counted (``auto``, ``manual``); another label
+        has no counter and is dropped rather than logged as an unknown stat.
+        """
+        if trigger not in ("auto", "manual"):
+            return
+        self.increment_stat(f"phone_action_{int(action)}_{trigger}")
+
     def increment_stat(self, stat_name: str) -> None:
         """Increment a statistic counter (thread-safe).
 
@@ -2738,6 +2809,10 @@ class GoogleFindMyCoordinator(
             return
 
         self._device_location_data.pop(device_id, None)
+        # A phone's battery level and Wi-Fi name share the lifecycle of its row.
+        phone_status = getattr(self, "_phone_status", None)
+        if isinstance(phone_status, dict):
+            phone_status.pop(device_id, None)
         # Drop the last-good fallback too: otherwise get_display_location_data
         # keeps serving the purged device's last Plus Code/coordinates whenever
         # the current row is gone, leaking a deleted device's position until
