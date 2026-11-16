@@ -683,6 +683,15 @@ DEVICE_LIST_POLL_INTERVAL: int = 300
 DEFAULT_LOCATION_POLL_INTERVAL: int = 300  # seconds; start a new polling cycle
 DEFAULT_DEVICE_POLL_DELAY: int = 5  # seconds; inter-device delay within one cycle
 DEFAULT_MIN_POLL_INTERVAL: int = 60  # seconds; hard lower bound between cycles
+# Floor for automatic location requests to a phone listed without a canonical ID
+# (row `locate_route == "phone"`). Each request shows a notification on the
+# phone, so until per-device intervals are supported such a phone is asked at
+# most every
+# max(effective account interval, this floor). The manual "Locate now" button is
+# not bound by it; its request stamps the phone and so moves the next automatic
+# one. Trackers and every other device keep DEFAULT_MIN_POLL_INTERVAL and the
+# account interval unchanged.
+PHONE_MIN_AUTO_POLL_INTERVAL_S: int = 900
 
 # Manual locate policy (button/service)
 LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
@@ -1354,6 +1363,23 @@ def map_token_hex_digest(seed: str) -> str:
 # discovery watcher observes on top of the default ``Auth/secrets.json``.
 SECRETS_EXTRA_WATCH_PATHS: str = "secrets_extra_watch_paths"
 
+# Row id of an Android phone that Google lists without a canonical ID: the prefix
+# plus the first PHONE_ID_HEX_LEN hex characters of HMAC-SHA-256 over the phone's
+# Android ID, keyed per config entry (phone_identity.py). Device-id class (b) of
+# AGENTS.md section 5: it may be logged, the Android ID never. The prefix lets the
+# action paths refuse such an id before anything is sent as a canonical ID.
+PHONE_ID_PREFIX: str = "aphone-"
+PHONE_ID_HEX_LEN: int = 32
+# Token-cache name of the per-entry HMAC key (64 hex characters). Key material:
+# never logged, redacted in diagnostics.
+PHONE_ID_KEY_CACHE_NAME: str = "phone_id_hmac_key"
+
+# Resends after a 401 that a phone action (1, 4, 5) allows the transport:
+# one ADM refresh, 6 s propagation, one resend. The full tracker sequence would
+# resend up to about 9.5 min after the trigger and make a phone ring or report
+# its location long after the button press. Passed as `max_auth_resends`.
+PHONE_MAX_AUTH_RESENDS: int = 1
+
 
 __all__ = [
     "DOMAIN",
@@ -1411,6 +1437,7 @@ __all__ = [
     "DEFAULT_LOCATION_POLL_INTERVAL",
     "DEFAULT_DEVICE_POLL_DELAY",
     "DEFAULT_MIN_POLL_INTERVAL",
+    "PHONE_MIN_AUTO_POLL_INTERVAL_S",
     "LOCATE_COOLDOWN_S",
     "DEFAULT_ALLOW_HISTORY_FALLBACK",
     "DEFAULT_ENABLE_STATS_ENTITIES",
@@ -1482,4 +1509,8 @@ __all__ = [
     "map_token_secret_seed",
     "map_token_hex_digest",
     "SECRETS_EXTRA_WATCH_PATHS",
+    "PHONE_ID_PREFIX",
+    "PHONE_ID_HEX_LEN",
+    "PHONE_ID_KEY_CACHE_NAME",
+    "PHONE_MAX_AUTH_RESENDS",
 ]

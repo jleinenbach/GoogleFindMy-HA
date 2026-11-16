@@ -386,8 +386,10 @@ sessions flowing into Home Assistant's reauthentication UI instead of being swal
 
 Classify an auth rejection by the HTTP **status**, never by the exception type. `NovaAuthError` is raised for every
 non-retryable 4xx (`nova_request.py` raises it for 400, 404, 405, 409, 422 as well; `HTTP_RETRY_ELIGIBLE` holds no 4xx
-besides 408 and 429), so a type check reads "device not found" as "your sign-in expired". A 401 that survived the refresh
-sequence arrives flagged `is_permanent=True`, which leaves 403 as the only plain credential rejection a handler sees.
+besides 408 and 429), so a type check reads "device not found" as "your sign-in expired". A 401 that survived the full refresh
+sequence arrives flagged `is_permanent=True`. The phone path caps the resends (`max_auth_resends=PHONE_MAX_AUTH_RESENDS`)
+and its 401 arrives WITHOUT the flag, because the cap ended the attempt, not a refresh shown to fail; so a handler sees
+two plain credential rejections, 403 and the capped 401, and must read both by status, never by `is_permanent` alone.
 `nova_request.is_credential_rejection` is the shared predicate: permanent first, then 401/403, an unreadable status keeps
 the conservative verdict, everything else is a server-side rejection. `api._classify_nova_auth_error` is its sound-path
 adapter and must not re-derive the status test -- a second copy is how the handlers drifted apart in the first place.
@@ -669,12 +671,15 @@ that keeps a rejection out of it.
 What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nova_request.py` still raises a type named
 "auth" for all of them, so a new handler that reads the type repeats the defect, and this paragraph is the only thing
 standing in its way. Giving the non-credential case its own exception class is the open follow-up; it needs an
-exhaustiveness test over `NovaError.__subclasses__()` first. Measured over the AST: ten `try` blocks catch
+exhaustiveness test over `NovaError.__subclasses__()` first. Measured over the AST: eleven `try` blocks catch
 `NovaAuthError`. Eight carry a broad `except Exception` in the same block and would swallow a new class under a name that
 hides the status; the two sound-request handlers catch it in a tuple with no broad handler, so a new class would
-propagate uncaught there instead. Two opposite failure modes in one change. Narrowing a handler is a behaviour change that needs its own regression test, not a
+propagate uncaught there. The phone locate sender (`NovaApi/ExecuteAction/LocatePhone/phone_locate.py`) re-raises it
+ahead of a narrow `except NovaError`, which would map a new sibling class to the stage `phone_request_failed` and drop
+its status (pinned by `tests/test_phone_locate_flow.py::test_acceptance_contract_maps_each_failure_to_its_own_stage`):
+the first failure mode without a broad handler. Two opposite failure modes in one change. Narrowing a handler is a behaviour change that needs its own regression test, not a
 drive-by edit; do not assume a green suite proves the rest of the tree already follows this rule.
-Every count in the two paragraphs above (six call sites in four files, ten `try` blocks, eight of them with a broad
+Every count in the two paragraphs above (six call sites in four files, eleven `try` blocks, eight of them with a broad
 handler) is enforced by `tests/test_nova_request.py::TestTheDocumentedExtentStaysTrue`, which derives them from the AST
 rather than from grep, following the rule `tests/AGENTS.md` states for shared tuples. Prose that carries a number and
 calls itself "the only thing standing in its way" must not be the only copy of that number: change the extent and this
@@ -709,6 +714,59 @@ locate) to `stamp_on_dispatch`, so the per-tracker request counters see every PO
 switched-off tracker without sending; the manual locate does NOT check the switch, because the switch stops only
 automatic requests. A new send site therefore needs the switch check (if it is automatic), both arguments, and an
 update of that test; one that skips them bypasses the switch or drops out of the counters.
+
+### Phones without a canonical ID (phone actions 1, 4, 5)
+
+Google lists some phones without a canonical ID; the integration addresses them by their Android ID (row id
+`aphone-…`, `phone_identity.py`). For these phones the code sends only the phone actions 1 (ring), 4 (locate) and
+5 (stop ring), in the form seen on one phone (1 and 4 measured, 5 observed). Every other number, including 2, 6, 7, 13, 14 and 30, 31, 32, is
+never sent to a phone, not even as a probe; tests may build such payloads only offline against a replaced transport.
+Two checks hold this at run time, the builder (`LocatePhone/phone_action_request.py`, which accepts 1, 4 and 5) and,
+authoritative, the payload lock in `async_nova_request` (`LocatePhone/phone_payload_guard.py`, which reads the bytes and
+passes exactly one of the three in its fixed form). `tests/test_guard_phone_action_numbers.py` is a tripwire on names in
+code, not a third lock: it cannot read an action built as a number or as bytes (`fields_by_number`, `MergeFromString`),
+names these blind spots in its docstring and pins them by test, together with the lock refusing what they produce. Keep
+these rules:
+
+- The phone path lives in `api.py`: locate in `_async_get_phone_location`, ring and stop as branches of
+  `async_play_sound` and `async_stop_sound`. It is not a third send site in `polling.py` or `locate.py`; the poll cycle
+  and the manual locate still reach it only through `async_get_device_location`.
+- Before any of the three actions is built, `_async_prepare_phone_request` checks the target, the entry, the receiver
+  and the readiness gate of the entry's push channel (`async_ensure_phone_channel`, see `Auth/AGENTS.md`). A refusal
+  sends nothing: locate raises `LocationRequestNotAcceptedError` with its stage, ring and stop return `NOT_SENT`.
+- No retries for 408, 429, 5xx or network failures (`max_retries=0`), and a bounded 401 sequence
+  (`max_auth_resends=PHONE_MAX_AUTH_RESENDS`, which is 1): one token refresh, 6 s, one resend. A further 401 ends as a
+  transient `NovaAuthError` (not `is_permanent`). The transport does not wait longer than 9 s for a refresh that
+  another request runs, neither before the first send nor after a 401. A request refused with 401 never reached the
+  phone; the bound exists so that a phone never rings or reports its location minutes after the trigger, as the full
+  tracker sequence (up to about 9.5 min) would allow. Never pass the phone actions without both arguments. The sound
+  outcomes go through the same classification as the tracker ring.
+- Automatic locate requests to such a phone are spaced by at least `max(account interval, PHONE_MIN_AUTO_POLL_INTERVAL_S)`
+  (900 s, `const.py`), measured from the POST stamp in `_locate_requested_mono` (`coordinator/polling.py`), because every
+  request may show a notification on the phone. A manual "Locate now" is not held back and writes the same stamp. The
+  stamp lives in memory, so a phone is due once after each restart or reload.
+- Capabilities come from the row, never from optimism: `can_ring` (action 1) and `can_stop_ring` (action 5) from
+  `supportedActions`. `can_play_sound` and `can_stop_sound` return `False` for a phone row without them.
+- The stop is device-scoped: action 5 carries a fresh request UUID and no cancel key, an accepted stop is
+  `CANCELLED`, `classify_stop_correlation` returns `None` for a phone, and the ring-start hold does not apply.
+- Each action handed to the transport writes one DEBUG line `Phone action=<n> trigger=<auto|manual> entry=<entry_id>` and counts in
+  `phone_action_<n>_<trigger>`. Logs carry the entry id, the row id, the action number or a stage, never the Android ID,
+  a token, a key or a payload.
+- Battery level (field 32.1) and Wi-Fi name (field 30.1) of the push that answers action 4 are read only in
+  `LocatePhone/phone_status.py`, through `PhoneRequestRegistry.read_status` (the same Android ID check as the
+  decryption). `locate_phone` hands them to the status sink (`set_phone_status_sink`, bound by the coordinator)
+  before it decrypts the location, so a push without a usable location still updates them. They live in the
+  coordinator's `_phone_status` store, read through `get_phone_status`; never put them into the location row (the
+  cache drops a row with an older fix) or into an attribute. A newer push replaces the whole status: no Wi-Fi name
+  means the phone is not on Wi-Fi. A battery level outside 0 to 100 is dropped; proto3 does not carry a level of 0.
+- The Wi-Fi name is personal data. It is the state of `GoogleFindMyPhoneWifiSensor` and nothing else: never logged,
+  never an attribute, not restored after a restart, redacted in diagnostics (`phone_wifi_ssid`, `wifi_ssid`, `ssid`).
+  The SIM record (field 31) is not read at all. Like any text sensor, its state goes to the recorder and the
+  logbook; Home Assistant has no per-entity switch against that. This is accepted (the Companion app records the same
+  name); users who do not want it in their history exclude the entity in `recorder:`. Say so in user-facing docs.
+
+Regression tests: `tests/test_phone_ring_paths.py`, `tests/test_phone_locate_flow.py`,
+`tests/test_phone_action_builder.py`, `tests/test_phone_status_sensors.py`, `tests/test_phone_diagnostics_redaction.py`.
 
 ### Map View reminders
 

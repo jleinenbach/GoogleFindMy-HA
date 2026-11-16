@@ -54,6 +54,12 @@
       "ble_battery": {
         "default": "mdi:battery"
       },
+      "phone_battery": {
+        "default": "mdi:battery"
+      },
+      "phone_wifi_ssid": {
+        "default": "mdi:wifi"
+      },
       "last_seen": {
         "default": "mdi:clock-outline"
       },

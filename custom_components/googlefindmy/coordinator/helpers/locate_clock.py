@@ -110,7 +110,10 @@ def stamp_on_dispatch(
                 per_device[kind] = per_device.get(kind, 0) + 1
 
     try:
-        with observe_request_dispatch(_stamp):
+        # The kind also labels the context for the request layer
+        # (``nova_request.current_dispatch_kind``): the phone locate path reads
+        # it for its measurement line and its per-trigger counters.
+        with observe_request_dispatch(_stamp, kind=kind):
             yield
     finally:
         is_open = False

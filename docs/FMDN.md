@@ -352,6 +352,11 @@ Fields seen on the wire that Spot does not name are declared under neutral names
 | `DeviceMetadata.PhoneInformation.phoneInformationField20` (20) | varint | numbers (value not logged) | phone record, n=1 phone | 2026-11-12 |
 | `DeviceMetadata.PhoneInformation.phoneInformationField21` (21) | varint | numbers (value not logged) | phone record, n=1 phone | 2026-11-12 |
 | `DeviceMetadata.PhoneInformation.phoneInformationField23` (23) | length-delimited | text, 32 hex characters, stability not measured (value not logged) | phone record, n=1 phone | 2026-11-12 |
+| `DeviceMetadata.PhoneInformation.phoneInformationField36` (36) | length-delimited | the phone's location, encrypted with the key of the request, form `PhoneLocationEnvelope` (value not logged); see S8.6 | only in the push answering phone action 4, n=1 phone | 2026-11-14 |
+| `PhoneLocationEnvelope.phoneLocationEnvelopeField3` (3) | varint | 1 | n=1 phone, 7 pushes | 2026-11-14 |
+| `PhoneWifiInformation.phoneWifiInformationField2` (2) | varint | small numbers (value not logged) | n=1 phone | 2026-11-14 |
+| `PhoneSimInformation.phoneSimInformationField2` (2) | varint | small numbers (value not logged); absent on 2026-11-14 | n=1 phone | 2026-11-15 |
+| `ExecuteActionPhoneLocate.phoneLocateField1` (1) | length-delimited | 16 random bytes, new for each request; the AES-128-CBC key of the answer (value not logged) | sent with phone action 4, n=1 phone | 2026-11-14 |
 
 ### S8.6 Phone and tracker records in the device list (measured 2026-11-12)
 
@@ -372,6 +377,16 @@ Measured on one account with one phone and several trackers, and on a second acc
 | `DeviceMetadata` (11) | `metadataField11` | 19-digit decimal equal to `phoneInformationField1` | n=1 phone, 2026-11-12 | hidden, meaning unknown |
 | `DeviceMetadata` (12) | `fetchTime` | equal to the request time | n=1 phone, 2026-11-12 | no |
 | `DeviceMetadata` (13) | `metadataField13` | 32 hex characters, unchanged over one off/on cycle | n=1 phone, 2026-11-12 | hidden, meaning unknown |
+
+**Answer to a locate request** (phone action 4, one phone, one push on 2026-11-14 and six on 2026-11-15). A phone without a canonical ID is reached through `ExecuteActionScope.phone` (field 1, `phoneInformationField1` set) with type `ANDROID_DEVICE`; action 4 carries 16 random bytes (`ExecuteActionPhoneLocate.phoneLocateField1`). The phone answers with a push to the requesting client whose phone record carries these fields:
+
+| Field (number) | Declared name | Observation | n, date | Personal data |
+|---|---|---|---|---|
+| `DeviceMetadata.PhoneInformation` (30) | `wifiInformation`, form `PhoneWifiInformation` | field 1 (`ssid`) equals the name of the Wi-Fi network the phone is connected to, in double quotes; field 2 small numbers, meaning unknown; shown as the phone's Wi-Fi network sensor, without the quotes | n=1 phone, 7 pushes, 2026-11-14/15 | yes |
+| `DeviceMetadata.PhoneInformation` (31) | `simInformation`, form `PhoneSimInformation` | field 1 (`simDisplayName`) equals the user-defined name of SIM 1; several SIMs not measured; not read by the integration | n=1 phone, 3 pushes, 2026-11-15 | yes |
+| `DeviceMetadata.PhoneInformation` (32) | `batteryInformation`, form `PhoneBatteryInformation` | field 1 (`batteryLevel`) equals the battery level in percent shown by the phone (5 of 5 pushes with a reference value, three distinct values); shown as the phone's battery sensor; a level of 0 is not on the wire (proto3 default) | n=1 phone, 2026-11-15 | no |
+| `DeviceMetadata.PhoneInformation` (36) | `phoneInformationField36`, form `PhoneLocationEnvelope` | `{2: {1: ciphertext, 32 bytes; 2: IV, 16 bytes}, 3: 1, 4: Time}`; AES-128-CBC with the key of the request, PKCS7 padding; the time is the location fix, 16 s to 146 s before the push | n=1 phone, 7 pushes, 2026-11-14/15 | yes |
+| `PhoneLocationPlaintext` (1, 2) | `position` (`latitude`, `longitude` as `double`), `accuracyMeters` (`float`) | 25 bytes; `accuracyMeters` equal to the accuracy the phone reported for the same fix (2 fixes) | n=1 phone, 2026-11-14/15 | yes (position) |
 
 **Tracker entries:**
 

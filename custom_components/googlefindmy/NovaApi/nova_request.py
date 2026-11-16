@@ -81,6 +81,8 @@ from ..const import (
     NOVA_API_USER_AGENT,
     NOVA_REQUEST_TOTAL_TIMEOUT_S,
 )
+from .ExecuteAction.LocatePhone.phone_payload_guard import check_phone_action_payload
+from .scopes import NOVA_ACTION_API_SCOPE
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -195,6 +197,12 @@ RECENT_REFRESH_WINDOW_S = 2.0
 # deadline is perpetually in the future (e.g., corrupt cache state or clock
 # skew).
 MAX_AUTH_DEADLINE_WAITS = 8
+
+# Longest wait a request with a bounded 401 sequence (``max_auth_resends`` set,
+# the phone actions) accepts for a token refresh that another request is
+# running: the 6 s propagation delay plus 3 s. Longer waits are not taken, so a
+# phone never rings or reports its location long after the trigger.
+_PHONE_PRE_REQUEST_WAIT_MAX_S = 9.0
 
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
 
@@ -410,9 +418,13 @@ def is_credential_rejection(err: NovaAuthError) -> bool:
     non-retryable 4xx (see the raise below the HTTP_RETRY_ELIGIBLE branch,
     whose own comment names "403 Forbidden, 404 Not Found"), and
     HTTP_RETRY_ELIGIBLE holds no 4xx besides 408 and 429, so 400, 404, 405,
-    409 and 422 all arrive as "auth". A 401 that survived the refresh
-    sequence is raised separately with is_permanent=True, which leaves 403
-    as the only plain credential rejection a handler sees.
+    409 and 422 all arrive as "auth". A 401 that survived the full refresh
+    sequence is raised separately with is_permanent=True. A caller that caps
+    the resends (``max_auth_resends``, the phone path) gets its 401 WITHOUT
+    the flag: the cap ended the attempt, not a refresh that was shown to
+    fail. So a handler sees two plain credential rejections, 403 and the
+    capped 401, and this predicate reads both as credential rejections by
+    their status.
 
     Reading the type alone therefore tells a user with a deleted device to
     check their sign-in. Every handler in this integration branches on THIS
@@ -610,16 +622,37 @@ def resolve_cache_from_provider() -> TokenCache | None:
 _REQUEST_DISPATCH_OBSERVER: contextvars.ContextVar[Callable[[], None] | None] = (
     contextvars.ContextVar("_request_dispatch_observer", default=None)
 )
+# The send site's label for the request (``"auto"`` for the poll cycle,
+# ``"manual"`` for a manual locate), set together with the observer. The phone
+# locate path reads it for its measurement line and its counters, because the
+# request layer has no other way to learn which send site asked.
+_REQUEST_DISPATCH_KIND: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_request_dispatch_kind", default=None
+)
 
 
 @contextmanager
-def observe_request_dispatch(callback: Callable[[], None]) -> Iterator[None]:
-    """Call ``callback`` each time a request awaited inside is about to be POSTed."""
+def observe_request_dispatch(
+    callback: Callable[[], None], *, kind: str | None = None
+) -> Iterator[None]:
+    """Call ``callback`` each time a request awaited inside is about to be POSTed.
+
+    ``kind`` labels the send site for :func:`current_dispatch_kind`; ``None``
+    leaves the label of the enclosing context in place.
+    """
     token = _REQUEST_DISPATCH_OBSERVER.set(callback)
+    kind_token = _REQUEST_DISPATCH_KIND.set(kind) if kind is not None else None
     try:
         yield
     finally:
+        if kind_token is not None:
+            _REQUEST_DISPATCH_KIND.reset(kind_token)
         _REQUEST_DISPATCH_OBSERVER.reset(token)
+
+
+def current_dispatch_kind() -> str | None:
+    """Return the send-site label of this context (``"auto"``, ``"manual"`` or ``None``)."""
+    return _REQUEST_DISPATCH_KIND.get()
 
 
 def _notify_request_dispatch() -> None:
@@ -1369,6 +1402,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     namespace: str | None = None,
     # Entry-scoped TokenCache for strict multi-account separation
     cache: TokenCache | None = None,
+    # Retries after the first attempt for retry-eligible HTTP statuses and
+    # network failures; the 401 refresh sequence is not affected.
+    max_retries: int = NOVA_MAX_RETRIES,
+    # Resends after a 401 (own refresh or a wait for a refresh running in
+    # another request). None keeps the full sequence of up to three resends.
+    max_auth_resends: int | None = None,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant (entry-scoped capable).
@@ -1397,12 +1436,30 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             (e.g. via `async_get_adm_token_isolated(...)`).
         namespace: Optional key namespace (e.g., config entry_id) to avoid cache collisions.
         cache: Optional entry-scoped TokenCache for strict multi-account separation.
+        max_retries: How often a retry-eligible HTTP status (408, 429, 5xx of
+            ``HTTP_RETRY_ELIGIBLE``) or a network failure is retried after the
+            first attempt. Default ``NOVA_MAX_RETRIES``; the phone locate path
+            passes ``0`` (one attempt, no repeat). Negative values raise.
+        max_auth_resends: How often the same request may be resent after a
+            401, counting the own refresh steps and every wait for a refresh
+            that another request is running. ``None`` (default) keeps the full
+            sequence (ADM refresh 6 s, 61 s + 6 s, 501 s). The phone paths pass
+            ``1``: one ADM refresh, 6 s, one resend; a further 401, or a
+            wait for another request's refresh that would last longer than the
+            propagation delay plus 3 s, raises ``NovaAuthError`` without
+            ``is_permanent``. A late resend could make a phone ring or report
+            its location minutes after the trigger. Negative values raise.
 
     Returns:
         Hex-encoded response body.
 
     Raises:
-        ValueError: if the hex_payload is invalid or username is unavailable.
+        ValueError: if the hex_payload is invalid, username is unavailable or
+            ``max_retries`` or ``max_auth_resends`` is negative.
+        PhoneActionNotAllowedError: the payload of the action scope addresses a
+            phone (scope field 1) with anything but exactly one of the actions
+            1, 4 or 5 in the builder's form; nothing is sent then
+            (``ExecuteAction/LocatePhone/phone_payload_guard.py``).
         NovaAuthError: on non-retryable 4xx client errors; use
             is_credential_rejection to tell a credential rejection from a
             rejected request.
@@ -1410,6 +1467,23 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         NovaHTTPError: on 5xx server errors after all retries.
         NovaError: on other unrecoverable errors like network issues after retries.
     """
+    if (
+        isinstance(max_retries, bool)
+        or not isinstance(max_retries, int)
+        or max_retries < 0
+    ):
+        raise ValueError("max_retries must be a non-negative integer")
+    if max_auth_resends is not None and (
+        isinstance(max_auth_resends, bool)
+        or not isinstance(max_auth_resends, int)
+        or max_auth_resends < 0
+    ):
+        raise ValueError("max_auth_resends must be None or a non-negative integer")
+    # Lock on the send path (run-time byte check): a payload that addresses a
+    # phone leaves this function only with one of the three allowed actions.
+    if api_scope == NOVA_ACTION_API_SCOPE:
+        check_phone_action_payload(hex_payload)
+
     url = f"https://android.googleapis.com/nova/{api_scope}"
 
     ns_raw = (namespace or "").strip()
@@ -1502,8 +1576,23 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         try:
             deadline = float(deadline_raw)
             now = time.time()
-            if now < deadline:
-                wait_time = min(deadline - now + 1.0, 120.0)
+            wait_time = min(deadline - now + 1.0, 120.0)
+            if now >= deadline:
+                pass  # The refresh window is over; send normally.
+            elif (
+                max_auth_resends is not None
+                and wait_time > _PHONE_PRE_REQUEST_WAIT_MAX_S
+            ):
+                # Bounded sequence: a phone action is not held back for
+                # a refresh running elsewhere. It goes out now with the token at
+                # hand; a 401 then ends in the bounded 401 branch below.
+                _LOGGER.info(
+                    "Nova API: auth refresh in progress (%.1fs left); %s is sent "
+                    "without waiting.",
+                    wait_time,
+                    api_scope,
+                )
+            else:
                 _LOGGER.info(
                     "Nova API: auth refresh in progress. Waiting %.1fs before request to %s.",
                     wait_time,
@@ -1551,6 +1640,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         retries_used = 0
         auth_retries_used = 0  # Counter for 401 retries after token refresh
         deadline_waits = 0  # Circuit breaker for 401 deadline-wait loops
+        auth_resends = 0  # Resends after a 401, own steps and waits
         # Sticky dispatch latch over the whole retry sequence. Dispatch is a
         # property of the *sequence*, not of the final attempt: once *any*
         # attempt reaches the wire, a side effect (a device ring) may already
@@ -1632,6 +1722,25 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         _AUTH_STEP_AAS_ADM_REFRESH = 1
                         _AUTH_STEP_LONG_COOLDOWN = 2
 
+                        # --- Bounded sequence (phone actions) ---
+                        # The request did not reach the device (401), so a stop
+                        # here costs nothing but the action itself; the caller
+                        # reports it as a transient auth failure.
+                        if (
+                            max_auth_resends is not None
+                            and auth_resends >= max_auth_resends
+                        ):
+                            _LOGGER.warning(
+                                "Nova API: 401 Unauthorized after %d allowed resend(s) "
+                                "for %s; not resending again.",
+                                max_auth_resends,
+                                api_scope,
+                            )
+                            raise NovaAuthError(
+                                status,
+                                "Unauthorized after the allowed token refresh; not resent",
+                            )
+
                         # --- Race condition guard ---
                         # Check if another request is already handling auth refresh.
                         # If so, wait for it to complete instead of starting parallel refreshes.
@@ -1658,6 +1767,21 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                     else:
                                         # Another request is handling refresh - wait and retry
                                         wait_time = min(deadline - now + 1.0, 30.0)
+                                        if (
+                                            max_auth_resends is not None
+                                            and wait_time
+                                            > _PHONE_PRE_REQUEST_WAIT_MAX_S
+                                        ):
+                                            _LOGGER.warning(
+                                                "Nova API: auth refresh by another request "
+                                                "needs %.1fs; %s is not held back that long.",
+                                                wait_time,
+                                                api_scope,
+                                            )
+                                            raise NovaAuthError(
+                                                status,
+                                                "Unauthorized; token refresh still running elsewhere",
+                                            )
                                         _LOGGER.info(
                                             "Nova API: auth refresh in progress by another request. "
                                             "Waiting %.1fs before retry (%d/%d).",
@@ -1667,6 +1791,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                         )
                                         await asyncio.sleep(wait_time)
                                         deadline_waits += 1
+                                        auth_resends += 1
                                         # Reload token from cache (may have been refreshed)
                                         token_key = f"adm_token_{user}"
                                         if ns_prefix:
@@ -1705,6 +1830,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             await asyncio.sleep(_PROPAGATION_DELAY_S)
                             await _cache_set(ns_deadline_key, None)  # Clear deadline
                             auth_retries_used += 1
+                            auth_resends += 1
                             continue
 
                         if auth_retries_used == _AUTH_STEP_AAS_ADM_REFRESH:
@@ -1744,6 +1870,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             await asyncio.sleep(_PROPAGATION_DELAY_S)
                             await _cache_set(ns_deadline_key, None)  # Clear deadline
                             auth_retries_used += 1
+                            auth_resends += 1
                             continue
 
                         if auth_retries_used == _AUTH_STEP_LONG_COOLDOWN:
@@ -1760,6 +1887,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             await asyncio.sleep(_LONG_COOLDOWN_S)
                             await _cache_set(ns_deadline_key, None)  # Clear deadline
                             auth_retries_used += 1
+                            auth_resends += 1
                             continue
 
                         # Step 4: Fourth 401 - all retries exhausted
@@ -1774,7 +1902,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         )
 
                     if status in HTTP_RETRY_ELIGIBLE:
-                        if retries_used < NOVA_MAX_RETRIES:
+                        if retries_used < max_retries:
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
                             )
@@ -1785,7 +1913,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 "Nova API request failed (Attempt %d/%d): HTTP %d for %s. "
                                 "Server response: %s. Retrying in %.2f seconds...",
                                 retries_used + 1,
-                                NOVA_MAX_RETRIES + 1,
+                                max_retries + 1,
                                 status,
                                 api_scope,
                                 text_snippet,
@@ -1805,12 +1933,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             )
                             if status == HTTP_TOO_MANY_REQUESTS:
                                 raise NovaRateLimitError(
-                                    f"Nova API rate limited after {NOVA_MAX_RETRIES + 1} attempts. "
+                                    f"Nova API rate limited after {max_retries + 1} attempts. "
                                     f"Server response: {text_snippet}"
                                 )
                             raise NovaHTTPError(
                                 status,
-                                f"Nova API failed after {NOVA_MAX_RETRIES + 1} attempts. "
+                                f"Nova API failed after {max_retries + 1} attempts. "
                                 f"Server response: {text_snippet}",
                             )
 
@@ -1823,13 +1951,16 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     # Consumers MUST call is_credential_rejection instead of
                     # reading the type. Splitting a separate exception class off
                     # here would let the typing carry the truth, but it is a
-                    # behaviour change of its own. Measured over the AST: ten
+                    # behaviour change of its own. Measured over the AST: eleven
                     # try blocks catch this class. Eight carry a broad
                     # `except Exception` in the same block and would swallow a
                     # new class under a name that hides the status; the two
-                    # sound-request handlers catch it in a tuple with no broad
-                    # handler at all, so there a new class would propagate
-                    # uncaught instead. Two opposite failure modes, which is why
+                    # sound-request handlers catch it with no broad handler at
+                    # all, so there a new class would propagate uncaught
+                    # instead. The phone locate sender's narrow
+                    # `except NovaError` would map it to `phone_request_failed`
+                    # and drop the status. Two opposite failure modes, which is
+                    # why
                     # the follow-up needs an exhaustiveness test over
                     # NovaError.__subclasses__() before it is attempted.
                     if status >= HTTP_INTERNAL_SERVER_ERROR:
@@ -1845,7 +1976,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                 # key has to survive. The latch only ever flips False -> True.
                 if _network_failure_reached_wire(e):
                     reached_wire = True
-                if retries_used < NOVA_MAX_RETRIES:
+                if retries_used < max_retries:
                     delay = _compute_delay(attempt, None)
                     # Tiered severity, mirroring the HTTP-status retry path above:
                     # a single transient network blip (attempt 1) is INFO, not log
@@ -1855,7 +1986,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     log_fn(
                         "Nova API request failed (Attempt %d/%d): %s for %s. Retrying in %.2f seconds...",
                         retries_used + 1,
-                        NOVA_MAX_RETRIES + 1,
+                        max_retries + 1,
                         type(e).__name__,
                         api_scope,
                         delay,

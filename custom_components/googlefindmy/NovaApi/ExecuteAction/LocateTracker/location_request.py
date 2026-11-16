@@ -117,9 +117,12 @@ class LocationRequestNotAcceptedError(Exception):
     a flag set AT the line. That flag is ``request_accepted``; the outer handler
     reads it to decide whether the failure it caught fell before or after the
     accept point.
-    ``stage`` is a flow-position marker from the closed set
-    ``LOCATION_REQUEST_NOT_ACCEPTED_STAGES``; growing it into a cause taxonomy
-    would break the classifier discipline this layer is held to.
+    ``stage`` is a flow-position marker from one of two closed sets:
+    ``LOCATION_REQUEST_NOT_ACCEPTED_STAGES`` for the tracker path, and
+    ``PHONE_LOCATE_NOT_ACCEPTED_STAGES`` (``LocatePhone/phone_locate.py``) for
+    phones without a canonical ID, raised from that module and from ``api.py``.
+    Growing either into a cause taxonomy would break the classifier discipline
+    this layer is held to.
 
     Base class is ``Exception`` deliberately, mirroring
     ``OwnerKeyLookupTransientError``, and explicitly NOT:
@@ -136,15 +139,18 @@ class LocationRequestNotAcceptedError(Exception):
       blocks route into the account-wide reauth verdict, but the credentials are
       presumed valid here -- a request that was not accepted says nothing about
       them.
-    * NOT ``NovaError``/``NovaAuthError``: ten ``try`` blocks name
+    * NOT ``NovaError``/``NovaAuthError``: eleven ``try`` blocks name
       ``NovaAuthError`` in a handler (the count ``TestTheDocumentedExtentStaysTrue``
       derives from the AST, and it is that name it counts, not the base
       ``NovaError``, of which there are more). Eight carry a broad
       ``except Exception`` in the same block that would swallow the signal; the
-      two sound-REQUEST handlers catch a fixed tuple with no broad fallback,
-      where it would instead propagate uncaught. Two opposite failure modes in
-      one inheritance choice (AGENTS.md, the two-opposite-failure-modes
-      paragraph).
+      two sound-REQUEST handlers catch a fixed tuple with no broad fallback, so
+      there it would propagate uncaught; the phone locate sender
+      (``LocatePhone/phone_locate.py``) re-raises it ahead of a narrow
+      ``except NovaError``, which would turn a new sibling class into the stage
+      ``phone_request_failed`` without its status. Two opposite failure modes in
+      one inheritance choice
+      (AGENTS.md, the two-opposite-failure-modes paragraph).
     * NOT ``HomeAssistantError``: ``exceptions.py`` reserves that base for
       conditions that already ARE a finished user-facing message. Measured,
       ``coordinator/locate.py`` carries no ``except HomeAssistantError`` at all;

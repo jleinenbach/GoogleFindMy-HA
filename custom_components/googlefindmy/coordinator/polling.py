@@ -52,6 +52,7 @@ from ..Auth.log_safety import describe_exception
 from ..const import (
     DEVICE_LIST_POLL_INTERVAL,
     DOMAIN,
+    PHONE_MIN_AUTO_POLL_INTERVAL_S,
     POLL_DEVICE_OUTER_TIMEOUT_S,
 )
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
@@ -1512,6 +1513,12 @@ class PollingOperations(_MixinBase):
                     can_ring = bool(dev.get("can_ring"))
                     slot = self._device_caps.setdefault(dev_id, {})
                     slot["can_ring"] = can_ring
+                # Phones listed without a canonical ID also carry whether they
+                # accept the stop-ring action 5 (decoder, from supportedActions).
+                if "can_stop_ring" in dev:
+                    self._device_caps.setdefault(dev_id, {})["can_stop_ring"] = bool(
+                        dev.get("can_stop_ring")
+                    )
 
                 # Google's product image (``get_device_image_url``). Only an
                 # allowed address is stored, and a list without one keeps the
@@ -1859,6 +1866,44 @@ class PollingOperations(_MixinBase):
             _LOGGER.debug("Failed to start reauth flow from poll cycle: %s", reauth_err)
 
     # ---------------------------- Polling Cycle -----------------------------
+    def _phone_auto_poll_wait_s(self, dev: Mapping[str, Any]) -> float | None:
+        """Seconds a phone row still has to wait for its next automatic request.
+
+        Applies only to rows of a phone listed without a canonical ID
+        (``locate_route == "phone"``); every other row returns ``None`` and
+        follows the cycle unchanged. Such a phone is asked at most every
+        ``max(max(location_poll_interval, min_poll_interval),
+        PHONE_MIN_AUTO_POLL_INTERVAL_S)`` seconds, measured from the POST stamp
+        in ``_locate_requested_mono``. A manual "Locate now" writes the same
+        stamp and therefore moves the next automatic request too. Without a
+        stamp (first cycle after a restart, the stamp lives in memory only) the
+        phone is due; one request per restart is accepted.
+
+        The baseline of the cycle (``_last_poll_mono``) is set at the END of a
+        cycle, so the stamp of the previous request is always at least one
+        account interval old when the next cycle starts: an account interval at
+        or above the floor is never stretched by this check.
+
+        Returns:
+            ``None`` when the row is due (or not a phone row), else the seconds
+            left until it is.
+        """
+        if dev.get("locate_route") != "phone":
+            return None
+        stamps = getattr(self, "_locate_requested_mono", None)
+        if not isinstance(stamps, Mapping):
+            return None
+        last = stamps.get(dev.get("id"))
+        if not isinstance(last, (int, float)):
+            return None
+        interval = max(
+            int(self.location_poll_interval),
+            int(self.min_poll_interval),
+            PHONE_MIN_AUTO_POLL_INTERVAL_S,
+        )
+        remaining = float(interval) - (time.monotonic() - float(last))
+        return remaining if remaining > 0 else None
+
     async def _async_start_poll_cycle(
         self,
         devices: list[dict[str, Any]],
@@ -2053,6 +2098,22 @@ class PollingOperations(_MixinBase):
                             dev_name,
                             idx + 1,
                             len(devices),
+                        )
+                        cycle_skipped_devices += 1
+                        continue
+                    # Phones without a canonical ID have their own floor.
+                    # The id is class (b) and may be logged; the name stays out
+                    # of this line like in the AUTOMATIC_POLLING_CHANGE line.
+                    phone_wait_s = self._phone_auto_poll_wait_s(dev)
+                    if phone_wait_s is not None:
+                        _LOGGER.debug(
+                            "Sequential poll: skipping phone %s (%d/%d), next "
+                            "automatic request in %.0fs (floor %ds)",
+                            dev_id,
+                            idx + 1,
+                            len(devices),
+                            phone_wait_s,
+                            PHONE_MIN_AUTO_POLL_INTERVAL_S,
                         )
                         cycle_skipped_devices += 1
                         continue

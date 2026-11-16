@@ -3153,7 +3153,7 @@ class TestTheDocumentedExtentStaysTrue:
 
     `custom_components/googlefindmy/AGENTS.md` states the extent of the
     status-based classification in prose ("six call sites in four files",
-    "ten try blocks catch NovaAuthError", "eight carry a broad except
+    "eleven try blocks catch NovaAuthError", "eight carry a broad except
     Exception"). That paragraph calls itself "the only thing standing in
     [the defect's] way", which makes an unenforced number the load-bearing
     part of the contract: a seventh handler, or a refactor that drops one,
@@ -3230,15 +3230,18 @@ class TestTheDocumentedExtentStaysTrue:
         assert len(per_file) == 4, per_file
         assert per_file.get("api.py") == 3, per_file
 
-    def test_ten_try_blocks_catch_the_auth_error_and_eight_have_a_broad_handler(
+    def test_eleven_try_blocks_catch_the_auth_error_and_eight_have_a_broad_handler(
         self,
     ) -> None:
         """The count that gates the open follow-up (a dedicated client-error class).
 
         Splitting NovaAuthError is only safe once every catcher is known: the
         eight blocks with a broad `except Exception` would swallow a new class
-        silently, the two sound handlers would let it escape. Both numbers are
-        the reason that follow-up is not a one-liner, so both are pinned.
+        silently; of the three narrow ones the two sound handlers would let it
+        escape, and the phone locate sender in `LocatePhone/phone_locate.py`
+        would map it to `phone_request_failed` and drop its status.
+        Both numbers are the reason that follow-up is not a one-liner, so both
+        are pinned.
         """
 
         catching: list[str] = []
@@ -3258,9 +3261,9 @@ class TestTheDocumentedExtentStaysTrue:
                 ):
                     with_broad.append(where)
 
-        assert len(catching) == 10, catching
+        assert len(catching) == 11, catching
         assert len(with_broad) == 8, with_broad
-        assert len(catching) - len(with_broad) == 2, (catching, with_broad)
+        assert len(catching) - len(with_broad) == 3, (catching, with_broad)
 
     # --------------------------------------------------------------- #
     # The second extent this file pins: the guards in front of the     #

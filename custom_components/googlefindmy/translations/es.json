@@ -688,6 +688,12 @@
       "ble_battery": {
         "name": "Batería BLE"
       },
+      "phone_battery": {
+        "name": "Batería"
+      },
+      "phone_wifi_ssid": {
+        "name": "Red Wi-Fi"
+      },
       "plus_code": {
         "name": "Plus Code",
         "state_attributes": {

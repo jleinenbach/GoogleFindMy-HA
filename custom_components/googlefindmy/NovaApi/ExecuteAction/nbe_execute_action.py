@@ -10,6 +10,7 @@ import binascii
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
+from custom_components.googlefindmy.const import PHONE_ID_PREFIX
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 
 # Typing-only imports to avoid expensive protobuf imports during runtime startup.
@@ -65,10 +66,15 @@ def create_action_request(
         A `DeviceUpdate_pb2.ExecuteActionRequest` instance.
 
     Raises:
-        ValueError: If required arguments are missing/empty.
+        ValueError: If required arguments are missing/empty, or if
+            ``canonic_device_id`` is the row id of a phone without canonical ID
+            (``PHONE_ID_PREFIX``): such a phone is addressed by its Android ID
+            through ``LocatePhone``, never as a canonical ID.
     """
     if not isinstance(canonic_device_id, str) or not canonic_device_id.strip():
         raise ValueError("canonic_device_id must be a non-empty string")
+    if canonic_device_id.strip().startswith(PHONE_ID_PREFIX):
+        raise ValueError("a phone row id is not a canonical id")
     if not isinstance(gcm_registration_id, str) or not gcm_registration_id.strip():
         raise ValueError("gcm_registration_id must be a non-empty string")
 

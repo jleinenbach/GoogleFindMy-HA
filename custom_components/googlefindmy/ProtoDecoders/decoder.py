@@ -12,7 +12,7 @@ import logging
 import math
 import os
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit
@@ -27,6 +27,7 @@ except ImportError:
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
+from custom_components.googlefindmy.const import PHONE_ID_PREFIX
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaProtobufDecodeError,
 )
@@ -183,6 +184,91 @@ def _usable_id_count(entries: Iterable[object] | None) -> int:
     return count
 
 
+def canonicless_android_id(device: Any) -> int | None:
+    """Return the Android ID of a phone listed without a canonical ID, else ``None``.
+
+    The one predicate for such a phone: the row in ``get_devices_with_location``
+    and the target table in ``api`` both follow it. An entry qualifies when its type
+    is ``IDENTIFIER_ANDROID``, it carries no usable canonical ID (neither under
+    ``phoneInformation`` nor directly) and its Android ID
+    (``phoneInformation.phoneInformationField1``, a proto3 scalar without presence,
+    so 0 means absent) is set. The value is personal data: callers keep it in a local
+    variable or the target table and never log it.
+    """
+    try:
+        ident = device.identifierInformation
+        if ident.type != DeviceUpdate_pb2.IDENTIFIER_ANDROID:
+            return None
+        phone_info = ident.phoneInformation
+        if _usable_id_count(phone_info.canonicIds.canonicId) or _usable_id_count(
+            ident.canonicIds.canonicId
+        ):
+            return None
+        android_id = phone_info.phoneInformationField1
+    except Exception as err:  # noqa: BLE001 - an unreadable entry is not a phone row
+        # Class only: the message of an error raised while reading the entry
+        # could carry a field value.
+        _LOGGER.debug(
+            "Device entry not readable as a phone without canonical ID (%s)",
+            type(err).__name__,
+        )
+        return None
+    if isinstance(android_id, bool) or not isinstance(android_id, int):
+        return None
+    return android_id if android_id != 0 else None
+
+
+def supported_action_numbers(device: Any) -> frozenset[int]:
+    """Return the action numbers a list entry offers in ``supportedActions``.
+
+    Each element is a serialized ``DeviceMetadata.SupportedActions`` whose ``type``
+    sets one field of ``ExecuteActionType``; the field number names the action.
+    Observed for one phone without canonical ID (2026-11-14): actions 1, 2, 4, 5, 6, 7, 13 and 14.
+    An element that does not parse is skipped.
+    """
+    numbers: set[int] = set()
+    for raw in getattr(device, "supportedActions", ()) or ():
+        action = DeviceUpdate_pb2.DeviceMetadata.SupportedActions()
+        try:
+            action.ParseFromString(bytes(raw))
+        except (DecodeError, TypeError, ValueError):
+            continue
+        if action.HasField("type"):
+            numbers.update(field.number for field, _ in action.type.ListFields())
+    return frozenset(numbers)
+
+
+def _build_phone_row(
+    device: Any, device_name: str, phone_id_for: Callable[[int], str]
+) -> dict[str, Any] | None:
+    """Return the row of a phone listed without a canonical ID, or ``None``.
+
+    The row id comes from ``phone_id_for`` (a keyed hash, ``phone_identity``); the
+    Android ID stays in this frame. A failing or malformed ``phone_id_for`` result
+    yields no row, so the entry drops as before.
+    """
+    android_id = canonicless_android_id(device)
+    if android_id is None:
+        return None
+    try:
+        phone_id = phone_id_for(android_id)
+    except Exception as err:  # noqa: BLE001 - never let one entry break the list
+        _LOGGER.debug(
+            "No row id for a phone without canonical ID (%s)", type(err).__name__
+        )
+        return None
+    if not (isinstance(phone_id, str) and phone_id.startswith(PHONE_ID_PREFIX)):
+        return None
+    actions = supported_action_numbers(device)
+    row = _build_device_stub(device_name, phone_id)
+    row["image_url"] = image_url_of(device)
+    row["locate_route"] = "phone"
+    row["identifier_type"] = "android"
+    row["can_ring"] = 1 in actions
+    row["can_stop_ring"] = 5 in actions
+    return row
+
+
 def _identifier_structure(device: object) -> tuple[str, bool, int, int]:
     """Shape of a device's identifier block.
 
@@ -279,6 +365,22 @@ _SECRET_PROTO_FIELDS: frozenset[str] = frozenset(
         "phoneInformationField21",
         "phoneInformationField23",
         "phoneInformation",
+        # Phone record fields seen in the answer to a locate request (observed
+        # 2026-11-14 and 2026-11-15, n=1 phone): Wi-Fi network name, SIM name and
+        # the encrypted location, with their forms. The two numbers of unknown
+        # meaning stay hidden like the other unknown fields of the phone record.
+        "wifiInformation",
+        "ssid",
+        "phoneWifiInformationField2",
+        "simInformation",
+        "simDisplayName",
+        "phoneSimInformationField2",
+        "phoneInformationField36",
+        "encrypted",
+        "ciphertext",
+        "iv",
+        # The AES key sent with a locate request; it decrypts the answer.
+        "phoneLocateField1",
         "phoneNumber",
         "privateKey",
         "recoveryKey",
@@ -1217,6 +1319,7 @@ def get_devices_with_location(
     *,
     cache: TokenCache | None = None,
     emit_canonicless_diagnostics: bool = False,
+    phone_id_for: Callable[[int], str] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract one consolidated row per canonic device ID from a device list.
 
@@ -1250,6 +1353,11 @@ def get_devices_with_location(
             side-effect free, so the main poll reads the genuine previous-poll
             visibility set instead of one the probe already overwrote. Pure row
             extraction (the query) is identical for both values.
+        phone_id_for: Maps the Android ID of a phone listed without a canonical ID
+            (``canonicless_android_id``) to its row id. With it, such a phone gets
+            one row (``locate_route="phone"``) that counts as visible and not as a
+            canonicless drop. Without it (capability probe, CLI, no per-entry key)
+            the phone drops as before.
 
     Returns:
         A list of device data dictionaries. Fields may be `None` if no valid
@@ -1659,6 +1767,12 @@ def get_devices_with_location(
             results.append(row)
             emitted_for_device += 1
 
+        if emitted_for_device == 0 and phone_id_for is not None:
+            phone_row = _build_phone_row(device, device_name, phone_id_for)
+            if phone_row is not None:
+                results.append(phone_row)
+                emitted_for_device = 1
+
         if emitted_for_device > 0:
             # Remember this device as visible this run so a later disappearance can be
             # told apart from a device that was never shown (the transition discriminator).
@@ -1723,9 +1837,9 @@ def get_devices_with_location(
                 # for a report with the IDENTIFIER STRUCTURE line logged above.
                 _LOGGER.debug(
                     "Device '%s' was returned without a canonical ID in this listing "
-                    "and is not shown as its own entity. This is common for Android "
-                    "phones (located via the owner's Locate flow) and for accessories "
-                    "listed without an 'information' block. If this device is not a "
+                    "and is not shown as its own entity. This happens for Android phones "
+                    "without a usable Android ID or before the per-account phone key is "
+                    "available, and for accessories listed without an 'information' block. If this device is not a "
                     "phone or tablet and Find My Device can locate or ring it on its "
                     "own, please open an issue and include the 'IDENTIFIER STRUCTURE' "
                     "line for it.",
