@@ -318,6 +318,24 @@ def test_canonicless_android_id_rejects_unreadable_or_foreign_shapes() -> None:
     assert decoder.canonicless_android_id(_shaped(7)) == 7  # the shape itself is valid
 
 
+def test_an_unreadable_entry_leaves_a_record_without_its_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The broad handler records the error class, never the error text."""
+
+    class _Raising:
+        @property
+        def identifierInformation(self) -> Any:
+            raise ValueError("4711471147114711471")
+
+    caplog.set_level(logging.DEBUG, logger="custom_components.googlefindmy")
+    assert decoder.canonicless_android_id(_Raising()) is None
+    records = [r for r in caplog.records if "canonical ID" in r.getMessage()]
+    assert len(records) == 1
+    assert "ValueError" in records[0].getMessage()
+    assert "4711471147114711471" not in caplog.text
+
+
 @pytest.mark.parametrize("phone_id", [None, 42, "no-prefix"])
 def test_phone_row_needs_a_prefixed_string_id(phone_id: Any) -> None:
     device = _phone("Phone", _random_android_id())

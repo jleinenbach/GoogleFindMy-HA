@@ -386,8 +386,10 @@ sessions flowing into Home Assistant's reauthentication UI instead of being swal
 
 Classify an auth rejection by the HTTP **status**, never by the exception type. `NovaAuthError` is raised for every
 non-retryable 4xx (`nova_request.py` raises it for 400, 404, 405, 409, 422 as well; `HTTP_RETRY_ELIGIBLE` holds no 4xx
-besides 408 and 429), so a type check reads "device not found" as "your sign-in expired". A 401 that survived the refresh
-sequence arrives flagged `is_permanent=True`, which leaves 403 as the only plain credential rejection a handler sees.
+besides 408 and 429), so a type check reads "device not found" as "your sign-in expired". A 401 that survived the full refresh
+sequence arrives flagged `is_permanent=True`. The phone path caps the resends (`max_auth_resends=PHONE_MAX_AUTH_RESENDS`)
+and its 401 arrives WITHOUT the flag, because the cap ended the attempt, not a refresh shown to fail; so a handler sees
+two plain credential rejections, 403 and the capped 401, and must read both by status, never by `is_permanent` alone.
 `nova_request.is_credential_rejection` is the shared predicate: permanent first, then 401/403, an unreadable status keeps
 the conservative verdict, everything else is a server-side rejection. `api._classify_nova_auth_error` is its sound-path
 adapter and must not re-derive the status test -- a second copy is how the handlers drifted apart in the first place.
@@ -671,9 +673,11 @@ What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nov
 standing in its way. Giving the non-credential case its own exception class is the open follow-up; it needs an
 exhaustiveness test over `NovaError.__subclasses__()` first. Measured over the AST: eleven `try` blocks catch
 `NovaAuthError`. Eight carry a broad `except Exception` in the same block and would swallow a new class under a name that
-hides the status; the two sound-request handlers catch it in a tuple with no broad handler, and the phone locate sender
-(`NovaApi/ExecuteAction/LocatePhone/phone_locate.py`) re-raises it ahead of a narrow `except NovaError`, so a new class
-would propagate uncaught at these three instead. Two opposite failure modes in one change. Narrowing a handler is a behaviour change that needs its own regression test, not a
+hides the status; the two sound-request handlers catch it in a tuple with no broad handler, so a new class would
+propagate uncaught there. The phone locate sender (`NovaApi/ExecuteAction/LocatePhone/phone_locate.py`) re-raises it
+ahead of a narrow `except NovaError`, which would map a new sibling class to the stage `phone_request_failed` and drop
+its status (pinned by `tests/test_phone_locate_flow.py::test_acceptance_contract_maps_each_failure_to_its_own_stage`):
+the first failure mode without a broad handler. Two opposite failure modes in one change. Narrowing a handler is a behaviour change that needs its own regression test, not a
 drive-by edit; do not assume a green suite proves the rest of the tree already follows this rule.
 Every count in the two paragraphs above (six call sites in four files, eleven `try` blocks, eight of them with a broad
 handler) is enforced by `tests/test_nova_request.py::TestTheDocumentedExtentStaysTrue`, which derives them from the AST
@@ -717,9 +721,12 @@ Google lists some phones without a canonical ID; the integration addresses them 
 `aphone-…`, `phone_identity.py`). For these phones the code sends only the phone actions 1 (ring), 4 (locate) and
 5 (stop ring), in the form seen on one phone (1 and 4 measured, 5 observed). Every other number, including 2, 6, 7, 13, 14 and 30, 31, 32, is
 never sent to a phone, not even as a probe; tests may build such payloads only offline against a replaced transport.
-Three layers hold this: the builder (`LocatePhone/phone_action_request.py`, which accepts 1, 4 and 5), the payload lock
-in `async_nova_request` (`LocatePhone/phone_payload_guard.py`, exactly one of the three in its fixed form) and
-`tests/test_guard_phone_action_numbers.py`. Keep these rules:
+Two checks hold this at run time, the builder (`LocatePhone/phone_action_request.py`, which accepts 1, 4 and 5) and,
+authoritative, the payload lock in `async_nova_request` (`LocatePhone/phone_payload_guard.py`, which reads the bytes and
+passes exactly one of the three in its fixed form). `tests/test_guard_phone_action_numbers.py` is a tripwire on names in
+code, not a third lock: it cannot read an action built as a number or as bytes (`fields_by_number`, `MergeFromString`),
+names these blind spots in its docstring and pins them by test, together with the lock refusing what they produce. Keep
+these rules:
 
 - The phone path lives in `api.py`: locate in `_async_get_phone_location`, ring and stop as branches of
   `async_play_sound` and `async_stop_sound`. It is not a third send site in `polling.py` or `locate.py`; the poll cycle

@@ -29,6 +29,7 @@ import re
 from pathlib import Path
 
 from custom_components import googlefindmy
+from custom_components.googlefindmy.ProtoDecoders import decoder
 
 _PACKAGE_ROOT = Path(googlefindmy.__file__).resolve().parent
 
@@ -54,9 +55,28 @@ _PHONE_SECRET_NAME = re.compile(
     re.IGNORECASE,
 )
 
-# Outside `Auth/` an `android_id` is a phone's Android ID (class (c)); inside it
-# is the integration's own GSF ID and stays allowed.
-_ANDROID_ID_NAME = re.compile(r"android_id", re.IGNORECASE)
+# Outside `Auth/` an `android_id` (also `androidId`) is a phone's Android ID
+# (class (c)); inside it is the integration's own GSF ID and stays allowed.
+_ANDROID_ID_NAME = re.compile(r"android_?id", re.IGNORECASE)
+
+
+def _spelling_key(name: str) -> str:
+    """One key for the camelCase and the snake_case spelling of a name."""
+    return name.replace("_", "").lower()
+
+
+# Fields of the protobuf schema that the decoder never shows
+# (`decoder._SECRET_PROTO_FIELDS`, kept complete by
+# `tests/test_decoder_spot_schema.py`). A value read from such a field is a
+# secret or personal data whatever the code calls it, so the field name itself
+# is a leaf to watch, in the schema spelling (`simDisplayName`,
+# `phoneInformationField1`) and in snake_case (`sim_display_name`). Derived, not
+# listed: a field added to the decoder's set is watched here without an edit.
+# Matched on the whole leaf, not as a substring: `iv` and `email` are fields of
+# that set and must not match `active` or `email_hash`.
+_SECRET_FIELD_KEYS: frozenset[str] = frozenset(
+    _spelling_key(name) for name in decoder._SECRET_PROTO_FIELDS
+)
 _OWN_ANDROID_ID_DIR = "Auth/"
 
 # Identifiers that match the pattern but are not addresses. Empty on purpose:
@@ -116,6 +136,7 @@ def _leaks(node: ast.AST, relative: str = "") -> list[str]:
         and (
             _ADDRESS_NAME.search(leaf)
             or _PHONE_SECRET_NAME.search(leaf)
+            or _spelling_key(leaf) in _SECRET_FIELD_KEYS
             or (
                 _ANDROID_ID_NAME.search(leaf)
                 and not relative.startswith(_OWN_ANDROID_ID_DIR)
@@ -257,3 +278,69 @@ def test_phone_target_and_android_id_are_caught(tmp_path: Path) -> None:
         ("probe.py", "android_id"),
         ("probe.py", "phone_target"),
     ]
+
+
+def _snake(name: str) -> str:
+    return re.sub(r"([A-Z])", r"_\1", name).lower()
+
+
+def test_every_secret_proto_field_is_caught_in_both_spellings(tmp_path: Path) -> None:
+    """Red probe: each field of the decoder's secret set, as attribute and snake name.
+
+    Built from the set itself, so a field added there is probed here as well.
+    """
+    names = sorted(decoder._SECRET_PROTO_FIELDS)
+    lines = ["import logging", "_LOGGER = logging.getLogger(__name__)"]
+    for name in names:
+        lines.append(f'_LOGGER.debug("x %s", record.{name})')
+        lines.append(f'_LOGGER.debug("x %s", {_snake(name)})')
+        lines.append(f'_LOGGER.debug("x %s", data["{name}"])')
+    (tmp_path / "probe.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    offenders, scanned = scan(root=tmp_path, reviewed=frozenset())
+    assert scanned == 3 * len(names)
+    reported = {line for _p, line, _leaf, _f in offenders}
+    assert reported == set(range(3, 3 + 3 * len(names))), sorted(
+        set(range(3, 3 + 3 * len(names))) - reported
+    )
+
+
+def test_the_schema_spellings_found_in_review_are_caught(tmp_path: Path) -> None:
+    """Red probe for the spellings a name list had missed, and `androidId`."""
+    leaves = [
+        "record.simDisplayName",
+        "x.simInformation",
+        "phone_info.phoneInformationField1",
+        "meta.metadataField11",
+        "androidId",
+        "self.android_id",
+    ]
+    lines = ["import logging", "_LOGGER = logging.getLogger(__name__)"]
+    lines += [f'_LOGGER.debug("x %s", {leaf})' for leaf in leaves]
+    (tmp_path / "probe.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    offenders, _ = scan(root=tmp_path, reviewed=frozenset())
+    assert sorted(leaf for _p, _l, leaf, _f in offenders) == sorted(
+        [
+            "simDisplayName",
+            "simInformation",
+            "phoneInformationField1",
+            "metadataField11",
+            "androidId",
+            "android_id",
+        ]
+    )
+
+
+def test_a_secret_field_name_matches_the_whole_leaf_only(tmp_path: Path) -> None:
+    """Counter-case: `iv` and `email` are in the set; longer names that contain them are not."""
+    assert "iv" in decoder._SECRET_PROTO_FIELDS
+    assert "email" in decoder._SECRET_PROTO_FIELDS
+    lines = ["import logging", "_LOGGER = logging.getLogger(__name__)"]
+    lines += [
+        '_LOGGER.debug("x %s", active)',
+        '_LOGGER.debug("x %s", self.email_count)',
+        '_LOGGER.debug("x %s", _mask_email_for_logs(email))',
+    ]
+    (tmp_path / "probe.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    offenders, scanned = scan(root=tmp_path, reviewed=frozenset())
+    assert scanned == 3
+    assert offenders == []

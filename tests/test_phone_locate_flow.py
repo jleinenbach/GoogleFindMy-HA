@@ -1028,6 +1028,14 @@ def _wrapped_network_failure() -> NovaError:
         return wrapped
 
 
+class _FutureClientRejection(NovaError):
+    """Stand-in for a non-credential 4xx class split off `NovaAuthError` later."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"client rejection {status}")
+        self.status = status
+
+
 @pytest.mark.parametrize(
     ("raised", "stage", "status"),
     [
@@ -1041,6 +1049,9 @@ def _wrapped_network_failure() -> NovaError:
             None,
         ),
         (ValueError("phone action 30 is not allowed"), "phone_request_failed", None),
+        # A new NovaError sibling of NovaAuthError does not escape this sender:
+        # the narrow `except NovaError` maps it, and the stage drops its status.
+        (_FutureClientRejection(404), "phone_request_failed", None),
     ],
 )
 async def test_acceptance_contract_maps_each_failure_to_its_own_stage(

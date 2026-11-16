@@ -418,9 +418,13 @@ def is_credential_rejection(err: NovaAuthError) -> bool:
     non-retryable 4xx (see the raise below the HTTP_RETRY_ELIGIBLE branch,
     whose own comment names "403 Forbidden, 404 Not Found"), and
     HTTP_RETRY_ELIGIBLE holds no 4xx besides 408 and 429, so 400, 404, 405,
-    409 and 422 all arrive as "auth". A 401 that survived the refresh
-    sequence is raised separately with is_permanent=True, which leaves 403
-    as the only plain credential rejection a handler sees.
+    409 and 422 all arrive as "auth". A 401 that survived the full refresh
+    sequence is raised separately with is_permanent=True. A caller that caps
+    the resends (``max_auth_resends``, the phone path) gets its 401 WITHOUT
+    the flag: the cap ended the attempt, not a refresh that was shown to
+    fail. So a handler sees two plain credential rejections, 403 and the
+    capped 401, and this predicate reads both as credential rejections by
+    their status.
 
     Reading the type alone therefore tells a user with a deleted device to
     check their sign-in. Every handler in this integration branches on THIS
@@ -1951,10 +1955,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     # try blocks catch this class. Eight carry a broad
                     # `except Exception` in the same block and would swallow a
                     # new class under a name that hides the status; the two
-                    # sound-request handlers and the phone locate sender catch
-                    # it with no broad handler at all, so there a new class
-                    # would propagate uncaught instead. Two opposite failure
-                    # modes, which is why
+                    # sound-request handlers catch it with no broad handler at
+                    # all, so there a new class would propagate uncaught
+                    # instead. The phone locate sender's narrow
+                    # `except NovaError` would map it to `phone_request_failed`
+                    # and drop the status. Two opposite failure modes, which is
+                    # why
                     # the follow-up needs an exhaustiveness test over
                     # NovaError.__subclasses__() before it is attempted.
                     if status >= HTTP_INTERNAL_SERVER_ERROR:

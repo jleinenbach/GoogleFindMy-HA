@@ -3237,8 +3237,9 @@ class TestTheDocumentedExtentStaysTrue:
 
         Splitting NovaAuthError is only safe once every catcher is known: the
         eight blocks with a broad `except Exception` would swallow a new class
-        silently, the three narrow ones (the two sound handlers and the phone
-        locate sender in `LocatePhone/phone_locate.py`) would let it escape.
+        silently; of the three narrow ones the two sound handlers would let it
+        escape, and the phone locate sender in `LocatePhone/phone_locate.py`
+        would map it to `phone_request_failed` and drop its status.
         Both numbers are the reason that follow-up is not a one-liner, so both
         are pinned.
         """

@@ -205,7 +205,13 @@ def canonicless_android_id(device: Any) -> int | None:
         ):
             return None
         android_id = phone_info.phoneInformationField1
-    except Exception:
+    except Exception as err:  # noqa: BLE001 - an unreadable entry is not a phone row
+        # Class only: the message of an error raised while reading the entry
+        # could carry a field value.
+        _LOGGER.debug(
+            "Device entry not readable as a phone without canonical ID (%s)",
+            type(err).__name__,
+        )
         return None
     if isinstance(android_id, bool) or not isinstance(android_id, int):
         return None

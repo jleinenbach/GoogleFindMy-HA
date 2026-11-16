@@ -1562,8 +1562,10 @@ class GoogleFindMyAPI:
               with status 401/403, or a PERMANENT Nova auth failure (the
               `NovaAuthPermanentError` subclass, or a base `NovaAuthError`
               flagged `is_permanent=True` after the refresh sequence).
-            - A plain, NON-permanent credential rejection -- in practice a 403,
-              since a 401 that survives the refresh arrives flagged permanent --
+            - A plain, NON-permanent credential rejection -- a 403, or the 401
+              of the phone path, whose capped resends (`max_auth_resends`) end
+              without the permanent flag; a tracker 401 that survives the full
+              refresh arrives flagged permanent --
               is re-raised as `NovaAuthError`, NOT converted. That is deliberate:
               the polling coordinator counts consecutive transient auth failures
               and escalates only at its own threshold, so converting here would
