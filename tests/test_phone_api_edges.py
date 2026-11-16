@@ -126,7 +126,7 @@ async def test_no_entry_scope_is_refused(monkeypatch: pytest.MonkeyPatch) -> Non
     api._cache = cast(Any, _NoScope())
     with pytest.raises(LocationRequestNotAcceptedError) as err:
         await api._async_prepare_phone_request(_PHONE)
-    assert err.value.stage == "phone_no_fcm_token"
+    assert err.value.stage == "phone_no_entry_scope"
 
 
 @pytest.mark.asyncio

@@ -1047,7 +1047,7 @@ class GoogleFindMyAPI:
         entry_id = self._namespace()
         if not entry_id:
             _LOGGER.debug("Phone %s: no entry scope for the push channel", device_id)
-            raise LocationRequestNotAcceptedError(stage="phone_no_fcm_token")
+            raise LocationRequestNotAcceptedError(stage="phone_no_entry_scope")
         receiver = self._phone_fcm_receiver(entry_id)
         if receiver is None:
             _LOGGER.debug("Phone %s: no push receiver available", device_id)

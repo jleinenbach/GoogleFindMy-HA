@@ -25,6 +25,7 @@ from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from .._reauth_reason import ReauthReasonCode
+from ..Auth.log_safety import describe_exception, exception_origin
 from ..const import (
     DEFAULT_MIN_POLL_INTERVAL,
     STOP_SOUND_MIN_DELAY_AFTER_PLAY_S,
@@ -1379,19 +1380,19 @@ class LocateOperations(_MixinBase):
             return StopSoundOutcome.FAILED
         except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
             _LOGGER.warning(
-                "Connection failed during stop_sound for %s: %s",
+                "Connection failed during stop_sound for %s (%s)",
                 device_id,
-                conn_err,
+                describe_exception(conn_err),
             )
             self.note_error(conn_err, where="async_stop_sound", device=device_id)
             self._note_stop_transport_problem_without_extending()
             return StopSoundOutcome.FAILED
         except Exception as err:
             _LOGGER.error(
-                "Unexpected error during stop_sound for %s: %s",
+                "Unexpected error during stop_sound for %s (%s at %s)",
                 device_id,
-                err,
-                exc_info=True,
+                describe_exception(err),
+                exception_origin(err),
             )
             self.note_error(err, where="async_stop_sound", device=device_id)
             return StopSoundOutcome.FAILED

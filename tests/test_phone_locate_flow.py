@@ -522,7 +522,6 @@ async def test_three_interleaved_requests_land_at_the_right_phone(
     keys = [_request_parts(p)[1] for p, _ in nova.calls]
     assert len({*keys}) == 3  # three requests, three different keys
     release.set()
-    await asyncio.sleep(0)
 
     for (payload, _kw), (_reg, _pid, aid, eid, lat) in reversed(
         list(zip(nova.calls, plan, strict=True))
@@ -543,15 +542,16 @@ async def test_second_request_on_an_open_phone_is_not_sent(
     rx = _receiver({_ENTRY_A: _TOKEN_A})
     registry = _registry_module().PhoneRequestRegistry()
     release = asyncio.Event()
+    sending = asyncio.Event()
 
     async def _hold(_payload: str, _kwargs: dict[str, Any]) -> None:
+        sending.set()
         await release.wait()
 
     nova = _Nova(_hold)
     _install_nova(monkeypatch, nova)
     first = asyncio.create_task(_locate(rx=rx, registry=registry))
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    await asyncio.wait_for(sending.wait(), timeout=5)  # the first request is in flight
     assert len(registry) == 1
 
     # Bounded: a register that admitted the second request would make it wait for

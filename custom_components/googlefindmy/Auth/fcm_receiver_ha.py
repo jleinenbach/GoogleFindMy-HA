@@ -4943,10 +4943,10 @@ class FcmReceiverHA:
                 # Fail closed: the client never started listening, so sending
                 # the location request would hand the token to a dead listener
                 # and the caller would block until an opaque 30s timeout.
-                # Clearing the local token means the function returns None (the
-                # sole caller, location_request.py, then reports a clear error
-                # and returns early) and the finally block pops the manual-
-                # locate callback so no stale registration leaks.
+                # Returning None makes each caller refuse before anything is
+                # sent: the tracker locate reports a clear error and its own
+                # finally block pops the manual-locate callback, the phone
+                # gate refuses the phone action.
                 _LOGGER.warning(
                     "[entry=%s] FCM client not in STARTED state after %.1fs; "
                     "aborting %s (fail-closed)",

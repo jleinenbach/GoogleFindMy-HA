@@ -622,9 +622,8 @@ async def test_two_overlapping_first_lists_create_one_key(
     first_task = asyncio.create_task(api._async_load_phone_id_key())
     await entered.wait()  # the first load is inside the write
     second_task = asyncio.create_task(api._async_load_phone_id_key())
-    for _ in range(3):
-        await asyncio.sleep(0)  # let the second load reach the lock
-    assert not second_task.done()  # it waits instead of creating a second key
+    # Released before the second load first runs: without the lock it would read
+    # the empty store ahead of the first write and create a second key.
     release.set()
     first, second = await asyncio.gather(first_task, second_task)
     assert first is not None and first == second

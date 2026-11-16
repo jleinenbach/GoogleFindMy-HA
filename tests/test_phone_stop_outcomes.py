@@ -90,6 +90,31 @@ async def test_unexpected_error_is_reported_without_transport_note(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "error",
+    [
+        ClientConnectionError("host 192.0.2.7:443 secret-text"),
+        RuntimeError("secret-text"),
+    ],
+)
+async def test_failure_records_carry_no_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+) -> None:
+    """The stop failure is logged by class and origin, never by its message."""
+    coordinator, _seen = _stop_coordinator(monkeypatch, error)
+    caplog.set_level("DEBUG")
+    assert await coordinator.async_stop_sound(_PHONE) is StopSoundOutcome.FAILED
+    records = [r for r in caplog.records if "stop_sound" in r.getMessage()]
+    assert records
+    for record in records:
+        assert "secret-text" not in record.getMessage()
+        assert record.exc_info is None
+        assert type(error).__name__ in record.getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("answer", "transport_noted"),
     [
         (SoundDispatchOutcome.TRANSPORT_FAILED, True),

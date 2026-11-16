@@ -46,12 +46,18 @@ _ADDRESS_NAME = re.compile(r"(^|_)mac(_|$)|address|^scanner$", re.IGNORECASE)
 # unambiguous across the package: a bare `android_id` is the integration's own
 # GSF ID in `Auth/` (logged there by design) and a bare `key` is mostly a dict
 # key, so the phone modules carry their own, stricter guard in
-# `tests/test_phone_log_hygiene.py`.
+# `tests/test_phone_log_hygiene.py`. `phone_target` names the table from row id
+# to Android ID (`api.py`), whose values are class (c).
 _PHONE_SECRET_NAME = re.compile(
     r"ssid|wifi|sim_display|locate_key|phone_id_key|ciphertext|push_hex"
-    r"|phone_android_id|phone_status",
+    r"|phone_android_id|phone_status|phone_target",
     re.IGNORECASE,
 )
+
+# Outside `Auth/` an `android_id` is a phone's Android ID (class (c)); inside it
+# is the integration's own GSF ID and stays allowed.
+_ANDROID_ID_NAME = re.compile(r"android_id", re.IGNORECASE)
+_OWN_ANDROID_ID_DIR = "Auth/"
 
 # Identifiers that match the pattern but are not addresses. Empty on purpose:
 # an entry is added only when the red probe below reports a false positive,
@@ -88,7 +94,7 @@ _LOG_LEVELS = frozenset(
 )
 
 
-def _leaks(node: ast.AST) -> list[str]:
+def _leaks(node: ast.AST, relative: str = "") -> list[str]:
     """Names of address-carrying leaves reachable without a masker."""
     if isinstance(node, ast.Call):
         func = node.func
@@ -97,7 +103,7 @@ def _leaks(node: ast.AST) -> list[str]:
             return []
     found: list[str] = []
     for child in ast.iter_child_nodes(node):
-        found.extend(_leaks(child))
+        found.extend(_leaks(child, relative))
     leaf: str | None = None
     if isinstance(node, ast.Name):
         leaf = node.id
@@ -107,7 +113,14 @@ def _leaks(node: ast.AST) -> list[str]:
         leaf = str(node.slice.value)
     if (
         leaf
-        and (_ADDRESS_NAME.search(leaf) or _PHONE_SECRET_NAME.search(leaf))
+        and (
+            _ADDRESS_NAME.search(leaf)
+            or _PHONE_SECRET_NAME.search(leaf)
+            or (
+                _ANDROID_ID_NAME.search(leaf)
+                and not relative.startswith(_OWN_ANDROID_ID_DIR)
+            )
+        )
         and leaf not in _NOT_AN_ADDRESS
     ):
         found.append(leaf)
@@ -164,7 +177,7 @@ def scan(
             # first argument leaks exactly as much as a positional argument.
             arguments: list[ast.AST] = [*node.args, *(kw.value for kw in node.keywords)]
             for argument in arguments:
-                for leaf in _leaks(argument):
+                for leaf in _leaks(argument, relative):
                     if _is_reviewed(reviewed, relative, leaf, fmt):
                         continue
                     offenders.append((relative, argument.lineno, leaf, fmt))
@@ -220,3 +233,27 @@ def test_phone_secret_names_are_caught(tmp_path: Path) -> None:
     offenders, scanned = scan(root=tmp_path, reviewed=frozenset())
     assert scanned == len(names)
     assert sorted(leaf for _p, _l, leaf, _f in offenders) == sorted(names)
+
+
+def test_phone_target_and_android_id_are_caught(tmp_path: Path) -> None:
+    """Red probe: the target table and an Android ID outside `Auth/` are reported."""
+    lines = ["import logging", "_LOGGER = logging.getLogger(__name__)"]
+    lines += [
+        '_LOGGER.debug("x %s", self._phone_targets.get(device_id))',
+        '_LOGGER.debug("x %s", phone_target[0])',
+        '_LOGGER.debug("x %s", android_id)',
+    ]
+    (tmp_path / "probe.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    auth = tmp_path / "Auth"
+    auth.mkdir()
+    (auth / "own.py").write_text(
+        'import logging\n_LOGGER = logging.getLogger(__name__)\n_LOGGER.debug("x %s", android_id)\n',
+        encoding="utf-8",
+    )
+    offenders, scanned = scan(root=tmp_path, reviewed=frozenset())
+    assert scanned == 4
+    assert sorted((path, leaf) for path, _l, leaf, _f in offenders) == [
+        ("probe.py", "_phone_targets"),
+        ("probe.py", "android_id"),
+        ("probe.py", "phone_target"),
+    ]

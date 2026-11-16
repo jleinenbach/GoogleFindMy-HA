@@ -15,7 +15,6 @@ record of these tests may carry the Wi-Fi name or an Android ID.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import subprocess
 import time
@@ -748,7 +747,6 @@ async def test_phone_sensors_appear_with_the_first_status(
     store["tag-1"] = PhoneStatus(battery_pct=70, wifi_ssid=_SSID, observed_at=_NOW)
     await harness.fire_listeners()
     assert all("tag-1" not in uid for uid in _phone_uids())
-    await asyncio.sleep(0)
 
 
 async def test_phone_sensors_come_back_from_the_registry(

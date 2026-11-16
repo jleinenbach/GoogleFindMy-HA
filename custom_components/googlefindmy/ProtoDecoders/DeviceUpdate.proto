@@ -195,7 +195,7 @@ message PhoneSimInformation {
 }
 
 message PhoneBatteryInformation {
-  uint64 batteryLevel = 1; // Observed 2026-11-15 (n=1 phone): percent, equal to the level shown by the phone in 6 of 6 pushes
+  uint64 batteryLevel = 1; // Observed 2026-11-15 (n=1 phone): percent, equal to the level shown by the phone in 5 of 5 pushes with a reference value
 }
 
 message PhoneLocationEnvelope {

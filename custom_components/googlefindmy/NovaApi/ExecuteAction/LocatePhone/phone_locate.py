@@ -88,6 +88,7 @@ _LOGGER = logging.getLogger(__name__)
 PHONE_LOCATE_NOT_ACCEPTED_STAGES: frozenset[str] = frozenset(
     {
         "phone_target_unknown",  # raised by the API layer: no Android ID for the id
+        "phone_no_entry_scope",  # raised by the API layer: no entry for the push channel
         "phone_receiver_unavailable",
         "phone_fcm_not_ready",  # raised by the API layer: push channel not listening
         "phone_no_fcm_token",
