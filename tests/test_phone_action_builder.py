@@ -7,7 +7,7 @@ not show a field the schema does not know. Every Android ID is synthetic.
 
 from __future__ import annotations
 
-import secrets
+import itertools
 from enum import IntEnum
 from typing import Any
 
@@ -25,8 +25,14 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocatePhone.phone_loca
 _TOKEN = "fcm-token-for-tests"
 
 
+# Invented, distinct Android IDs of the observed shape (19 digits, 62 bit). A counter
+# instead of ``secrets``: another test module may leave ``secrets.randbelow``
+# patched for the rest of the session.
+_ANDROID_IDS = itertools.count(1_234_567_890_123_456_789, 7_919)
+
+
 def _android_id() -> int:
-    return 10**18 + secrets.randbelow(4 * 10**18)
+    return next(_ANDROID_IDS)
 
 
 def _varint(data: bytes, pos: int) -> tuple[int, int]:
@@ -271,7 +277,7 @@ def test_non_integer_actions_raise_value_error(action: Any) -> None:
 
 
 def test_android_id_beyond_uint64_never_reaches_the_error_text() -> None:
-    too_big = 2**64 + secrets.randbelow(10**6)
+    too_big = 2**64 + 12_345
     with pytest.raises(ValueError) as excinfo:
         build_phone_action_request(too_big, PhoneAction.RING, _TOKEN, "r")
     assert str(too_big) not in str(excinfo.value)

@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import logging
-import secrets
 from typing import Any
 
 import pytest
@@ -35,9 +35,15 @@ def _reset_decoder_state() -> None:
     decoder._reset_canonicless_warning_state()
 
 
+# Invented, distinct Android IDs of the observed shape (19 digits, 62 bit). A counter
+# instead of ``secrets``: another test module may leave ``secrets.randbelow``
+# patched for the rest of the session, which made two "random" IDs equal.
+_ANDROID_IDS = itertools.count(1_234_567_890_123_456_789, 7_919)
+
+
 def _random_android_id() -> int:
-    """Return a synthetic 19-digit Android ID (the observed shape, 62 bit)."""
-    return 10**18 + secrets.randbelow(4 * 10**18)
+    """Return a new invented 19-digit Android ID, distinct within the session."""
+    return next(_ANDROID_IDS)
 
 
 def _action_bytes(number: int) -> bytes:

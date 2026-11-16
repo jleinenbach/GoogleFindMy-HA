@@ -107,11 +107,16 @@ PhoneStatusSink = Callable[[str, PhoneStatus], None]
 class PhoneLocateReceiver(Protocol):
     """What the push receiver offers the phone path (``FcmReceiverHA``)."""
 
-    def get_entry_fcm_token(self, entry_id: str) -> str | None: ...
+    def get_entry_fcm_token(self, entry_id: str) -> str | None:
+        """Return the push token of ``entry_id`` alone, or ``None``."""
+
     def register_phone_request(
         self, entry_id: str, request_uuid: str, callback: Callable[[str], None]
-    ) -> None: ...
-    def unregister_phone_request(self, entry_id: str, request_uuid: str) -> None: ...
+    ) -> None:
+        """Route the push that answers ``request_uuid`` to ``callback``."""
+
+    def unregister_phone_request(self, entry_id: str, request_uuid: str) -> None:
+        """Forget the phone request ``request_uuid`` of ``entry_id``."""
 
 
 def _receiver_token(receiver: object, entry_id: str) -> str | None:

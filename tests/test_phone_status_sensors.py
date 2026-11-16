@@ -855,3 +855,86 @@ async def test_status_of_a_phone_that_is_not_listed_is_dropped(
         _PHONE, PhoneStatus(battery_pct=70, wifi_ssid=_SSID, observed_at=_NOW)
     )
     assert coord.get_phone_status(_PHONE) is not None
+
+
+# ---------------------------------------------------------------------------
+# Availability, restore data and updates without the device
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cls", "suffix"),
+    [(GoogleFindMyPhoneBatterySensor, "b"), (GoogleFindMyPhoneWifiSensor, "w")],
+)
+async def test_sensor_is_unavailable_without_the_device(
+    cls: type[Any], suffix: str
+) -> None:
+    entity = _sensor(cls, None, suffix)
+    entity.coordinator_has_device = lambda: True
+    assert entity.available is True
+    entity.coordinator_has_device = lambda: False
+    assert entity.available is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cls", "suffix"),
+    [(GoogleFindMyPhoneBatterySensor, "b"), (GoogleFindMyPhoneWifiSensor, "w")],
+)
+async def test_update_without_the_device_only_writes_the_state(
+    cls: type[Any], suffix: str
+) -> None:
+    entity = _sensor(cls, None, suffix)
+    entity.coordinator_has_device = lambda: False
+    entity.refresh_device_label_from_coordinator = MagicMock()
+    entity._handle_coordinator_update()
+    entity.refresh_device_label_from_coordinator.assert_not_called()
+    entity.async_write_ha_state.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_restore_data_without_a_fresh_status_keeps_the_restored_value(
+    clock: _Clock,
+) -> None:
+    entity = _sensor(GoogleFindMyPhoneBatterySensor, None, "b")
+    entity._attr_native_value = 42
+    entity._last_observation_wall = _NOW - 60
+    stored = entity.extra_restore_state_data.as_dict()
+    assert stored["native_value"] == 42
+    assert stored["last_observation_wall"] == _NOW - 60
+
+
+@pytest.mark.asyncio
+async def test_restore_without_stored_data_leaves_the_value_unknown() -> None:
+    entity = _sensor(GoogleFindMyPhoneBatterySensor, None, "b")
+    entity.async_get_last_extra_data = AsyncMock(return_value=None)
+    with patch.object(
+        GoogleFindMyPhoneBatterySensor.__bases__[1],
+        "async_added_to_hass",
+        new_callable=AsyncMock,
+    ):
+        await entity.async_added_to_hass()
+    assert entity.native_value is None
+
+
+@pytest.mark.asyncio
+async def test_restore_does_not_replace_a_newer_value(clock: _Clock) -> None:
+    entity = _sensor(GoogleFindMyPhoneBatterySensor, None, "b")
+    entity._attr_native_value = 80
+    entity._last_observation_wall = _NOW - 10
+    stored = {
+        "native_value": 30,
+        "native_unit_of_measurement": "%",
+        "last_observation_wall": _NOW - 600,
+    }
+    entity.async_get_last_extra_data = AsyncMock(
+        return_value=SimpleNamespace(as_dict=lambda: dict(stored))
+    )
+    with patch.object(
+        GoogleFindMyPhoneBatterySensor.__bases__[1],
+        "async_added_to_hass",
+        new_callable=AsyncMock,
+    ):
+        await entity.async_added_to_hass()
+    assert entity._attr_native_value == 80

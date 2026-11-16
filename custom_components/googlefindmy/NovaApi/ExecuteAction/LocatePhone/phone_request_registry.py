@@ -140,10 +140,6 @@ class PhoneRequestRegistry:
         """Tell whether a request for ``phone_id`` of ``entry_id`` is open."""
         return (entry_id, phone_id) in self._by_phone
 
-    def get(self, entry_id: str, request_uuid: str) -> PhoneRequest | None:
-        """Return the open request ``request_uuid`` of ``entry_id``, if any."""
-        return self._by_request.get((entry_id, request_uuid))
-
     def open(
         self,
         *,

@@ -274,3 +274,26 @@ async def test_invalid_limit_raises_before_sending(bad: Any) -> None:
     with pytest.raises(ValueError, match="max_auth_resends"):
         await _send(session, _Cache(), [], max_auth_resends=bad)
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [-1, True, 1.5, "1"])
+async def test_invalid_retry_count_raises_before_sending(bad: Any) -> None:
+    session = _Session([200])
+    with pytest.raises(ValueError, match="max_retries"):
+        await _send(session, _Cache(), [], max_retries=bad)
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [None, 1])
+async def test_refresh_window_in_the_past_sends_without_waiting(
+    sleeps: list[float], limit: int | None
+) -> None:
+    session = _Session([200])
+    cache = _Cache()
+    cache.data[AUTH_RETRY_DEADLINE_KEY] = time.time() - 5.0
+
+    assert await _send(session, cache, [], max_auth_resends=limit) == "0102"
+    assert sleeps == []
+    assert len(session.calls) == 1

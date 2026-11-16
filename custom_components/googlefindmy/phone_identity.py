@@ -34,8 +34,11 @@ PHONE_ID_KEY_BYTES = 32
 class _KeyCache(Protocol):
     """The part of the entry-scoped token cache this module uses."""
 
-    async def async_get_cached_value(self, key: str) -> Any: ...
-    async def async_set_cached_value(self, key: str, value: Any) -> None: ...
+    async def async_get_cached_value(self, key: str) -> Any:
+        """Return the cached value of ``key``, or ``None``."""
+
+    async def async_set_cached_value(self, key: str, value: Any) -> None:
+        """Store ``value`` under ``key``."""
 
 
 def _decode_stored_key(value: Any) -> bytes | None:

@@ -786,9 +786,9 @@ async def async_setup_entry(
                     subentry_key=tracker_scope.subentry_key,
                     subentry_identifier=tracker_identifier,
                 )
-                uid = getattr(entity, "unique_id", None)
-                if not isinstance(uid, str) or uid in added_unique_ids:
-                    continue
+                # The constructor always sets the unique ID; ``known`` already keeps a
+                # phone from being built twice for one class.
+                uid = str(getattr(entity, "unique_id", ""))
                 in_registry = (
                     er.async_get(hass).async_get_entity_id("sensor", DOMAIN, uid)
                     is not None
