@@ -33,6 +33,18 @@ updates:
       - dependency-name: "python-semantic-release"
         versions: ["10.6.2"]
     groups:
+      # ruff, codespell and bandit are also pinned as a pre-commit hook rev and
+      # in script/local_verify.py, so their update needs a manual follow-up
+      # (AGENTS.md, "Configuration alignment") and gets a PR of its own.
+      # Dependabot puts a dependency into the first group that matches, so this
+      # group must stay above python-minor and must not set update-types,
+      # applies-to or dependency-type; the precommit contract test
+      # checks the group, its position and its keys.
+      pre-commit-tools:
+        patterns:
+          - "ruff"
+          - "codespell"
+          - "bandit"
       # Group minor/patch updates together
       python-minor:
         patterns:

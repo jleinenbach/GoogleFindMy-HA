@@ -14,6 +14,12 @@ dependency update raises one of the three tools, the same PR bumps the matching
 ``rev:`` and the pin in ``script/local_verify.py`` (root ``AGENTS.md``, bullet
 "Configuration alignment").
 
+Dependabot only raises the lock, so that follow-up is manual. To keep it from
+turning the ``python-minor`` group PR red together with unrelated packages, the
+pip entry of ``.github/dependabot.yml`` puts the three tools into a group of
+their own. Dependabot assigns a dependency to the first group that matches, so
+that group has to come before ``python-minor``; a further check pins this.
+
 Further checks pin the configuration defects this file was written for: the
 legacy ``ruff`` hook id, which received ``check`` twice and read it as a file
 name, a ``check`` element in the ``args`` of the new ``ruff-check`` id, and
@@ -25,12 +31,22 @@ entry has to start the ``mypy`` executable.
 Blind spot: the CI skips the ``mypy`` and ``pytest`` hooks because both run in
 jobs of their own, so any other defect in those two entries goes unnoticed
 there; only the forms checked here are covered (``language: system`` for both,
-the executable of the ``mypy`` entry).
+the executable of the ``mypy`` entry). The Dependabot check models pattern
+matching, exclusions and group order, and rejects ``update-types``,
+``applies-to`` and ``dependency-type`` on the tool group outright, also with
+values that do not narrow it (``applies-to: version-updates``), because each of
+them can send a tool update past that group. It models version updates only: a
+group with ``applies-to: security-updates`` elsewhere in the entry is not
+modelled (above the tool group it fails the check; security updates of the
+tools are not checked). It does not model how Dependabot folds
+case or normalises ``-`` and ``_`` in names; ``fnmatchcase`` is stricter, so a
+mismatch fails rather than passes. It expects exactly one pip entry.
 """
 
 from __future__ import annotations
 
 import tomllib
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +60,13 @@ CONFIG_PATH = REPO_ROOT / ".pre-commit-config.yaml"
 LOCK_PATH = REPO_ROOT / "poetry.lock"
 CI_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 CI_BANDIT_STEP = "Run bandit (security)"
+DEPENDABOT_PATH = REPO_ROOT / ".github" / "dependabot.yml"
+# The catch-all pip group of .github/dependabot.yml.
+CATCH_ALL_GROUP = "python-minor"
+# Group keys that can narrow which updates a group takes. The check rejects them
+# on the tool group by presence, since a narrowing value would let a tool update
+# fall through to a later group.
+NARROWING_GROUP_KEYS = ("update-types", "applies-to", "dependency-type")
 
 # Hook repository of each tool whose rev must equal its version in poetry.lock.
 LOCKED_HOOK_REPOS = {
@@ -307,3 +330,166 @@ def test_ci_bandit_job_scans_the_hook_tree() -> None:
 
     assert _ci_bandit_targets() == _hook_bandit_targets(list(hook["args"]))
     assert _ci_bandit_targets() == ["custom_components", "script"]
+
+
+def _pip_entry(config: dict[str, Any]) -> dict[str, Any]:
+    entries = [
+        entry
+        for entry in config.get("updates", [])
+        if entry.get("package-ecosystem") == "pip"
+    ]
+    assert len(entries) == 1, f"expected one pip entry, found {len(entries)}"
+    return entries[0]
+
+
+def first_pip_group(config: dict[str, Any], package: str) -> str | None:
+    """Return the first pip group whose name patterns take ``package``.
+
+    Dependabot puts a dependency into the first group whose ``patterns`` match
+    and whose ``exclude-patterns`` do not. Only the name patterns are modelled
+    here; the keys that narrow a group further are checked by
+    ``pinned_tool_group_defects``.
+    """
+
+    for name, spec in (_pip_entry(config).get("groups") or {}).items():
+        patterns = [str(pattern) for pattern in spec.get("patterns", [])]
+        excluded = [str(pattern) for pattern in spec.get("exclude-patterns", [])]
+        if any(fnmatchcase(package, pattern) for pattern in patterns) and not any(
+            fnmatchcase(package, pattern) for pattern in excluded
+        ):
+            return str(name)
+    return None
+
+
+def pinned_tool_group_defects(config: dict[str, Any]) -> list[str]:
+    """Return the tools whose Dependabot group setup lets them mix with others.
+
+    A tool must land in a group other than the catch-all, and that group may
+    only name tools from ``LOCKED_HOOK_REPOS``: a wildcard there would pull
+    unrelated updates back into the PR that needs the manual pin follow-up.
+    The group must not set a key from ``NARROWING_GROUP_KEYS``: a group for
+    security updates only, for production dependencies only or for some
+    SemVer levels only would let a tool update reach ``python-minor`` again.
+    """
+
+    groups = _pip_entry(config).get("groups") or {}
+    defects: list[str] = []
+    for tool in sorted(LOCKED_HOOK_REPOS):
+        group = first_pip_group(config, tool)
+        if group is None or group == CATCH_ALL_GROUP:
+            defects.append(f"{tool}: in group {group!r}")
+            continue
+        foreign = [
+            str(pattern)
+            for pattern in groups[group].get("patterns", [])
+            if str(pattern) not in LOCKED_HOOK_REPOS
+        ]
+        if foreign:
+            defects.append(f"{tool}: group {group!r} also matches {foreign}")
+            continue
+        narrowing = [key for key in NARROWING_GROUP_KEYS if key in groups[group]]
+        if narrowing:
+            defects.append(
+                f"{tool}: group {group!r} sets {narrowing}; leave these keys off"
+            )
+    return defects
+
+
+def _dependabot() -> dict[str, Any]:
+    loaded = yaml.safe_load(DEPENDABOT_PATH.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+@pytest.mark.parametrize("tool", sorted(LOCKED_HOOK_REPOS))
+def test_dependabot_keeps_the_tool_out_of_python_minor(tool: str) -> None:
+    """Each pinned tool gets its update PR apart from the catch-all group."""
+
+    defects = [
+        defect
+        for defect in pinned_tool_group_defects(_dependabot())
+        if defect.startswith(f"{tool}:")
+    ]
+
+    assert defects == [], (
+        f"{defects}. Give ruff, codespell and bandit a pip group of their own "
+        f"above {CATCH_ALL_GROUP!r} in .github/dependabot.yml (AGENTS.md, "
+        f'"Configuration alignment").'
+    )
+
+
+def _pip_config(groups: dict[str, Any]) -> dict[str, Any]:
+    return {"updates": [{"package-ecosystem": "pip", "groups": groups}]}
+
+
+_CATCH_ALL = {"patterns": ["*"], "update-types": ["minor", "patch"]}
+_TOOLS = {"patterns": ["ruff", "codespell", "bandit"]}
+
+
+@pytest.mark.parametrize(
+    ("groups", "expected"),
+    [
+        ({CATCH_ALL_GROUP: _CATCH_ALL}, ["bandit", "codespell", "ruff"]),
+        (
+            {CATCH_ALL_GROUP: _CATCH_ALL, "pre-commit-tools": _TOOLS},
+            ["bandit", "codespell", "ruff"],
+        ),
+        (
+            {"pre-commit-tools": {"patterns": ["*"]}, CATCH_ALL_GROUP: _CATCH_ALL},
+            ["bandit", "codespell", "ruff"],
+        ),
+        (
+            {
+                "pre-commit-tools": {"patterns": ["ruff", "codespell"]},
+                CATCH_ALL_GROUP: _CATCH_ALL,
+            },
+            ["bandit"],
+        ),
+        (
+            {
+                "pre-commit-tools": {**_TOOLS, "exclude-patterns": ["ruff"]},
+                CATCH_ALL_GROUP: _CATCH_ALL,
+            },
+            ["ruff"],
+        ),
+        (
+            {
+                "pre-commit-tools": {**_TOOLS, "update-types": ["major"]},
+                CATCH_ALL_GROUP: _CATCH_ALL,
+            },
+            ["bandit", "codespell", "ruff"],
+        ),
+        (
+            {
+                "pre-commit-tools": {**_TOOLS, "applies-to": "security-updates"},
+                CATCH_ALL_GROUP: _CATCH_ALL,
+            },
+            ["bandit", "codespell", "ruff"],
+        ),
+        (
+            {
+                "pre-commit-tools": {**_TOOLS, "dependency-type": "production"},
+                CATCH_ALL_GROUP: _CATCH_ALL,
+            },
+            ["bandit", "codespell", "ruff"],
+        ),
+        ({"pre-commit-tools": _TOOLS, CATCH_ALL_GROUP: _CATCH_ALL}, []),
+    ],
+    ids=[
+        "catch-all-only",
+        "tool-group-below-catch-all",
+        "wildcard-tool-group",
+        "tool-missing",
+        "tool-excluded",
+        "tool-group-update-types",
+        "tool-group-security-only",
+        "tool-group-dependency-type",
+        "target-form",
+    ],
+)
+def test_pinned_tool_group_arm(groups: dict[str, Any], expected: list[str]) -> None:
+    """Self-test of the arm: order, wildcards, gaps, exclusions, narrowing."""
+
+    defects = pinned_tool_group_defects(_pip_config(groups))
+
+    assert [defect.split(":")[0] for defect in defects] == expected
