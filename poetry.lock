@@ -2239,14 +2239,14 @@ test = ["basedpyright (==1.39.9) ; python_version >= \"3.9\" and sys_platform !=
 
 [[package]]
 name = "gpsoauth"
-version = "2.0.0"
+version = "3.0.0"
 description = "A python client library for Google Play Services OAuth."
 optional = false
-python-versions = "<4.0,>=3.9"
+python-versions = "<4.0,>=3.10"
 groups = ["main"]
 files = [
-    {file = "gpsoauth-2.0.0-py3-none-any.whl", hash = "sha256:fb8bf9cb8b6e6bee1dbedbbbe8958ace71cddaccf5950e79b38c4d2ae9870641"},
-    {file = "gpsoauth-2.0.0.tar.gz", hash = "sha256:9e3b765a6a4e0364dec1bc4157bd3ed7e5ec3066589e285d0b46986910aa6bd2"},
+    {file = "gpsoauth-3.0.0-py3-none-any.whl", hash = "sha256:c62ea43707d16d34047813bcf7c7ec5267388698b381b2252a12dfa8ca33355f"},
+    {file = "gpsoauth-3.0.0.tar.gz", hash = "sha256:ea06cfeae32a7391c878ab1d275c024c07c3c32bc599b29fd28f80c82b313835"},
 ]
 
 [package.dependencies]
