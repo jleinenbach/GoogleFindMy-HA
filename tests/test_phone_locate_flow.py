@@ -1225,12 +1225,15 @@ async def test_push_with_canonical_id_still_reaches_the_tracker_callback() -> No
         (cid, hx)
     )
     phone_got: list[str] = []
-    _require(rx, "register_phone_request")(_ENTRY_A, "uuid-tracker", phone_got.append)
+    # An open phone request on the same channel answers to its own request id;
+    # a push with canonical id reaches the phone register only by
+    # that id (tests/test_phone_owned_canonic_route.py).
+    _require(rx, "register_phone_request")(_ENTRY_A, "uuid-phone", phone_got.append)
 
     await _push(rx, _ENTRY_A, push_hex)
 
     assert got == [("tracker-canonic-id", push_hex)]
-    assert phone_got == []  # a push with a canonical id never takes the phone switch
+    assert phone_got == []  # a push answering another request keeps the tracker path
 
 
 async def test_push_without_canonical_id_and_without_request_keeps_the_old_debug(

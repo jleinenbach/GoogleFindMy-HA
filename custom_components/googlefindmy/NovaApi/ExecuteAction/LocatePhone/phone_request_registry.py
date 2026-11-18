@@ -1,5 +1,5 @@
 # custom_components/googlefindmy/NovaApi/ExecuteAction/LocatePhone/phone_request_registry.py
-"""Open locate requests of phones listed without a canonical ID, with their keys.
+"""Open locate requests of phones reached through phone action 4, with their keys.
 
 One locate request (phone action 4) carries a fresh 16-byte key; the phone answers
 with a push that names the ``requestUuid`` of that request and holds the location

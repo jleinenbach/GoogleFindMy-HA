@@ -742,8 +742,9 @@ these rules:
   tracker sequence (up to about 9.5 min) would allow. Never pass the phone actions without both arguments. The sound
   outcomes go through the same classification as the tracker ring.
 - Automatic locate requests to such a phone are spaced by at least `max(account interval, PHONE_MIN_AUTO_POLL_INTERVAL_S)`
-  (900 s, `const.py`), measured from the POST stamp in `_locate_requested_mono` (`coordinator/polling.py`), because every
-  request may show a notification on the phone. A manual "Locate now" is not held back and writes the same stamp. The
+  (900 s, `const.py`), measured from the POST stamp in `_locate_requested_mono` (`coordinator/polling.py`), because
+  action 4 showed a notification on the phone in every measured request: from the owner's account and from an account
+  the phone is shared into (one phone, n = 3, 2026-11-18). A manual "Locate now" is not held back and writes the same stamp. The
   stamp lives in memory, so a phone is due once after each restart or reload.
 - Capabilities come from the row, never from optimism: `can_ring` (action 1) and `can_stop_ring` (action 5) from
   `supportedActions`. `can_play_sound` and `can_stop_sound` return `False` for a phone row without them.
@@ -765,8 +766,35 @@ these rules:
   logbook; Home Assistant has no per-entity switch against that. This is accepted (the Companion app records the same
   name); users who do not want it in their history exclude the entity in `recorder:`. Say so in user-facing docs.
 
+- A second class of phone takes the phone path for a manual locate only: a row with a canonical ID whose
+  `supportedActions` offer action 4 and whose Android ID comes from the entry's own device list
+  (`owned_phone_target`). The API keeps the canonical ID to Android ID map in `_phone_targets` (filled only from a
+  list with a real account cache, never logged, read through `has_phone_target`) and routes on
+  `is_phone_id(device_id) or (device_id in self._phone_targets and nova_request.current_dispatch_kind() == "manual")`.
+  The label comes from the send site: `coordinator/locate.py` stamps `"manual"` ("Locate now" and every service call,
+  also from an automation the user built), `coordinator/polling.py` stamps `"auto"`. An automatic request and a
+  request without a label take the tracker path (a task created inside a `"manual"` block inherits that
+  label, because the label is a context variable), because action 4 showed a notification on the phone in every
+  measured request. Such a row
+  carries no `locate_route` mark, so the phone floor does not apply to it and it follows the account interval.
+  A new send site may stamp `"manual"` only when a person or an automation built by the user triggers it. The table
+  carries the targets of the phone action for the button, the services and the sensors.
+  Ring and stop of such a phone stay on the tracker path. The switch, the open-request lock and the rule that an
+  older fix never replaces a newer one apply unchanged. A list without action 4 puts the phone back on the tracker path for every request. Its battery
+  and Wi-Fi sensors are created through `coordinator.is_on_phone_route`, so they follow the table, not a stored fix;
+  they get values only from a manual request, and after a restart they come back only once the list offers action 4
+  again.
+- The answer to action 4 is matched by its request UUID before the canonical ID of the push is read
+  (`_deliver_phone_push` in `Auth/fcm_receiver_ha.py`), so a push with a canonical ID that answers an open phone
+  request reaches the phone registry; any other push takes the tracker path unchanged.
+- `PhoneRequestRegistry.read_status` parses the push synchronously on the event loop, unlike the tracker
+  decryption in the executor. This is deliberate: about 1.7 µs per parse (synthetic push of 208 bytes with a
+  canonical ID and fields 30, 32 and 36, 20 000 runs, upb backend, 2026-11-16), far below 1 ms. Measure again
+  before moving it.
+
 Regression tests: `tests/test_phone_ring_paths.py`, `tests/test_phone_locate_flow.py`,
-`tests/test_phone_action_builder.py`, `tests/test_phone_status_sensors.py`, `tests/test_phone_diagnostics_redaction.py`.
+`tests/test_phone_action_builder.py`, `tests/test_phone_status_sensors.py`, `tests/test_phone_diagnostics_redaction.py`,
+`tests/test_phone_owned_canonic_route.py`.
 
 ### Map View reminders
 

@@ -761,7 +761,8 @@ class GoogleFindMyCoordinator(
             bind_phone_observer
         ):
             bind_phone_observer(self._count_phone_action)
-        # Battery level and Wi-Fi name of phones without a canonical ID:
+        # Battery level and Wi-Fi name of phones on the phone route (with or
+        # without a canonical ID):
         # their own store, next to and never inside the location cache, so a
         # push whose fix is older than the stored one still refreshes them. Not
         # copied into any attribute; the phone sensors read it through
@@ -947,7 +948,7 @@ class GoogleFindMyCoordinator(
             "invalid_ts_drop_benign": 0,  # regressed/out-of-order timestamps (expected sub-bucket of invalid_ts_drop_count)
             "fused_updates": 0,  # overlapping fixes fused to stabilize coordinates
             "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
-            # Phone actions sent to phones listed without a canonical ID, split
+            # Phone actions sent to phones on the phone route, split
             # by the send site (measurement channel): locate (4) from the
             # poll cycle or a press, ring (1) and stop ring (5) only on a press.
             "phone_action_4_auto": 0,
@@ -2526,6 +2527,17 @@ class GoogleFindMyCoordinator(
         self._phone_status[phone_id] = status
         _LOGGER.debug("Phone status updated for %s", phone_id)
         self.async_update_listeners()
+
+    def is_on_phone_route(self, device_id: str) -> bool:
+        """Return whether the latest device list puts ``device_id`` on the phone route.
+
+        True for a phone listed with a canonical ID that offers the phone locate
+        action and for a phone listed without one that has a target. Read from
+        the API's target table, so it does not depend on a stored fix. Test
+        doubles of the coordinator may lack the API.
+        """
+        check = getattr(getattr(self, "api", None), "has_phone_target", None)
+        return callable(check) and bool(check(device_id))
 
     def get_phone_status(self, device_id: str) -> PhoneStatus | None:
         """Return the latest battery level and Wi-Fi name of a phone, if known."""

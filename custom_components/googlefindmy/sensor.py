@@ -164,8 +164,9 @@ BLE_BATTERY_DESCRIPTION = SensorEntityDescription(
     # based on percentage value (mdi:battery, mdi:battery-20, mdi:battery-alert).
 )
 
-# Battery level and Wi-Fi name of a phone listed without a canonical ID.
-# Both come from the push that answers a locate request; they are
+# Battery level and Wi-Fi name of a phone on the phone route (listed without a
+# canonical ID, or listed with one and offering the phone locate action). Both
+# come from the push that answers a locate request; they are
 # created like the BLE battery: when the entity registry already holds them, or
 # with the first value. The Wi-Fi sensor is enabled by default.
 PHONE_BATTERY_DESCRIPTION = SensorEntityDescription(
@@ -744,10 +745,12 @@ async def async_setup_entry(
                                 dev_id,
                             )
 
-                # --- Phone battery and Wi-Fi sensors (phones without a
-                # canonical ID only; when the entity registry already holds
-                # them, or with the first value of the phone's status) ---
-                if is_phone_id(dev_id):
+                # --- Phone battery and Wi-Fi sensors (phones on the phone
+                # route only: listed without a canonical ID, or listed with one
+                # and holding a target in the latest device list; when the
+                # entity registry already holds them, or with the first value
+                # of the phone's status) ---
+                if is_phone_id(dev_id) or _is_on_phone_route(coordinator, dev_id):
                     entities.extend(
                         _build_phone_status_entities(
                             device, dev_id, tracker_scope, tracker_identifier
@@ -2332,6 +2335,16 @@ def _phone_status_of(coordinator: Any, device_id: str | None) -> PhoneStatus | N
     return cast("PhoneStatus | None", status)
 
 
+def _is_on_phone_route(coordinator: Any, device_id: str) -> bool:
+    """Return whether the latest device list puts ``device_id`` on the phone route.
+
+    Read from the coordinator's target check, independent of any stored fix.
+    Test doubles of the coordinator may lack ``is_on_phone_route``.
+    """
+    check = getattr(coordinator, "is_on_phone_route", None)
+    return callable(check) and bool(check(device_id))
+
+
 def _fresh_phone_status(coordinator: Any, device_id: str | None) -> PhoneStatus | None:
     """Return the phone's status if its push is at most 7 days old."""
     status = _phone_status_of(coordinator, device_id)
@@ -2341,7 +2354,7 @@ def _fresh_phone_status(coordinator: Any, device_id: str | None) -> PhoneStatus 
 
 
 class GoogleFindMyPhoneBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
-    """Battery level of a phone listed without a canonical ID.
+    """Battery level of a phone on the phone route.
 
     The value comes from field 32.1 of the push that answers a locate request,
     in percent; values outside 0 to 100 never reach the coordinator's store.
@@ -2473,7 +2486,7 @@ class GoogleFindMyPhoneBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
 
 
 class GoogleFindMyPhoneWifiSensor(GoogleFindMyDeviceEntity, SensorEntity):
-    """Name of the Wi-Fi network a phone without a canonical ID is on.
+    """Name of the Wi-Fi network a phone on the phone route is on.
 
     The value comes from field 30.1 of the push that answers a locate request,
     without its enclosing quotes. ``unknown`` when the latest push carried no

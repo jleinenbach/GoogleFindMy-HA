@@ -1,5 +1,8 @@
 # custom_components/googlefindmy/NovaApi/ExecuteAction/LocatePhone/phone_locate.py
-"""Locate a phone that Google lists without a canonical ID (phone action 4).
+"""Locate a phone by its Android ID (phone action 4).
+
+Used for a phone that Google lists without a canonical ID and, for a manual
+locate only, for a phone listed with a canonical ID whose entry offers action 4.
 
 Order of one request, which the push timing dictates (the answer arrives about
 0.6 s after the POST): the register entry with the fresh key and the push callback
@@ -271,7 +274,8 @@ async def locate_phone(  # noqa: PLR0913 - one argument per collaborator
     """Send one locate request to the phone and return ``[row]`` or ``[]``.
 
     Args:
-        phone_id: The phone's row id (``aphone-…``), class (b), may be logged.
+        phone_id: The phone's row id (``aphone-…``, or the canonical ID of a
+            phone listed with one), class (b), may be logged.
         android_id: The phone's Android ID from the current device list; used
             for the request and the push check, never logged.
         entry_id: Config entry whose account and push channel are used.

@@ -2689,14 +2689,20 @@ class FcmReceiverHA:
             if hex_string is None:
                 return
 
+            # A phone answers a locate request (action 4) with a push that is
+            # matched on the request id of this channel (entry_id) and handed
+            # to the waiting request as is, with or without canonical id. The
+            # register check here only skips the call while no phone request
+            # is open on this entry; ``_deliver_phone_push`` repeats the same
+            # check before it parses the request id.
+            if any(
+                key[0] == entry_id for key in self._phone_request_callbacks
+            ) and await self._deliver_phone_push(entry_id, hex_string):
+                return
+
             # P1 fix: offload protobuf parsing to executor
             canonic_id = await self._extract_canonic_id_async(hex_string)
             if not canonic_id:
-                # A phone without a canonical ID answers a locate request with a
-                # push like this one; it is matched on the request id of this
-                # channel (entry_id) and handed to the waiting request as is.
-                if await self._deliver_phone_push(entry_id, hex_string):
-                    return
                 _LOGGER.debug("FCM response has no canonical id")
                 return
 
@@ -3128,9 +3134,10 @@ class FcmReceiverHA:
 
         Handles the schema difference between Android devices (nested in phoneInformation)
         and Spot/Tracker devices (direct canonicIds), as defined in DeviceUpdate.proto.
-        Returns ``None`` for a phone listed without a canonical ID; the caller
-        offers such a push to ``_deliver_phone_push`` (matched by request UUID and
-        entry) before it gives up on the push.
+        Returns ``None`` for a phone listed without a canonical ID. A push that
+        answers an open phone request has already been handed to
+        ``_deliver_phone_push`` (matched by request UUID and entry) before this
+        extraction runs, with or without canonical ID.
         """
         try:
             device_update = decoder_module.parse_device_update_protobuf(hex_response)
@@ -3176,7 +3183,11 @@ class FcmReceiverHA:
         return request_uuid if isinstance(request_uuid, str) and request_uuid else None
 
     async def _deliver_phone_push(self, entry_id: str, hex_string: str) -> bool:
-        """Hand a push without canonical id to the open phone request it answers.
+        """Hand a push to the open phone request it answers.
+
+        Covers a push answering an open phone request with or without canonical
+        id; a push that matches no open request returns ``False`` and takes the
+        tracker path unchanged.
 
         The push is parsed in the executor only while a phone request is open on
         this entry's channel. The match is ``(entry_id, requestUuid)``: a push on
@@ -3194,7 +3205,7 @@ class FcmReceiverHA:
         callback = self._phone_request_callbacks.get((entry_id, request_uuid))
         if callback is None:
             _LOGGER.debug(
-                "[entry=%s] FCM push without canonical id matches no open phone request",
+                "[entry=%s] FCM push matches no open phone request",
                 entry_id,
             )
             return False
