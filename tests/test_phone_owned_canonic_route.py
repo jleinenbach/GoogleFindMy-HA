@@ -1368,6 +1368,23 @@ def _readme_paragraph_with(marker: str) -> str:
 
 
 def test_readme_names_the_sensors_of_an_owned_phone() -> None:
+    """The README paragraph on phone sensors keeps the corrected claims.
+
+    Up to PR #1463 the README said that a phone listed with a canonical ID
+    gets neither of the two sensors (``_OLD_README_SENTENCE``). This test pins
+    the corrected wording, rejects a draft claim of a silent own-account
+    request that a measurement replaced before release, and keeps the floor
+    value in one place.
+
+    Blind spot: these are substring and presence checks. They cannot tell an
+    accurate paragraph from one that contains the right phrases next to a new
+    wrong claim, and a reworded return of a withdrawn claim passes unless it
+    reuses the exact text checked below. It is a ratchet, not a proof.
+
+    Retirement: delete this test once the corrected paragraph has shipped
+    unchanged in a release (case (a) of "Docstring semantics guards" in
+    ``tests/AGENTS.md``).
+    """
     paragraph = _readme_paragraph_with('"Battery"')
     assert _OLD_README_SENTENCE not in paragraph
     assert "canonical ID and that offers the locate action" in paragraph
@@ -1383,6 +1400,24 @@ def test_readme_names_the_sensors_of_an_owned_phone() -> None:
 
 
 def test_contract_names_the_second_phone_class_and_the_loop_parse() -> None:
+    """The integration contract names the owned-phone route and its limits.
+
+    Up to PR #1463 ``custom_components/googlefindmy/AGENTS.md`` gave
+    "every request may show a notification" as the reason for spacing
+    automatic requests to a phone; it now cites the measured requests instead.
+    This test rejects the old sentence and a draft citation of one silent
+    own-account request, and pins the replacement statements: the owned-phone
+    target, ring and stop staying on the tracker path, the synchronous parse
+    on the event loop and the rule for the ``"manual"`` dispatch label.
+
+    Blind spot: these are substring and presence checks. They cannot verify
+    that the contract describes the code correctly, and a withdrawn claim that
+    returns in different words passes. It is a ratchet, not a proof.
+
+    Retirement: delete this test once the corrected contract text has shipped
+    unchanged in a release (case (a) of "Docstring semantics guards" in
+    ``tests/AGENTS.md``).
+    """
     contract = (
         _REPO_ROOT / "custom_components" / "googlefindmy" / "AGENTS.md"
     ).read_text(encoding="utf-8")
