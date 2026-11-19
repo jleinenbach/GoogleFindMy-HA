@@ -103,6 +103,10 @@ REPO_ROOT = Path(
 # Poetry so that readers of older instructions recognise them.
 _REMOVED_WITH_POETRY = "were removed with the move to Poetry and no longer exist"
 
+# tests/test_pr_template_contract.py: the self-test plants a dead target to prove
+# that the template check reports it.
+_PLANTED_IN_TEMPLATE_CHECK = "planted dead target, admitted in test_guard_make_targets"
+
 # Places that name a removed target on purpose. Key: (repo-relative path, target);
 # value: wording that must stand on the same line for the mention to be admitted.
 ALLOWED_MENTIONS: dict[tuple[str, str], str] = {
@@ -110,6 +114,7 @@ ALLOWED_MENTIONS: dict[tuple[str, str], str] = {
     ("AGENTS.md", "test-deps"): _REMOVED_WITH_POETRY,
     ("AGENTS.md", "test-stubs"): _REMOVED_WITH_POETRY,
     ("AGENTS.md", "install-ha-stubs"): _REMOVED_WITH_POETRY,
+    ("tests/test_pr_template_contract.py", "nope"): _PLANTED_IN_TEMPLATE_CHECK,
 }
 
 _TEXT_SUFFIXES = frozenset(
