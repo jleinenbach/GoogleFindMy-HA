@@ -525,7 +525,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 
 ## 1) What must be in **every** PR (lean checklist)
 
-* **PR template alignment.** Complete [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) and keep the responses synchronized with the items listed below.
+* **PR template alignment.** Contributors fill in [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md). Maintainers open pull requests with `gh pr create --body-file` from a filled copy of [.github/MAINTAINER_PR_BODY.md](.github/MAINTAINER_PR_BODY.md), which repeats the contributor sections and adds the maintainer verification; GitHub does not offer it as a template. `tests/test_pr_template_contract.py` keeps both in line with `semantic-pr.yml`, the `Makefile` and the coverage floor. Keep the responses synchronized with the items listed below.
 * **AGENTS upkeep.** Before opening a PR, review all applicable `AGENTS.md` files and update them when improvements or corrections are evident.
 * **Translation schema guardrails.** Home Assistant option/config flow translations must stick to the documented schema. Under each `options.step.<id>` or `config.step.<id>` block, only use `title`, `description`, `data`, `data_description`, `menu_options`, `error`, `abort`, and `progress`. Avoid nested `select` objects or other ad-hoc keys—translation validation will reject them and the options UI will render placeholders instead of labels.
   * `data_description` entries must be **strings**. Validators reject dictionaries at that path, so encode select choice labels in plain text (for example, list the choices in the field description) and reserve option-specific labels for the selector definition in `config_flow.py`.
