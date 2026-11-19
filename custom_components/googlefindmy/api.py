@@ -206,17 +206,17 @@ def _is_multi_entry_guard_message(msg: str) -> bool:
     return ("Multiple config entries active" in m) or ("entry.runtime_data" in m)
 
 
-def _maybe_log_guard_once(
-    context: str, *, email: str | None = None, entry_id: str | None = None
-) -> None:
-    """Log the multi-entry guard once at INFO; subsequent occurrences at DEBUG."""
+def _maybe_log_guard_once(context: str, *, entry_id: str | None = None) -> None:
+    """Log the multi-entry guard once at INFO; subsequent occurrences at DEBUG.
+
+    The account is named by its config entry ID only. There is deliberately no
+    parameter for the account e-mail address: these lines end up in logs that
+    users attach to public issues. AGENTS.md section 5 ("Never log") bans e-mail
+    addresses in clear text and lists the entry ID as class (b), allowed at any
+    level.
+    """
     global _GUARD_LOGGED_ONCE
-    extra = []
-    if email:
-        extra.append(f"email={email}")
-    if entry_id:
-        extra.append(f"entry_id={entry_id}")
-    suffix = f" ({', '.join(extra)})" if extra else ""
+    suffix = f" (entry_id={entry_id})" if entry_id else ""
 
     if not _GUARD_LOGGED_ONCE:
         _LOGGER.info(
@@ -1499,13 +1499,8 @@ class GoogleFindMyAPI:
 
             # Detect and tame the multi-entry guard (INFO once, DEBUG thereafter)
             if _is_multi_entry_guard_message(msg):
-                # Try to enrich with context if available from cache (best-effort)
-                try:
-                    email = await self._cache.async_get_cached_value(username_string)
-                except Exception:
-                    email = None
                 entry_id = getattr(self._cache, "entry_id", None)
-                _maybe_log_guard_once("device_list", email=email, entry_id=entry_id)
+                _maybe_log_guard_once("device_list", entry_id=entry_id)
 
                 # Still raise UpdateFailed so the coordinator/flow can keep semantics,
                 # and the flow can recognize the guard by message content.

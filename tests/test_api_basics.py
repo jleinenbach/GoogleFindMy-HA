@@ -147,13 +147,10 @@ class TestMaybeLogGuardOnce:
 
     def test_extras_are_appended(self, caplog: pytest.LogCaptureFixture) -> None:
         caplog.set_level(logging.INFO, logger=api_module._LOGGER.name)
-        _maybe_log_guard_once(
-            "device_list", email="user@example.com", entry_id="entry-1"
-        )
+        _maybe_log_guard_once("device_list", entry_id="entry-1")
         info = [r for r in caplog.records if r.levelno == logging.INFO]
         message = info[0].getMessage()
-        assert "email=user@example.com" in message
-        assert "entry_id=entry-1" in message
+        assert message.endswith(" (entry_id=entry-1)")
 
 
 class TestFcmProviderRegistration:
