@@ -123,6 +123,7 @@ from .ProtoDecoders.decoder import (
 )
 from .ProtoDecoders.decoder import (
     get_devices_with_location,
+    owned_phone_target,
     parse_device_list_protobuf,
 )
 from .SpotApi.spot_request import SpotAuthPermanentError
@@ -637,10 +638,14 @@ class GoogleFindMyAPI:
         # Key: canonical device id, Value: can_ring (bool)
         self._device_capabilities: dict[str, bool] = {}
 
-        # Phones listed without a canonical ID: the per-entry HMAC key
-        # behind their row ids, loaded before the first list is processed, and the
-        # row id -> Android ID table of the latest list. The table lives only in
-        # memory and is replaced by every list; nothing here is ever logged.
+        # Phones on the phone route: the per-entry HMAC key behind the row ids
+        # of phones listed without a canonical ID, loaded before the first list
+        # is processed, and the row id -> Android ID table of the latest list.
+        # The table also holds phones listed with a canonical ID that offer the
+        # phone locate action (canonical ID -> Android ID). It names the phones
+        # that can receive the phone action; which request takes it is decided
+        # in ``async_get_device_location``. It lives only in memory and is
+        # replaced by every list; nothing here is ever logged.
         self._phone_id_key: bytes | None = None
         self._phone_id_key_lock = asyncio.Lock()
         self._phone_targets: dict[str, int] = {}
@@ -662,6 +667,13 @@ class GoogleFindMyAPI:
         either value; the status never travels in the location row.
         """
         self._phone_status_sink = sink
+
+    def has_phone_target(self, device_id: str) -> bool:
+        """Return whether the latest device list holds a phone target for ``device_id``.
+
+        Only the membership leaves the API; the Android ID stays in the table.
+        """
+        return device_id in self._phone_targets
 
     async def close(self) -> None:
         """Cleanup local references."""
@@ -865,6 +877,18 @@ class GoogleFindMyAPI:
             emit_canonicless_diagnostics=True,
             phone_id_for=phone_id_for,
         )
+        # Phones listed with a canonical ID that offer the phone locate action
+        # join the same table, keyed by their canonical ID (the row id). Only
+        # with a real token cache, as for the canonicless rows: flows and the
+        # CLI keep the tracker route. The keys cannot collide with the
+        # prefixed row ids above.
+        owned: dict[str, int] = {}
+        if token_cache is not None:
+            for metadata in parsed.deviceMetadata:
+                target = owned_phone_target(metadata)
+                if target is not None:
+                    owned[target[0]] = target[1]
+        phone_targets.update(owned)
         self._phone_targets = phone_targets
         if device_rows:
             for device in device_rows:
@@ -977,7 +1001,7 @@ class GoogleFindMyAPI:
             return best_record
         return records[0]
 
-    # ------------------------ Phones without a canonical ID -----------------------
+    # ------------------------- Phones on the phone route --------------------------
     def _phone_fcm_receiver(self, entry_id: str) -> Any | None:
         """Return the shared push receiver for ``entry_id``, or ``None``.
 
@@ -1062,7 +1086,12 @@ class GoogleFindMyAPI:
         return android_id, entry_id, receiver
 
     async def _async_get_phone_location(self, device_id: str) -> list[dict[str, Any]]:
-        """Locate a phone listed without a canonical ID (row id with the prefix).
+        """Locate a phone with the phone locate action (action 4).
+
+        The row id is either the prefixed id of a phone listed without a
+        canonical ID, or the canonical ID of a phone listed with one that offers
+        the phone locate action; both have an entry in ``_phone_targets``. A
+        phone listed with a canonical ID comes here only for a manual request.
 
         Preconditions and the readiness gate run in
         ``_async_prepare_phone_request``; a refusal there raises
@@ -1662,11 +1691,23 @@ class GoogleFindMyAPI:
                 device_name,
                 device_id,
             )
-            if is_phone_id(device_id):
-                # A phone listed without a canonical ID: its own path, inside this
-                # handler so the auth mapping and the pass-through of
-                # LocationRequestNotAcceptedError below apply unchanged. A
-                # prefixed id without a target raises there and nothing is sent.
+            if is_phone_id(device_id) or (
+                device_id in self._phone_targets
+                and nova_request.current_dispatch_kind() == "manual"
+            ):
+                # The phone locate action. A phone listed without a canonical ID
+                # (prefixed row id) has no other path and always takes it. A
+                # phone listed with one and offering the action (entry in the
+                # target table) takes it only for a manual request ("Locate
+                # now" or a service call): the phone shows a notification for
+                # every measured request (one phone). Automatic and unlabelled requests for it
+                # (a task created inside a manual block inherits that label)
+                # stay on the tracker route below, which returns the phone's
+                # own last report. Kept inside this handler so the auth mapping
+                # and the pass-through of LocationRequestNotAcceptedError below
+                # apply unchanged. A prefixed id without a target raises there
+                # and nothing is sent. Ring and stop keep their tracker actions
+                # for a phone listed with a canonical ID.
                 records = await self._async_get_phone_location(device_id)
                 best = self._select_best_location(records)
                 if best:

@@ -1869,9 +1869,11 @@ class PollingOperations(_MixinBase):
     def _phone_auto_poll_wait_s(self, dev: Mapping[str, Any]) -> float | None:
         """Seconds a phone row still has to wait for its next automatic request.
 
-        Applies only to rows of a phone listed without a canonical ID
-        (``locate_route == "phone"``); every other row returns ``None`` and
-        follows the cycle unchanged. Such a phone is asked at most every
+        Applies only to rows whose automatic request is the phone locate action
+        (``locate_route == "phone"``), that is a phone listed without a
+        canonical ID. A phone listed with one is asked like a tracker and,
+        like every other row, returns ``None`` and follows the cycle
+        unchanged. Such a phone is asked at most every
         ``max(max(location_poll_interval, min_poll_interval),
         PHONE_MIN_AUTO_POLL_INTERVAL_S)`` seconds, measured from the POST stamp
         in ``_locate_requested_mono``. A manual "Locate now" writes the same
@@ -2101,7 +2103,7 @@ class PollingOperations(_MixinBase):
                         )
                         cycle_skipped_devices += 1
                         continue
-                    # Phones without a canonical ID have their own floor.
+                    # Phones listed without a canonical ID have their own floor.
                     # The id is class (b) and may be logged; the name stays out
                     # of this line like in the AUTOMATIC_POLLING_CHANGE line.
                     phone_wait_s = self._phone_auto_poll_wait_s(dev)

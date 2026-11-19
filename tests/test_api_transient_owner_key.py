@@ -40,6 +40,7 @@ def _make_api() -> GoogleFindMyAPI:
     api._contributor_mode = None
     api._contributor_mode_switch_epoch = 0
     api._namespace = lambda: "entry-transient"
+    api._phone_targets = {}
     return api
 
 

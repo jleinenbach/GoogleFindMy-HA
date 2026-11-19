@@ -624,8 +624,11 @@ _REQUEST_DISPATCH_OBSERVER: contextvars.ContextVar[Callable[[], None] | None] = 
 )
 # The send site's label for the request (``"auto"`` for the poll cycle,
 # ``"manual"`` for a manual locate), set together with the observer. The phone
-# locate path reads it for its measurement line and its counters, because the
-# request layer has no other way to learn which send site asked.
+# locate path reads it for its measurement line and its counters, and
+# ``api.async_get_device_location`` routes on it: a phone listed with a
+# canonical ID gets the phone locate action only for ``"manual"``. The request
+# layer has no other way to learn which send site asked. Like the observer, the
+# label is inherited by tasks created in the setting context.
 _REQUEST_DISPATCH_KIND: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_request_dispatch_kind", default=None
 )

@@ -388,6 +388,8 @@ Measured on one account with one phone and several trackers, and on a second acc
 | `DeviceMetadata.PhoneInformation` (36) | `phoneInformationField36`, form `PhoneLocationEnvelope` | `{2: {1: ciphertext, 32 bytes; 2: IV, 16 bytes}, 3: 1, 4: Time}`; AES-128-CBC with the key of the request, PKCS7 padding; the time is the location fix, 16 s to 146 s before the push | n=1 phone, 7 pushes, 2026-11-14/15 | yes |
 | `PhoneLocationPlaintext` (1, 2) | `position` (`latitude`, `longitude` as `double`), `accuracyMeters` (`float`) | 25 bytes; `accuracyMeters` equal to the accuracy the phone reported for the same fix (2 fixes) | n=1 phone, 2026-11-14/15 | yes (position) |
 
+**Phone with a canonical ID in its owner's account** (2026-11-16). Addressed through `ExecuteActionScope.phone` with the Android ID from the owner's own device list and action 4, a phone that Google lists with a canonical ID answers with the same fields 30, 32 and 36 as above (n=1 phone). The answer to the tracker locate request for the same phone carries an empty `phoneInformation` (n=2 requests), so the battery level and the Wi-Fi name come only through action 4. Values are not recorded here.
+
 **Tracker entries:**
 
 | Field (number) | Declared name | Observation | n, date | Personal data |

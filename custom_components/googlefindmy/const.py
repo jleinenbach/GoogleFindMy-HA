@@ -683,10 +683,14 @@ DEVICE_LIST_POLL_INTERVAL: int = 300
 DEFAULT_LOCATION_POLL_INTERVAL: int = 300  # seconds; start a new polling cycle
 DEFAULT_DEVICE_POLL_DELAY: int = 5  # seconds; inter-device delay within one cycle
 DEFAULT_MIN_POLL_INTERVAL: int = 60  # seconds; hard lower bound between cycles
-# Floor for automatic location requests to a phone listed without a canonical ID
-# (row `locate_route == "phone"`). Each request shows a notification on the
-# phone, so until per-device intervals are supported such a phone is asked at
-# most every
+# Floor for automatic location requests to a row whose automatic request is the
+# phone locate action (`locate_route == "phone"`), that is a phone listed without
+# a canonical ID. Each such request showed a notification from Google Play
+# services on the phone, from the owner's own account as from an account the
+# phone is shared into (one phone, n = 3, 2026-11-18). A phone listed with a
+# canonical ID is asked automatically with the tracker request, which showed no
+# notification (n = 2), and is not bound by this floor. Until per-device
+# intervals are supported such a phone is asked at most every
 # max(effective account interval, this floor). The manual "Locate now" button is
 # not bound by it; its request stamps the phone and so moves the next automatic
 # one. Trackers and every other device keep DEFAULT_MIN_POLL_INTERVAL and the

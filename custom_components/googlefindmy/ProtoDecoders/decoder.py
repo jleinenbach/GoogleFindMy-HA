@@ -238,6 +238,61 @@ def supported_action_numbers(device: Any) -> frozenset[int]:
     return frozenset(numbers)
 
 
+# Field number of ``ExecuteActionType.phoneActionField4``, the phone locate action
+# (the request side sets it in ``phone_action_request``).
+_PHONE_LOCATE_ACTION = DeviceUpdate_pb2.ExecuteActionType.DESCRIPTOR.fields_by_name[
+    "phoneActionField4"
+].number
+
+
+def owned_phone_target(device: Any) -> tuple[str, int] | None:
+    """Return ``(canonic_id, android_id)`` of a phone that the locate action can reach.
+
+    The predicate for an Android phone listed with a canonical ID: its type is
+    ``IDENTIFIER_ANDROID``, the first entry of ``phoneInformation.canonicIds`` carries
+    a non-empty ID (the same entry the row in ``get_devices_with_location`` uses, so
+    the returned ID is that row's ``id``), its Android ID
+    (``phoneInformation.phoneInformationField1``, 0 means absent) is set and the entry
+    offers the phone locate action in ``supportedActions``. A phone without a usable
+    first canonical ID is not covered here; ``canonicless_android_id`` handles the
+    phone without any canonical ID. The Android ID is personal data: callers keep it
+    in a local variable or the target table and never log it.
+    """
+    try:
+        ident = device.identifierInformation
+        if ident.type != DeviceUpdate_pb2.IDENTIFIER_ANDROID:
+            return None
+        phone_info = ident.phoneInformation
+        first = phone_info.canonicIds.canonicId[:1]
+        canonic_id = getattr(first[0], "id", None) if first else None
+        android_id = phone_info.phoneInformationField1
+    except Exception as err:  # noqa: BLE001 - an unreadable entry is no locate target
+        # Class only: the message of an error raised while reading the entry
+        # could carry a field value.
+        _LOGGER.debug(
+            "Device entry not readable as a phone with canonical ID (%s)",
+            type(err).__name__,
+        )
+        return None
+    if not (isinstance(canonic_id, str) and canonic_id):
+        return None
+    if (
+        isinstance(android_id, bool)
+        or not isinstance(android_id, int)
+        or android_id == 0
+    ):
+        return None
+    try:
+        offers_locate = _PHONE_LOCATE_ACTION in supported_action_numbers(device)
+    except Exception as err:  # noqa: BLE001 - one entry must not break the list
+        _LOGGER.debug(
+            "Device entry not readable as a phone with canonical ID (%s)",
+            type(err).__name__,
+        )
+        return None
+    return (canonic_id, android_id) if offers_locate else None
+
+
 def _build_phone_row(
     device: Any, device_name: str, phone_id_for: Callable[[int], str]
 ) -> dict[str, Any] | None:
