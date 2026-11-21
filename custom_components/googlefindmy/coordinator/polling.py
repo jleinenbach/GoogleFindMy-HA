@@ -75,6 +75,9 @@ from ..ProtoDecoders import decoder
 from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
+from ..SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+    begin_owner_key_poll_cycle,
+)
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
 from .helpers.cache import (
@@ -1976,6 +1979,11 @@ class PollingOperations(_MixinBase):
                 # whole device loop runs to completion before the single escalation
                 # fires, so the remaining trackers still get one (failing) Nova call.
                 # That is the rare end-state cost of per-cycle counting.
+                # A new poll cycle grants one owner-key refresh claim per account
+                # (version gap, issue #246).
+                _cycle_entry = getattr(self, "config_entry", None)
+                if _cycle_entry is not None:
+                    begin_owner_key_poll_cycle(_cycle_entry.entry_id)
                 cycle_decrypt_error: DecryptionError | None = None
                 # True if any device hit a per-tracker StaleOwnerKeyError this
                 # cycle. Such cycles must NOT be reported as crypto OK even when

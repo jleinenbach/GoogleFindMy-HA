@@ -361,6 +361,29 @@ def reset_foreign_reading_tracker() -> Iterable[None]:
     _reset_foreign_reading_tracker()
 
 
+_OWNER_KEY_MODULE = (
+    "custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key"
+)
+
+
+def _reset_owner_key_refresh_state() -> None:
+    # Only when already imported, like the foreign-reading tracker above. The
+    # reset function is looked up with getattr: a test that swaps in an older
+    # get_owner_key.py (rot probe) must not end in a fixture error.
+    module = sys.modules.get(_OWNER_KEY_MODULE)
+    reset = getattr(module, "reset_owner_key_refresh_state", None)
+    if callable(reset):
+        reset()
+
+
+@pytest.fixture(autouse=True)
+def isolate_owner_key_refresh_state() -> Iterable[None]:
+    """Isolate the per-account owner-key refresh throttle and gap register."""
+    _reset_owner_key_refresh_state()
+    yield
+    _reset_owner_key_refresh_state()
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_teardown() -> None:
     """Heal the lazy symbol, then fail the culprit of a cross-test symbol leak.

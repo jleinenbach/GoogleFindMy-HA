@@ -30,11 +30,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import re
+import time
 from binascii import Error as BinasciiError
 from binascii import unhexlify
 from collections.abc import Awaitable, Callable
-from typing import Any, NamedTuple
+from dataclasses import dataclass, field
+from typing import Any, Final, Literal, NamedTuple, TypeGuard
 
 from cryptography.exceptions import InvalidTag
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -53,6 +56,11 @@ from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
 )
 from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (
     async_get_shared_key,
+)
+from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+    OWNER_KEY_VERSIONS_FIELD,
+    VaultEntry,
+    from_bundle_field,
 )
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
@@ -494,6 +502,255 @@ async def async_fetch_owner_key_uncached(
     return OwnerKeyInfo(
         key=key_bytes, version=version if isinstance(version, int) else None
     )
+
+
+# ---------------------------------------------------------------------------
+# Owner-key versions from the vault bundle field (issue #246)
+# ---------------------------------------------------------------------------
+
+VaultLookupStatus = Literal[
+    "found", "field_missing", "version_missing", "undecryptable"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class VaultOwnerKeyLookup:
+    """Outcome of a vault lookup; ``key`` is the unwrapped owner key or ``None``.
+
+    ``repr()`` and ``str()`` name only ``status`` and ``versions``, never bytes.
+    """
+
+    key: bytes | None = field(repr=False)
+    status: VaultLookupStatus
+    versions: tuple[int, ...]
+
+
+def _lookup_failure(
+    status: VaultLookupStatus, versions: tuple[int, ...] = ()
+) -> VaultOwnerKeyLookup:
+    return VaultOwnerKeyLookup(key=None, status=status, versions=versions)
+
+
+async def _read_vault_field(
+    cache: TokenCache,
+) -> tuple[VaultEntry, ...] | VaultLookupStatus:
+    """Read and parse the bundle field; a status string on any failure."""
+    try:
+        raw_field = await cache.get(OWNER_KEY_VERSIONS_FIELD)
+    except Exception as exc:  # noqa: BLE001 - lookup is best-effort by contract
+        _LOGGER.debug(
+            "Vault owner-key lookup: field read failed (%s)", type(exc).__name__
+        )
+        return "field_missing"
+    if raw_field is None:
+        return "field_missing"
+    try:
+        entries = from_bundle_field(raw_field)
+    except Exception as exc:  # noqa: BLE001 - lookup is best-effort by contract
+        _LOGGER.debug(
+            "Vault owner-key lookup: field parse failed (%s)", type(exc).__name__
+        )
+        entries = None
+    return "undecryptable" if entries is None else entries
+
+
+async def _read_wrapping_key(cache: TokenCache) -> bytes | VaultLookupStatus:
+    """Read the shared key like ``decrypt_locations``; a status string on failure."""
+    try:
+        cached_user = await cache.get(username_string)
+        wrapping_key = await async_get_shared_key(
+            cache=cache,
+            username=cached_user if isinstance(cached_user, str) else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - lookup is best-effort by contract
+        _LOGGER.debug(
+            "Vault owner-key lookup: shared key read failed (%s)", type(exc).__name__
+        )
+        return "field_missing"
+    if not isinstance(wrapping_key, (bytes, bytearray)) or not wrapping_key:
+        return "undecryptable"
+    return bytes(wrapping_key)
+
+
+async def _unwrap_vault_blob(wrapping_key: bytes, blob: bytes) -> bytes | None:
+    """Unwrap a vault blob in the executor; ``None`` unless exactly 32 bytes."""
+    try:
+        unwrapped: Any = await _run_in_executor(decrypt_owner_key, wrapping_key, blob)
+    except Exception as exc:  # noqa: BLE001 - lookup is best-effort by contract
+        _LOGGER.debug("Vault owner-key lookup: unwrap failed (%s)", type(exc).__name__)
+        return None
+    if (
+        not isinstance(unwrapped, (bytes, bytearray))
+        or len(unwrapped) != _OWNER_KEY_LENGTH
+    ):
+        return None
+    return bytes(unwrapped)
+
+
+async def async_get_vault_owner_key(
+    *, cache: TokenCache, version: int
+) -> VaultOwnerKeyLookup:
+    """Unwrap the owner key of ``version`` from the bundle field; never raises.
+
+    Reads the field ``owner_key_versions`` and the shared key from the entry
+    cache and decrypts the vault entry in the executor, as ``_retrieve_owner_key``
+    does for the Spot owner key. The unwrapped key is never persisted.
+
+    Error contract: any exception while reading the cache (field, username or
+    shared key, including a cache without ``get``) gives ``field_missing``; an
+    absent field gives ``field_missing``; a field in a foreign shape gives
+    ``undecryptable``; a field without ``version`` gives ``version_missing``; a
+    missing shared key, a failing decryption or a result that is not exactly 32
+    bytes gives ``undecryptable``. Only the exception class name is logged, at
+    DEBUG. ``asyncio.CancelledError`` is not an ``Exception`` and propagates.
+    """
+    entries = await _read_vault_field(cache)
+    if isinstance(entries, str):
+        return _lookup_failure(entries)
+    versions = tuple(entry.version for entry in entries)
+    entry = next((item for item in entries if item.version == version), None)
+    if entry is None:
+        return _lookup_failure("version_missing", versions)
+    wrapping_key = await _read_wrapping_key(cache)
+    if isinstance(wrapping_key, str):
+        return _lookup_failure(wrapping_key, versions)
+    unwrapped = await _unwrap_vault_blob(wrapping_key, entry.key)
+    if unwrapped is None:
+        return _lookup_failure("undecryptable", versions)
+    return VaultOwnerKeyLookup(key=unwrapped, status="found", versions=versions)
+
+
+# Minimum spacing of owner-key Spot refreshes outside a poll cycle (push path,
+# CLI). Equal to DEFAULT_LOCATION_POLL_INTERVAL, kept local so this module does
+# not depend on const.py.
+OWNER_KEY_SPOT_REFRESH_MIN_INTERVAL_S: Final = 300
+
+# Test seam for the refresh throttle.
+_monotonic: Callable[[], float] = time.monotonic
+
+
+@dataclass(slots=True)
+class _OwnerKeyRefreshState:
+    """Per-account throttle and version-gap register."""
+
+    cycle_seq: int = 0
+    last_claim_cycle: int = 0
+    last_claim_at: float = -math.inf
+    resolver_last_claim_at: float = -math.inf
+    open_gap_versions: set[int] = field(default_factory=set)
+    resolved_versions: set[int] = field(default_factory=set)
+
+
+_owner_key_refresh_state: dict[str, _OwnerKeyRefreshState] = {}
+
+
+def _scope_name(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def owner_key_scope(cache: object) -> str:
+    """Return the account scope of ``cache``: entry id, namespace or object id.
+
+    An empty or blank string counts as missing; never raises.
+    """
+    for attribute in ("entry_id", "namespace"):
+        try:
+            name = _scope_name(getattr(cache, attribute, None))
+        except Exception:  # noqa: BLE001 - a raising property counts as missing
+            name = None
+        if name is not None:
+            return name
+    return f"id:{id(cache)}"
+
+
+def _state_for(scope: str) -> _OwnerKeyRefreshState:
+    state = _owner_key_refresh_state.get(scope)
+    if state is None:
+        state = _OwnerKeyRefreshState()
+        _owner_key_refresh_state[scope] = state
+    return state
+
+
+def _is_version(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def begin_owner_key_poll_cycle(scope: str) -> None:
+    """Mark the start of a poll cycle; its first refresh claim is granted."""
+    _state_for(scope).cycle_seq += 1
+
+
+def claim_owner_key_spot_refresh(cache: object) -> bool:
+    """Grant a forced owner-key refresh: once per poll cycle, else every 300 s.
+
+    Without a preceding ``begin_owner_key_poll_cycle`` (push path, CLI) only the
+    clock counts; the first claim of a scope is always granted.
+    """
+    state = _state_for(owner_key_scope(cache))
+    now = _monotonic()
+    if (
+        state.cycle_seq != state.last_claim_cycle
+        or now - state.last_claim_at >= OWNER_KEY_SPOT_REFRESH_MIN_INTERVAL_S
+    ):
+        state.last_claim_cycle = state.cycle_seq
+        state.last_claim_at = now
+        return True
+    return False
+
+
+def claim_owner_key_spot_refresh_by_clock(cache: object) -> bool:
+    """Grant the EID resolver's own refresh claim, by the clock alone.
+
+    Touches only ``resolver_last_claim_at``, never the poll-cycle claim.
+    """
+    state = _state_for(owner_key_scope(cache))
+    now = _monotonic()
+    if now - state.resolver_last_claim_at >= OWNER_KEY_SPOT_REFRESH_MIN_INTERVAL_S:
+        state.resolver_last_claim_at = now
+        return True
+    return False
+
+
+def record_owner_key_version_gap(cache: object, version: object) -> None:
+    """Add ``version`` to the open gap versions of the cache's scope (idempotent)."""
+    if _is_version(version):
+        _state_for(owner_key_scope(cache)).open_gap_versions.add(version)
+
+
+def record_owner_key_version_resolved(cache: object, version: object) -> None:
+    """Move ``version`` from open to resolved; a no-op unless it is open."""
+    if not _is_version(version):
+        return
+    state = _owner_key_refresh_state.get(owner_key_scope(cache))
+    if state is not None and version in state.open_gap_versions:
+        state.open_gap_versions.discard(version)
+        state.resolved_versions.add(version)
+
+
+def consume_resolved_owner_key_versions(scope: str) -> tuple[int, ...]:
+    """Return the resolved versions of ``scope`` in order and clear only them."""
+    state = _owner_key_refresh_state.get(scope)
+    if state is None or not state.resolved_versions:
+        return ()
+    resolved = tuple(sorted(state.resolved_versions))
+    state.resolved_versions.clear()
+    return resolved
+
+
+def open_owner_key_version_gaps(scope: str) -> tuple[int, ...]:
+    """Return the open gap versions of ``scope`` in order (read only)."""
+    state = _owner_key_refresh_state.get(scope)
+    return tuple(sorted(state.open_gap_versions)) if state is not None else ()
+
+
+def forget_owner_key_refresh_state(scope: str) -> None:
+    """Drop the register of ``scope`` (entry unload or removal)."""
+    _owner_key_refresh_state.pop(scope, None)
+
+
+def reset_owner_key_refresh_state() -> None:
+    """Clear the whole register (test seam, no production caller)."""
+    _owner_key_refresh_state.clear()
 
 
 # ---------------------------------------------------------------------------
