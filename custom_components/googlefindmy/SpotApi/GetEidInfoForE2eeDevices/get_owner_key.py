@@ -443,7 +443,7 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
             _LOGGER.error(
                 "Owner key for user '%s' is not valid hex or base64/base64url. "
                 "Please store the key as a 64-char hex string (32 bytes). Error: %s",
-                user,
+                _mask_email_for_logs(user),
                 exc,
             )
             # Clear per-user & legacy cache to prevent repeated failures on the same invalid data
@@ -467,7 +467,7 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
         _LOGGER.error(
             "Owner key for user '%s' has an invalid length: %d bytes (expected 32). "
             "Clear credentials and re-authenticate if this persists.",
-            user,
+            _mask_email_for_logs(user),
             len(key_bytes),
         )
         await cache.set(_user_cache_key(user), None)
