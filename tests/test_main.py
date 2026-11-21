@@ -1074,6 +1074,9 @@ class TestPasteRoundTrip:
             def __init__(self) -> None:
                 self.saved: dict = {}
 
+            async def async_get_cached_value(self, name: str) -> object:
+                return self.saved.get(name)
+
             async def async_set_cached_value(self, name: str, value: object) -> None:
                 self.saved[name] = value
 

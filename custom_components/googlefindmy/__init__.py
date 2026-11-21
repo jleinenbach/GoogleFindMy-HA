@@ -660,6 +660,7 @@ _LOGGABLE_BUNDLE_FIELDS: tuple[str, ...] = (
     "google_email",
     "oauth_token",
     "owner_key",
+    "owner_key_versions",
     "shared_key",
     "token",
     "username",
@@ -9571,6 +9572,31 @@ async def _async_save_secrets_data(
                 "Failed to save bundle field %s (%s) for %s to persistent cache: %s",
                 field_name,
                 type(value).__name__,
+                log_label,
+                err,
+            )
+
+    # The loop above only sets the fields the bundle carries. A bundle with a
+    # shared_key but without owner-key versions was written by a login run whose
+    # vault fetch failed or by an older login tool; versions kept from an earlier
+    # import belong to an older shared_key and would only produce wrong
+    # diagnoses, so they go. A bundle without a shared_key leaves them alone:
+    # it says nothing about which shared_key they belong to.
+    from .KeyBackup.vault_web_api import OWNER_KEY_VERSIONS_FIELD
+
+    if secrets_data.get("shared_key") and OWNER_KEY_VERSIONS_FIELD not in secrets_data:
+        try:
+            if await cache.async_get_cached_value(OWNER_KEY_VERSIONS_FIELD) is not None:
+                await cache.async_set_cached_value(OWNER_KEY_VERSIONS_FIELD, None)
+                _LOGGER.debug(
+                    "Account %s: removed bundle field owner_key_versions; "
+                    "the imported bundle has a shared_key and no versions",
+                    log_label,
+                )
+        except (OSError, TypeError) as err:
+            _LOGGER.warning(
+                "Failed to remove bundle field owner_key_versions for %s "
+                "from persistent cache: %s",
                 log_label,
                 err,
             )
