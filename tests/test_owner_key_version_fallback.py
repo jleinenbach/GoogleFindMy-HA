@@ -52,8 +52,6 @@ from tests.helpers.polling_mixin_stub import PollingStub
 
 pytestmark = pytest.mark.asyncio
 
-_NOT_CLASSIFIED = "owner-key version gap not yet exempt from account reauth"
-
 
 class _SpotDouble:
     """Spot-side doubles that count every call that would reach Spot.
@@ -239,7 +237,6 @@ async def test_tracker_older_than_spot_keeps_stale_owner_key_error(
         )
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_NOT_CLASSIFIED)
 async def test_version_unavailable_error_never_drives_account_reauth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -258,11 +255,12 @@ async def test_version_unavailable_error_never_drives_account_reauth(
     _install(monkeypatch, world)
     cache = _seeded_cache(world, None)
 
-    with pytest.raises(DecryptionError) as ei:
+    with pytest.raises(OwnerKeyVersionUnavailableError) as ei:
         await _dl.async_retrieve_identity_key(
             world.tracker_registration(2), cache=cache
         )
     gap_error = ei.value
+    assert isinstance(gap_error, DecryptionError)
 
     stub = _make_polling_stub()
     for _ in range(_MAX_DECRYPT_FAILURES + 1):

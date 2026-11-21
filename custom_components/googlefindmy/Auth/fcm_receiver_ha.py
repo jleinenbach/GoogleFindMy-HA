@@ -107,6 +107,7 @@ from custom_components.googlefindmy.location_row_markers import (
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
+    OwnerKeyVersionUnavailableError,
     StaleOwnerKeyError,
     any_real_location_record,
     async_decrypt_location_response_locations,
@@ -3461,6 +3462,15 @@ class FcmReceiverHA:
                             entry_id, device_update
                         ),
                     )
+                except OwnerKeyVersionUnavailableError as gap_err:
+                    # Owner-key version gap (issue #246): the coordinator records
+                    # status and warning; stale=False is ignored for this class, so
+                    # it never feeds the reauth counter. Must precede the
+                    # DecryptionError handler (it is a subclass).
+                    self._note_decrypt_failure_for_entry(
+                        entry_id, stale=False, error=gap_err
+                    )
+                    return {}
                 except StaleOwnerKeyError as stale_err:
                     _LOGGER.info(
                         "Background location update skipped (stale tracker key) for "

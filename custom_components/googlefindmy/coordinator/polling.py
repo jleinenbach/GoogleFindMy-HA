@@ -58,6 +58,7 @@ from ..const import (
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
+    OwnerKeyVersionUnavailableError,
     OwnReportIdentityMismatchError,
     SharedKeyMissingError,
     StaleOwnerKeyError,
@@ -420,7 +421,11 @@ class PollingOperations(_MixinBase):
                 mismatch). Such failures are NOT account-wide and must not drive
                 the account-wide reauth counter -- an account reauth would not fix a
                 single outdated tracker.
-            error: The decryption error, kept for diagnostics/logging.
+            error: The decryption error, kept for diagnostics/logging. An
+                ``OwnerKeyVersionUnavailableError`` (owner-key version gap,
+                issue #246) is classified from the error itself: it sets
+                ``owner_key_version_unavailable`` and never touches the
+                account-wide counter, whatever ``stale`` says.
             device: Optional device name for log context.
 
         Returns:
@@ -429,6 +434,25 @@ class PollingOperations(_MixinBase):
             cooldown allows a fresh escalation); False otherwise.
         """
         self._last_decrypt_error = f"{type(error).__name__}: {error}"
+
+        if isinstance(error, OwnerKeyVersionUnavailableError):
+            # Owner-key version gap (issue #246): the tracker needs a newer
+            # owner-key version than Spot serves and the bundle holds. A fresh
+            # account reauth cannot be proven to help, and the gap can persist,
+            # so it must never drive the account-wide reauth counter. The
+            # message carries numbers only (no keys, blobs or account names).
+            self._set_crypto_status(CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE)
+            _LOGGER.warning(
+                "Tracker %s needs owner key version %s, but Spot serves version "
+                "%s and the secrets bundle holds %d version(s); remedy: %s. "
+                "Other devices are unaffected.",
+                device or "?",
+                error.required_version,
+                error.current_version,
+                len(error.bundle_versions),
+                error.remedy,
+            )
+            return False
 
         if stale:
             # Per-tracker outdated owner key: log per occurrence, do not touch the
@@ -580,6 +604,10 @@ class PollingOperations(_MixinBase):
             # ``except DecryptionError`` blocks; this is the defense-in-depth guard
             # so the shared discriminator never drives a transient miss into reauth.
             return False
+        if isinstance(cycle_decrypt_error, OwnerKeyVersionUnavailableError):
+            # An owner-key version gap (issue #246) is per tracker and may be
+            # permanent; a reauth cannot be proven to fix it. Never account-wide.
+            return False
         if not cycle_had_successful_decrypt:
             return True
         return not self._is_device_local_decrypt_failure(cycle_decrypt_error)
@@ -590,6 +618,7 @@ class PollingOperations(_MixinBase):
         cycle_decrypt_error: DecryptionError | None,
         cycle_had_successful_decrypt: bool,
         cycle_had_stale_key: bool,
+        cycle_had_owner_key_version_gap: bool = False,
     ) -> bool:
         """Resolve a poll cycle's decrypt verdict and return whether to escalate.
 
@@ -652,12 +681,18 @@ class PollingOperations(_MixinBase):
                 "healthy, so no re-authentication is required. Details: %s",
                 cycle_decrypt_error,
             )
-        if cycle_had_successful_decrypt and not cycle_had_stale_key:
+        if (
+            cycle_had_successful_decrypt
+            and not cycle_had_stale_key
+            and not cycle_had_owner_key_version_gap
+        ):
             # Positive proof and no per-tracker stale key: heal the diagnostic
             # sensor (D6 OK source, single writer) and clear the error class with
             # it. Gating on ``not cycle_had_stale_key`` keeps a per-tracker
             # StaleOwnerKeyError's error class intact while its tracker_key_outdated
-            # status persists.
+            # status persists. ``not cycle_had_owner_key_version_gap`` does the
+            # same for owner_key_version_unavailable (issue #246): a sibling
+            # decrypting says nothing about the missing owner-key version.
             self._set_crypto_status(CryptoStatus.OK)
             self._last_decrypt_error = None
         if cycle_had_successful_decrypt:
@@ -667,7 +702,7 @@ class PollingOperations(_MixinBase):
             self.note_decrypt_success()
         return False
 
-    def _finalize_cycle_decrypt_state(
+    def _finalize_cycle_decrypt_state(  # noqa: PLR0913 - keyword-only cycle flags
         self,
         *,
         cycle_decrypt_error: DecryptionError | None,
@@ -675,6 +710,7 @@ class PollingOperations(_MixinBase):
         cycle_had_stale_key: bool,
         cycle_failed: bool,
         last_exception: Exception | None,
+        cycle_had_owner_key_version_gap: bool = False,
     ) -> tuple[bool, Exception | None, ConfigEntryAuthFailed | None]:
         """Apply the cycle's decrypt verdict and reconcile the cycle-failure state.
 
@@ -700,6 +736,7 @@ class PollingOperations(_MixinBase):
             cycle_decrypt_error=cycle_decrypt_error,
             cycle_had_successful_decrypt=cycle_had_successful_decrypt,
             cycle_had_stale_key=cycle_had_stale_key,
+            cycle_had_owner_key_version_gap=cycle_had_owner_key_version_gap,
         ):
             reauth_exc = ConfigEntryAuthFailed(
                 "Location decryption keeps failing: the shared key "
@@ -1990,6 +2027,11 @@ class PollingOperations(_MixinBase):
                 # the account-wide key is healthy, so the diagnostic sensor does
                 # not flicker away the tracker_key_outdated state.
                 cycle_had_stale_key = False
+                # True if any device hit an OwnerKeyVersionUnavailableError this
+                # cycle (owner-key version gap, issue #246). Like
+                # cycle_had_stale_key it keeps a sibling's success from flickering
+                # owner_key_version_unavailable to OK.
+                cycle_had_owner_key_version_gap = False
                 # True once a device returns usable location data without a
                 # DecryptionError: positive proof the shared key works. Crypto OK
                 # requires this proof, not merely the absence of a decrypt error
@@ -2715,11 +2757,12 @@ class PollingOperations(_MixinBase):
                             # availability outage is not a fix. So: keep
                             # ``cycle_failed`` (the cycle really did not poll
                             # every device) and leave ``last_exception`` to the
-                            # failures that are about the account. This is the
-                            # only branch here that sets one without the other,
+                            # failures that are about the account. This and the
+                            # owner-key version gap branch further down are the
+                            # only branches here that set one without the other,
                             # deliberately: every other one reports a condition
-                            # that says something about the account, this one
-                            # does not.
+                            # that says something about the account, these two
+                            # do not.
                             cycle_failed = True
                             cycle_rejected_devices += 1
                             # Deliberately NOT touched HERE: the transient-auth
@@ -2812,6 +2855,22 @@ class PollingOperations(_MixinBase):
                         last_exception = auth_exc
                         self._request_poll_reauth(auth_exc)
                         return
+                    except OwnerKeyVersionUnavailableError as gap_err:
+                        # Owner-key version gap (issue #246): per tracker, never
+                        # account-wide, possibly permanent. Keep cycle_failed (the
+                        # cycle did not poll every device) but leave
+                        # last_exception alone, exactly like the rejection branch
+                        # above -- see the house rule there: a permanent gap must
+                        # not mark every entity of the account unavailable on
+                        # every poll. Must precede the StaleOwnerKeyError and
+                        # DecryptionError handlers (it is a DecryptionError).
+                        self.note_decrypt_failure(
+                            stale=False, error=gap_err, device=dev_name
+                        )
+                        cycle_had_owner_key_version_gap = True
+                        cycle_failed = True
+                        self._consecutive_timeouts = 0
+                        continue
                     except StaleOwnerKeyError as stale_err:
                         # Per-tracker owner-key version mismatch (D2): an account-wide
                         # reauth would not help -- only this tracker is outdated. Log
@@ -3236,6 +3295,9 @@ class PollingOperations(_MixinBase):
                         cycle_had_stale_key=cycle_had_stale_key,
                         cycle_failed=cycle_failed,
                         last_exception=last_exception,
+                        cycle_had_owner_key_version_gap=(
+                            cycle_had_owner_key_version_gap
+                        ),
                     )
                 )
                 if reauth_exc is not None:

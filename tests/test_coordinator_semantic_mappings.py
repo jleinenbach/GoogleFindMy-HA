@@ -25,6 +25,7 @@ from custom_components.googlefindmy.coordinator.polling import (
     _MAX_TRANSIENT_AUTH_FAILURES,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    OwnerKeyVersionUnavailableError,
     SharedKeyMismatchError,
     StaleOwnerKeyError,
 )
@@ -1381,6 +1382,39 @@ async def test_poll_cycle_mixed_stale_and_success_keeps_tracker_outdated() -> No
     )
 
     assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_mixed_gap_and_success_keeps_owner_key_version_unavailable() -> (
+    None
+):
+    """A healthy sibling must NOT flicker owner_key_version_unavailable to OK.
+
+    Issue #246: the gap is per tracker; a sibling decrypting proves nothing about
+    the missing owner-key version. Covers the whole flag path: the catch site
+    sets ``cycle_had_owner_key_version_gap``, the post-loop call hands it over
+    and the OK gate reads it. Dropping any of the three turns this red.
+    """
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _MixedDecryptAPI(
+        "dev-gap",
+        OwnerKeyVersionUnavailableError(
+            required_version=2,
+            current_version=1,
+            bundle_versions=(),
+            remedy="login",
+        ),
+        {"latitude": 1.0, "longitude": 2.0, "last_seen": 100},
+    )
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-gap", "name": "New"}, {"id": "dev-ok", "name": "Hub"}]
+    )
+
+    assert coordinator.crypto_status.state == CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE
+    assert coordinator._consecutive_decrypt_failures == 0
 
 
 @pytest.mark.asyncio

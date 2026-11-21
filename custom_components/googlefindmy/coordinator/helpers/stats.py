@@ -65,6 +65,10 @@ class CryptoStatus:
         TRACKER_KEY_OUTDATED: A single tracker is encrypted with an outdated
             owner-key version (``StaleOwnerKeyError``); re-pair that tracker. This
             is per-tracker and never triggers an account-wide reauth.
+        OWNER_KEY_VERSION_UNAVAILABLE: A tracker needs a newer owner-key version
+            than Spot serves and the secrets bundle holds
+            (``OwnerKeyVersionUnavailableError``, issue #246). Per tracker; never
+            triggers an account-wide reauth.
     """
 
     UNKNOWN = "unknown"
@@ -72,6 +76,7 @@ class CryptoStatus:
     SHARED_KEY_INVALID = "shared_key_invalid"
     SHARED_KEY_MISSING = "shared_key_missing"
     TRACKER_KEY_OUTDATED = "tracker_key_outdated"
+    OWNER_KEY_VERSION_UNAVAILABLE = "owner_key_version_unavailable"
 
 
 # ---------------------------------------------------------------------------
