@@ -11,7 +11,10 @@ from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
     get_invalid_tag_exception,
 )
 from tests.helpers import DummyCache
-from tests.helpers.owner_key_vault_fixtures import make_vault_world
+from tests.helpers.owner_key_vault_fixtures import (
+    OWNER_KEY_VERSIONS_FIELD,
+    make_vault_world,
+)
 
 
 @pytest.mark.asyncio
@@ -128,25 +131,28 @@ async def test_try_decrypt_identity_key_gap_uses_vault_entry_without_refresh(
     """Issue #246: tracker version 2, Spot serves 1, vault entry 2 in the bundle.
 
     The resolver must take the owner key of version 2 from the bundle field
-    ``owner_key_versions`` instead of forcing a Spot refresh. Spot keeps serving
-    version 1 even on ``force_refresh``, which is the situation of the report.
+    instead of forcing a Spot refresh. Spot keeps serving version 1 even on
+    ``force_refresh``, which is the situation of the report. The shared key sits
+    in the entry cache, so the real retrieval returns it through any binding.
     """
     world = make_vault_world(versions=(1, 2), spot_version=1)
     cache = DummyCache()
-    cache.values["owner_key_versions"] = world.bundle_field
+    world.seed_entry_cache(cache.values, world.bundle_field)
+    assert OWNER_KEY_VERSIONS_FIELD in cache.values
     calls: list[bool] = []
 
     async def fake_async_get_owner_key(
-        *, cache: object, force_refresh: bool = False, **kwargs: object
+        *,
+        cache: object,
+        username: str | None = None,
+        eid_info_getter: object | None = None,
+        shared_key_getter: object | None = None,
+        force_refresh: bool = False,
     ) -> eid_resolver.OwnerKeyInfo:
         calls.append(force_refresh)
         return eid_resolver.OwnerKeyInfo(key=world.owner_keys[1], version=1)
 
-    async def fake_async_get_shared_key(*, cache: object, **kwargs: object) -> bytes:
-        return world.shared_key
-
     monkeypatch.setattr(eid_resolver, "async_get_owner_key", fake_async_get_owner_key)
-    monkeypatch.setattr(eid_resolver, "async_get_shared_key", fake_async_get_shared_key)
     monkeypatch.setattr(eid_resolver, "is_mcu_tracker", lambda **_: False)
 
     identity = DeviceIdentity(
