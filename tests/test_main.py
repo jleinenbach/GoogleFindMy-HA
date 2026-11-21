@@ -773,7 +773,7 @@ class TestEnsureVaultKeysExit:
             {"username": "u@example.com", "oauth_token": "oauth", "aas_token": "aas"}
         )
 
-        async def _raise(_cache):  # type: ignore[no-untyped-def]
+        async def _raise(_cache, **_kwargs):  # type: ignore[no-untyped-def]
             raise RuntimeError("vault returned None")
 
         monkeypatch.setattr(cli_main, "_ensure_shared_key", _raise)
@@ -805,7 +805,7 @@ class TestEnsureVaultKeysExit:
 
         cache = _AsyncDictCache({"username": "u@example.com"})
 
-        async def _raise(_cache):  # type: ignore[no-untyped-def]
+        async def _raise(_cache, **_kwargs):  # type: ignore[no-untyped-def]
             raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT)
 
         monkeypatch.setattr(cli_main, "_ensure_shared_key", _raise)
@@ -828,7 +828,7 @@ class TestEnsureVaultKeysExit:
 
         cache = _AsyncDictCache({"username": "u@example.com"})
 
-        async def _raise(_cache):  # type: ignore[no-untyped-def]
+        async def _raise(_cache, **_kwargs):  # type: ignore[no-untyped-def]
             raise RuntimeError("boom")
 
         monkeypatch.setattr(cli_main, "_ensure_shared_key", _raise)
@@ -848,7 +848,7 @@ class TestEnsureVaultKeysExit:
 
         cache = _AsyncDictCache({"username": "u@example.com"})
 
-        async def _interrupt(_cache):  # type: ignore[no-untyped-def]
+        async def _interrupt(_cache, **_kwargs):  # type: ignore[no-untyped-def]
             raise KeyboardInterrupt
 
         monkeypatch.setattr(cli_main, "_ensure_shared_key", _interrupt)
@@ -973,7 +973,7 @@ class TestVaultKeysCompleteness:
 
         cache = _AsyncDictCache({"username": "u@example.com"})
 
-        async def _set_shared(_cache):  # type: ignore[no-untyped-def]
+        async def _set_shared(_cache, **_kwargs):  # type: ignore[no-untyped-def]
             await _cache.set("shared_key", "shared-hex")
 
         async def _set_owner(_cache):  # type: ignore[no-untyped-def]
@@ -1001,7 +1001,7 @@ class TestVaultKeysCompleteness:
             {"username": "u@example.com", "oauth_token": "oauth", "aas_token": "aas"}
         )
 
-        async def _set_shared(_cache):  # type: ignore[no-untyped-def]
+        async def _set_shared(_cache, **_kwargs):  # type: ignore[no-untyped-def]
             await _cache.set("shared_key", "shared-hex")
 
         async def _owner_boom(_cache):  # type: ignore[no-untyped-def]
@@ -1029,7 +1029,7 @@ class TestVaultKeysCompleteness:
 
         cache = _AsyncDictCache({"username": "u@example.com"})
 
-        async def _set_shared(_cache):  # type: ignore[no-untyped-def]
+        async def _set_shared(_cache, **_kwargs):  # type: ignore[no-untyped-def]
             await _cache.set("shared_key", "shared-hex")
 
         async def _owner_boom(_cache):  # type: ignore[no-untyped-def]

@@ -215,7 +215,7 @@ async def test_generate_migrates_legacy_user_scoped_key() -> None:
 async def test_generate_invokes_generator_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_retrieve() -> str:
+    async def fake_retrieve(**_kwargs: Any) -> str:
         return _HEX_KEY
 
     monkeypatch.setattr(skr, "_retrieve_shared_key_hex", fake_retrieve)
@@ -227,7 +227,7 @@ async def test_generate_invokes_generator_when_absent(
 async def test_generate_rejects_non_string_generator_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_retrieve() -> Any:
+    async def fake_retrieve(**_kwargs: Any) -> Any:
         return 12345  # not a string
 
     monkeypatch.setattr(skr, "_retrieve_shared_key_hex", fake_retrieve)
@@ -239,7 +239,7 @@ async def test_generate_rejects_non_string_generator_result(
 async def test_force_refresh_clears_then_regenerates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_retrieve() -> str:
+    async def fake_retrieve(**_kwargs: Any) -> str:
         return _HEX_KEY
 
     monkeypatch.setattr(skr, "_retrieve_shared_key_hex", fake_retrieve)
@@ -282,7 +282,7 @@ async def test_retrieve_raises_in_non_interactive_mode(no_tty_stdin: None) -> No
 async def test_retrieve_returns_interactive_result(
     tty_stdin: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_flow() -> str:
+    async def fake_flow(**_kwargs: Any) -> str:
         return _HEX_KEY
 
     monkeypatch.setattr(skr, "_interactive_flow_hex", fake_flow)
@@ -303,7 +303,7 @@ async def test_retrieve_guard_blocks_second_browser_attempt(
 async def test_retrieve_wraps_interactive_failure(
     tty_stdin: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def boom() -> str:
+    async def boom(**_kwargs: Any) -> str:
         raise ValueError("no chrome")
 
     monkeypatch.setattr(skr, "_interactive_flow_hex", boom)
@@ -319,7 +319,7 @@ async def test_retrieve_wraps_interactive_failure(
 def _install_fake_flow(monkeypatch: pytest.MonkeyPatch, return_value: Any) -> None:
     """Inject a fake ``shared_key_flow`` module and a pass-through executor."""
     module = ModuleType("custom_components.googlefindmy.KeyBackup.shared_key_flow")
-    module.request_shared_key_flow = lambda: return_value  # type: ignore[attr-defined]
+    module.request_shared_key_flow = lambda **_kwargs: return_value  # type: ignore[attr-defined]
     monkeypatch.setitem(
         sys.modules,
         "custom_components.googlefindmy.KeyBackup.shared_key_flow",
@@ -424,7 +424,7 @@ async def test_retrieve_lets_the_install_hint_through(
         MISSING_BROWSER_PACKAGES_HINT,
     )
 
-    async def missing_packages() -> str:
+    async def missing_packages(**_kwargs: Any) -> str:
         raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT)
 
     monkeypatch.setattr(skr, "_interactive_flow_hex", missing_packages)
@@ -451,7 +451,7 @@ async def test_retrieve_asks_the_packages_when_the_hint_is_gone(
 
     monkeypatch.setattr(browser_deps, "browser_packages_missing", lambda: True)
 
-    async def swallowed() -> str:
+    async def swallowed(**_kwargs: Any) -> str:
         raise RuntimeError("Interactive shared key flow returned empty/invalid result")
 
     monkeypatch.setattr(skr, "_interactive_flow_hex", swallowed)
@@ -477,7 +477,7 @@ async def test_foreground_home_assistant_cannot_open_the_browser_flow(
     Home Assistant process, on a bundle without a shared key.
     """
 
-    async def must_not_run() -> str:
+    async def must_not_run(**_kwargs: Any) -> str:
         raise AssertionError("the browser flow must not be reached")
 
     monkeypatch.setattr(skr, "_interactive_flow_hex", must_not_run)
@@ -516,7 +516,7 @@ async def test_an_unattended_cli_run_is_refused(
     monkeypatch.delenv(skr._ENV_ASSUME_INTERACTIVE, raising=False)
     skr._browser_flow_attempted = False
 
-    async def must_not_run() -> str:
+    async def must_not_run(**_kwargs: Any) -> str:
         raise AssertionError("the browser flow must not be reached unattended")
 
     monkeypatch.setattr(skr, "_interactive_flow_hex", must_not_run)
@@ -535,7 +535,7 @@ async def test_the_assume_interactive_opt_in_admits_a_tty_less_console(
     monkeypatch.setenv(skr._ENV_ASSUME_INTERACTIVE, "1")
     skr._browser_flow_attempted = False
 
-    async def fake_flow() -> str:
+    async def fake_flow(**_kwargs: Any) -> str:
         return _HEX_KEY
 
     monkeypatch.setattr(skr, "_interactive_flow_hex", fake_flow)
@@ -562,3 +562,159 @@ def test_the_cli_entry_point_sets_the_marker(monkeypatch: pytest.MonkeyPatch) ->
         cli_main._main([])
 
     assert os.environ.get(skr._ENV_CLI_PROCESS) == "1"
+
+
+# ---------------------------------------------------------------------------
+# Owner-key vault: sink plumbing and the sign-in-only entry point
+# ---------------------------------------------------------------------------
+
+
+def _install_recording_flow(
+    monkeypatch: pytest.MonkeyPatch, vault_result: Any = None
+) -> dict[str, Any]:
+    """Fake ``shared_key_flow`` that records how each entry point was called."""
+    record: dict[str, Any] = {"shared": [], "vault_only": 0}
+    module = ModuleType("custom_components.googlefindmy.KeyBackup.shared_key_flow")
+
+    def request_shared_key_flow(**kwargs: Any) -> str:
+        record["shared"].append(kwargs)
+        return _HEX_KEY
+
+    def request_vault_entries_flow() -> Any:
+        record["vault_only"] += 1
+        return vault_result
+
+    module.request_shared_key_flow = request_shared_key_flow  # type: ignore[attr-defined]
+    module.request_vault_entries_flow = request_vault_entries_flow  # type: ignore[attr-defined]
+    monkeypatch.setitem(
+        sys.modules,
+        "custom_components.googlefindmy.KeyBackup.shared_key_flow",
+        module,
+    )
+
+    async def passthrough(func: Callable[..., Any], *args: Any) -> Any:
+        return func(*args)
+
+    monkeypatch.setattr(skr, "_run_in_executor", passthrough)
+    return record
+
+
+async def test_async_get_shared_key_hands_the_vault_sink_to_the_flow(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sink travels unchanged from the public API down to the browser flow."""
+    record = _install_recording_flow(monkeypatch)
+
+    def sink(_result: Any) -> None:
+        return None
+
+    assert (
+        await skr.async_get_shared_key(cache=FakeCache(), vault_sink=sink) == _RAW_KEY
+    )
+    assert record["shared"] == [{"vault_sink": sink}]
+
+
+async def test_async_get_shared_key_without_sink_passes_none(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Callers that know nothing about the vault keep the old behaviour."""
+    record = _install_recording_flow(monkeypatch)
+
+    await skr.async_get_shared_key(cache=FakeCache())
+    assert record["shared"] == [{"vault_sink": None}]
+
+
+async def test_cached_shared_key_never_calls_the_vault_sink(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _install_recording_flow(monkeypatch)
+
+    def sink(_result: Any) -> None:
+        raise AssertionError("no browser flow, no sink call")
+
+    cache = FakeCache({"shared_key": _HEX_KEY})
+    assert await skr.async_get_shared_key(cache=cache, vault_sink=sink) == _RAW_KEY
+    assert record["shared"] == []
+
+
+async def test_vault_entries_interactive_runs_the_sign_in_only_flow(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Returns the flow's result, leaves the one-shot guard alone, writes nothing."""
+    sentinel = object()
+    record = _install_recording_flow(monkeypatch, vault_result=sentinel)
+    started: list[int] = []
+
+    result = await skr.async_fetch_vault_entries_interactive(
+        on_start=lambda: started.append(record["vault_only"])
+    )
+
+    assert result is sentinel
+    assert record == {"shared": [], "vault_only": 1}
+    assert started == [0]
+    assert skr._browser_flow_attempted is False
+
+
+async def test_vault_entries_interactive_ignores_a_spent_browser_guard(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard belongs to the shared-key flow; it neither blocks nor is reset here."""
+    record = _install_recording_flow(monkeypatch, vault_result="r")
+    skr._browser_flow_attempted = True
+
+    assert await skr.async_fetch_vault_entries_interactive() == "r"
+    assert record["vault_only"] == 1
+    assert skr._browser_flow_attempted is True
+
+
+@pytest.mark.parametrize(
+    ("isatty", "marker"),
+    [(True, False), (False, True), (False, False)],
+    ids=["terminal_without_cli", "cli_without_terminal", "neither"],
+)
+async def test_vault_entries_interactive_refuses_like_the_shared_key_flow(
+    isatty: bool, marker: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same sessions refused, with the same words, and before any output."""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: isatty))
+    monkeypatch.delenv(skr._ENV_ASSUME_INTERACTIVE, raising=False)
+    if marker:
+        monkeypatch.setenv(skr._ENV_CLI_PROCESS, "1")
+    else:
+        monkeypatch.delenv(skr._ENV_CLI_PROCESS, raising=False)
+    record = _install_recording_flow(monkeypatch)
+    started: list[bool] = []
+
+    with pytest.raises(skr.SharedKeyUnavailableError) as vault_only:
+        await skr.async_fetch_vault_entries_interactive(
+            on_start=lambda: started.append(True)
+        )
+    with pytest.raises(skr.SharedKeyUnavailableError) as shared:
+        await skr._retrieve_shared_key_hex()
+
+    assert str(vault_only.value) == str(shared.value)
+    assert record == {"shared": [], "vault_only": 0}
+    assert started == []
+
+
+async def test_vault_entries_interactive_reports_missing_packages_by_type(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unimportable flow module becomes `BrowserPackagesUnusable` with the hint."""
+    from custom_components.googlefindmy.browser_deps import (
+        INSTALL_COMMAND,
+        BrowserPackagesUnusable,
+    )
+
+    monkeypatch.setitem(
+        sys.modules, "custom_components.googlefindmy.KeyBackup.shared_key_flow", None
+    )
+    started: list[bool] = []
+
+    with pytest.raises(BrowserPackagesUnusable) as excinfo:
+        await skr.async_fetch_vault_entries_interactive(
+            on_start=lambda: started.append(True)
+        )
+
+    assert INSTALL_COMMAND in str(excinfo.value)
+    assert started == []

@@ -40,6 +40,12 @@ if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
     from collections.abc import Callable, Mapping, Sequence
 
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+        VaultCause,
+        VaultEntry,
+        VaultFetchResult,
+    )
+
 _this_dir = Path(__file__).resolve().parent
 _standalone = not (
     _this_dir.name == "googlefindmy" and _this_dir.parent.name == "custom_components"
@@ -647,21 +653,116 @@ async def _ensure_aas_token(cache: object) -> None:
         sys.exit(1)
 
 
-async def _ensure_shared_key(cache: object) -> None:
+class _VaultSink:
+    """Collects the owner-key vault fetch of one CLI run, in memory only.
+
+    Holds at most one ``VaultFetchResult``; nothing is written to the cache
+    before the self-test in ``_ensure_owner_key_versions`` has passed.
+    ``browser_ran`` says a fetch result arrived, ``shared_key_refreshed`` that
+    this run obtained a new shared key through the unlock page.
+    """
+
+    __slots__ = ("browser_ran", "results", "shared_key_refreshed")
+
+    def __init__(self) -> None:
+        self.results: list[VaultFetchResult] = []
+        self.browser_ran = False
+        self.shared_key_refreshed = False
+
+    def __call__(self, result: VaultFetchResult) -> None:
+        self.browser_ran = True
+        if not self.results:
+            self.results.append(result)
+
+    def __repr__(self) -> str:
+        # `VaultFetchResult.__repr__` renders counts and the cause only.
+        results = ", ".join(repr(result) for result in self.results)
+        return (
+            f"_VaultSink(results=[{results}], browser_ran={self.browser_ran}, "
+            f"shared_key_refreshed={self.shared_key_refreshed})"
+        )
+
+    __str__ = __repr__
+
+
+def _print_vault_cause(cause: VaultCause, count: int, hint: str | None = None) -> None:
+    """Report why no owner-key version field was written: cause class and count only."""
+    lead = f"\n{hint}\n" if hint else ""
+    print(
+        f"{lead}\nNote: owner-key versions were not saved "
+        f"(cause={cause.value}, entries={count}).\n"
+        "This is non-fatal: the generated secrets.json is ready to use.\n",
+        file=sys.stderr,
+    )
+
+
+async def _fetch_vault_for_cached_shared_key(
+    cache: object, vault_sink: _VaultSink
+) -> None:
+    """Fetch the vault entries when the shared key is cached but the field is not.
+
+    Path (c): only the Google sign-in runs, never the unlock page, so the cached
+    shared key is neither requested nor written. Every failure ends here; the
+    bundle and the exit code stay as they would be without this fetch.
+    """
+    from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+        BrowserPackagesUnusable,
+    )
+    from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (  # noqa: PLC0415
+        SharedKeyUnavailableError,
+        async_fetch_vault_entries_interactive,
+    )
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (  # noqa: PLC0415
+        OWNER_KEY_VERSIONS_FIELD,
+        VaultCause,
+    )
+
+    try:
+        if await cache.get(OWNER_KEY_VERSIONS_FIELD) is not None:  # type: ignore[attr-defined]
+            return
+        result = await async_fetch_vault_entries_interactive(
+            on_start=lambda: print(
+                "Fetching owner-key versions from the account vault "
+                "(Google sign-in only, no PIN)...\n"
+            )
+        )
+    except SharedKeyUnavailableError:
+        # No attended command-line session: no browser, no fetch, nothing to say.
+        return
+    except BrowserPackagesUnusable as exc:
+        _print_vault_cause(VaultCause.HTTP_STATUS, 0, hint=str(exc))
+        return
+    except Exception:  # noqa: BLE001
+        _print_vault_cause(VaultCause.HTTP_STATUS, 0)
+        return
+    vault_sink(result)
+
+
+async def _ensure_shared_key(
+    cache: object, vault_sink: _VaultSink | None = None
+) -> None:
     """Obtain the shared key from Google's vault if not already cached.
 
     Called eagerly during CLI startup (before any location requests) to avoid
     triggering the browser flow lazily during decryption, which can conflict
     with ChromeDriver file locks on Windows.
+
+    With ``vault_sink``, the browser flow also fetches the owner-key vault
+    entries; a cached shared key without the owner-key version field triggers a
+    sign-in-only fetch instead (``_fetch_vault_for_cached_shared_key``).
     """
     existing = await cache.get("shared_key")  # type: ignore[attr-defined]
     if existing:
+        if vault_sink is not None:
+            await _fetch_vault_for_cached_shared_key(cache, vault_sink)
         return
     # Check user-scoped legacy key too
     username = await cache.get("username")  # type: ignore[attr-defined]
     if isinstance(username, str) and username:
         legacy = await cache.get(f"shared_key_{username}")  # type: ignore[attr-defined]
         if legacy:
+            if vault_sink is not None:
+                await _fetch_vault_for_cached_shared_key(cache, vault_sink)
             return
     print("Retrieving encryption key from Google Key Backup vault...\n")
     from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (  # noqa: PLC0415
@@ -671,7 +772,10 @@ async def _ensure_shared_key(cache: object) -> None:
     await async_get_shared_key(
         cache=cache,  # type: ignore[arg-type]
         username=username if isinstance(username, str) else None,
+        vault_sink=vault_sink,
     )
+    if vault_sink is not None:
+        vault_sink.shared_key_refreshed = True
     print("Encryption key saved.\n")
 
 
@@ -712,6 +816,131 @@ async def _ensure_owner_key(cache: object) -> None:
     print("Owner key saved.\n")
 
 
+async def _read_run_shared_key(cache: object) -> bytes | None:
+    """Return the shared key this run works with, read like ``_ensure_shared_key``.
+
+    ``shared_key`` first, then ``shared_key_<username>``. Decoded locally, so a
+    missing key never starts a browser and a base64 value is never rewritten.
+    """
+    from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (  # noqa: PLC0415
+        _decode_base64_like_32,
+        _decode_hex_32,
+    )
+
+    value = await cache.get("shared_key")  # type: ignore[attr-defined]
+    if not (isinstance(value, str) and value.strip()):
+        username = await cache.get("username")  # type: ignore[attr-defined]
+        value = None
+        if isinstance(username, str) and username:
+            value = await cache.get(f"shared_key_{username}")  # type: ignore[attr-defined]
+    if not (isinstance(value, str) and value.strip()):
+        return None
+    try:
+        return _decode_hex_32(value)
+    except ValueError:
+        try:
+            return _decode_base64_like_32(value)
+        except ValueError:
+            return None
+
+
+async def _owner_key_versions_self_test(
+    cache: object, entries: tuple[VaultEntry, ...]
+) -> bool:
+    """Return True when the vault entry of version M matches Spot's owner key.
+
+    The entry of the current Spot version M is opened with the run's shared key
+    and compared byte for byte with the owner key Spot serves in this run. A
+    missing shared key, an unavailable Spot owner key, a missing entry M or a
+    blob that does not open all fail the test. Reads only; writes nothing.
+    """
+    import hmac  # noqa: PLC0415
+
+    from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (  # noqa: PLC0415
+        decrypt_owner_key,
+    )
+    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (  # noqa: PLC0415
+        async_fetch_owner_key_uncached,
+    )
+
+    shared_key = await _read_run_shared_key(cache)
+    if shared_key is None:
+        return False
+    username = await cache.get("username")  # type: ignore[attr-defined]
+    try:
+        spot = await async_fetch_owner_key_uncached(
+            cache=cache,  # type: ignore[arg-type]
+            username=username if isinstance(username, str) else None,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    current = next((e for e in entries if e.version == spot.version), None)
+    if spot.version is None or current is None:
+        return False
+    try:
+        opened = decrypt_owner_key(shared_key, current.key)
+    except Exception:  # noqa: BLE001
+        return False
+    return hmac.compare_digest(bytes(opened), bytes(spot.key))
+
+
+async def _write_owner_key_versions(
+    cache: object, result: VaultFetchResult
+) -> VaultCause | None:
+    """Write the field after a passed self-test; return the cause otherwise.
+
+    Until the self-test has passed the entries stay in memory; the field is then
+    written with exactly one ``cache.set``.
+    """
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (  # noqa: PLC0415
+        OWNER_KEY_VERSIONS_FIELD,
+        VaultCause,
+        select_finder_hw,
+        to_bundle_field,
+    )
+
+    if result.cause is not None:
+        return result.cause
+    entries = select_finder_hw(result.entries)
+    if not await _owner_key_versions_self_test(cache, entries):
+        return VaultCause.SELF_TEST_FAILED
+    await cache.set(OWNER_KEY_VERSIONS_FIELD, to_bundle_field(entries))  # type: ignore[attr-defined]
+    print(f"Owner-key versions saved ({len(entries)} version(s)).\n")
+    return None
+
+
+async def _ensure_owner_key_versions(cache: object, sink: _VaultSink) -> None:
+    """Write the owner-key version field after a passed self-test, else report once.
+
+    The only writer of the field. A run that obtained a new shared key without a
+    usable fetch removes an existing field, so the bundle never pairs a new
+    shared key with entries of an old one. Never raises ``Exception``; the exit
+    code stays as without the fetch.
+    """
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (  # noqa: PLC0415
+        OWNER_KEY_VERSIONS_FIELD,
+        VaultCause,
+        select_finder_hw,
+    )
+
+    if sink.results:
+        result = sink.results[0]
+        try:
+            cause = await _write_owner_key_versions(cache, result)
+        except Exception:  # noqa: BLE001
+            cause = VaultCause.SELF_TEST_FAILED
+        if cause is None:
+            return
+        _print_vault_cause(cause, len(select_finder_hw(result.entries)))
+    if not sink.shared_key_refreshed:
+        return
+    try:
+        if await cache.get(OWNER_KEY_VERSIONS_FIELD) is not None:  # type: ignore[attr-defined]
+            await cache.set(OWNER_KEY_VERSIONS_FIELD, None)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 async def _ensure_vault_keys(cache: object) -> None:
     """Eagerly obtain the vault keys with a per-key criticality boundary.
 
@@ -737,8 +966,9 @@ async def _ensure_vault_keys(cache: object) -> None:
     expensive full OAuth login on the next run.
     """
     # Shared key: essential and browser-bound. Failure is fatal.
+    sink = _VaultSink()
     try:
-        await _ensure_shared_key(cache)
+        await _ensure_shared_key(cache, vault_sink=sink)
     except Exception as err:  # noqa: BLE001
         from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
             INSTALL_COMMAND,
@@ -787,6 +1017,9 @@ async def _ensure_vault_keys(cache: object) -> None:
             "on first use. The generated secrets.json is ready to use.\n",
             file=sys.stderr,
         )
+
+    # Owner-key versions: optional, self-tested before the single write.
+    await _ensure_owner_key_versions(cache, sink)
 
 
 async def _clear_stale_adm_token(cache: object) -> None:

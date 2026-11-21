@@ -469,6 +469,33 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
     return OwnerKeyInfo(key=key_bytes, version=cache_version)
 
 
+async def async_fetch_owner_key_uncached(
+    *, cache: TokenCache, username: str | None
+) -> OwnerKeyInfo:
+    """Fetch the owner key from Spot without reading or writing the owner-key cache.
+
+    For the login tool's vault self-test, which needs the owner key of *this*
+    run rather than a cached one. The shared key is read through
+    ``async_get_shared_key`` like in ``_retrieve_owner_key``; nothing under the
+    ``owner_key`` prefix is touched.
+
+    Raises:
+        RuntimeError: Spot returned no usable owner key, or it is not 32 bytes.
+        InvalidTag: the shared key does not open the owner key.
+    """
+    payload = await _retrieve_owner_key(username or "", cache=cache)
+    key_hex = payload.get("key")
+    if not isinstance(key_hex, str):
+        raise RuntimeError("Owner key payload carries no key.")
+    key_bytes = bytes.fromhex(key_hex)
+    if len(key_bytes) != _OWNER_KEY_LENGTH:
+        raise RuntimeError("Owner key must be exactly 32 bytes long.")
+    version = payload.get("version")
+    return OwnerKeyInfo(
+        key=key_bytes, version=version if isinstance(version, int) else None
+    )
+
+
 # ---------------------------------------------------------------------------
 # Legacy sync facade (CLI/offline only)
 # ---------------------------------------------------------------------------

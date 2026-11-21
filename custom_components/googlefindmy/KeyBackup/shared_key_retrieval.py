@@ -34,6 +34,7 @@ Retrieval strategy (when not cached):
 from __future__ import annotations
 
 import base64
+import functools
 import importlib
 import logging
 import os
@@ -42,12 +43,19 @@ import sys
 from binascii import Error as BinasciiError
 from binascii import unhexlify
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.typing_utils import (
     run_in_executor as _run_in_executor,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+        VaultFetchResult,
+    )
+
+    VaultSink = Callable[[VaultFetchResult], None]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,11 +147,14 @@ def _decode_base64_like_32(s: str) -> bytes:
 # -----------------------------------------------------------------------------
 
 
-async def _interactive_flow_hex() -> str:
+async def _interactive_flow_hex(*, vault_sink: VaultSink | None = None) -> str:
     """Run the interactive shared-key flow (CLI only) and return a hex string.
 
     This opens a browser and requires a TTY; **not suitable for Home Assistant**.
     We keep it as a last-resort fallback for developer CLI usage.
+
+    ``vault_sink`` is handed to ``request_shared_key_flow``, which fetches the
+    owner-key vault entries once in the same browser session and passes them on.
     """
     # Deliberately dynamic: this module must stay importable in the Home
     # Assistant runtime, where the browser packages are absent (they are not in
@@ -162,8 +173,11 @@ async def _interactive_flow_hex() -> str:
         raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT) from err
     request_shared_key_flow = shared_key_flow.request_shared_key_flow
 
-    # Run potentially interactive/GUI logic in executor
-    result = await _run_in_executor(request_shared_key_flow)
+    # Run potentially interactive/GUI logic in executor. `run_in_executor` takes
+    # positional arguments only, hence the partial.
+    result = await _run_in_executor(
+        functools.partial(request_shared_key_flow, vault_sink=vault_sink)
+    )
 
     # Normalize the result to hex
     if isinstance(result, (bytes, bytearray)):
@@ -222,7 +236,7 @@ def _attended_session() -> bool:
     return bool(sys.stdin and sys.stdin.isatty())
 
 
-async def _retrieve_shared_key_hex() -> str:
+async def _retrieve_shared_key_hex(*, vault_sink: VaultSink | None = None) -> str:
     """Obtain a hex-encoded shared key (32 bytes) via the interactive browser flow.
 
     The interactive flow opens Chrome, navigates to Google's Key Backup vault,
@@ -245,6 +259,55 @@ async def _retrieve_shared_key_hex() -> str:
     """
     global _browser_flow_attempted  # noqa: PLW0603
 
+    _require_attended_cli_session()
+
+    if _browser_flow_attempted:
+        raise RuntimeError(
+            "Shared key browser flow already attempted in this session. "
+            "Restart with --reauth to try again."
+        )
+    _browser_flow_attempted = True
+    try:
+        _LOGGER.info("Retrieving shared key via interactive browser flow (CLI mode)")
+        return await _interactive_flow_hex(vault_sink=vault_sink)
+    except Exception as err:
+        _LOGGER.warning("Interactive shared key flow failed: %s", err)
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            INSTALL_COMMAND,
+            MISSING_BROWSER_PACKAGES_HINT,
+            BrowserPackagesUnusable,
+            browser_packages_missing,
+        )
+
+        # Installed but unusable: the type says so where the text cannot.
+        if isinstance(err, BrowserPackagesUnusable):
+            raise
+
+        # "Install these two packages" and "your Chrome installation is
+        # broken" are different problems with different remedies. The
+        # generic message below tells a user whose only fault is a missing
+        # pip install to re-run the tool, which cannot help. Let the hint
+        # through untouched when it is the one that was raised.
+        if INSTALL_COMMAND in str(err):
+            raise
+        # It usually is not: `shared_key_flow.request_shared_key_flow`
+        # catches every driver failure and returns `None`, so the hint
+        # raised inside `create_driver` never reaches this line as text.
+        # The packages can still be asked directly.
+        if browser_packages_missing():
+            raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT) from err
+        raise RuntimeError(
+            "Shared key retrieval failed. "
+            "Ensure Chrome/Chromium is installed for the browser-based flow."
+        ) from err
+
+
+def _require_attended_cli_session() -> None:
+    """Raise `SharedKeyUnavailableError` unless a browser flow may open here.
+
+    Shared by every browser entry point of this module, so the shared-key flow
+    and the vault-only flow refuse the same sessions with the same words.
+    """
     is_attended = _attended_session()
     is_cli = _cli_process()
 
@@ -271,53 +334,47 @@ async def _retrieve_shared_key_hex() -> str:
             "no tty."
         )
 
-    if is_cli:
-        if _browser_flow_attempted:
-            raise RuntimeError(
-                "Shared key browser flow already attempted in this session. "
-                "Restart with --reauth to try again."
-            )
-        _browser_flow_attempted = True
-        try:
-            _LOGGER.info(
-                "Retrieving shared key via interactive browser flow (CLI mode)"
-            )
-            return await _interactive_flow_hex()
-        except Exception as err:
-            _LOGGER.warning("Interactive shared key flow failed: %s", err)
-            from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
-                INSTALL_COMMAND,
-                MISSING_BROWSER_PACKAGES_HINT,
-                BrowserPackagesUnusable,
-                browser_packages_missing,
-            )
+    if not is_cli:
+        raise SharedKeyUnavailableError(
+            "Shared key not available in non-interactive environment. "
+            "Provide the key via secrets bundle or run the CLI with --reauth."
+        )
 
-            # Installed but unusable: the type says so where the text cannot.
-            if isinstance(err, BrowserPackagesUnusable):
-                raise
 
-            # "Install these two packages" and "your Chrome installation is
-            # broken" are different problems with different remedies. The
-            # generic message below tells a user whose only fault is a missing
-            # pip install to re-run the tool, which cannot help. Let the hint
-            # through untouched when it is the one that was raised.
-            if INSTALL_COMMAND in str(err):
-                raise
-            # It usually is not: `shared_key_flow.request_shared_key_flow`
-            # catches every driver failure and returns `None`, so the hint
-            # raised inside `create_driver` never reaches this line as text.
-            # The packages can still be asked directly.
-            if browser_packages_missing():
-                raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT) from err
-            raise RuntimeError(
-                "Shared key retrieval failed. "
-                "Ensure Chrome/Chromium is installed for the browser-based flow."
-            ) from err
+async def async_fetch_vault_entries_interactive(
+    *, on_start: Callable[[], None] | None = None
+) -> VaultFetchResult:
+    """Sign in through the browser and fetch the owner-key vault entries only.
 
-    raise SharedKeyUnavailableError(
-        "Shared key not available in non-interactive environment. "
-        "Provide the key via secrets bundle or run the CLI with --reauth."
+    For a cached shared key whose bundle lacks the owner-key version field: the
+    same session checks as the shared-key flow, then the sign-in without the
+    unlock page. Neither reads nor sets the once-per-process browser guard and
+    touches no cache, so the cached shared key stays exactly as it is.
+
+    ``on_start`` runs once the session checks passed, right before the browser
+    opens; a refused session therefore produces no output at all.
+
+    Raises:
+        SharedKeyUnavailableError: the session may not open a browser.
+        BrowserPackagesUnusable: the browser packages are absent or broken.
+    """
+    _require_attended_cli_session()
+    try:
+        shared_key_flow = importlib.import_module(
+            "custom_components.googlefindmy.KeyBackup.shared_key_flow"
+        )
+    except ImportError as err:
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            BrowserPackagesUnusable,
+        )
+
+        raise BrowserPackagesUnusable from err
+    if on_start is not None:
+        on_start()
+    result: VaultFetchResult = await _run_in_executor(
+        shared_key_flow.request_vault_entries_flow
     )
+    return result
 
 
 # -----------------------------------------------------------------------------
@@ -334,6 +391,7 @@ async def _get_or_generate_shared_key_hex(
     cache: TokenCache,
     username: str | None,
     force_refresh: bool = False,
+    vault_sink: VaultSink | None = None,
 ) -> str:
     """Return the shared key hex string with proper scoping & one-time migration."""
     if cache is None:
@@ -363,7 +421,7 @@ async def _get_or_generate_shared_key_hex(
 
     # Generate fresh and persist
     async def _generate() -> str:
-        return await _retrieve_shared_key_hex()
+        return await _retrieve_shared_key_hex(vault_sink=vault_sink)
 
     generator = cast(
         Callable[[], Awaitable[str] | str],
@@ -391,6 +449,7 @@ async def async_get_shared_key(
     cache: TokenCache,
     username: str | None = None,
     force_refresh: bool = False,
+    vault_sink: VaultSink | None = None,
 ) -> bytes:
     """Return the 32-byte shared key (entry-scoped capable).
 
@@ -402,6 +461,8 @@ async def async_get_shared_key(
         - When ``force_refresh`` is True, cached values are cleared before
           retrieval.  In HA (non-interactive) mode this raises RuntimeError,
           which triggers the reauth flow.
+        - ``vault_sink`` receives the owner-key vault entries when the browser
+          flow runs; with a cached key it is never called.
 
     Returns:
         bytes: a 32-byte key.
@@ -413,7 +474,10 @@ async def async_get_shared_key(
         raise ValueError("TokenCache instance is required for multi-account safety.")
 
     hex_value = await _get_or_generate_shared_key_hex(
-        cache=cache, username=username, force_refresh=force_refresh
+        cache=cache,
+        username=username,
+        force_refresh=force_refresh,
+        vault_sink=vault_sink,
     )
 
     # Validate and return as bytes; self-heal non-hex to hex
