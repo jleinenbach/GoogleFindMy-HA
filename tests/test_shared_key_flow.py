@@ -11,110 +11,22 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy.KeyBackup import shared_key_flow
-
-
-class _FakeAlert:
-    """Selenium alert double exposing canned text and an ``accept`` recorder."""
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.accepted = False
-
-    def accept(self) -> None:
-        self.accepted = True
-
-
-class _FakeSwitchTo:
-    """``driver.switch_to`` shim returning the next queued alert."""
-
-    def __init__(self, driver: _FakeDriver) -> None:
-        self._driver = driver
-
-    @property
-    def alert(self) -> _FakeAlert:
-        return self._driver.current_alert
-
-
-class _FakeDriver:
-    """Scripted driver that feeds a sequence of alert payloads to the flow.
-
-    The ``WebDriverWait`` replacement consults ``alert_present`` to decide
-    whether an alert is pending. Each loop iteration pops the next payload and
-    arms ``current_alert`` so ``switch_to.alert`` returns it.
-    """
-
-    def __init__(self, payloads: list[str]) -> None:
-        self._payloads = list(payloads)
-        self.current_alert: _FakeAlert = _FakeAlert("")
-        self.visited_urls: list[str] = []
-        self.scripts: list[str] = []
-        self.quit_calls = 0
-        self.switch_to = _FakeSwitchTo(self)
-
-    def get(self, url: str) -> None:
-        self.visited_urls.append(url)
-
-    def execute_script(self, script: str) -> Any:
-        self.scripts.append(script)
-        return None
-
-    def quit(self) -> None:
-        self.quit_calls += 1
-
-    def arm_next_alert(self) -> bool:
-        """Load the next payload as the active alert; return False when drained."""
-
-        if not self._payloads:
-            return False
-        self.current_alert = _FakeAlert(self._payloads.pop(0))
-        return True
-
-
-class _FlowWait:
-    """WebDriverWait replacement driving both wait stages of the flow.
-
-    The first ``until`` (url_contains) returns immediately. Subsequent ``until``
-    calls (alert_is_present, 0.5s timeout) arm the next alert; once payloads run
-    out a ``TimeoutException`` would loop forever, so the driver instead raises
-    ``_StopFlow`` to break the otherwise infinite ``while True`` loop in a test.
-    """
-
-    def __init__(self, driver: _FakeDriver, timeout: float) -> None:
-        self.driver = driver
-        self.timeout = timeout
-
-    def until(self, _condition: Any) -> Any:
-        # The first stage waits on a URL; treat any condition with the long
-        # timeout as that stage and resolve instantly.
-        if self.timeout >= 1:
-            return True
-        if not self.driver.arm_next_alert():
-            raise _StopFlow
-        return True
-
-
-class _StopFlow(Exception):
-    """Sentinel used by tests to terminate the otherwise infinite alert loop."""
-
-
-def _patch_flow(
-    monkeypatch: pytest.MonkeyPatch,
-    driver: _FakeDriver,
-    *,
-    shared_key: bytes | None = None,
-) -> None:
-    """Patch driver creation, waits and the security URL/parser helpers."""
-
-    monkeypatch.setattr(shared_key_flow, "create_driver", lambda **kwargs: driver)
-    monkeypatch.setattr(shared_key_flow, "WebDriverWait", _FlowWait)
-    monkeypatch.setattr(
-        shared_key_flow, "get_security_domain_request_url", lambda: "https://sec"
-    )
-    if shared_key is not None:
-        monkeypatch.setattr(
-            shared_key_flow, "get_fmdn_shared_key", lambda _: shared_key
-        )
-
+from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+    FETCH_SCRIPT,
+    FIND_MY_DEVICE_URL,
+    VaultCause,
+    VaultFetchResult,
+)
+from tests.helpers.owner_key_vault_fixtures import VaultWorld, make_vault_world
+from tests.helpers.shared_key_flow_doubles import (
+    FakeClock,
+    FlowWait,
+    NoAlertWait,
+    vault_answer,
+)
+from tests.helpers.shared_key_flow_doubles import FakeDriver as _FakeDriver
+from tests.helpers.shared_key_flow_doubles import StopFlow as _StopFlow
+from tests.helpers.shared_key_flow_doubles import patch_flow as _patch_flow
 
 # ---------------------------------------------------------------------------
 # _parse_cli_args
@@ -530,3 +442,341 @@ def test_cli_path_binds_the_redaction_helper_not_the_diagnostics_copy(
 
     # the helper the module bound is the shared one, not a diagnostics-local copy
     assert redaction.describe_keys.__module__.endswith("redaction")
+
+
+# ---------------------------------------------------------------------------
+# vault fetch in the same session (vault_sink, fetch_vault_entries)
+# ---------------------------------------------------------------------------
+
+
+_CLOSE_VIEW = json.dumps({"method": "closeView"})
+_SET_KEYS = json.dumps({"method": "setVaultSharedKeys", "vaultKeys": "raw-keys"})
+
+
+@pytest.fixture
+def world() -> VaultWorld:
+    return make_vault_world(versions=(1, 2, 3), spot_version=1)
+
+
+def _quitting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda d: d and d.quit())
+
+
+def test_without_sink_the_vault_is_never_fetched(
+    monkeypatch: pytest.MonkeyPatch, world: VaultWorld
+) -> None:
+    driver = _FakeDriver([_SET_KEYS], async_answer=vault_answer(world))
+    _patch_flow(monkeypatch, driver, shared_key=world.shared_key)
+    _quitting(monkeypatch)
+
+    assert shared_key_flow.request_shared_key_flow() == world.shared_key.hex()
+    assert FIND_MY_DEVICE_URL not in driver.visited_urls
+    assert driver.async_scripts == []
+
+
+def test_sink_gets_the_entries_once_before_the_unlock_page(
+    monkeypatch: pytest.MonkeyPatch, world: VaultWorld
+) -> None:
+    driver = _FakeDriver([_SET_KEYS], async_answer=vault_answer(world))
+    _patch_flow(monkeypatch, driver, shared_key=world.shared_key)
+    _quitting(monkeypatch)
+    received: list[VaultFetchResult] = []
+
+    result = shared_key_flow.request_shared_key_flow(vault_sink=received.append)
+
+    assert result == world.shared_key.hex()
+    assert len(received) == 1
+    assert received[0].cause is None
+    assert {e.version: e.key for e in received[0].entries} == world.wrapped_owner_keys
+    assert driver.visited_urls == [
+        "https://accounts.google.com/",
+        FIND_MY_DEVICE_URL,
+        "https://sec",
+    ]
+    assert driver.quit_calls == 1
+
+
+def test_raising_sink_still_returns_the_shared_key(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    world: VaultWorld,
+) -> None:
+    """A sink that raises must not end the flow through the outer handler."""
+
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    driver = _FakeDriver([_SET_KEYS], async_answer=vault_answer(world))
+    _patch_flow(monkeypatch, driver, shared_key=world.shared_key)
+    _quitting(monkeypatch)
+
+    def _sink(_result: VaultFetchResult) -> None:
+        raise ValueError("sink exploded")
+
+    assert shared_key_flow.request_shared_key_flow(vault_sink=_sink) == (
+        world.shared_key.hex()
+    )
+    assert "https://sec" in driver.visited_urls
+    logged = " ".join(caplog.messages)
+    assert "Vault sink raised: ValueError" in logged
+    assert "sink exploded" not in logged
+    assert "terminated unexpectedly" not in logged
+
+
+def test_failed_fetch_reaches_the_sink_and_the_flow_goes_on(
+    monkeypatch: pytest.MonkeyPatch, world: VaultWorld
+) -> None:
+    driver = _FakeDriver([_SET_KEYS], async_answer=RuntimeError("script died"))
+    _patch_flow(monkeypatch, driver, shared_key=world.shared_key)
+    _quitting(monkeypatch)
+    received: list[VaultFetchResult] = []
+
+    result = shared_key_flow.request_shared_key_flow(vault_sink=received.append)
+
+    assert result == world.shared_key.hex()
+    assert [r.cause for r in received] == [VaultCause.HTTP_STATUS]
+    assert received[0].entries == ()
+
+
+def test_navigates_before_fetch(
+    world: VaultWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`get(FIND_MY_DEVICE_URL)` comes first, with exactly that constant."""
+
+    monkeypatch.setattr(shared_key_flow, "WebDriverWait", FlowWait)
+    driver = _FakeDriver(async_answer=vault_answer(world))
+
+    result = shared_key_flow.fetch_vault_entries(driver)  # type: ignore[arg-type]
+
+    assert result.cause is None
+    kinds = [kind for kind, _ in driver.calls]
+    assert kinds == ["get", "set_script_timeout", "execute_async_script"]
+    assert driver.calls[0] == ("get", FIND_MY_DEVICE_URL)
+    assert driver.calls[1] == (
+        "set_script_timeout",
+        shared_key_flow.VAULT_FETCH_TIMEOUT_S,
+    )
+    assert driver.calls[2] == ("execute_async_script", FETCH_SCRIPT)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(None, id="no_answer"),
+        pytest.param("text", id="not_a_dict"),
+        pytest.param({"ok": False, "error": "TypeError"}, id="script_error"),
+        pytest.param({"ok": False, "status": 403, "text": "denied"}, id="status_403"),
+        pytest.param({"ok": "yes", "status": 200, "text": "x"}, id="ok_not_true"),
+        pytest.param({"ok": True, "status": 200, "text": None}, id="text_missing"),
+    ],
+)
+def test_unusable_answer_is_http_status(
+    monkeypatch: pytest.MonkeyPatch, answer: object
+) -> None:
+    monkeypatch.setattr(shared_key_flow, "WebDriverWait", FlowWait)
+    driver = _FakeDriver(async_answer=answer)
+
+    result = shared_key_flow.fetch_vault_entries(driver)  # type: ignore[arg-type]
+
+    assert result == VaultFetchResult((), VaultCause.HTTP_STATUS)
+
+
+def test_answer_text_goes_through_the_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shared_key_flow, "WebDriverWait", FlowWait)
+    driver = _FakeDriver(async_answer={"ok": True, "status": 200, "text": "<html>"})
+
+    result = shared_key_flow.fetch_vault_entries(driver)  # type: ignore[arg-type]
+
+    assert result == VaultFetchResult((), VaultCause.NO_FRAME)
+
+
+def test_navigation_failure_is_http_status_and_skips_the_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shared_key_flow, "WebDriverWait", FlowWait)
+    driver = _FakeDriver(async_answer={"ok": True, "text": ""})
+    driver.get_error = RuntimeError("net::ERR_NAME_NOT_RESOLVED")
+    driver.get_error_url = FIND_MY_DEVICE_URL
+
+    result = shared_key_flow.fetch_vault_entries(driver)  # type: ignore[arg-type]
+
+    assert result == VaultFetchResult((), VaultCause.HTTP_STATUS)
+    assert driver.async_scripts == []
+
+
+def test_page_readiness_timeout_is_http_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    from selenium.common.exceptions import TimeoutException
+
+    class _NeverReady:
+        def __init__(self, _driver: object, _timeout: float) -> None:
+            pass
+
+        def until(self, condition: Any) -> Any:
+            condition(driver)  # the readiness probe runs in the page
+            raise TimeoutException
+
+    monkeypatch.setattr(shared_key_flow, "WebDriverWait", _NeverReady)
+    driver = _FakeDriver(async_answer={"ok": True, "text": ""})
+
+    result = shared_key_flow.fetch_vault_entries(driver)  # type: ignore[arg-type]
+
+    assert result == VaultFetchResult((), VaultCause.HTTP_STATUS)
+    assert driver.scripts == [shared_key_flow._WIZ_READY_SCRIPT]
+    assert driver.async_scripts == []
+
+
+# ---------------------------------------------------------------------------
+# request_vault_entries_flow (sign-in only, no unlock page)
+# ---------------------------------------------------------------------------
+
+
+def _forbid_unlock_page(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    requested: list[int] = []
+
+    def _security_url() -> str:
+        requested.append(1)
+        return "https://sec"
+
+    monkeypatch.setattr(
+        shared_key_flow, "get_security_domain_request_url", _security_url
+    )
+    return requested
+
+
+def test_vault_entries_flow_skips_the_unlock_page(
+    monkeypatch: pytest.MonkeyPatch, world: VaultWorld
+) -> None:
+    driver = _FakeDriver(async_answer=vault_answer(world))
+    _patch_flow(monkeypatch, driver)
+    requested = _forbid_unlock_page(monkeypatch)
+    _quitting(monkeypatch)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        shared_key_flow,
+        "create_driver",
+        lambda **kwargs: captured.update(kwargs) or driver,
+    )
+
+    result = shared_key_flow.request_vault_entries_flow(
+        chrome_path="/opt/chrome", chrome_version=149
+    )
+
+    assert isinstance(result, VaultFetchResult)
+    assert result.cause is None
+    assert len(result.entries) == 3
+    assert requested == []
+    assert not any("setVaultSharedKeys" in script for script in driver.scripts)
+    assert "https://sec" not in driver.visited_urls
+    assert driver.visited_urls == ["https://accounts.google.com/", FIND_MY_DEVICE_URL]
+    assert captured == {"chrome_path": "/opt/chrome", "chrome_version": 149}
+    assert driver.quit_calls == 1
+
+
+def test_vault_entries_flow_sign_in_timeout_is_http_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from selenium.common.exceptions import TimeoutException
+
+    class _SignInTimesOut:
+        def __init__(self, _driver: object, _timeout: float) -> None:
+            pass
+
+        def until(self, _condition: Any) -> Any:
+            raise TimeoutException
+
+    driver = _FakeDriver(async_answer={"ok": True, "text": ""})
+    monkeypatch.setattr(shared_key_flow, "create_driver", lambda **_: driver)
+    monkeypatch.setattr(shared_key_flow, "WebDriverWait", _SignInTimesOut)
+    requested = _forbid_unlock_page(monkeypatch)
+    _quitting(monkeypatch)
+
+    result = shared_key_flow.request_vault_entries_flow()
+
+    assert result == VaultFetchResult((), VaultCause.HTTP_STATUS)
+    assert driver.visited_urls == ["https://accounts.google.com/"]
+    assert requested == []
+    assert driver.quit_calls == 1
+
+
+def test_vault_entries_flow_driver_failure_is_http_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(**_: Any) -> Any:
+        raise RuntimeError("chrome crashed")
+
+    monkeypatch.setattr(shared_key_flow, "create_driver", _boom)
+
+    result = shared_key_flow.request_vault_entries_flow()
+
+    assert result == VaultFetchResult((), VaultCause.HTTP_STATUS)
+
+
+def test_vault_entries_flow_passes_unusable_packages_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.googlefindmy import browser_deps
+
+    def _unusable(**_: Any) -> Any:
+        raise browser_deps.BrowserPackagesUnusable("uc installed but broken")
+
+    monkeypatch.setattr(shared_key_flow, "create_driver", _unusable)
+
+    with pytest.raises(browser_deps.BrowserPackagesUnusable):
+        shared_key_flow.request_vault_entries_flow()
+
+
+# ---------------------------------------------------------------------------
+# alert deadline (L-14)
+# ---------------------------------------------------------------------------
+
+
+def test_alert_deadline_ends_the_flow_after_300_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No usable alert within 300 s on the injected clock: `None`, one quit.
+
+    The wait double advances the clock by each 0.5 s alert wait and stops a
+    loop without a deadline after 10 000 waits, so that mutant ends red here
+    instead of hanging.
+    """
+
+    clock = FakeClock()
+    wait = NoAlertWait(clock)
+    driver = _FakeDriver()
+    monkeypatch.setattr(shared_key_flow, "create_driver", lambda **_: driver)
+    monkeypatch.setattr(shared_key_flow, "WebDriverWait", wait)
+    monkeypatch.setattr(
+        shared_key_flow, "get_security_domain_request_url", lambda: "https://sec"
+    )
+    monkeypatch.setattr(shared_key_flow, "_monotonic", clock)
+    _quitting(monkeypatch)
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    assert shared_key_flow.ALERT_DEADLINE_S == 300
+    assert 300 <= clock.now < 300 + 0.5 + 1e-9
+    assert wait.alert_waits == 600
+    assert driver.quit_calls == 1
+    logged = " ".join(caplog.messages)
+    assert "cause=alert_deadline" in logged
+    assert "terminated unexpectedly" not in logged
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "alert" not in out.err.lower()
+
+
+def test_alert_deadline_is_not_reached_by_a_quick_answer(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Counterpart: an answer inside the deadline wins, no deadline cause."""
+
+    driver = _FakeDriver([_CLOSE_VIEW])
+    _patch_flow(monkeypatch, driver)
+    monkeypatch.setattr(shared_key_flow, "_monotonic", FakeClock())
+    _quitting(monkeypatch)
+
+    assert shared_key_flow.request_shared_key_flow() is None
+    assert "alert_deadline" not in " ".join(caplog.messages)
+    assert driver.quit_calls == 1
