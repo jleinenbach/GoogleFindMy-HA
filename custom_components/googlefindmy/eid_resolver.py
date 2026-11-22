@@ -70,6 +70,9 @@ from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
 from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     OwnerKeyInfo,
     async_get_owner_key,
+    async_get_vault_owner_key,
+    claim_owner_key_spot_refresh_by_clock,
+    record_owner_key_version_resolved,
 )
 
 if TYPE_CHECKING:
@@ -3078,6 +3081,7 @@ class GoogleFindMyEIDResolver:
                         self._decryption_status[identity.registry_id] = (
                             envelope.metadata.get("status", "")
                         )
+                        self._record_resolved_owner_key_version(identity, cache)
                         return envelope
                     continue
                 except Exception:  # noqa: BLE001
@@ -3093,9 +3097,23 @@ class GoogleFindMyEIDResolver:
 
                     result = DecryptionResult(key=bytes(decrypted), metadata=metadata)
                     self._decryption_status[identity.registry_id] = metadata["status"]
+                    self._record_resolved_owner_key_version(identity, cache)
                     return result
 
         return None
+
+    @staticmethod
+    def _record_resolved_owner_key_version(
+        identity: DeviceIdentity, cache: TokenCache
+    ) -> None:
+        """Move the tracker's owner-key version from open to resolved (issue #246).
+
+        Called at every successful return. The register only records a version
+        that is open, so a success on an already healed cache changes nothing.
+        The resolver never opens a gap and never raises a Repairs issue.
+        """
+        if identity.owner_key_version is not None:
+            record_owner_key_version_resolved(cache, identity.owner_key_version)
 
     def _unwrap_aesgcm_envelope(
         self,
@@ -3164,13 +3182,22 @@ class GoogleFindMyEIDResolver:
         ):
             _LOGGER.info(
                 "Owner Key Version mismatch detected: Tracker requires V%s, "
-                "Cache has V%s. Refreshing...",
+                "Cache has V%s. Trying the vault entry, then a refresh.",
                 identity.owner_key_version,
                 owner_key_info.version,
             )
-            refreshed = await _fetch(force_refresh=True)
-            if refreshed is not None:
-                return refreshed
+            # Issue #246: the bundle field may hold the required version, so no
+            # Spot call is needed. Otherwise refresh by the resolver's own clock
+            # claim; the poll-cycle claim belongs to decrypt_locations alone.
+            vault = await async_get_vault_owner_key(
+                cache=cache, version=identity.owner_key_version
+            )
+            if vault.status == "found" and vault.key is not None:
+                return OwnerKeyInfo(vault.key, identity.owner_key_version)
+            if claim_owner_key_spot_refresh_by_clock(cache):
+                refreshed = await _fetch(force_refresh=True)
+                if refreshed is not None:
+                    return refreshed
 
         return owner_key_info
 
