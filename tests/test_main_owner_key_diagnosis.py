@@ -12,6 +12,9 @@ explicit version; an AST test pins that.
 from __future__ import annotations
 
 import ast
+import asyncio
+import inspect
+from collections.abc import Coroutine
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,6 +32,9 @@ from custom_components.googlefindmy.KeyBackup.vault_web_api import (
     VaultFetchResult,
 )
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
+    get_eid_info_request as _eid_info_request,
+)
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     _build_request_bytes,
 )
@@ -290,27 +296,131 @@ def test_build_request_bytes_carries_requested_version() -> None:
 # ---------------------------------------------------------------------------
 
 _SPOT_REQUEST_FUNCS = frozenset({"async_get_eid_info", "_build_request_bytes"})
+_VERSION_PARAM = "owner_key_version"
+
+
+def _positional_version_index() -> dict[str, int | None]:
+    """Position of the version parameter per helper, read from the real signatures.
+
+    ``None`` means keyword-only: a positional argument cannot carry the version.
+    """
+    index: dict[str, int | None] = {}
+    for name in _SPOT_REQUEST_FUNCS:
+        helper = getattr(_eid_info_request, name)
+        params = list(inspect.signature(helper).parameters.values())
+        positional = [
+            p.name
+            for p in params
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        index[name] = (
+            positional.index(_VERSION_PARAM) if _VERSION_PARAM in positional else None
+        )
+    return index
+
+
+def _callee(func: ast.expr, aliases: dict[str, str]) -> str | None:
+    if isinstance(func, ast.Name):
+        return aliases.get(func.id, func.id)
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _carries_version(
+    helper: str,
+    args: list[ast.expr],
+    keywords: list[ast.keyword],
+    positions: dict[str, int | None],
+    forwarding: bool,
+) -> bool:
+    """Return True when a call of ``helper`` with these arguments sets the version."""
+
+    def own_parameter(value: ast.expr) -> bool:
+        return forwarding and isinstance(value, ast.Name) and value.id == _VERSION_PARAM
+
+    for keyword in keywords:
+        if keyword.arg == _VERSION_PARAM and not own_parameter(keyword.value):
+            return True
+        if keyword.arg is None:  # ``**mapping``
+            mapping = keyword.value
+            if not isinstance(mapping, ast.Dict) or any(
+                key is None
+                or (isinstance(key, ast.Constant) and key.value == _VERSION_PARAM)
+                for key in mapping.keys
+            ):
+                return True
+    position = positions[helper]
+    for index, arg in enumerate(args):
+        if isinstance(arg, ast.Starred):
+            return True
+        if index == position and not own_parameter(arg):
+            return True
+    return False
+
+
+class _ExplicitVersionFinder(ast.NodeVisitor):
+    def __init__(self, positions: dict[str, int | None]) -> None:
+        self.positions = positions
+        self.aliases: dict[str, str] = {}
+        self.functions: list[str] = []
+        self.lines: list[int] = []
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name in _SPOT_REQUEST_FUNCS:
+                self.aliases[alias.asname or alias.name] = alias.name
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if (
+            len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and _callee(node.value, self.aliases) in _SPOT_REQUEST_FUNCS
+        ):
+            self.aliases[node.targets[0].id] = str(_callee(node.value, self.aliases))
+        self.generic_visit(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.functions.append(node.name)
+        self.generic_visit(node)
+        self.functions.pop()
+
+    visit_FunctionDef = _visit_function
+    visit_AsyncFunctionDef = _visit_function
+
+    def visit_Call(self, node: ast.Call) -> None:
+        # Inside a helper, passing its own ``owner_key_version`` on is forwarding.
+        forwarding = bool(self.functions) and self.functions[-1] in _SPOT_REQUEST_FUNCS
+        name = _callee(node.func, self.aliases)
+        if name in _SPOT_REQUEST_FUNCS:
+            if _carries_version(
+                name, node.args, node.keywords, self.positions, forwarding
+            ):
+                self.lines.append(node.lineno)
+        elif name == "partial" and node.args:
+            bound = _callee(node.args[0], self.aliases)
+            if bound in _SPOT_REQUEST_FUNCS and _carries_version(
+                bound, node.args[1:], node.keywords, self.positions, forwarding
+            ):
+                self.lines.append(node.lineno)
+        self.generic_visit(node)
 
 
 def _explicit_version_calls(source: str) -> list[int]:
-    """Return the line of every call to a Spot request helper with the keyword."""
-    lines: list[int] = []
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = (
-            func.id
-            if isinstance(func, ast.Name)
-            else func.attr
-            if isinstance(func, ast.Attribute)
-            else None
-        )
-        if name in _SPOT_REQUEST_FUNCS and any(
-            keyword.arg == "owner_key_version" for keyword in node.keywords
-        ):
-            lines.append(node.lineno)
-    return lines
+    """Return the line of every call that hands Spot an explicit owner-key version.
+
+    Recognised: a helper called by name, by ``from … import … as`` alias, by a
+    module-level alias or as an attribute; the version as keyword, as positional
+    argument where the signature allows it, inside ``**mapping`` (a literal dict
+    without the key is clean, any other mapping counts) or through ``*args``;
+    and the same arguments bound with ``functools.partial``. Passing a helper's
+    own parameter on inside that helper is forwarding, not a request.
+    Declared blind spots: ``getattr(module, "…")``, a call through a local
+    variable bound inside a function, and a wrapper function in between.
+    """
+    finder = _ExplicitVersionFinder(_positional_version_index())
+    finder.visit(ast.parse(source))
+    return sorted(finder.lines)
 
 
 def test_no_runtime_owner_key_version() -> None:
@@ -332,6 +442,52 @@ def test_no_runtime_owner_key_version_detector_controls() -> None:
     assert _explicit_version_calls("api._build_request_bytes(owner_key_version=3)\n")
     assert _explicit_version_calls("await async_get_eid_info(cache=c)\n") == []
     assert _explicit_version_calls("other(owner_key_version=3)\n") == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "_build_request_bytes(3)\n",
+        "api._build_request_bytes(n)\n",
+        "_build_request_bytes(*args)\n",
+        'await async_get_eid_info(cache=c, **{"owner_key_version": 3})\n',
+        "await async_get_eid_info(cache=c, **options)\n",
+        "from m import async_get_eid_info as fetch\nawait fetch(cache=c, owner_key_version=3)\n",
+        "from m import _build_request_bytes as build\nbuild(4)\n",
+        "fetch = async_get_eid_info\nawait fetch(cache=c, owner_key_version=3)\n",
+        "functools.partial(async_get_eid_info, owner_key_version=3)\n",
+        "partial(_build_request_bytes, 3)\n",
+        "def other(owner_key_version):\n    _build_request_bytes(owner_key_version)\n",
+    ],
+)
+def test_detector_finds_every_explicit_form(source: str) -> None:
+    """Each form hands Spot a version; a bare-keyword rule would miss them."""
+    assert _explicit_version_calls(source) != []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "_build_request_bytes()\n",
+        "await async_get_eid_info(cache=c)\n",
+        'await async_get_eid_info(**{"cache": c})\n',
+        "functools.partial(async_get_eid_info, cache=c)\n",
+        "def _build_request_bytes(owner_key_version=-1):\n    pass\n"
+        "async def async_get_eid_info(*, cache, owner_key_version=-1):\n"
+        "    _build_request_bytes(owner_key_version)\n",
+    ],
+)
+def test_detector_negative_controls(source: str) -> None:
+    """No version, or a helper forwarding its own parameter: clean."""
+    assert _explicit_version_calls(source) == []
+
+
+def test_detector_positions_come_from_the_signatures() -> None:
+    """Keyword-only in ``async_get_eid_info``, first positional in the builder."""
+    assert _positional_version_index() == {
+        "async_get_eid_info": None,
+        "_build_request_bytes": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -390,6 +546,16 @@ async def test_diagnosis_unusable_browser_packages_prints_the_hint(
     assert "install the browser packages first" in out.err
 
 
+def _drive_without_loop(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run a coroutine that never suspends to its result, without a loop."""
+    try:
+        coro.send(None)
+    except StopIteration as stop:
+        return stop.value
+    coro.close()
+    raise AssertionError("the coroutine suspended; it needs a real event loop")
+
+
 def test_diagnosis_cli_signs_in_and_runs_with_the_file_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -418,6 +584,9 @@ def test_diagnosis_cli_signs_in_and_runs_with_the_file_cache(
     monkeypatch.setattr(cli_main, "_ensure_aas_token", _aas)
     monkeypatch.setattr(cli_main, "_run_owner_key_diagnosis", _diagnosis)
     monkeypatch.setenv("GOOGLEFINDMY_ENTRY_ID", "env-entry")
+    # No competing event loop in tests (tests/AGENTS.md): every double above
+    # returns without suspending, so the coroutine runs to its end on send().
+    monkeypatch.setattr(asyncio, "run", _drive_without_loop)
 
     rc = cli_main._owner_key_diagnosis_cli(
         SimpleNamespace(entry="arg-entry", diagnose_owner_key_versions=5)

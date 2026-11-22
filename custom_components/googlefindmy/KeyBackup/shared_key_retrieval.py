@@ -46,6 +46,9 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, cast
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+    SharedKeyFlowDeadlineError,
+)
 from custom_components.googlefindmy.typing_utils import (
     run_in_executor as _run_in_executor,
 )
@@ -296,6 +299,11 @@ async def _retrieve_shared_key_hex(*, vault_sink: VaultSink | None = None) -> st
         # The packages can still be asked directly.
         if browser_packages_missing():
             raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT) from err
+        if isinstance(err, SharedKeyFlowDeadlineError):
+            raise RuntimeError(
+                f"Shared key retrieval timed out: {err} Run the login tool again "
+                "and finish the Google sign-in and the unlock page."
+            ) from err
         raise RuntimeError(
             "Shared key retrieval failed. "
             "Ensure Chrome/Chromium is installed for the browser-based flow."

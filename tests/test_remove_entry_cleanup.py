@@ -249,15 +249,10 @@ async def test_async_remove_entry_deletes_owner_key_version_issues(
     to an entry whose id merely starts with ``entry-remove``; a bare prefix test
     would delete it.
     """
-    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
-        get_owner_key,
-    )
-
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
     forgotten: list[str] = []
-    monkeypatch.setattr(
-        get_owner_key, "forget_owner_key_refresh_state", forgotten.append
-    )
+    # Patched where ``__init__.py`` binds the name (module-level import).
+    monkeypatch.setattr(integration, "forget_owner_key_refresh_state", forgotten.append)
 
     own = [
         "owner_key_version_unavailable_entry-remove_v2",
@@ -304,15 +299,10 @@ async def test_async_remove_entry_owner_key_issue_registry_shapes(
     shape: str,
 ) -> None:
     """Tuple keys are matched by domain; an unusable registry never stops removal."""
-    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
-        get_owner_key,
-    )
-
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
     forgotten: list[str] = []
-    monkeypatch.setattr(
-        get_owner_key, "forget_owner_key_refresh_state", forgotten.append
-    )
+    # Patched where ``__init__.py`` binds the name (module-level import).
+    monkeypatch.setattr(integration, "forget_owner_key_refresh_state", forgotten.append)
     own = "owner_key_version_unavailable_entry-remove_v2"
     if shape == "tuple_keys":
         registry: object = _TupleKeyRegistry(

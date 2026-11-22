@@ -12,8 +12,11 @@ fed in there, never an output of the code under test.
 from __future__ import annotations
 
 import base64
+import json
+import re
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -881,3 +884,81 @@ async def test_field_removal_error_after_new_shared_key_is_swallowed() -> None:
     await cli_main._ensure_owner_key_versions(cache, sink)
 
     assert cache.sets == []
+
+
+# ---------------------------------------------------------------------------
+# Remedy texts against the CLI (the advice must name a flag that exists)
+# ---------------------------------------------------------------------------
+
+_INTEGRATION_DIR = Path(cli_main.__file__).resolve().parent
+_REMEDY_KEYS = ("owner_key_version_login_required", "owner_key_version_not_in_vault")
+
+
+def _remedy_texts() -> list[tuple[str, str]]:
+    sources = [_INTEGRATION_DIR / "strings.json"]
+    sources += sorted((_INTEGRATION_DIR / "translations").glob("*.json"))
+    texts: list[tuple[str, str]] = []
+    for source in sources:
+        issues = json.loads(source.read_text(encoding="utf-8"))["issues"]
+        texts += [
+            (f"{source.name}:{key}", issues[key]["description"]) for key in _REMEDY_KEYS
+        ]
+    return texts
+
+
+def test_remedy_texts_name_only_flags_the_cli_accepts() -> None:
+    """Every ``--flag`` in a remedy text is an option of ``main.py``.
+
+    Renaming the flag in the parser turns this red instead of leaving the
+    Repairs text silently wrong. The texts must name ``--reauth`` at all: it is
+    the way past an old ``secrets.json`` that a plain run reuses.
+    """
+    options = {
+        option
+        for action in cli_main._build_cli_parser()._actions
+        for option in action.option_strings
+    }
+    texts = _remedy_texts()
+    assert len(texts) == 2 * 11
+    for where, text in texts:
+        flags = set(re.findall(r"(?<![\w-])--[a-z][a-z-]*", text))
+        assert "--reauth" in flags, where
+        assert flags <= options, (where, flags - options)
+
+
+def test_docker_helper_hands_gfmy_args_to_main_py() -> None:
+    """The Docker remedy ``GFMY_ARGS=--reauth`` only works if the helper passes it."""
+    entrypoint = (_INTEGRATION_DIR / "docker-login" / "entrypoint.sh").read_text(
+        encoding="utf-8"
+    )
+    assert re.search(r"python3 main\.py \$\{GFMY_ARGS:-\}", entrypoint)
+
+
+def test_reauth_clears_the_version_field_and_the_shared_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--reauth`` drops the field and the shared key, so the next run reads the vault.
+
+    This is the premise of the remedy texts: a kept ``secrets.json`` with the
+    field skips the vault, ``--reauth`` does not.
+    """
+    secrets = tmp_path / "secrets.json"
+    secrets.write_text(
+        json.dumps(
+            {
+                "username": _USERNAME,
+                "aas_token": "aas",
+                "shared_key": "11" * 32,
+                OWNER_KEY_VERSIONS_FIELD: {"1": {"version": 1}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLEFINDMY_SECRETS_PATH", str(secrets))
+
+    assert cli_main._clear_stale_tokens_for_reauth() is not None
+
+    remaining = json.loads(secrets.read_text(encoding="utf-8"))
+    assert OWNER_KEY_VERSIONS_FIELD not in remaining
+    assert "shared_key" not in remaining
+    assert remaining["username"] == _USERNAME

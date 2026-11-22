@@ -37,6 +37,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    OwnerKeyLookupTransientError,
     OwnerKeyVersionUnavailableError,
     StaleOwnerKeyError,
 )
@@ -46,6 +47,7 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     OwnerKeyInfo,
 )
+from custom_components.googlefindmy.SpotApi.spot_request import SpotError
 from tests.helpers import DummyCache
 from tests.helpers.owner_key_vault_fixtures import VaultWorld, make_vault_world
 from tests.helpers.polling_mixin_stub import PollingStub
@@ -343,6 +345,110 @@ async def test_spot_calls_per_cycle(
 
     assert spot.spot_calls == 1
     assert spot.force_refresh_calls == 1
+
+
+async def test_failed_refresh_leaves_throttled_siblings_transient(
+    monkeypatch: pytest.MonkeyPatch, clock: list[float]
+) -> None:
+    """A refresh that fails transiently is no evidence for the throttled siblings.
+
+    Tracker 1 claims the cycle's refresh, which fails at the transport layer.
+    Tracker 2 in the same cycle gets no claim; it must not be classified as a
+    version gap from the stale cache, only skipped as transient, and no second
+    Spot call is made. The next cycle refreshes again and classifies.
+    """
+    world = make_vault_world(versions=(1, 2), spot_version=1)
+    spot = _install(monkeypatch, world)
+    plain_lookup = spot.get_owner_key
+    failures = [SpotError("transport down")]
+
+    async def failing_refresh(**kwargs: Any) -> OwnerKeyInfo:
+        if kwargs.get("force_refresh") and failures:
+            spot.force_refresh_calls += 1
+            raise failures.pop()
+        return await plain_lookup(**kwargs)
+
+    monkeypatch.setattr(_dl, "async_get_owner_key", failing_refresh)
+    cache = _ScopedCache("entry-1")
+    world.seed_entry_cache(cache.values, None)
+
+    _gok.begin_owner_key_poll_cycle("entry-1")
+    for _ in range(3):
+        with pytest.raises(OwnerKeyLookupTransientError):
+            await _dl.async_retrieve_identity_key(
+                world.tracker_registration(2),
+                cache=cache,  # type: ignore[arg-type]
+            )
+    assert spot.force_refresh_calls == 1
+
+    _gok.begin_owner_key_poll_cycle("entry-1")
+    error = await _expect_gap(cache, world)
+    assert error.required_version == 2
+    assert spot.force_refresh_calls == 2
+
+
+async def test_confirmed_refresh_is_read_back_by_a_throttled_sibling(
+    monkeypatch: pytest.MonkeyPatch, clock: list[float]
+) -> None:
+    """A sibling that read the cache before the refresh uses the refreshed key.
+
+    Spot rotated to version 2. Tracker 1 claims and refreshes successfully.
+    Tracker 2's first lookup still returned version 1 (read before the refresh
+    stored version 2); throttled, it reads the key back and decrypts instead of
+    raising a gap built on the stale read.
+    """
+    world = make_vault_world(versions=(1, 2), spot_version=1)
+    spot = _install(monkeypatch, world)
+    spot.refresh_version = 2
+    cache = _ScopedCache("entry-1")
+    world.seed_entry_cache(cache.values, None)
+
+    _gok.begin_owner_key_poll_cycle("entry-1")
+    assert world.eiks[2] in await _dl.async_retrieve_identity_key(
+        world.tracker_registration(2), cache=cache
+    )
+    assert spot.force_refresh_calls == 1
+
+    plain_versions = [1, 2]  # stale first read, then the stored refresh
+
+    async def stale_then_fresh(**kwargs: Any) -> OwnerKeyInfo:
+        assert not kwargs.get("force_refresh"), "throttled: no second refresh"
+        version = plain_versions.pop(0)
+        return OwnerKeyInfo(key=world.owner_keys[version], version=version)
+
+    monkeypatch.setattr(_dl, "async_get_owner_key", stale_then_fresh)
+    _dl.clear_eik_cache()
+    assert world.eiks[2] in await _dl.async_retrieve_identity_key(
+        world.tracker_registration(2), cache=cache
+    )
+    assert plain_versions == []
+
+
+async def test_unreadable_refreshed_key_is_transient_for_a_sibling(
+    monkeypatch: pytest.MonkeyPatch, clock: list[float]
+) -> None:
+    """Confirmed window, but the read-back fails: transient, never a gap."""
+    world = make_vault_world(versions=(1, 2), spot_version=1)
+    spot = _install(monkeypatch, world)
+    cache = _ScopedCache("entry-1")
+    world.seed_entry_cache(cache.values, None)
+    _gok.begin_owner_key_poll_cycle("entry-1")
+    await _expect_gap(cache, world)
+    assert spot.force_refresh_calls == 1
+
+    reads = [OwnerKeyInfo(key=world.owner_keys[1], version=1)]
+
+    async def first_read_then_fail(**_kwargs: Any) -> OwnerKeyInfo:
+        if reads:
+            return reads.pop()
+        raise RuntimeError("SENTINEL-cache")
+
+    monkeypatch.setattr(_dl, "async_get_owner_key", first_read_then_fail)
+    with pytest.raises(OwnerKeyLookupTransientError) as ei:
+        await _dl.async_retrieve_identity_key(
+            world.tracker_registration(2), cache=cache
+        )
+    assert "SENTINEL" not in str(ei.value)
 
 
 async def test_push_without_cycle_throttled_by_clock(

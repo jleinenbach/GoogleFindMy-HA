@@ -412,6 +412,14 @@ def test_select_of_nothing_is_empty() -> None:
     assert select_finder_hw([]) == ()
 
 
+def test_select_drops_versions_below_one() -> None:
+    """Versions 0 and -1 never reach the bundle; version 1 stays (boundary)."""
+    chosen = select_finder_hw([_entry(0, 1), _entry(-1, 1), _entry(1, 1, fill=6)])
+
+    assert [(e.version, e.key[0]) for e in chosen] == [(1, 6)]
+    assert list(to_bundle_field([_entry(0, 1), _entry(2, 1)])) == ["2"]
+
+
 # --------------------------------------------------------------------------- #
 # Bundle field
 # --------------------------------------------------------------------------- #
@@ -476,6 +484,14 @@ def _field_mutants(world: VaultWorld) -> dict[str, object]:
         "foreign_domain": with_item(domain="other_domain"),
         "version_as_string": with_item(version="1"),
         "version_as_bool": with_item(version=True),
+        "version_zero": {
+            **{k: v for k, v in good.items() if k != "1"},
+            "0": {**item, "version": 0},
+        },
+        "version_negative": {
+            **{k: v for k, v in good.items() if k != "1"},
+            "-1": {**item, "version": -1},
+        },
         "epoch_missing": with_item(epoch=None),
         "key_missing": {**good, "1": missing_key},
     }

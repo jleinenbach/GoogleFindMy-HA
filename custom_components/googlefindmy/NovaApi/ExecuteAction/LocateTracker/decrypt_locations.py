@@ -77,6 +77,8 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
     async_get_owner_key,
     async_get_vault_owner_key,
     claim_owner_key_spot_refresh,
+    confirm_owner_key_spot_refresh,
+    owner_key_spot_refresh_confirmed,
     record_owner_key_version_gap,
     record_owner_key_version_resolved,
 )
@@ -961,13 +963,41 @@ async def async_retrieve_identity_key(
                 owner_key_info.version,
             )
             owner_key_info = await _force_refresh_owner_key(cache)
+            confirm_owner_key_spot_refresh(cache)
             spot_owner_key_version = owner_key_info.version
-        else:
+        elif owner_key_spot_refresh_confirmed(cache):
+            # Throttled, but this window's refresh completed: its answer is the
+            # positive evidence. Re-read it, because this call may have read the
+            # cache before that refresh stored the new owner key.
             _LOGGER.debug(
                 "Owner-key refresh for version gap V%s skipped (throttled, "
-                "vault status=%s).",
+                "vault status=%s); using this window's refresh.",
                 owner_key_version,
                 gap_lookup.status,
+            )
+            try:
+                owner_key_info = await async_get_owner_key(cache=cache)
+            except Exception as exc:  # noqa: BLE001 - no evidence, so transient
+                raise OwnerKeyLookupTransientError(
+                    "Owner key retrieval did not complete (transient): the owner "
+                    "key refreshed in this window could not be read back. This "
+                    "will be retried."
+                ) from exc
+            spot_owner_key_version = owner_key_info.version
+        else:
+            # Throttled, and this window's refresh failed or is still running:
+            # nothing says what Spot serves now, so classifying a gap would rest
+            # on the stale cache (classifier discipline: positive evidence only).
+            _LOGGER.debug(
+                "Owner-key refresh for version gap V%s skipped (throttled, "
+                "window's refresh not confirmed, vault status=%s).",
+                owner_key_version,
+                gap_lookup.status,
+            )
+            raise OwnerKeyLookupTransientError(
+                "Owner key retrieval did not complete (transient): the owner-key "
+                "refresh of this window has not completed, so the version gap "
+                "cannot be classified yet. This will be retried."
             )
         version_gap = vault_key_used or (
             owner_key_info.version is not None

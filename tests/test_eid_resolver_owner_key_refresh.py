@@ -196,19 +196,61 @@ async def test_try_decrypt_identity_key_gap_uses_vault_entry_without_refresh(
 _CYCLE_CLAIM = "claim_owner_key_spot_refresh"
 
 
-def _cycle_claim_hits(source: str) -> list[str]:
-    """Return every reference to the poll-cycle claim in ``source`` (exact name)."""
+def _called_names(function: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names.add(node.value)
+    return names
+
+
+def _claiming_names(*sources: str) -> frozenset[str]:
+    """Return the cycle claim and every function of ``sources`` that reaches it.
+
+    Built as a fixed point over the module-level functions: a function that
+    names the claim, or a function that already reaches it, reaches it too.
+    """
+    bodies: dict[str, set[str]] = {}
+    for source in sources:
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                bodies[node.name] = _called_names(node)
+    claiming = {_CYCLE_CLAIM}
+    changed = True
+    while changed:
+        changed = False
+        for name, called in bodies.items():
+            if name not in claiming and called & claiming:
+                claiming.add(name)
+                changed = True
+    return frozenset(claiming)
+
+
+def _cycle_claim_hits(
+    source: str, names: frozenset[str] = frozenset({_CYCLE_CLAIM})
+) -> list[str]:
+    """Return every reference in ``source`` to one of ``names`` (exact name).
+
+    Covers a name, an attribute, an imported name and a string constant (the
+    form behind ``getattr(module, "…")``, ``vars(module)["…"]`` and
+    ``module.__dict__["…"]``). Declared blind spot: a name assembled at run
+    time, for example ``getattr(gok, "claim_" + suffix)``.
+    """
     hits: list[str] = []
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Name) and node.id == _CYCLE_CLAIM:
+        if isinstance(node, ast.Name) and node.id in names:
             hits.append(f"name:{node.lineno}")
-        elif isinstance(node, ast.Attribute) and node.attr == _CYCLE_CLAIM:
+        elif isinstance(node, ast.Attribute) and node.attr in names:
             hits.append(f"attribute:{node.lineno}")
+        elif isinstance(node, ast.Constant) and node.value in names:
+            hits.append(f"string:{node.lineno}")
         elif isinstance(node, ast.ImportFrom):
             hits.extend(
-                f"import:{node.lineno}"
-                for alias in node.names
-                if alias.name == _CYCLE_CLAIM
+                f"import:{node.lineno}" for alias in node.names if alias.name in names
             )
     return hits
 
@@ -301,8 +343,11 @@ async def test_resolver_invalid_tag_then_poll_raises_shared_key_mismatch(
 
 
 def test_resolver_never_takes_cycle_claim() -> None:
-    """``eid_resolver.py`` never names the poll-cycle claim."""
-    assert _cycle_claim_hits(inspect.getsource(eid_resolver)) == []
+    """``eid_resolver.py`` names neither the claim nor a function that takes it."""
+    claiming = _claiming_names(inspect.getsource(_gok), inspect.getsource(_dl))
+    # Not vacuous: the decrypt path reaches the claim through its entry point.
+    assert {_CYCLE_CLAIM, "async_retrieve_identity_key"} <= claiming
+    assert _cycle_claim_hits(inspect.getsource(eid_resolver), claiming) == []
 
 
 def test_cycle_claim_ast_detector_controls() -> None:
@@ -322,6 +367,35 @@ def test_cycle_claim_ast_detector_controls() -> None:
         )
         == []
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'getattr(gok, "claim_owner_key_spot_refresh")(cache)\n',
+        'vars(gok)["claim_owner_key_spot_refresh"](cache)\n',
+        'gok.__dict__["claim_owner_key_spot_refresh"](cache)\n',
+    ],
+)
+def test_cycle_claim_detector_finds_string_forms(source: str) -> None:
+    """Reaching the claim by its name as a string is a hit too."""
+    assert _cycle_claim_hits(source)
+
+
+def test_cycle_claim_detector_follows_helper_hops() -> None:
+    """A resolver call of a function that takes the claim, two hops away, is a hit."""
+    source = (
+        "def take(cache):\n"
+        "    return claim_owner_key_spot_refresh(cache)\n"
+        "def middle(cache):\n"
+        "    return take(cache)\n"
+        "def unrelated(cache):\n"
+        "    return claim_owner_key_spot_refresh_by_clock(cache)\n"
+    )
+    claiming = _claiming_names(source)
+    assert claiming == {_CYCLE_CLAIM, "take", "middle"}
+    assert _cycle_claim_hits("helpers.middle(cache)\n", claiming)
+    assert _cycle_claim_hits("unrelated(cache)\n", claiming) == []
 
 
 @pytest.mark.asyncio

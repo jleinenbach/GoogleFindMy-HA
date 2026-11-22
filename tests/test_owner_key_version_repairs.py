@@ -152,6 +152,25 @@ def test_gap_failure_creates_one_issue(remedy: str, translation_key: str) -> Non
     stub._set_auth_state.assert_not_called()
 
 
+def test_gap_warning_keeps_the_device_name_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gap record repeats every poll: WARNING has numbers, the name only DEBUG."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.googlefindmy")
+    stub = _make_stub()
+    record_owner_key_version_gap(_Scope(), 2)
+    stub.note_decrypt_failure(stale=False, error=_gap_error(2), device="Grandma's Keys")
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "needs owner key version 2" in warnings[0].getMessage()
+    assert "Grandma" not in warnings[0].getMessage()
+    assert any(
+        r.levelno == logging.DEBUG and "Grandma's Keys" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 def test_gap_failure_with_empty_bundle_uses_dash() -> None:
     """An empty bundle list renders as ``-``, never as an empty placeholder."""
     stub = _make_stub()
@@ -423,3 +442,34 @@ async def test_unload_parent_forgets_owner_key_refresh_state(
 
     assert open_owner_key_version_gaps("entry-unload") == ()
     assert open_owner_key_version_gaps("entry-other") == (2,)
+
+
+@pytest.mark.asyncio
+async def test_unload_parent_deletes_its_owner_key_version_issues(
+    monkeypatch: pytest.MonkeyPatch, issue_registry_capture: Any
+) -> None:
+    """Unload retires the entry's issues with the register, and only them.
+
+    Without this a reload loses the register that tells a later success which
+    issue to delete, and the issue stays until Home Assistant restarts.
+    ``entry-unload_x`` merely starts with the entry id and keeps its issue.
+    """
+    entry = make_config_entry(entry_id="entry-unload", title="Unload Entry")
+    own = [_issue_id(2, "entry-unload"), _issue_id(3, "entry-unload")]
+    foreign = [_issue_id(2, "entry-unload_x"), _issue_id(2, "entry-other")]
+    for issue_id in own + foreign:
+        issue_registry_capture.registry.issues[issue_id] = {
+            "issue_id": issue_id,
+            "domain": integration.DOMAIN,
+        }
+    monkeypatch.setattr(
+        integration, "_async_unload_parent_entry", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        integration, "discard_pending_entry_reload", lambda *_args: None
+    )
+
+    assert await integration.async_unload_entry(SimpleNamespace(data={}), entry)
+
+    assert sorted(iid for _domain, iid in issue_registry_capture.deleted) == own
+    assert sorted(issue_registry_capture.registry.issues) == sorted(foreign)

@@ -637,6 +637,7 @@ class _OwnerKeyRefreshState:
     last_claim_cycle: int = 0
     last_claim_at: float = -math.inf
     resolver_last_claim_at: float = -math.inf
+    refresh_confirmed: bool = False
     open_gap_versions: set[int] = field(default_factory=set)
     resolved_versions: set[int] = field(default_factory=set)
 
@@ -684,7 +685,9 @@ def claim_owner_key_spot_refresh(cache: object) -> bool:
     """Grant a forced owner-key refresh: once per poll cycle, else every 300 s.
 
     Without a preceding ``begin_owner_key_poll_cycle`` (push path, CLI) only the
-    clock counts; the first claim of a scope is always granted.
+    clock counts; the first claim of a scope is always granted. A granted claim
+    stays unconfirmed until ``confirm_owner_key_spot_refresh`` reports that the
+    refresh completed.
     """
     state = _state_for(owner_key_scope(cache))
     now = _monotonic()
@@ -694,8 +697,24 @@ def claim_owner_key_spot_refresh(cache: object) -> bool:
     ):
         state.last_claim_cycle = state.cycle_seq
         state.last_claim_at = now
+        state.refresh_confirmed = False
         return True
     return False
+
+
+def confirm_owner_key_spot_refresh(cache: object) -> None:
+    """Record that the refresh granted by the last claim completed."""
+    _state_for(owner_key_scope(cache)).refresh_confirmed = True
+
+
+def owner_key_spot_refresh_confirmed(cache: object) -> bool:
+    """Return True when the refresh of the current claim window completed.
+
+    False while that refresh is still running or after it failed: a throttled
+    caller then has no fresh answer from Spot and must not classify a gap.
+    """
+    state = _owner_key_refresh_state.get(owner_key_scope(cache))
+    return state is not None and state.refresh_confirmed
 
 
 def claim_owner_key_spot_refresh_by_clock(cache: object) -> bool:

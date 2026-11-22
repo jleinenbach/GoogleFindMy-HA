@@ -32,6 +32,7 @@ import pytest
 from custom_components.googlefindmy.KeyBackup import shared_key_flow
 from custom_components.googlefindmy.KeyBackup.vault_web_api import (
     FIND_MY_DEVICE_URL,
+    SharedKeyFlowDeadlineError,
     VaultCause,
     VaultFetchResult,
 )
@@ -288,7 +289,8 @@ def test_alert_deadline_leaks_nothing(
     monkeypatch.setattr(shared_key_flow, "_monotonic", clock)
     _quitting(monkeypatch)
 
-    assert shared_key_flow.request_shared_key_flow(vault_sink=received.append) is None
+    with pytest.raises(SharedKeyFlowDeadlineError):
+        shared_key_flow.request_shared_key_flow(vault_sink=received.append)
 
     assert len(received[0].entries) == 3
     assert any("cause=alert_deadline" in message for message in caplog.messages)

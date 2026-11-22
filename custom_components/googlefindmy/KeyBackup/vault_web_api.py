@@ -57,6 +57,7 @@ __all__ = [
     "FIND_MY_DEVICE_URL",
     "OWNER_KEY_VERSIONS_FIELD",
     "RPC_ID",
+    "SharedKeyFlowDeadlineError",
     "VaultCause",
     "VaultEntry",
     "VaultFetchResult",
@@ -148,6 +149,16 @@ class VaultCause(StrEnum):
     HTTP_STATUS = "http_status"
     SELF_TEST_FAILED = "self_test_failed"
     ALERT_DEADLINE = "alert_deadline"
+
+
+class SharedKeyFlowDeadlineError(RuntimeError):
+    """The unlock page sent no result before the alert deadline ran out.
+
+    Raised by the browser flow after the driver has quit, so the login tool can
+    say that the sign-in was not finished in time instead of blaming the
+    browser installation. Defined here because this module needs no browser
+    package, so the Home Assistant side can import it as well.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,12 +312,14 @@ def parse_batchexecute(text: str) -> VaultFetchResult:
 def select_finder_hw(entries: Iterable[VaultEntry]) -> tuple[VaultEntry, ...]:
     """Keep ``finder_hw`` entries only, one per version with the highest epoch.
 
-    Ties go to the later entry, as in ``response_parser.get_fmdn_shared_key``
+    Versions below 1 are dropped: the runtime only ever looks up positive
+    versions, and ``from_bundle_field`` rejects any other. Ties go to the later
+    entry, as in ``response_parser.get_fmdn_shared_key``
     (``epoch >= latest_epoch``). The result is ordered by version.
     """
     latest: dict[int, VaultEntry] = {}
     for entry in entries:
-        if entry.domain != FINDER_HW_DOMAIN:
+        if entry.domain != FINDER_HW_DOMAIN or entry.version < 1:
             continue
         current = latest.get(entry.version)
         if current is None or entry.epoch >= current.epoch:
@@ -340,6 +353,7 @@ def _entry_from_field_item(name: object, item: object) -> VaultEntry | None:
     blob_hex = item.get("key")
     if not (
         _is_int(version)
+        and version > 0
         and _is_int(epoch)
         and domain == FINDER_HW_DOMAIN
         and isinstance(blob_hex, str)
@@ -359,8 +373,8 @@ def from_bundle_field(value: object) -> tuple[VaultEntry, ...] | None:
     """Read the bundle field back; ``None`` for any foreign shape, never raises.
 
     Accepted only in the exact shape ``to_bundle_field`` writes: a dict whose keys
-    are the decimal versions and whose values carry an int ``version`` equal to
-    the key, an int ``epoch``, the domain ``finder_hw`` and the lowercase hex of a
+    are the decimal versions and whose values carry a positive int ``version``
+    equal to the key, an int ``epoch``, the domain ``finder_hw`` and the lowercase hex of a
     blob of ``ENCRYPTED_OWNER_KEY_LEN`` bytes. One foreign item rejects the whole
     field. An empty dict yields ``()``. Entries are ordered by version.
     """

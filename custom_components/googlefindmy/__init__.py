@@ -325,6 +325,9 @@ def get_proto_decoders() -> Mapping[ProtoDecoderModuleName, ModuleType]:
 
 
 from .eid_resolver import GoogleFindMyEIDResolver  # noqa: E402
+from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (  # noqa: E402
+    forget_owner_key_refresh_state,
+)
 
 
 def __getattr__(name: str) -> Any:
@@ -10667,11 +10670,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             return await _async_unload_subentry(hass, entry)
         # The owner-key refresh register (issue #246) is process-wide and keyed
         # by the parent entry id; drop it so a reload starts without stale gaps.
-        from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
-            forget_owner_key_refresh_state,
-        )
-
+        # Its Repairs issues go with it: only the register tells a later success
+        # which issue to retire, so an issue kept past this point would outlive
+        # a healed gap until Home Assistant restarts. A gap that persists raises
+        # its issue again on the first failed decrypt after the reload.
         forget_owner_key_refresh_state(entry.entry_id)
+        _async_delete_owner_key_version_issues(hass, entry.entry_id, "unload")
         return await _async_unload_parent_entry(hass, entry)
     finally:
         # The claimed reload has arrived at its unload half; release the latch so a
@@ -10724,6 +10728,46 @@ async def _async_refresh_discovery_watch_paths(
             "Discovery watch-path refresh failed (exclude_entry_id=%s)",
             exclude_entry_id,
             exc_info=True,
+        )
+
+
+def _async_delete_owner_key_version_issues(
+    hass: HomeAssistant, entry_id: str, context: str
+) -> None:
+    """Delete every owner-key version Repairs issue of one entry (issue #246).
+
+    The issues carry entry and version in their id, so this walks the registry
+    for the entry's ones. Exact match only: another entry whose id starts with
+    this one keeps its issues. Best effort: a registry failure is logged by type.
+    """
+    try:
+        registry = ir.async_get(hass)
+        issues_attr = getattr(registry, "issues", None)
+        if not isinstance(issues_attr, Mapping):
+            issues_attr = getattr(registry, "_issues", None)
+        owner_key_issue_ids: list[str] = []
+        if isinstance(issues_attr, Mapping):
+            for key, payload in list(issues_attr.items()):
+                if isinstance(key, tuple) and len(key) == 2:
+                    domain, issue_id = str(key[0]), str(key[1])
+                else:
+                    issue_id = str(key)
+                    domain = (
+                        str(payload.get("domain", DOMAIN))
+                        if isinstance(payload, Mapping)
+                        else DOMAIN
+                    )
+                if domain == DOMAIN and is_owner_key_version_issue_for(
+                    issue_id, entry_id
+                ):
+                    owner_key_issue_ids.append(issue_id)
+        for issue_id in owner_key_issue_ids:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+    except Exception as err:  # noqa: BLE001 - best-effort cleanup
+        _LOGGER.debug(
+            "Deleting owner-key version issues during %s raised: %s",
+            context,
+            type(err).__name__,
         )
 
 
@@ -10901,42 +10945,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # keeps the user's "ignore". Only the removal of the entry retires it.
     ir.async_delete_issue(hass, DOMAIN, frozen_attributes_issue_id(entry.entry_id))
 
-    # Owner-key version issues (issue #246) carry entry and version in their id,
-    # so removal walks the registry for this entry's ones; no poll or push will
-    # run again to retire them. Exact match only: another entry whose id starts
-    # with this one keeps its issues.
-    try:
-        registry = ir.async_get(hass)
-        issues_attr = getattr(registry, "issues", None)
-        if not isinstance(issues_attr, Mapping):
-            issues_attr = getattr(registry, "_issues", None)
-        owner_key_issue_ids: list[str] = []
-        if isinstance(issues_attr, Mapping):
-            for key, payload in list(issues_attr.items()):
-                if isinstance(key, tuple) and len(key) == 2:
-                    domain, issue_id = str(key[0]), str(key[1])
-                else:
-                    issue_id = str(key)
-                    domain = (
-                        str(payload.get("domain", DOMAIN))
-                        if isinstance(payload, Mapping)
-                        else DOMAIN
-                    )
-                if domain == DOMAIN and is_owner_key_version_issue_for(
-                    issue_id, entry.entry_id
-                ):
-                    owner_key_issue_ids.append(issue_id)
-        for issue_id in owner_key_issue_ids:
-            ir.async_delete_issue(hass, DOMAIN, issue_id)
-    except Exception as err:  # noqa: BLE001 - best-effort cleanup
-        _LOGGER.debug(
-            "Deleting owner-key version issues during async_remove_entry raised: %s",
-            type(err).__name__,
-        )
-
-    from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
-        forget_owner_key_refresh_state,
-    )
+    # Owner-key version issues (issue #246) carry entry and version in their id;
+    # no poll or push will run again to retire them.
+    _async_delete_owner_key_version_issues(hass, entry.entry_id, "removal")
 
     forget_owner_key_refresh_state(entry.entry_id)
 

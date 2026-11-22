@@ -701,9 +701,22 @@ async def _fetch_vault_for_cached_shared_key(
 ) -> None:
     """Fetch the vault entries when the shared key is cached but the field is not.
 
-    Path (c): only the Google sign-in runs, never the unlock page, so the cached
-    shared key is neither requested nor written. Every failure ends here; the
-    bundle and the exit code stay as they would be without this fetch.
+    Only the Google sign-in runs, never the unlock page, so the cached shared key
+    is neither requested nor written. Every failure ends here; the bundle and the
+    exit code stay as they would be without this fetch.
+
+    The fetch is retried on every run while the field is missing, so a bundle
+    from before the field existed gains it without the PIN. A run whose fetch
+    keeps failing therefore signs in to Google again each time; that cost is
+    accepted, because skipping the retry would leave such a bundle without the
+    field for good.
+
+    A present field is never refreshed here, so a run that reuses an old
+    ``secrets.json`` does not read the vault again. A switch such as
+    ``--refresh-owner-key-versions`` could drop the early return below for one
+    run. It was left out on purpose: ``--reauth``, or a run without the old
+    file, reads the vault anyway and reaches the same state, and the Repairs
+    texts name exactly that.
     """
     from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
         BrowserPackagesUnusable,
@@ -852,7 +865,8 @@ async def _owner_key_versions_self_test(
     The entry of the current Spot version M is opened with the run's shared key
     and compared byte for byte with the owner key Spot serves in this run. A
     missing shared key, an unavailable Spot owner key, a missing entry M or a
-    blob that does not open all fail the test. Reads only; writes nothing.
+    blob that does not open all fail the test. Never writes the owner-key
+    version field; the Spot request may refresh its token in the cache.
     """
     import hmac  # noqa: PLC0415
 
@@ -1366,7 +1380,9 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             "Sign in, list the owner-key versions of the account vault and ask "
             "Spot which version it serves, by default and for version N (without "
             "N: every vault version above the default). Prints domain, version, "
-            "epoch and counts only; writes nothing."
+            "epoch and counts only, never key material, and never writes the "
+            "owner-key version field. Like any login run it signs in first and "
+            "may refresh the login tokens in secrets.json."
         ),
     )
     return parser
@@ -1398,7 +1414,9 @@ async def _run_owner_key_diagnosis(
     ``spot_explicit[N]=<version|error class>``. Never key material. ``requested``
     > 0 asks Spot for that version only; otherwise for every vault version above
     M, or for M+1 when there is none. Returns 0 even for an empty result and 2
-    when the session may not open a browser. Writes nothing to the cache.
+    when the session may not open a browser. Never writes the owner-key
+    version field; the sign-in and the Spot request may refresh login tokens in
+    the cache like any login run.
     """
     from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
         BrowserPackagesUnusable,

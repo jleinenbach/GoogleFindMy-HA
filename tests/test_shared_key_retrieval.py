@@ -26,6 +26,9 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy.KeyBackup import shared_key_retrieval as skr
+from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+    SharedKeyFlowDeadlineError,
+)
 
 # A deterministic 32-byte key used across the suite.
 _RAW_KEY = bytes(range(32))
@@ -309,6 +312,24 @@ async def test_retrieve_wraps_interactive_failure(
     monkeypatch.setattr(skr, "_interactive_flow_hex", boom)
     with pytest.raises(RuntimeError, match="Shared key retrieval failed"):
         await skr._retrieve_shared_key_hex()
+
+
+async def test_retrieve_names_the_alert_deadline_not_chrome(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sign-in left unfinished is reported as a timeout, never as a Chrome fault."""
+
+    async def deadline(**_kwargs: Any) -> str:
+        raise SharedKeyFlowDeadlineError("The sign-in was not finished within 300 s.")
+
+    monkeypatch.setattr(skr, "_interactive_flow_hex", deadline)
+    with pytest.raises(RuntimeError) as excinfo:
+        await skr._retrieve_shared_key_hex()
+    message = str(excinfo.value)
+    assert message.startswith("Shared key retrieval timed out:")
+    assert "within 300 s" in message
+    assert "Chrome" not in message
+    assert isinstance(excinfo.value.__cause__, SharedKeyFlowDeadlineError)
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ from custom_components.googlefindmy.KeyBackup import shared_key_flow
 from custom_components.googlefindmy.KeyBackup.vault_web_api import (
     FETCH_SCRIPT,
     FIND_MY_DEVICE_URL,
+    SharedKeyFlowDeadlineError,
     VaultCause,
     VaultFetchResult,
 )
@@ -735,7 +736,10 @@ def test_alert_deadline_ends_the_flow_after_300_seconds(
     caplog: pytest.LogCaptureFixture,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """No usable alert within 300 s on the injected clock: `None`, one quit.
+    """No usable alert within 300 s on the injected clock: deadline error, one quit.
+
+    The flow raises ``SharedKeyFlowDeadlineError`` only after the driver quit, so
+    the login tool can name the timeout instead of the browser installation.
 
     The wait double advances the clock by each 0.5 s alert wait and stops a
     loop without a deadline after 10 000 waits, so that mutant ends red here
@@ -753,7 +757,8 @@ def test_alert_deadline_ends_the_flow_after_300_seconds(
     monkeypatch.setattr(shared_key_flow, "_monotonic", clock)
     _quitting(monkeypatch)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyFlowDeadlineError, match="within 300 s"):
+        shared_key_flow.request_shared_key_flow()
 
     assert shared_key_flow.ALERT_DEADLINE_S == 300
     assert 300 <= clock.now < 300 + 0.5 + 1e-9

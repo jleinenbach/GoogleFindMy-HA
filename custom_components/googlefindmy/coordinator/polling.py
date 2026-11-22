@@ -448,11 +448,13 @@ class PollingOperations(_MixinBase):
             # so it must never drive the account-wide reauth counter. The
             # message carries numbers only (no keys, blobs or account names).
             self._set_crypto_status(CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE)
+            # The record repeats every poll while the gap lasts, so the device
+            # name stays at DEBUG (unattended-record rule); WARNING has numbers.
+            _LOGGER.debug("Owner key version gap on tracker %s", device or "?")
             _LOGGER.warning(
-                "Tracker %s needs owner key version %s, but Spot serves version "
+                "A tracker needs owner key version %s, but Spot serves version "
                 "%s and the secrets bundle holds %d version(s); remedy: %s. "
                 "Other devices are unaffected.",
-                device or "?",
                 error.required_version,
                 error.current_version,
                 len(error.bundle_versions),

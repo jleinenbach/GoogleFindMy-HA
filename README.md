@@ -194,13 +194,13 @@ When a tracker needs a version that neither Spot nor the field can supply, Home 
 
 > A tracker needs owner key version {required_version}, but Google serves version {current_version} and the secrets bundle has no usable key for this version. Versions in the bundle: {bundle_versions}.
 >
-> Run the login tool again (Docker login helper or `main.py`) and import the new `secrets.json`. Other trackers are not affected.
+> Run the login tool again (Docker login helper or `main.py`) and import the new `secrets.json`. If the tool still keeps a `secrets.json` from an earlier login, delete that file first or start the tool with `--reauth` (Docker login helper: `GFMY_ARGS=--reauth`); otherwise it reuses the file and does not read the key vault again. Other trackers are not affected.
 
-> A tracker needs owner key version {required_version}, but Google serves version {current_version} and the key vault of this Google account does not hold this version. Versions in the bundle: {bundle_versions}.
+> A tracker needs owner key version {required_version}, but Google serves version {current_version} and the key vault of this Google account did not hold this version when the login tool last read it. Versions in the bundle: {bundle_versions}.
 >
-> A new login cannot fetch this key yet. The tracker's locations stay unavailable until Google serves version {required_version} or a later run of the login tool finds it in the vault. This issue disappears once the tracker can be decrypted again. Other trackers are not affected.
+> Google may add this version to the vault later; only a login run after that can fetch it. To try again, run the login tool (Docker login helper or `main.py`) and import the new `secrets.json`. If the tool still keeps a `secrets.json` from an earlier login, delete that file first or start the tool with `--reauth` (Docker login helper: `GFMY_ARGS=--reauth`); otherwise it reuses the file and does not read the key vault again. Until then the tracker's locations stay unavailable, unless Google starts serving version {required_version}. This issue disappears once the tracker can be decrypted again. Other trackers are not affected.
 
-To see what the vault and Spot report, run the read-only diagnosis. It prints domain, version and epoch of each vault entry, their count, a cause class and the versions Spot serves, never key material, and it writes nothing:
+To see what the vault and Spot report, run the read-only diagnosis. It prints domain, version and epoch of each vault entry, their count, a cause class and the versions Spot serves, never key material, and it never writes the owner-key version field. Like any login run, it signs in first and may refresh the login tokens in `secrets.json`:
 
 ```bash
 python main.py --diagnose-owner-key-versions        # optionally add a version: ... 3

@@ -2,65 +2,135 @@
 """Every decision catch site handles the owner-key version gap.
 
 ``OwnerKeyVersionUnavailableError`` is a ``DecryptionError`` subclass. A catch
-site that decides between "per tracker" and "account-wide" (it names the bare
-``StaleOwnerKeyError``) must catch the gap in its own clause BEFORE that one;
-otherwise the gap falls through to ``except DecryptionError`` and drives the
-account-wide reauth path (issue #246).
+site that decides between "per tracker" and "account-wide" must catch the gap in
+its own clause BEFORE that decision; otherwise the gap falls through to the
+per-tracker or the account-wide branch and drives a reauth path (issue #246).
 
-Rule: each ``except`` clause whose type is the bare name ``StaleOwnerKeyError``
-(``ast.Name``) has a preceding clause for ``OwnerKeyVersionUnavailableError`` in
-the same ``try``. Tuple clauses that list ``DecryptionError`` are pass-throughs
-(they re-raise or log and hand the class on unchanged); they are not decision
-sites and are pinned as a list instead.
+How a clause type is read: the expression of ``ast.ExceptHandler.type`` is
+resolved to the watched classes it names. Resolved are a bare name, a name bound
+by ``from … import X as Y`` or by a module-level ``Y = X`` / ``Y = (X, Z)``, an
+attribute (``module.X``, resolved by its last part) and a tuple or list of these,
+starred elements included.
+
+Rules, per ``try``:
+
+1. A clause that catches ``StaleOwnerKeyError`` without ``DecryptionError``, or
+   whose body tests ``isinstance(…, StaleOwnerKeyError)``, is a decision site and
+   needs a preceding clause that catches ``OwnerKeyVersionUnavailableError``.
+2. A clause that catches ``DecryptionError`` (alone or in a tuple) without a
+   preceding gap clause hands the class on unchanged. Such pass-through clauses
+   are pinned per file, so a new one, for example a decision site that only
+   catches ``DecryptionError``, turns the pin red until it is classified.
+
+Declared blind spots (not resolved, therefore neither flagged nor counted): a
+clause type built by a call or a subscript (``except errors()``,
+``except ERRORS[0]``), a name bound inside a function or imported with
+``import module`` and re-bound later, and an ``isinstance`` reached through an
+alias of ``isinstance`` or a helper function.
 """
 
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass, field
 from pathlib import Path
+
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
 _STALE = "StaleOwnerKeyError"
 _GAP = "OwnerKeyVersionUnavailableError"
 _DECRYPTION = "DecryptionError"
-_EXPECTED_PASSTHROUGH = {"NovaApi/ExecuteAction/LocateTracker/location_request.py"}
+_WATCHED = frozenset({_STALE, _GAP, _DECRYPTION})
+# Clauses that catch ``DecryptionError`` without a gap clause before them; each
+# re-raises or stores the error for its caller unchanged (measured 2026-11-22).
+_EXPECTED_PASSTHROUGH = {
+    "NovaApi/ExecuteAction/LocateTracker/location_request.py": 2,
+    "api.py": 1,
+}
 
 
-def _handler_name(handler: ast.ExceptHandler) -> str | None:
-    return handler.type.id if isinstance(handler.type, ast.Name) else None
+def _bindings(tree: ast.Module) -> dict[str, frozenset[str]]:
+    """Map module-level names to the watched classes they stand for."""
+    names: dict[str, frozenset[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _WATCHED:
+                    names[alias.asname or alias.name] = frozenset({alias.name})
+        elif (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            resolved = _resolve(node.value, names)
+            if resolved:
+                names[node.targets[0].id] = resolved
+    return names
 
 
-def _tries(tree: ast.AST) -> list[ast.Try | ast.TryStar]:
-    return [n for n in ast.walk(tree) if isinstance(n, ast.Try | ast.TryStar)]
+def _resolve(expr: ast.expr | None, names: dict[str, frozenset[str]]) -> frozenset[str]:
+    """Return the watched classes an exception-type expression names."""
+    if isinstance(expr, ast.Name):
+        return names.get(expr.id, frozenset({expr.id}) & _WATCHED)
+    if isinstance(expr, ast.Attribute):
+        return frozenset({expr.attr}) & _WATCHED
+    if isinstance(expr, ast.Tuple | ast.List):
+        out: frozenset[str] = frozenset()
+        for elt in expr.elts:
+            inner = elt.value if isinstance(elt, ast.Starred) else elt
+            out |= _resolve(inner, names)
+        return out
+    return frozenset()
+
+
+def _body_tests_stale(
+    handler: ast.ExceptHandler, names: dict[str, frozenset[str]]
+) -> bool:
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "isinstance"
+        and len(node.args) == 2
+        and _STALE in _resolve(node.args[1], names)
+        for node in ast.walk(handler)
+    )
+
+
+@dataclass
+class _Scan:
+    violations: list[str] = field(default_factory=list)
+    stale_clauses: int = 0
+    passthrough: int = 0
+
+
+def _scan(source: str, label: str) -> _Scan:
+    tree = ast.parse(source)
+    names = _bindings(tree)
+    result = _Scan()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try | ast.TryStar):
+            continue
+        seen_gap = False
+        for handler in node.handlers:
+            caught = _resolve(handler.type, names)
+            if _GAP in caught:
+                seen_gap = True
+                continue
+            stale_clause = _STALE in caught and _DECRYPTION not in caught
+            result.stale_clauses += stale_clause
+            if stale_clause or _body_tests_stale(handler, names):
+                if not seen_gap:
+                    result.violations.append(f"{label}:{handler.lineno}")
+            elif _DECRYPTION in caught and not seen_gap:
+                result.passthrough += 1
+    return result
 
 
 def _violations(source: str, label: str) -> tuple[list[str], int]:
-    """Return (violations, number of bare StaleOwnerKeyError clauses)."""
-    violations: list[str] = []
-    stale_clauses = 0
-    for node in _tries(ast.parse(source)):
-        seen_gap = False
-        for handler in node.handlers:
-            name = _handler_name(handler)
-            if name == _GAP:
-                seen_gap = True
-            elif name == _STALE:
-                stale_clauses += 1
-                if not seen_gap:
-                    violations.append(f"{label}:{handler.lineno}")
-    return violations, stale_clauses
-
-
-def _passthrough_tuples(source: str) -> int:
-    count = 0
-    for node in _tries(ast.parse(source)):
-        for handler in node.handlers:
-            if isinstance(handler.type, ast.Tuple) and any(
-                isinstance(elt, ast.Name) and elt.id == _DECRYPTION
-                for elt in handler.type.elts
-            ):
-                count += 1
-    return count
+    """Return (violations, number of decision clauses naming the stale class)."""
+    found = _scan(source, label)
+    return found.violations, found.stale_clauses
 
 
 def _package_sources() -> list[tuple[str, str]]:
@@ -71,7 +141,7 @@ def _package_sources() -> list[tuple[str, str]]:
 
 
 def test_every_stale_catch_is_preceded_by_gap_catch() -> None:
-    """Each bare ``except StaleOwnerKeyError`` has a gap clause before it."""
+    """Each decision clause has a gap clause before it."""
     violations: list[str] = []
     stale_total = 0
     for label, source in _package_sources():
@@ -81,7 +151,7 @@ def test_every_stale_catch_is_preceded_by_gap_catch() -> None:
 
     assert violations == []
     # Not vacuous: the three decision sites (poll, manual locate, push) exist.
-    assert stale_total >= 3
+    assert stale_total == 3
 
 
 def test_guard_positive_control_flags_missing_gap_clause() -> None:
@@ -105,8 +175,74 @@ def test_guard_positive_control_flags_missing_gap_clause() -> None:
     assert _violations(late, "late.py")[0] == ["late.py:3"]
 
 
+_GAP_FIRST = "except OwnerKeyVersionUnavailableError as gap:\n    note(gap)\n"
+
+# Each form names the stale class in a way the bare-name rule missed; every one
+# must be reported without the gap clause and pass with it.
+_DECISION_FORMS = {
+    "attribute": ("", "except dl.StaleOwnerKeyError as err:\n    handle(err)\n"),
+    "import_alias": (
+        "from x import StaleOwnerKeyError as S\n",
+        "except S as err:\n    handle(err)\n",
+    ),
+    "module_constant": (
+        "from x import StaleOwnerKeyError\nPER_TRACKER = (StaleOwnerKeyError, KeyError)\n",
+        "except PER_TRACKER as err:\n    handle(err)\n",
+    ),
+    "tuple_without_decryption": (
+        "",
+        "except (StaleOwnerKeyError, ValueError) as err:\n    handle(err)\n",
+    ),
+    "starred_tuple": (
+        "",
+        "except (*OTHERS, StaleOwnerKeyError) as err:\n    handle(err)\n",
+    ),
+    "isinstance_in_decryption_clause": (
+        "",
+        "except DecryptionError as err:\n"
+        "    if isinstance(err, StaleOwnerKeyError):\n"
+        "        per_tracker(err)\n"
+        "    else:\n"
+        "        escalate(err)\n",
+    ),
+    "isinstance_with_tuple_and_alias": (
+        "from x import StaleOwnerKeyError as S\n",
+        "except Exception as err:\n"
+        "    if isinstance(err, (KeyError, S)):\n"
+        "        per_tracker(err)\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("form", sorted(_DECISION_FORMS))
+def test_guard_flags_every_decision_form(form: str) -> None:
+    """Every form is a decision site: red without the gap clause, green with it."""
+    head, clause = _DECISION_FORMS[form]
+    bare = f"{head}try:\n    work()\n{clause}"
+    assert _violations(bare, "f.py")[0] == [f"f.py:{head.count(chr(10)) + 3}"]
+
+    guarded = f"{head}try:\n    work()\n{_GAP_FIRST}{clause}"
+    assert _violations(guarded, "f.py")[0] == []
+
+
+def test_guard_gap_clause_by_alias_or_attribute_counts() -> None:
+    """The preceding gap clause is resolved the same way as the stale clause."""
+    source = (
+        "from x import OwnerKeyVersionUnavailableError as Gap\n"
+        "try:\n"
+        "    work()\n"
+        "except Gap:\n"
+        "    note()\n"
+        "except dl.StaleOwnerKeyError:\n"
+        "    handle()\n"
+    )
+    assert _violations(source, "a.py") == ([], 1)
+    attr = source.replace("except Gap:", "except dl.OwnerKeyVersionUnavailableError:")
+    assert _violations(attr, "b.py") == ([], 1)
+
+
 def test_guard_negative_control_tuple_form_is_not_a_decision_site() -> None:
-    """Negative control: the tuple form and a correct site are both clean."""
+    """Negative control: the pass-through tuple and a correct site are clean."""
     tuple_form = (
         "try:\n"
         "    work()\n"
@@ -114,8 +250,8 @@ def test_guard_negative_control_tuple_form_is_not_a_decision_site() -> None:
         "    log(err)\n"
         "    raise\n"
     )
-    assert _violations(tuple_form, "tuple.py") == ([], 0)
-    assert _passthrough_tuples(tuple_form) == 1
+    found = _scan(tuple_form, "tuple.py")
+    assert (found.violations, found.stale_clauses, found.passthrough) == ([], 0, 1)
 
     correct = (
         "try:\n"
@@ -124,13 +260,25 @@ def test_guard_negative_control_tuple_form_is_not_a_decision_site() -> None:
         "    note(gap)\n"
         "except StaleOwnerKeyError as err:\n"
         "    handle(err)\n"
+        "except DecryptionError as err:\n"
+        "    escalate(err)\n"
     )
-    assert _violations(correct, "correct.py") == ([], 1)
+    found = _scan(correct, "correct.py")
+    assert (found.violations, found.stale_clauses, found.passthrough) == ([], 1, 0)
 
 
-def test_passthrough_tuples_are_pinned() -> None:
-    """Pass-through tuples listing ``DecryptionError`` live only in the pinned file."""
-    files = {
-        label for label, source in _package_sources() if _passthrough_tuples(source)
+def test_decryption_only_site_is_counted_as_pass_through() -> None:
+    """A site that only catches ``DecryptionError`` lands in the pinned count."""
+    source = "try:\n    work()\nexcept DecryptionError as err:\n    escalate(err)\n"
+    found = _scan(source, "d.py")
+    assert (found.violations, found.passthrough) == ([], 1)
+
+
+def test_passthrough_clauses_are_pinned() -> None:
+    """Clauses catching ``DecryptionError`` without a gap clause are pinned per file."""
+    counts = {
+        label: found.passthrough
+        for label, source in _package_sources()
+        if (found := _scan(source, label)).passthrough
     }
-    assert files == _EXPECTED_PASSTHROUGH
+    assert counts == _EXPECTED_PASSTHROUGH

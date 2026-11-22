@@ -36,6 +36,7 @@ from custom_components.googlefindmy.KeyBackup.shared_key_request import (
 from custom_components.googlefindmy.KeyBackup.vault_web_api import (
     FETCH_SCRIPT,
     FIND_MY_DEVICE_URL,
+    SharedKeyFlowDeadlineError,
     VaultCause,
     VaultFetchResult,
     parse_batchexecute,
@@ -238,13 +239,16 @@ def request_shared_key_flow(  # noqa: PLR0915 - the alert loop is one protocol
             LOGGER.debug("Unhandled alert payload: %s", describe_keys(data))
 
         LOGGER.warning("Shared key flow ended: cause=%s", VaultCause.ALERT_DEADLINE)
-        return None
 
     except Exception:  # pragma: no cover - runtime Selenium failures
         LOGGER.exception("Shared key flow terminated unexpectedly")
         return None
     finally:
         safe_quit_driver(driver)
+    # Only the deadline reaches this line; raised after the driver quit.
+    raise SharedKeyFlowDeadlineError(
+        f"The sign-in was not finished within {ALERT_DEADLINE_S} s."
+    )
 
 
 def request_vault_entries_flow(
