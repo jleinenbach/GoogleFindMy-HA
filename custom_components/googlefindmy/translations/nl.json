@@ -777,7 +777,8 @@
           "ok": "OK",
           "shared_key_invalid": "Ongeldig (herauthenticatie vereist)",
           "shared_key_missing": "Ontbreekt (onvolledige bundel)",
-          "tracker_key_outdated": "Trackersleutel verouderd"
+          "tracker_key_outdated": "Trackersleutel verouderd",
+          "owner_key_version_unavailable": "Versie van eigenaarssleutel niet beschikbaar"
         }
       },
       "stat_background_updates": {
@@ -862,6 +863,14 @@
     "tracker_attributes_frozen_no_automations": {
       "title": "Tracker-attributen behouden nu de waarde van de laatste waarneming",
       "description": "De apparaattrackers van **{entry_title}** werken de attributen `location_age` en `location_status` niet meer bij tussen twee waarnemingen: ze behouden de waarde van de laatste waarneming en veranderen pas bij de volgende (bijvoorbeeld een nieuwe locatie, de overgang naar 'Verouderd' of een wijziging van de beschikbaarheid). De hoofdtracker behoudt de `coarse_*`-attributen op dezelfde manier, en de tracker 'Laatste locatie' heeft ze niet meer. Zo lijkt een tracker zonder nieuwe locatie niet langer actueler dan een andere, bijvoorbeeld voor een persoon.\n\nGebruik voor de actuele waarden deze entiteiten:\n{replacement_sensors}\n\nDeze attributen worden verwijderd, uiterlijk met de eerste release van de integratie vanaf Home Assistant {breaks_version}."
+    },
+    "owner_key_version_login_required": {
+      "title": "Een tracker heeft een nieuwere eigenaarssleutel nodig",
+      "description": "Een tracker heeft versie {required_version} van de eigenaarssleutel nodig, maar Google levert versie {current_version} en de geheimenbundel bevat geen bruikbare sleutel voor deze versie. Versies in de bundel: {bundle_versions}.\n\nVoer de inlogtool opnieuw uit (Docker-inloghulp of `main.py`) en importeer het nieuwe `secrets.json`. Andere trackers worden niet beïnvloed."
+    },
+    "owner_key_version_not_in_vault": {
+      "title": "Versie van de eigenaarssleutel ontbreekt in de kluis van het account",
+      "description": "Een tracker heeft versie {required_version} van de eigenaarssleutel nodig, maar Google levert versie {current_version} en de sleutelkluis van dit Google-account bevat deze versie niet. Versies in de bundel: {bundle_versions}.\n\nEen nieuwe aanmelding kan deze sleutel nog niet ophalen. De locaties van de tracker blijven onbeschikbaar totdat Google versie {required_version} levert of een latere run van de inlogtool hem in de kluis vindt. Deze melding verdwijnt zodra de tracker weer ontsleuteld kan worden. Andere trackers worden niet beïnvloed."
     }
   },
   "exceptions": {

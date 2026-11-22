@@ -43,6 +43,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.core import Event
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
@@ -52,8 +53,11 @@ from ..Auth.log_safety import describe_exception
 from ..const import (
     DEVICE_LIST_POLL_INTERVAL,
     DOMAIN,
+    ISSUE_OWNER_KEY_VERSION_LOGIN_KEY,
+    ISSUE_OWNER_KEY_VERSION_VAULT_KEY,
     PHONE_MIN_AUTO_POLL_INTERVAL_S,
     POLL_DEVICE_OUTER_TIMEOUT_S,
+    owner_key_version_issue_id,
 )
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
@@ -78,6 +82,8 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
 )
 from ..SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     begin_owner_key_poll_cycle,
+    consume_resolved_owner_key_versions,
+    open_owner_key_version_gaps,
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
@@ -452,6 +458,7 @@ class PollingOperations(_MixinBase):
                 len(error.bundle_versions),
                 error.remedy,
             )
+            self._create_owner_key_version_issue(error)
             return False
 
         if stale:
@@ -816,6 +823,14 @@ class PollingOperations(_MixinBase):
         observed account-wide proof, not fabricated before the first real signal.
         Routes through the single ``_set_crypto_status`` writer, so the sensor
         never diverges from the reauth escalation it visualizes.
+
+        Owner-key version gaps (issue #246) heal here too, because a push-only
+        setup may never run a poll cycle: the Repairs issue of every version the
+        decrypt path recorded as resolved is deleted, and
+        ``OWNER_KEY_VERSION_UNAVAILABLE`` returns to OK only when a version was
+        resolved AND no gap version of the account is still open. With two
+        trackers missing different versions, healing one deletes its issue but
+        keeps the status until the other heals as well.
         """
         self.note_decrypt_success()
         if self._crypto_status_state in (
@@ -825,6 +840,92 @@ class PollingOperations(_MixinBase):
             # Move status and error class together: they are one sensor surface.
             self._set_crypto_status(CryptoStatus.OK)
             self._last_decrypt_error = None
+        resolved = self._delete_resolved_owner_key_version_issues()
+        scope = self._owner_key_version_scope()
+        if (
+            resolved
+            and scope is not None
+            and not open_owner_key_version_gaps(scope)
+            and self._crypto_status_state is CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE
+        ):
+            self._set_crypto_status(CryptoStatus.OK)
+            self._last_decrypt_error = None
+
+    def _owner_key_version_scope(self) -> str | None:
+        """Return the entry id that scopes owner-key version gaps, if any.
+
+        Matches the scope the decrypt path derives from the token cache
+        (``TokenCache.entry_id``). Without a config entry there is no scope, so
+        no Repairs issue is raised or deleted.
+        """
+        entry = getattr(self, "config_entry", None)
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
+        return entry_id if isinstance(entry_id, str) and entry_id else None
+
+    def _create_owner_key_version_issue(
+        self, error: OwnerKeyVersionUnavailableError
+    ) -> None:
+        """Raise the Repairs issue of one owner-key version gap (issue #246).
+
+        One issue per entry and required version, not fixable; the translation
+        key names the remedy. Placeholders carry version numbers only (L-5).
+        Best effort: a registry failure is logged by type and never breaks the
+        decrypt-failure bookkeeping.
+        """
+        scope = self._owner_key_version_scope()
+        if scope is None:
+            return
+        try:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                owner_key_version_issue_id(scope, error.required_version),
+                is_fixable=False,
+                is_persistent=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key=(
+                    ISSUE_OWNER_KEY_VERSION_LOGIN_KEY
+                    if error.remedy == "login"
+                    else ISSUE_OWNER_KEY_VERSION_VAULT_KEY
+                ),
+                translation_placeholders={
+                    "required_version": str(error.required_version),
+                    "current_version": (
+                        "-"
+                        if error.current_version is None
+                        else str(error.current_version)
+                    ),
+                    "bundle_versions": ", ".join(map(str, error.bundle_versions))
+                    or "-",
+                },
+            )
+        except Exception as err:  # noqa: BLE001 - Repairs is best effort
+            _LOGGER.debug(
+                "Failed to create owner-key version Repairs issue: %s",
+                type(err).__name__,
+            )
+
+    def _delete_resolved_owner_key_version_issues(self) -> tuple[int, ...]:
+        """Delete the Repairs issue of every resolved gap version; return them.
+
+        Consumes the resolved versions of the entry's scope, so each version is
+        deleted once, whether the success came from a poll cycle or a push.
+        """
+        scope = self._owner_key_version_scope()
+        if scope is None:
+            return ()
+        resolved = consume_resolved_owner_key_versions(scope)
+        for version in resolved:
+            try:
+                ir.async_delete_issue(
+                    self.hass, DOMAIN, owner_key_version_issue_id(scope, version)
+                )
+            except Exception as err:  # noqa: BLE001 - Repairs is best effort
+                _LOGGER.debug(
+                    "Failed to delete owner-key version Repairs issue: %s",
+                    type(err).__name__,
+                )
+        return resolved
 
     def _is_on_hass_loop(self) -> bool:
         """Return True if currently executing on the HA event loop thread."""
@@ -3288,6 +3389,9 @@ class PollingOperations(_MixinBase):
                 # A benign per-device downgrade neither escalates to reauth NOR marks
                 # the coordinator update failed; a genuinely account-wide failure
                 # surfaces and, at the consecutive-cycle threshold, escalates.
+                # Owner-key version gaps resolved during this cycle retire their
+                # Repairs issues first (issue #246).
+                self._delete_resolved_owner_key_version_issues()
                 cycle_failed, last_exception, reauth_exc = (
                     self._finalize_cycle_decrypt_state(
                         cycle_decrypt_error=cycle_decrypt_error,

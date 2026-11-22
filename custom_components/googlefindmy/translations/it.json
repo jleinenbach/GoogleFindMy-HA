@@ -777,7 +777,8 @@
           "ok": "OK",
           "shared_key_invalid": "Non valida (riautenticazione necessaria)",
           "shared_key_missing": "Mancante (bundle incompleto)",
-          "tracker_key_outdated": "Chiave del tracker obsoleta"
+          "tracker_key_outdated": "Chiave del tracker obsoleta",
+          "owner_key_version_unavailable": "Versione della chiave del proprietario non disponibile"
         }
       },
       "stat_background_updates": {
@@ -862,6 +863,14 @@
     "tracker_attributes_frozen_no_automations": {
       "title": "Gli attributi del tracciatore mantengono ora il valore dell'ultima osservazione",
       "description": "I tracciatori dei dispositivi di **{entry_title}** non aggiornano più gli attributi `location_age` e `location_status` tra due osservazioni: mantengono il valore dell'ultima osservazione e cambiano solo con la successiva (ad esempio una nuova posizione, il passaggio a 'Obsoleta' o un cambio di disponibilità). Il tracciatore principale mantiene allo stesso modo gli attributi `coarse_*`, e il tracciatore 'Ultima posizione' non li ha più. Così un tracciatore senza una nuova posizione non sembra più aggiornato di un altro, ad esempio per una persona.\n\nPer i valori attuali, usa queste entità:\n{replacement_sensors}\n\nQuesti attributi verranno rimossi, al più tardi con la prima versione dell'integrazione a partire da Home Assistant {breaks_version}."
+    },
+    "owner_key_version_login_required": {
+      "title": "Un tracker richiede una chiave del proprietario più recente",
+      "description": "Un tracker richiede la versione {required_version} della chiave del proprietario, ma Google fornisce la versione {current_version} e il bundle dei segreti non contiene una chiave utilizzabile per questa versione. Versioni nel bundle: {bundle_versions}.\n\nEsegui di nuovo lo strumento di accesso (assistente di accesso Docker o `main.py`) e importa il nuovo `secrets.json`. Gli altri tracker non sono interessati."
+    },
+    "owner_key_version_not_in_vault": {
+      "title": "Versione della chiave del proprietario assente dall'archivio dell'account",
+      "description": "Un tracker richiede la versione {required_version} della chiave del proprietario, ma Google fornisce la versione {current_version} e l'archivio delle chiavi di questo account Google non contiene questa versione. Versioni nel bundle: {bundle_versions}.\n\nUn nuovo accesso non può ancora recuperare questa chiave. Le posizioni del tracker restano non disponibili finché Google non fornisce la versione {required_version} o un'esecuzione successiva dello strumento di accesso non la trova nell'archivio. Questa segnalazione scompare non appena il tracker può essere di nuovo decifrato. Gli altri tracker non sono interessati."
     }
   },
   "exceptions": {

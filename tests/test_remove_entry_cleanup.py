@@ -237,6 +237,56 @@ def test_async_remove_entry_purges_store_and_creates_issue(
     ) in issue_registry_capture.deleted
 
 
+@pytest.mark.asyncio
+async def test_async_remove_entry_deletes_owner_key_version_issues(
+    monkeypatch: pytest.MonkeyPatch,
+    issue_registry_capture: Any,
+    _no_fcm_release: list[None],
+) -> None:
+    """F6: removal retires this entry's owner-key version issues, and only them.
+
+    ``…_entry-remove_x_v2`` shares the prefix of this entry's issues but belongs
+    to an entry whose id merely starts with ``entry-remove``; a bare prefix test
+    would delete it.
+    """
+    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
+        get_owner_key,
+    )
+
+    monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
+    forgotten: list[str] = []
+    monkeypatch.setattr(
+        get_owner_key, "forget_owner_key_refresh_state", forgotten.append
+    )
+
+    own = [
+        "owner_key_version_unavailable_entry-remove_v2",
+        "owner_key_version_unavailable_entry-remove_v3",
+    ]
+    foreign = [
+        "owner_key_version_unavailable_entry-remove_x_v2",
+        "owner_key_version_unavailable_other-entry_v2",
+    ]
+    for issue_id in own + foreign:
+        issue_registry_capture.registry.issues[issue_id] = {
+            "issue_id": issue_id,
+            "domain": DOMAIN,
+        }
+
+    entry = make_config_entry(entry_id="entry-remove", title="Find My Entry")
+    _coordinator, _token_cache, _filter, runtime_data = _setup_runtime(entry)
+    hass = _HassStub(entry, runtime_data)
+
+    await integration.async_remove_entry(hass, entry)
+
+    deleted_ids = {iid for _domain, iid in issue_registry_capture.deleted}
+    for issue_id in own:
+        assert (DOMAIN, issue_id) in issue_registry_capture.deleted
+    for issue_id in foreign:
+        assert issue_id not in deleted_ids
+    assert forgotten == ["entry-remove"]
+
+
 def test_async_remove_entry_respects_retention_option(
     monkeypatch: pytest.MonkeyPatch,
     issue_registry_capture: Any,

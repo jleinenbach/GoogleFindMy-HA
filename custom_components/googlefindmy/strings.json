@@ -777,7 +777,8 @@
           "ok": "OK",
           "shared_key_invalid": "Invalid (re-authentication required)",
           "shared_key_missing": "Missing (incomplete bundle)",
-          "tracker_key_outdated": "Tracker key outdated"
+          "tracker_key_outdated": "Tracker key outdated",
+          "owner_key_version_unavailable": "Owner key version unavailable"
         }
       },
       "stat_background_updates": {
@@ -862,6 +863,14 @@
     "tracker_attributes_frozen_no_automations": {
       "title": "Tracker attributes now keep the value of the last observation",
       "description": "The device trackers of **{entry_title}** no longer update the attributes `location_age` and `location_status` between observations: they keep the value of the last observation and change only with the next one (for example a new fix, the change to stale, or an availability change). The main tracker keeps the `coarse_*` attributes the same way, and the Last Location tracker no longer has them. A tracker without a new fix therefore no longer looks fresher than another one, for example to a person.\n\nFor the live values, use these entities:\n{replacement_sensors}\n\nThese attributes will be removed, at the latest with the first integration release from Home Assistant {breaks_version} on."
+    },
+    "owner_key_version_login_required": {
+      "title": "A tracker needs a newer owner key",
+      "description": "A tracker needs owner key version {required_version}, but Google serves version {current_version} and the secrets bundle has no usable key for this version. Versions in the bundle: {bundle_versions}.\n\nRun the login tool again (Docker login helper or `main.py`) and import the new `secrets.json`. Other trackers are not affected."
+    },
+    "owner_key_version_not_in_vault": {
+      "title": "Owner key version missing from the account vault",
+      "description": "A tracker needs owner key version {required_version}, but Google serves version {current_version} and the key vault of this Google account does not hold this version. Versions in the bundle: {bundle_versions}.\n\nA new login cannot fetch this key yet. The tracker's locations stay unavailable until Google serves version {required_version} or a later run of the login tool finds it in the vault. This issue disappears once the tracker can be decrypted again. Other trackers are not affected."
     }
   },
   "exceptions": {

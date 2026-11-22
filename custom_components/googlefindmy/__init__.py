@@ -10665,6 +10665,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     try:
         if parent_entry_id:
             return await _async_unload_subentry(hass, entry)
+        # The owner-key refresh register (issue #246) is process-wide and keyed
+        # by the parent entry id; drop it so a reload starts without stale gaps.
+        from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+            forget_owner_key_refresh_state,
+        )
+
+        forget_owner_key_refresh_state(entry.entry_id)
         return await _async_unload_parent_entry(hass, entry)
     finally:
         # The claimed reload has arrived at its unload half; release the latch so a
@@ -10893,6 +10900,47 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # The held-attributes issue outlives unloads on purpose, so that a reload
     # keeps the user's "ignore". Only the removal of the entry retires it.
     ir.async_delete_issue(hass, DOMAIN, frozen_attributes_issue_id(entry.entry_id))
+
+    # Owner-key version issues (issue #246) carry entry and version in their id,
+    # so removal walks the registry for this entry's ones; no poll or push will
+    # run again to retire them. Exact match only: another entry whose id starts
+    # with this one keeps its issues.
+    try:
+        from .const import is_owner_key_version_issue_for
+
+        registry = ir.async_get(hass)
+        issues_attr = getattr(registry, "issues", None)
+        if not isinstance(issues_attr, Mapping):
+            issues_attr = getattr(registry, "_issues", None)
+        owner_key_issue_ids: list[str] = []
+        if isinstance(issues_attr, Mapping):
+            for key, payload in list(issues_attr.items()):
+                if isinstance(key, tuple) and len(key) == 2:
+                    domain, issue_id = str(key[0]), str(key[1])
+                else:
+                    issue_id = str(key)
+                    domain = (
+                        str(payload.get("domain", DOMAIN))
+                        if isinstance(payload, Mapping)
+                        else DOMAIN
+                    )
+                if domain == DOMAIN and is_owner_key_version_issue_for(
+                    issue_id, entry.entry_id
+                ):
+                    owner_key_issue_ids.append(issue_id)
+        for issue_id in owner_key_issue_ids:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+    except Exception as err:  # noqa: BLE001 - best-effort cleanup
+        _LOGGER.debug(
+            "Deleting owner-key version issues during async_remove_entry raised: %s",
+            type(err).__name__,
+        )
+
+    from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+        forget_owner_key_refresh_state,
+    )
+
+    forget_owner_key_refresh_state(entry.entry_id)
 
     try:
         owner_index = _ensure_device_owner_index(bucket)

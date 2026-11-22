@@ -777,7 +777,8 @@
           "ok": "OK",
           "shared_key_invalid": "Inválida (reautenticação necessária)",
           "shared_key_missing": "Em falta (pacote incompleto)",
-          "tracker_key_outdated": "Chave do localizador desatualizada"
+          "tracker_key_outdated": "Chave do localizador desatualizada",
+          "owner_key_version_unavailable": "Versão da chave do proprietário indisponível"
         }
       },
       "stat_background_updates": {
@@ -862,6 +863,14 @@
     "tracker_attributes_frozen_no_automations": {
       "title": "Os atributos do rastreador mantêm agora o valor da última observação",
       "description": "Os rastreadores de dispositivo de **{entry_title}** já não atualizam os atributos `location_age` e `location_status` entre duas observações: mantêm o valor da última observação e só mudam com a seguinte (por exemplo, uma nova localização, a passagem para «Desatualizada» ou uma alteração de disponibilidade). O rastreador principal mantém da mesma forma os atributos `coarse_*`, e o rastreador «Última localização» já não os tem. Assim, um rastreador sem nova localização já não parece mais atual do que outro, por exemplo para uma pessoa.\n\nPara os valores atuais, utilize estas entidades:\n{replacement_sensors}\n\nEstes atributos serão removidos, o mais tardar com a primeira versão da integração a partir do Home Assistant {breaks_version}."
+    },
+    "owner_key_version_login_required": {
+      "title": "Um localizador precisa de uma chave do proprietário mais recente",
+      "description": "Um localizador precisa da versão {required_version} da chave do proprietário, mas a Google fornece a versão {current_version} e o pacote de segredos não tem nenhuma chave utilizável para esta versão. Versões no pacote: {bundle_versions}.\n\nExecute novamente a ferramenta de início de sessão (assistente de início de sessão do Docker ou `main.py`) e importe o novo `secrets.json`. Os outros localizadores não são afetados."
+    },
+    "owner_key_version_not_in_vault": {
+      "title": "Versão da chave do proprietário em falta no cofre da conta",
+      "description": "Um localizador precisa da versão {required_version} da chave do proprietário, mas a Google fornece a versão {current_version} e o cofre de chaves desta conta Google não contém esta versão. Versões no pacote: {bundle_versions}.\n\nUm novo início de sessão ainda não consegue obter esta chave. A posição do localizador continua indisponível até a Google fornecer a versão {required_version} ou uma execução posterior da ferramenta de início de sessão a encontrar no cofre. Este aviso desaparece assim que for possível desencriptar novamente o localizador. Os outros localizadores não são afetados."
     }
   },
   "exceptions": {

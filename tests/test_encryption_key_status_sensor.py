@@ -51,6 +51,7 @@ _REQUIRED_STATES = {
     "shared_key_invalid",
     "shared_key_missing",
     "tracker_key_outdated",
+    "owner_key_version_unavailable",
 }
 
 

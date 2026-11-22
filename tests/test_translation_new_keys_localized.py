@@ -22,7 +22,14 @@ from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
 
-NEW_KEYS: tuple[str, ...] = ("entity.switch.automatic_location_polling.name",)
+NEW_KEYS: tuple[str, ...] = (
+    "entity.switch.automatic_location_polling.name",
+    "issues.owner_key_version_login_required.title",
+    "issues.owner_key_version_login_required.description",
+    "issues.owner_key_version_not_in_vault.title",
+    "issues.owner_key_version_not_in_vault.description",
+    "entity.sensor.encryption_key_status.state.owner_key_version_unavailable",
+)
 
 # (language file name, key) -> reason why the English value is correct there.
 ALLOWED_IDENTICAL: Mapping[tuple[str, str], str] = {}
