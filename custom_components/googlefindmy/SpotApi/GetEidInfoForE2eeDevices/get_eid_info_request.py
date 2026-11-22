@@ -69,15 +69,19 @@ def _classify_body(body: bytes) -> str:
     return "binary"
 
 
-def _build_request_bytes() -> bytes:
+def _build_request_bytes(owner_key_version: int = -1) -> bytes:
     """Build and serialize the GetEidInfoForE2eeDevices protobuf request.
+
+    Args:
+        owner_key_version: Owner-key version to request. The runtime always
+            sends ``-1``; only the CLI diagnosis asks for an explicit version.
 
     Returns:
         Serialized request bytes suitable for the Spot API.
     """
     req = Common_pb2.GetEidInfoForE2eeDevicesRequest()
     # API convention: -1 means "latest available owner key"
-    req.ownerKeyVersion = -1
+    req.ownerKeyVersion = owner_key_version
     req.hasOwnerKeyVersion = True
     return req.SerializeToString()
 
@@ -148,12 +152,14 @@ async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> 
 
 
 async def async_get_eid_info(
-    *, cache: TokenCache
+    *, cache: TokenCache, owner_key_version: int = -1
 ) -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
     """Fetch and parse EID info for E2EE devices (async, preferred).
 
     Args:
         cache: Entry-scoped TokenCache used for SPOT authentication and token reuse.
+        owner_key_version: Owner-key version to request; ``-1`` (latest) at
+            runtime, an explicit version only from the CLI diagnosis.
 
     Returns:
         Parsed `GetEidInfoForE2eeDevicesResponse` protobuf message.
@@ -163,7 +169,7 @@ async def async_get_eid_info(
         DecodeError: if the protobuf payload cannot be parsed.
         RuntimeError: for lower-level Spot API request failures or missing helpers.
     """
-    serialized_request = _build_request_bytes()
+    serialized_request = _build_request_bytes(owner_key_version)
     response_bytes = await _spot_call_async(
         "GetEidInfoForE2eeDevices", serialized_request, cache=cache
     )

@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from custom_components.googlefindmy.KeyBackup.vault_web_api import (
         VaultCause,
@@ -1355,7 +1355,130 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             "Also enabled via the GOOGLEFINDMY_DEBUG environment variable."
         ),
     )
+    parser.add_argument(
+        "--diagnose-owner-key-versions",
+        nargs="?",
+        type=int,
+        const=0,
+        default=None,
+        metavar="N",
+        help=(
+            "Sign in, list the owner-key versions of the account vault and ask "
+            "Spot which version it serves, by default and for version N (without "
+            "N: every vault version above the default). Prints domain, version, "
+            "epoch and counts only; writes nothing."
+        ),
+    )
     return parser
+
+
+async def _spot_owner_key_version(
+    eid_info: Callable[..., Awaitable[Any]], cache: object, version: int
+) -> str:
+    """Return the owner-key version Spot serves for ``version``, or the error class."""
+    try:
+        response = await eid_info(cache=cache, owner_key_version=version)
+        served = response.encryptedOwnerKeyAndMetadata.ownerKeyVersion
+    except Exception as exc:  # noqa: BLE001 - diagnosis reports the class only
+        return type(exc).__name__
+    return str(served)
+
+
+async def _run_owner_key_diagnosis(
+    cache: object,
+    requested: int,
+    *,
+    fetch: Callable[..., Awaitable[Any]] | None = None,
+    eid_info: Callable[..., Awaitable[Any]] | None = None,
+) -> int:
+    """Print the owner-key version diagnosis (issue #246); return the exit code.
+
+    Output, one item per line: ``domain=… version=… epoch=…`` per vault entry,
+    ``entries=<n>``, ``cause=<class|none>``, ``spot_default_version=<M>`` and
+    ``spot_explicit[N]=<version|error class>``. Never key material. ``requested``
+    > 0 asks Spot for that version only; otherwise for every vault version above
+    M, or for M+1 when there is none. Returns 0 even for an empty result and 2
+    when the session may not open a browser. Writes nothing to the cache.
+    """
+    from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+        BrowserPackagesUnusable,
+    )
+    from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (  # noqa: PLC0415
+        SharedKeyUnavailableError,
+        async_fetch_vault_entries_interactive,
+    )
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (  # noqa: PLC0415
+        VaultCause,
+    )
+    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (  # noqa: PLC0415
+        async_get_eid_info,
+    )
+
+    fetch = fetch or async_fetch_vault_entries_interactive
+    eid_info = eid_info or async_get_eid_info
+    entries: tuple[Any, ...] = ()
+    cause: VaultCause | None
+    try:
+        result = await fetch(
+            on_start=lambda: print(
+                "Signing in to read the account vault (Google sign-in only, no PIN)...\n"
+            )
+        )
+    except SharedKeyUnavailableError:
+        print(
+            "The owner-key diagnosis needs an attended terminal session.",
+            file=sys.stderr,
+        )
+        return 2
+    except BrowserPackagesUnusable as exc:
+        print(str(exc), file=sys.stderr)
+        cause = VaultCause.HTTP_STATUS
+    except Exception:  # noqa: BLE001 - reported as a cause class
+        cause = VaultCause.HTTP_STATUS
+    else:
+        entries, cause = tuple(result.entries), result.cause
+
+    for entry in entries:
+        print(f"domain={entry.domain} version={entry.version} epoch={entry.epoch}")
+    print(f"entries={len(entries)}")
+    print(f"cause={cause.value if cause is not None else 'none'}")
+
+    spot_default = await _spot_owner_key_version(eid_info, cache, -1)
+    print(f"spot_default_version={spot_default}")
+    if requested > 0:
+        targets = [requested]
+    else:
+        vault_versions = sorted({entry.version for entry in entries})
+        if spot_default.lstrip("-").isdigit():
+            default_version = int(spot_default)
+            targets = [v for v in vault_versions if v > default_version] or [
+                default_version + 1
+            ]
+        else:
+            targets = vault_versions
+    for version in targets:
+        served = await _spot_owner_key_version(eid_info, cache, version)
+        print(f"spot_explicit[{version}]={served}")
+    return 0
+
+
+def _owner_key_diagnosis_cli(args: argparse.Namespace) -> int:
+    """Sign in, register the file cache and run the owner-key diagnosis."""
+    import asyncio  # noqa: PLC0415
+
+    _ensure_authenticated()
+    entry_id = _resolve_effective_entry_id(
+        args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+    )
+    file_cache = _register_file_cache(entry_id)
+
+    async def _run() -> int:
+        await _ensure_aas_token(file_cache)
+        return await _run_owner_key_diagnosis(
+            file_cache, args.diagnose_owner_key_versions
+        )
+
+    return asyncio.run(_run())
 
 
 def _configure_cli_logging(*, debug_flag: bool, env: Mapping[str, str]) -> None:
@@ -1404,6 +1527,12 @@ def _main(argv: Sequence[str] | None = None) -> None:
 
     args = _build_cli_parser().parse_args(argv)
     _configure_cli_logging(debug_flag=args.debug, env=os.environ)
+
+    # getattr: callers that build their own namespace predate this flag.
+    if getattr(args, "diagnose_owner_key_versions", None) is not None:
+        # Read-only diagnosis (issue #246): sign-in, vault listing and Spot
+        # versions, then exit; the bootstrap and the CLI menu do not run.
+        sys.exit(_owner_key_diagnosis_cli(args))
 
     # Always run the token-bootstrap pipeline, regardless of flat vs. repo
     # directory layout.  When a usable cache already exists, _ensure_authenticated
