@@ -512,6 +512,31 @@ bash login.sh       # or: docker compose run --service-ports --rm googlefindmy-l
 If `data/secrets.json` already holds valid tokens, the browser step is skipped
 and the CLI lists devices directly. You can ignore the noVNC link.
 
+### Owner-key versions from the account vault
+
+Some trackers are encrypted with a newer owner-key version than the one Google's Spot service hands out. Home Assistant can still decrypt them when `secrets.json` carries the owner keys of every version, read from the account's key vault during the login run (field `owner_key_versions`).
+
+A login run writes this field when both conditions hold:
+
+- The vault was read in the same browser session. A full login (Google sign-in plus the unlock page) reads it together with the shared key. If the shared key is already cached but the field is missing, a normal run signs in to Google once more, without the unlock page, and reads only the vault.
+- A self-test passes: the vault entry of the version Spot serves right now must decrypt to the owner key Spot returns. If Spot's version is not in the vault, or the entry does not match, the field is not written and the run prints `Note: owner-key versions were not saved (cause=..., entries=...)`. The `secrets.json` stays usable either way.
+
+When a tracker needs a version that neither Spot nor the field can supply, Home Assistant raises a Repairs issue for that tracker instead of asking you to re-authenticate the whole account. Its text names one of two remedies:
+
+> A tracker needs owner key version {required_version}, but Google serves version {current_version} and the secrets bundle has no usable key for this version. Versions in the bundle: {bundle_versions}.
+>
+> Run the login tool again (Docker login helper or `main.py`) and import the new `secrets.json`. Other trackers are not affected.
+
+> A tracker needs owner key version {required_version}, but Google serves version {current_version} and the key vault of this Google account does not hold this version. Versions in the bundle: {bundle_versions}.
+>
+> A new login cannot fetch this key yet. The tracker's locations stay unavailable until Google serves version {required_version} or a later run of the login tool finds it in the vault. This issue disappears once the tracker can be decrypted again. Other trackers are not affected.
+
+To see what the vault and Spot report, run the read-only diagnosis. It prints domain, version and epoch of each vault entry, their count, a cause class and the versions Spot serves, never key material, and it writes nothing:
+
+```bash
+GFMY_ARGS="--diagnose-owner-key-versions" bash login.sh
+```
+
 ## Forcing a fresh login
 
 ```bash

@@ -11,7 +11,7 @@ Runtime contracts, platform forwarding rules, and HA lifecycle helper usage for 
 * **Service-to-coordinator propagation:** When a service handler invokes a coordinator method that returns a boolean (for example, play/stop sound helpers that suppress requests when push is unavailable), raise `ServiceValidationError` when the result is `False` so callers and UI surfaces receive an explicit failure instead of silent success logs.
 * **Platform forwarding reminder:**
   * The parent `async_setup_entry` handles coordinator/bootstrap work and explicitly triggers platform setup for any new subentries by calling `_async_setup_new_subentries`. Home Assistant subentry flows do not automatically fan out to platforms.
-  * Forward setups **once per platform set** via `_async_setup_new_subentries` by gathering the union of required platforms and calling `hass.config_entries.async_forward_entry_setups(parent_entry, platforms)` **without** `config_subentry_id` or other kwargs (see the interface snapshot in [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#quick-ssot-probe-per-subentry-platform-forwarding)).
+  * Forward setups **once per platform set** via `_async_setup_new_subentries` by gathering the union of required platforms and calling `hass.config_entries.async_forward_entry_setups(parent_entry, platforms)` **without** `config_subentry_id` or other kwargs (see the interface snapshot in [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#quick-ssot-probe-per-subentry-platform-forwarding)).
   * Immediately after forwarding, emit dispatcher signals for each subentry so platforms receive the full `ConfigSubentry` object and can attach entities per child.
   * When forwarding or unloading the **parent entry's** own platforms, continue passing a `tuple` of platform names to `hass.config_entries.async_forward_entry_setups`/`async_forward_entry_unload`. Home Assistant caches these iterables and expects immutability during parent-level fan-out.
   * Track whether parent platforms were actually forwarded on setup using `_gfm_parent_platforms_forwarded` in `RuntimeData` and skip unload calls when the flag is `False` to avoid `ValueError: Config entry was never loaded!` noise during retries.
@@ -21,7 +21,7 @@ Runtime contracts, platform forwarding rules, and HA lifecycle helper usage for 
   * The legacy `RuntimeData.legacy_forwarded_platforms`/`legacy_forward_notice` tracking remains in the codebase for historical builds but should stay dormant on modern Home Assistant releases.
 * Use the shared `_async_setup_new_subentries` helper whenever subentries are created (during parent setup **and** at runtime) so every child receives a dispatcher signal after the single forward pass.
 * Once subentries exist, invoke `_async_setup_new_subentries` **without** `enforce_registration=True`. The registration delay loop is reserved for missing IDs; removing the flag prevents an infinite `ConfigEntryNotReady` retry cycle when Home Assistant is already finalizing the registry.
-  * See [`docs/CONFIG_SUBENTRIES_HANDBOOK.md#automatic-retry-queue-for-unknownentry`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#automatic-retry-queue-for-unknownentry) for the bounded retry/backoff design that `_async_setup_new_subentries` enforces when `UnknownEntry` fires.
+  * See [`docs/CONFIG_SUBENTRIES_HANDBOOK.md#automatic-retry-queue-for-unknownentry`](../../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#automatic-retry-queue-for-unknownentry) for the bounded retry/backoff design that `_async_setup_new_subentries` enforces when `UnknownEntry` fires.
   * The retry queue stores its handles and per-subentry attempt counts on `entry.runtime_data` (for example, `RuntimeData.subentry_retry_handles` and `RuntimeData.subentry_retry_attempts`). Keep those runtime caches typed and cleaned up during unload so strict mypy runs continue to catch handle leaks or mismatched awaitables as the queue gains new states. After adjusting imports near these helpers, run `python -m ruff check --select I --fix` to keep the lint-driven sorting from masking future docstring or typing diffs.
 * Home Assistant's subentry helpers (`async_add_subentry`, `async_update_subentry`, `async_remove_subentry`) may return a `ConfigSubentry`, a sentinel boolean/`None`, or an awaitable yielding one of those values. Always normalize results through the shared `_await_subentry_result` helper (or an equivalent `inspect.isawaitable` guard) so asynchronous responses update the manager cache correctly.
 * Tracker device healing should clear any stray `config_subentry_id` links for the current entry before applying the expected tracker link so only the parent/child pair remains associated with a hub. Log the removed subentry IDs to aid debugging of multi-hub migrations and keep tests aligned with the coordinator helpers that enforce this cleanup. Add a short reminder near new healing helpers when they mutate registry links so future contributors retain the cleanup-and-log contract, and document the cleanup in related changes so future maintenance keeps the coordinator behavior in sync with the guidance here.
@@ -121,7 +121,7 @@ async def async_setup_entry(
     )
 ```
 
-The forward call runs only once per platform set, while each subentry is delivered via dispatcher with its full context, aligning with the SSoT interface snapshot in [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#quick-ssot-probe-per-subentry-platform-forwarding).
+The forward call runs only once per platform set, while each subentry is delivered via dispatcher with its full context, aligning with the SSoT interface snapshot in [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#quick-ssot-probe-per-subentry-platform-forwarding).
 
 ### Regression note
 
@@ -129,5 +129,5 @@ An earlier fix removed manual platform forwarding but missed programmatic subent
 
 ## Subentry lifecycle references
 
-* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Setup, unload, and removal playbooks (see especially the `ValueError: Config entry ... already been setup!` postmortem).
-* [`tests/AGENTS.md`](../../../tests/AGENTS.md) — Discovery and reconfigure test stubs, including the lightweight `ConfigEntry` doubles referenced above.
+* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Setup, unload, and removal playbooks (see especially the `ValueError: Config entry ... already been setup!` postmortem).
+* [`tests/AGENTS.md`](../../../../tests/AGENTS.md) — Discovery and reconfigure test stubs, including the lightweight `ConfigEntry` doubles referenced above.
