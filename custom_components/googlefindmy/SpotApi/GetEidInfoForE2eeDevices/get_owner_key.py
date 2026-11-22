@@ -682,7 +682,11 @@ def begin_owner_key_poll_cycle(scope: str) -> None:
 
 
 def claim_owner_key_spot_refresh(cache: object) -> bool:
-    """Grant a forced owner-key refresh: once per poll cycle, else every 300 s.
+    """Grant a forced owner-key refresh: first claim of a poll cycle, or 300 s.
+
+    A claim is granted when the scope's poll cycle has advanced since the last
+    claim, or when 300 s have passed since it; a cycle longer than 300 s can
+    therefore grant a second claim.
 
     Without a preceding ``begin_owner_key_poll_cycle`` (push path, CLI) only the
     clock counts; the first claim of a scope is always granted. A granted claim

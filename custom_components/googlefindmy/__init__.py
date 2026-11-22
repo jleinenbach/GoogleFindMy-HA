@@ -10668,15 +10668,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     try:
         if parent_entry_id:
             return await _async_unload_subentry(hass, entry)
-        # The owner-key refresh register (issue #246) is process-wide and keyed
-        # by the parent entry id; drop it so a reload starts without stale gaps.
-        # Its Repairs issues go with it: only the register tells a later success
-        # which issue to retire, so an issue kept past this point would outlive
-        # a healed gap until Home Assistant restarts. A gap that persists raises
-        # its issue again on the first failed decrypt after the reload.
-        forget_owner_key_refresh_state(entry.entry_id)
-        _async_delete_owner_key_version_issues(hass, entry.entry_id, "unload")
-        return await _async_unload_parent_entry(hass, entry)
+        unloaded = await _async_unload_parent_entry(hass, entry)
+        if unloaded:
+            # The owner-key refresh register (issue #246) is process-wide and
+            # keyed by the parent entry id; drop it so a reload starts without
+            # stale gaps. Its Repairs issues go with it: only the register tells
+            # a later success which issue to retire, so an issue kept past this
+            # point would outlive a healed gap until Home Assistant restarts. A
+            # gap that persists raises its issue again on the first failed
+            # decrypt after the reload. After the teardown, not before: a decrypt
+            # still running during the teardown would otherwise record the gap
+            # and raise the issue again behind the cleanup.
+            forget_owner_key_refresh_state(entry.entry_id)
+            _async_delete_owner_key_version_issues(hass, entry.entry_id, "unload")
+        return unloaded
     finally:
         # The claimed reload has arrived at its unload half; release the latch so a
         # change made after this point can schedule the next one. Deliberately in

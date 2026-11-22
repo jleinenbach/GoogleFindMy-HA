@@ -34,6 +34,8 @@ from custom_components.googlefindmy.const import (
     ISSUE_OWNER_KEY_VERSION_LOGIN_KEY,
     ISSUE_OWNER_KEY_VERSION_VAULT_KEY,
     OWNER_KEY_VERSION_ISSUE_PREFIX,
+    is_owner_key_version_issue_for,
+    owner_key_version_issue_id,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator.helpers.stats import CryptoStatus
@@ -169,6 +171,32 @@ def test_gap_warning_keeps_the_device_name_at_debug(
         r.levelno == logging.DEBUG and "Grandma's Keys" in r.getMessage()
         for r in caplog.records
     )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        ("3", True),
+        ("12", True),
+        ("", False),
+        ("x", False),
+        ("3x", False),
+        ("-3", False),
+        ("\u0663", False),  # ARABIC-INDIC DIGIT THREE: isdigit() alone accepts it
+    ],
+)
+def test_issue_id_match_needs_an_ascii_decimal_version(
+    suffix: str, expected: bool
+) -> None:
+    """Only ``<prefix>_<entry>_v<ascii digits>`` belongs to the entry."""
+    issue_id = f"{OWNER_KEY_VERSION_ISSUE_PREFIX}_e1_v{suffix}"
+    assert is_owner_key_version_issue_for(issue_id, "e1") is expected
+
+
+def test_issue_id_match_rejects_an_entry_with_the_same_prefix() -> None:
+    other = owner_key_version_issue_id("e10", 3)
+    assert is_owner_key_version_issue_for(other, "e1") is False
+    assert is_owner_key_version_issue_for(other, "e10") is True
 
 
 def test_gap_failure_with_empty_bundle_uses_dash() -> None:
@@ -442,6 +470,54 @@ async def test_unload_parent_forgets_owner_key_refresh_state(
 
     assert open_owner_key_version_gaps("entry-unload") == ()
     assert open_owner_key_version_gaps("entry-other") == (2,)
+
+
+@pytest.mark.asyncio
+async def test_gap_recorded_during_teardown_is_dropped_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decrypt still running in the teardown cannot leave a gap behind."""
+    entry = make_config_entry(entry_id="entry-unload", title="Unload Entry")
+
+    async def teardown_with_late_decrypt(*_args: Any) -> bool:
+        record_owner_key_version_gap(_Scope("entry-unload"), 4)
+        return True
+
+    monkeypatch.setattr(
+        integration, "_async_unload_parent_entry", teardown_with_late_decrypt
+    )
+    monkeypatch.setattr(
+        integration, "discard_pending_entry_reload", lambda *_args: None
+    )
+
+    assert await integration.async_unload_entry(SimpleNamespace(data={}), entry)
+
+    assert open_owner_key_version_gaps("entry-unload") == ()
+
+
+@pytest.mark.asyncio
+async def test_failed_unload_keeps_register_and_issues(
+    monkeypatch: pytest.MonkeyPatch, issue_registry_capture: Any
+) -> None:
+    """The entry keeps running after a failed unload, so its gaps stay tracked."""
+    entry = make_config_entry(entry_id="entry-unload", title="Unload Entry")
+    record_owner_key_version_gap(_Scope("entry-unload"), 2)
+    issue_id = _issue_id(2, "entry-unload")
+    issue_registry_capture.registry.issues[issue_id] = {
+        "issue_id": issue_id,
+        "domain": integration.DOMAIN,
+    }
+    monkeypatch.setattr(
+        integration, "_async_unload_parent_entry", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        integration, "discard_pending_entry_reload", lambda *_args: None
+    )
+
+    assert not await integration.async_unload_entry(SimpleNamespace(data={}), entry)
+
+    assert open_owner_key_version_gaps("entry-unload") == (2,)
+    assert issue_registry_capture.deleted == []
 
 
 @pytest.mark.asyncio

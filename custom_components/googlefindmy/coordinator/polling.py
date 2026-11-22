@@ -832,7 +832,10 @@ class PollingOperations(_MixinBase):
         ``OWNER_KEY_VERSION_UNAVAILABLE`` returns to OK only when a version was
         resolved AND no gap version of the account is still open. With two
         trackers missing different versions, healing one deletes its issue but
-        keeps the status until the other heals as well.
+        keeps the status until the other heals as well. Known limit: the register
+        holds versions, not trackers, so an open version whose tracker is gone
+        (removed, or failing for another reason since) keeps this status until
+        the next reload; the poll path heals without this check.
         """
         self.note_decrypt_success()
         if self._crypto_status_state in (

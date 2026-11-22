@@ -46,10 +46,22 @@ from custom_components.googlefindmy.const import (
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
+    _ensure_flow_handler_default,
     attach_config_entries_flow_manager,
     prepare_flow_hass_config_entries,
     set_config_flow_unique_id,
 )
+
+
+@pytest.fixture(autouse=True)
+def _flow_handler_is_the_domain() -> None:
+    """Give every ``ConfigFlow()`` the domain as ``handler``, as the flow manager does.
+
+    Tests here build the flow directly. Without this fixture they only see a
+    handler if an earlier test on the same xdist worker went through
+    ``prepare_flow_hass_config_entries``, so the result depended on test order.
+    """
+    _ensure_flow_handler_default()
 
 
 def test_config_flow_import_without_gpsoauth(

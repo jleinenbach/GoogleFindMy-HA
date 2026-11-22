@@ -773,7 +773,15 @@ def create_google_maps_link(latitude: float, longitude: float) -> str | None:
 def _owner_key_gap_remedy(
     lookup: VaultOwnerKeyLookup | None, *, vault_key_used: bool
 ) -> OwnerKeyRemedy:
-    """Map the vault outcome of a version gap to its remedy."""
+    """Map the vault outcome of a version gap to its remedy.
+
+    ``vault`` only when the vault did not hold the version at the last login;
+    every other outcome is ``login``. Known limit: if the vault entry opened
+    (``vault_key_used``) but the identity key still does not decrypt with it, a
+    new login reads the same entry again and cannot help; there is no remedy
+    text for that case yet. The first branch states this case explicitly; it
+    returns what the fall-through would.
+    """
     if vault_key_used:
         return "login"
     if lookup is not None and lookup.status == "version_missing":
@@ -977,6 +985,19 @@ async def async_retrieve_identity_key(
             )
             try:
                 owner_key_info = await async_get_owner_key(cache=cache)
+            except (InvalidTag, RuntimeError) as exc:
+                # Same policy as the initial lookup: an InvalidTag is the one
+                # positive signal of a wrong shared key (L3) and must not be
+                # downgraded here. A structural defect stays transient; the
+                # claim of the next window re-derives it.
+                classified = _classify_owner_key_failure(exc, context="read-back")
+                if not isinstance(classified, _OwnerKeyRederiveRequired):
+                    raise classified from exc
+                raise OwnerKeyLookupTransientError(
+                    "Owner key retrieval did not complete (transient): the owner "
+                    "key refreshed in this window could not be read back. This "
+                    "will be retried."
+                ) from exc
             except Exception as exc:  # noqa: BLE001 - no evidence, so transient
                 raise OwnerKeyLookupTransientError(
                     "Owner key retrieval did not complete (transient): the owner "

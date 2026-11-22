@@ -8,14 +8,16 @@ per-tracker or the account-wide branch and drives a reauth path (issue #246).
 
 How a clause type is read: the expression of ``ast.ExceptHandler.type`` is
 resolved to the watched classes it names. Resolved are a bare name, a name bound
-by ``from … import X as Y`` or by a module-level ``Y = X`` / ``Y = (X, Z)``, an
-attribute (``module.X``, resolved by its last part) and a tuple or list of these,
-starred elements included.
+by ``from … import X as Y`` or at module level by ``Y = X`` / ``Y = (X, Z)``,
+``A = B = X``, ``Y: Final = X`` or ``A, B = X, Z``, an attribute (``module.X``,
+resolved by its last part), a tuple or list of these (starred elements
+included), a PEP 604 union ``X | Z`` and a walrus ``(Y := X)``.
 
 Rules, per ``try``:
 
 1. A clause that catches ``StaleOwnerKeyError`` without ``DecryptionError``, or
-   whose body tests ``isinstance(…, StaleOwnerKeyError)``, is a decision site and
+   whose body tests ``isinstance(…, StaleOwnerKeyError)`` or
+   ``type(…) is`` / ``==`` / ``in`` ``StaleOwnerKeyError``, is a decision site and
    needs a preceding clause that catches ``OwnerKeyVersionUnavailableError``.
 2. A clause that catches ``DecryptionError`` (alone or in a tuple) without a
    preceding gap clause hands the class on unchanged. Such pass-through clauses
@@ -24,9 +26,10 @@ Rules, per ``try``:
 
 Declared blind spots (not resolved, therefore neither flagged nor counted): a
 clause type built by a call or a subscript (``except errors()``,
-``except ERRORS[0]``), a name bound inside a function or imported with
-``import module`` and re-bound later, and an ``isinstance`` reached through an
-alias of ``isinstance`` or a helper function.
+``except ERRORS[0]``), a name bound inside a function or a class
+(``except self.ERRORS``), a name imported with ``import module`` and re-bound
+later, a ``match`` statement on the exception, and an ``isinstance`` reached
+through an alias of ``isinstance`` or a helper function.
 """
 
 from __future__ import annotations
@@ -58,15 +61,26 @@ def _bindings(tree: ast.Module) -> dict[str, frozenset[str]]:
             for alias in node.names:
                 if alias.name in _WATCHED:
                     names[alias.asname or alias.name] = frozenset({alias.name})
-        elif (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-        ):
-            resolved = _resolve(node.value, names)
-            if resolved:
-                names[node.targets[0].id] = resolved
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:  # ``A = B = X`` binds both
+                _bind(target, node.value, names)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            _bind(node.target, node.value, names)  # ``Y: Final = X``
     return names
+
+
+def _bind(target: ast.expr, value: ast.expr, names: dict[str, frozenset[str]]) -> None:
+    if isinstance(target, ast.Name):
+        resolved = _resolve(value, names)
+        if resolved:
+            names[target.id] = resolved
+    elif (
+        isinstance(target, ast.Tuple | ast.List)
+        and isinstance(value, ast.Tuple | ast.List)
+        and len(target.elts) == len(value.elts)
+    ):
+        for inner_target, inner_value in zip(target.elts, value.elts, strict=True):
+            _bind(inner_target, inner_value, names)
 
 
 def _resolve(expr: ast.expr | None, names: dict[str, frozenset[str]]) -> frozenset[str]:
@@ -81,6 +95,10 @@ def _resolve(expr: ast.expr | None, names: dict[str, frozenset[str]]) -> frozens
             inner = elt.value if isinstance(elt, ast.Starred) else elt
             out |= _resolve(inner, names)
         return out
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.BitOr):
+        return _resolve(expr.left, names) | _resolve(expr.right, names)
+    if isinstance(expr, ast.NamedExpr):
+        return _resolve(expr.value, names)
     return frozenset()
 
 
@@ -88,12 +106,30 @@ def _body_tests_stale(
     handler: ast.ExceptHandler, names: dict[str, frozenset[str]]
 ) -> bool:
     return any(
+        _is_isinstance_stale(node, names) or _is_type_compare_stale(node, names)
+        for node in ast.walk(handler)
+    )
+
+
+def _is_isinstance_stale(node: ast.AST, names: dict[str, frozenset[str]]) -> bool:
+    return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "isinstance"
         and len(node.args) == 2
         and _STALE in _resolve(node.args[1], names)
-        for node in ast.walk(handler)
+    )
+
+
+def _is_type_compare_stale(node: ast.AST, names: dict[str, frozenset[str]]) -> bool:
+    """``type(err) is S``, ``type(err) == S`` or ``type(err) in (S, …)``."""
+    return (
+        isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Call)
+        and isinstance(node.left.func, ast.Name)
+        and node.left.func.id == "type"
+        and any(isinstance(op, ast.Is | ast.Eq | ast.In) for op in node.ops)
+        and any(_STALE in _resolve(c, names) for c in node.comparators)
     )
 
 
@@ -204,6 +240,34 @@ _DECISION_FORMS = {
         "        per_tracker(err)\n"
         "    else:\n"
         "        escalate(err)\n",
+    ),
+    "final_constant": (
+        "from x import StaleOwnerKeyError\nPER: Final = (StaleOwnerKeyError, KeyError)\n",
+        "except PER as err:\n    handle(err)\n",
+    ),
+    "chained_constant": (
+        "from x import StaleOwnerKeyError\nA = B = (StaleOwnerKeyError, KeyError)\n",
+        "except B as err:\n    handle(err)\n",
+    ),
+    "unpacked_constant": (
+        "from x import StaleOwnerKeyError\nA, B = StaleOwnerKeyError, KeyError\n",
+        "except A as err:\n    handle(err)\n",
+    ),
+    "pep604_union_in_isinstance": (
+        "",
+        "except Exception as err:\n"
+        "    if isinstance(err, KeyError | StaleOwnerKeyError):\n"
+        "        per_tracker(err)\n",
+    ),
+    "type_is_in_body": (
+        "",
+        "except Exception as err:\n"
+        "    if type(err) is StaleOwnerKeyError:\n"
+        "        per_tracker(err)\n",
+    ),
+    "walrus_clause_type": (
+        "",
+        "except (E := StaleOwnerKeyError) as err:\n    handle(err)\n",
     ),
     "isinstance_with_tuple_and_alias": (
         "from x import StaleOwnerKeyError as S\n",

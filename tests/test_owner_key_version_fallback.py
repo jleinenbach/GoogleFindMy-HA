@@ -39,6 +39,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
     DecryptionError,
     OwnerKeyLookupTransientError,
     OwnerKeyVersionUnavailableError,
+    SharedKeyMismatchError,
     StaleOwnerKeyError,
 )
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
@@ -449,6 +450,85 @@ async def test_unreadable_refreshed_key_is_transient_for_a_sibling(
             world.tracker_registration(2), cache=cache
         )
     assert "SENTINEL" not in str(ei.value)
+
+
+async def test_new_claim_window_drops_the_previous_confirmation(
+    clock: list[float],
+) -> None:
+    """A confirmation belongs to its claim window, never to the next one.
+
+    Otherwise a throttled sibling in the new window would read the old
+    confirmation and classify a gap on a cache the new refresh has not
+    replaced yet (positive evidence only, L5).
+    """
+    cache = SimpleNamespace(entry_id="entry-1")
+    _gok.begin_owner_key_poll_cycle("entry-1")
+    assert _gok.claim_owner_key_spot_refresh(cache)
+    _gok.confirm_owner_key_spot_refresh(cache)
+    assert _gok.owner_key_spot_refresh_confirmed(cache)
+
+    _gok.begin_owner_key_poll_cycle("entry-1")
+    assert _gok.claim_owner_key_spot_refresh(cache)
+    assert not _gok.owner_key_spot_refresh_confirmed(cache)
+
+
+async def test_spot_serving_exactly_the_required_version_is_no_gap(
+    monkeypatch: pytest.MonkeyPatch, clock: list[float]
+) -> None:
+    """Boundary: after the refresh Spot serves version N itself.
+
+    If the tracker still does not decrypt, the version is not missing; raising
+    the gap issue would send the user to a login that cannot help.
+    """
+    world = make_vault_world(versions=(1, 2), spot_version=1)
+    _install(monkeypatch, world)
+    cache = _ScopedCache("entry-1")
+    world.seed_entry_cache(cache.values, None)
+
+    async def refresh_serves_n_with_wrong_key(**kwargs: Any) -> OwnerKeyInfo:
+        if kwargs.get("force_refresh"):
+            return OwnerKeyInfo(key=b"\x11" * 32, version=2)
+        return OwnerKeyInfo(key=world.owner_keys[1], version=1)
+
+    monkeypatch.setattr(_dl, "async_get_owner_key", refresh_serves_n_with_wrong_key)
+    _gok.begin_owner_key_poll_cycle("entry-1")
+    with pytest.raises(DecryptionError) as ei:
+        await _dl.async_retrieve_identity_key(
+            world.tracker_registration(2), cache=cache
+        )
+    # The plain per-device failure, not the gap subclass (measured 2026-11-22).
+    assert type(ei.value) is DecryptionError
+
+
+async def test_invalid_tag_on_read_back_is_a_shared_key_mismatch(
+    monkeypatch: pytest.MonkeyPatch, clock: list[float]
+) -> None:
+    """L3: an InvalidTag is the one positive signal of a wrong shared key.
+
+    The read-back of a throttled sibling must not downgrade it to transient.
+    """
+    from cryptography.exceptions import InvalidTag
+
+    world = make_vault_world(versions=(1, 2), spot_version=1)
+    spot = _install(monkeypatch, world)
+    cache = _ScopedCache("entry-1")
+    world.seed_entry_cache(cache.values, None)
+    _gok.begin_owner_key_poll_cycle("entry-1")
+    await _expect_gap(cache, world)
+    assert spot.force_refresh_calls == 1
+
+    reads = [OwnerKeyInfo(key=world.owner_keys[1], version=1)]
+
+    async def first_read_then_invalid_tag(**_kwargs: Any) -> OwnerKeyInfo:
+        if reads:
+            return reads.pop()
+        raise InvalidTag()
+
+    monkeypatch.setattr(_dl, "async_get_owner_key", first_read_then_invalid_tag)
+    with pytest.raises(SharedKeyMismatchError):
+        await _dl.async_retrieve_identity_key(
+            world.tracker_registration(2), cache=cache
+        )
 
 
 async def test_push_without_cycle_throttled_by_clock(

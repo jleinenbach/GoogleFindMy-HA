@@ -509,8 +509,15 @@ Because HA and the login container run on the same box here, the produced
 ```bash
 bash login.sh       # or: docker compose run --service-ports --rm googlefindmy-login
 ```
-If `data/secrets.json` already holds valid tokens, the browser step is skipped
-and the CLI lists devices directly. You can ignore the noVNC link.
+If `data/secrets.json` already holds valid tokens and the owner-key version
+field (see below), the browser step is skipped and the CLI lists devices
+directly. You can ignore the noVNC link.
+
+A `secrets.json` written before that field existed does not have it yet. Then
+each run signs in to Google once more (no unlock page) to read the key vault,
+and waits up to 5 minutes for that sign-in, until one run has written the
+field. Open the noVNC link for it. Without a terminal (Container Station
+application) the CLI skips this step silently and lists devices as before.
 
 ### Owner-key versions from the account vault
 
@@ -518,7 +525,7 @@ Some trackers are encrypted with a newer owner-key version than the one Google's
 
 A login run writes this field when both conditions hold:
 
-- The vault was read in the same browser session. A full login (Google sign-in plus the unlock page) reads it together with the shared key. If the shared key is already cached but the field is missing, a normal run signs in to Google once more, without the unlock page, and reads only the vault.
+- The vault was read in the same browser session. A full login (Google sign-in plus the unlock page) reads it together with the shared key; the unlock page waits up to 5 minutes for your PIN or pattern, then the run ends with a timeout. If the shared key is already cached but the field is missing, a normal run signs in to Google once more, without the unlock page, and reads only the vault.
 - A self-test passes: the vault entry of the version Spot serves right now must decrypt to the owner key Spot returns. If Spot's version is not in the vault, or the entry does not match, the field is not written and the run prints `Note: owner-key versions were not saved (cause=..., entries=...)`. The `secrets.json` stays usable either way.
 
 When a tracker needs a version that neither Spot nor the field can supply, Home Assistant raises a Repairs issue for that tracker instead of asking you to re-authenticate the whole account. Its text names one of two remedies:

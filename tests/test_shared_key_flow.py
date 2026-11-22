@@ -227,7 +227,7 @@ def test_module_entrypoint_invokes_flow(monkeypatch: pytest.MonkeyPatch) -> None
 def test_the_command_reports_failure_in_its_exit_status(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`request_shared_key_flow` returns `None` for every failure.
+    """`request_shared_key_flow` returns `None` for most failures.
 
     A caller that ignores that return exits 0 on a run that retrieved nothing,
     and a script around it cannot tell success from failure. Missing browser
@@ -248,6 +248,50 @@ def test_the_command_reports_failure_in_its_exit_status(
 
     assert flow._main() == 1
     assert browser_deps.INSTALL_COMMAND in capsys.readouterr().err
+
+
+def test_the_command_reports_an_expired_unlock_page_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The unlock-page deadline ends the command with a message and exit 1."""
+
+    from custom_components.googlefindmy.KeyBackup import shared_key_flow as flow
+
+    def _expire(**_: Any) -> None:
+        raise flow.SharedKeyFlowDeadlineError("alert_deadline")
+
+    monkeypatch.setattr(
+        flow,
+        "_parse_cli_args",
+        lambda: SimpleNamespace(chrome_path=None, chrome_version=None),
+    )
+    monkeypatch.setattr(flow, "request_shared_key_flow", _expire)
+
+    assert flow._main() == 1
+    err = capsys.readouterr().err
+    assert f"within {flow.ALERT_DEADLINE_S // 60} minutes" in err
+    assert "Traceback" not in err
+
+
+def test_vault_flow_driver_init_failure_logs_the_type_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A driver error message may carry page content: log its type, no traceback."""
+
+    def _fail(**_: Any) -> None:
+        raise RuntimeError(_SECRET)
+
+    monkeypatch.setattr(shared_key_flow, "create_driver", _fail)
+
+    result = shared_key_flow.request_vault_entries_flow()
+
+    assert result.cause is VaultCause.HTTP_STATUS
+    assert result.entries == ()
+    records = [r for r in caplog.records if "vault entries flow" in r.getMessage()]
+    assert len(records) == 1
+    assert "RuntimeError" in records[0].getMessage()
+    assert _SECRET not in records[0].getMessage()
+    assert records[0].exc_info is None
 
 
 def test_the_command_succeeds_when_a_key_comes_back(

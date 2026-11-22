@@ -211,14 +211,19 @@ def _called_names(function: ast.AST) -> set[str]:
 def _claiming_names(*sources: str) -> frozenset[str]:
     """Return the cycle claim and every function of ``sources`` that reaches it.
 
-    Built as a fixed point over the module-level functions: a function that
-    names the claim, or a function that already reaches it, reaches it too.
+    Built as a fixed point over every function of ``sources``, methods and
+    nested functions included: a function that names the claim, or a function
+    that already reaches it, reaches it too. Names are bare, so same-named
+    functions merge. Declared blind spot: a helper in a third module. Running
+    the fixed point over the whole package does not close it, because by bare
+    name it spreads through ``__init__`` and ``__call__`` to hundreds of
+    functions (measured 2026-11-22); that would need a qualified call graph.
     """
     bodies: dict[str, set[str]] = {}
     for source in sources:
-        for node in ast.parse(source).body:
+        for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                bodies[node.name] = _called_names(node)
+                bodies.setdefault(node.name, set()).update(_called_names(node))
     claiming = {_CYCLE_CLAIM}
     changed = True
     while changed:
@@ -380,6 +385,20 @@ def test_cycle_claim_ast_detector_controls() -> None:
 def test_cycle_claim_detector_finds_string_forms(source: str) -> None:
     """Reaching the claim by its name as a string is a hit too."""
     assert _cycle_claim_hits(source)
+
+
+def test_cycle_claim_detector_follows_methods_and_nested_functions() -> None:
+    """A method or a nested function that takes the claim reaches it too."""
+    source = (
+        "class Helper:\n"
+        "    def take(self, cache):\n"
+        "        return claim_owner_key_spot_refresh(cache)\n"
+        "def outer(cache):\n"
+        "    def inner():\n"
+        "        return claim_owner_key_spot_refresh(cache)\n"
+        "    return inner()\n"
+    )
+    assert _claiming_names(source) == {_CYCLE_CLAIM, "take", "inner", "outer"}
 
 
 def test_cycle_claim_detector_follows_helper_hops() -> None:

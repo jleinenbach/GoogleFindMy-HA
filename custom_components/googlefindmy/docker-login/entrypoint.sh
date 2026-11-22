@@ -8,7 +8,8 @@
 #
 # On the first run (no cached tokens) main.py launches the Chrome login flow;
 # once a usable secrets.json exists it returns early and just lists devices —
-# no browser step. Pass extra flags via the GFMY_ARGS environment variable,
+# no browser step. Exception: a secrets.json without the owner-key version
+# field makes each attended run sign in once more to read the key vault. Pass extra flags via the GFMY_ARGS environment variable,
 # e.g. GFMY_ARGS="--reauth" to force a fresh login, or "--debug" for verbose
 # bootstrap/FCM logging.
 set -e
@@ -407,7 +408,8 @@ fi
 # actionable instruction block (open the URL, sign in to the Chrome window that
 # comes up there) is printed by the login flow (auth_flow.py) right before it
 # starts Chrome, and ONLY on a real login -- a second run with an existing
-# secrets.json returns early and shows no such block. Uses the real URL passed
+# secrets.json returns early and shows no such block, unless the file lacks
+# the owner-key version field and the run signs in again to read the vault. Uses the real URL passed
 # via compose (LAN address with --ip, else
 # loopback); a manual `docker run` falls back to localhost.
 echo "[entrypoint] noVNC available at ${GOOGLEFINDMY_NOVNC_URL:-http://localhost:7900} (password: ${GOOGLEFINDMY_NOVNC_PASSWORD:-secret})."

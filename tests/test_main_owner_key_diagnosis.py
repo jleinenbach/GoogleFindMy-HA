@@ -368,16 +368,27 @@ class _ExplicitVersionFinder(ast.NodeVisitor):
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         for alias in node.names:
-            if alias.name in _SPOT_REQUEST_FUNCS:
+            if alias.name in _SPOT_REQUEST_FUNCS or (
+                node.module == "functools" and alias.name == "partial"
+            ):
                 self.aliases[alias.asname or alias.name] = alias.name
 
+    def _bind(self, target: ast.expr, value: ast.expr | None) -> None:
+        name = _callee(value, self.aliases) if value is not None else None
+        if isinstance(target, ast.Name) and name in _SPOT_REQUEST_FUNCS:
+            self.aliases[target.id] = str(name)
+
     def visit_Assign(self, node: ast.Assign) -> None:
-        if (
-            len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and _callee(node.value, self.aliases) in _SPOT_REQUEST_FUNCS
-        ):
-            self.aliases[node.targets[0].id] = str(_callee(node.value, self.aliases))
+        for target in node.targets:  # also ``a = b = helper``
+            self._bind(target, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._bind(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self._bind(node.target, node.value)
         self.generic_visit(node)
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -391,7 +402,8 @@ class _ExplicitVersionFinder(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         # Inside a helper, passing its own ``owner_key_version`` on is forwarding.
         forwarding = bool(self.functions) and self.functions[-1] in _SPOT_REQUEST_FUNCS
-        name = _callee(node.func, self.aliases)
+        func = node.func.value if isinstance(node.func, ast.NamedExpr) else node.func
+        name = _callee(func, self.aliases)
         if name in _SPOT_REQUEST_FUNCS:
             if _carries_version(
                 name, node.args, node.keywords, self.positions, forwarding
@@ -414,9 +426,13 @@ def _explicit_version_calls(source: str) -> list[int]:
     argument where the signature allows it, inside ``**mapping`` (a literal dict
     without the key is clean, any other mapping counts) or through ``*args``;
     and the same arguments bound with ``functools.partial``. Passing a helper's
-    own parameter on inside that helper is forwarding, not a request.
-    Declared blind spots: ``getattr(module, "…")``, a call through a local
-    variable bound inside a function, and a wrapper function in between.
+    own parameter on inside that helper is forwarding, not a request. Aliases
+    count from plain, chained (``a = b = helper``), annotated and walrus
+    bindings anywhere in the module, and ``partial`` imported under another name.
+    Declared blind spots: ``getattr(module, "…")``, an alias stored on an
+    attribute (``self.fetch = helper``), a helper passed as an argument, and a
+    wrapper function in between. A request built directly is covered by
+    ``test_only_the_request_builder_writes_owner_key_version``.
     """
     finder = _ExplicitVersionFinder(_positional_version_index())
     finder.visit(ast.parse(source))
@@ -458,6 +474,11 @@ def test_no_runtime_owner_key_version_detector_controls() -> None:
         "functools.partial(async_get_eid_info, owner_key_version=3)\n",
         "partial(_build_request_bytes, 3)\n",
         "def other(owner_key_version):\n    _build_request_bytes(owner_key_version)\n",
+        "fetch: object = async_get_eid_info\nawait fetch(cache=c, owner_key_version=3)\n",
+        "a = fetch = async_get_eid_info\nawait fetch(cache=c, owner_key_version=3)\n",
+        "await (f := async_get_eid_info)(cache=c, owner_key_version=3)\n",
+        "from functools import partial as p\np(_build_request_bytes, 3)\n",
+        "def run():\n    fetch = async_get_eid_info\n    fetch(cache=c, owner_key_version=3)\n",
     ],
 )
 def test_detector_finds_every_explicit_form(source: str) -> None:
@@ -480,6 +501,68 @@ def test_detector_finds_every_explicit_form(source: str) -> None:
 def test_detector_negative_controls(source: str) -> None:
     """No version, or a helper forwarding its own parameter: clean."""
     assert _explicit_version_calls(source) == []
+
+
+_OWNER_KEY_VERSION_WRITERS = {
+    # The one builder of the Spot request; both helpers go through it.
+    "SpotApi/GetEidInfoForE2eeDevices/get_eid_info_request.py",
+    # Registers a new tracker: EncryptedUserSecrets of the pairing request,
+    # not a Spot owner-key request.
+    "SpotApi/CreateBleDevice/create_ble_device.py",
+}
+
+
+def _owner_key_version_writes(source: str) -> list[int]:
+    """Lines that set ``ownerKeyVersion`` on a request: attribute target, keyword
+    of a constructor call, or ``setattr(…, "ownerKeyVersion", …)``."""
+    lines: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        lines += [
+            node.lineno
+            for target in targets
+            if isinstance(target, ast.Attribute) and target.attr == "ownerKeyVersion"
+        ]
+        if isinstance(node, ast.Call):
+            if any(k.arg == "ownerKeyVersion" for k in node.keywords):
+                lines.append(node.lineno)
+            if (
+                _callee(node.func, {}) == "setattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "ownerKeyVersion"
+            ):
+                lines.append(node.lineno)
+    return sorted(set(lines))
+
+
+def test_only_the_request_builder_writes_owner_key_version() -> None:
+    """A Spot request built by hand would bypass both helpers and the detector."""
+    writers = {
+        str(path.relative_to(_PACKAGE)): hits
+        for path in sorted(_PACKAGE.rglob("*.py"))
+        if not path.name.endswith("_pb2.py")
+        and (hits := _owner_key_version_writes(path.read_text(encoding="utf-8")))
+    }
+    assert set(writers) == _OWNER_KEY_VERSION_WRITERS
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "req.ownerKeyVersion = 4\n",
+        "req.ownerKeyVersion += 1\n",
+        "Request(ownerKeyVersion=4)\n",
+        'setattr(req, "ownerKeyVersion", 4)\n',
+    ],
+)
+def test_owner_key_version_write_detector_controls(source: str) -> None:
+    assert _owner_key_version_writes(source) == [1]
+    assert _owner_key_version_writes("v = msg.ownerKeyVersion\n") == []
 
 
 def test_detector_positions_come_from_the_signatures() -> None:

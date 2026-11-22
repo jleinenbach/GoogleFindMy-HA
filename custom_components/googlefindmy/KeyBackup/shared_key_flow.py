@@ -268,8 +268,13 @@ def request_vault_entries_flow(
         driver = create_driver(chrome_path=chrome_path, chrome_version=chrome_version)
     except BrowserPackagesUnusable:
         raise
-    except Exception:
-        LOGGER.exception("Failed to initialize ChromeDriver for vault entries flow")
+    except Exception as exc:
+        # Type only, like the handler below: a driver error message can carry
+        # page content.
+        LOGGER.warning(
+            "Failed to initialize ChromeDriver for vault entries flow (%s)",
+            type(exc).__name__,
+        )
         return VaultFetchResult((), VaultCause.HTTP_STATUS)
 
     try:
@@ -295,12 +300,14 @@ def request_vault_entries_flow(
 def _main() -> int:
     """Run the flow as a command and report the outcome in the exit status.
 
-    `request_shared_key_flow` returns `None` for every failure, including the
+    `request_shared_key_flow` returns `None` for most failures, including the
     one that got more likely when the browser packages left `manifest.json`:
     they are simply not installed. A caller that ignores that return exits 0
     on a run that retrieved nothing, and a script around it cannot tell the
     difference. The packages are named here because at this point they are the
-    likeliest reason, and this is the last place that still knows.
+    likeliest reason, and this is the last place that still knows. An unlock
+    page that is not completed within ``ALERT_DEADLINE_S`` raises
+    `SharedKeyFlowDeadlineError`; it is reported as a timeout, not a traceback.
     """
 
     args = _parse_cli_args()
@@ -310,6 +317,13 @@ def _main() -> int:
         )
     except BrowserPackagesUnusable as err:
         print(f"\n{err}\n", file=sys.stderr)
+        return 1
+    except SharedKeyFlowDeadlineError:
+        print(
+            "\nThe unlock page was not completed within "
+            f"{ALERT_DEADLINE_S // 60} minutes. Run the tool again.",
+            file=sys.stderr,
+        )
         return 1
     if key:
         print(key)
