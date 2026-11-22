@@ -150,6 +150,7 @@ ENCRYPTION_KEY_STATUS_OPTIONS: list[str] = [
     CryptoStatus.SHARED_KEY_INVALID,
     CryptoStatus.SHARED_KEY_MISSING,
     CryptoStatus.TRACKER_KEY_OUTDATED,
+    CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE,
 ]
 
 BLE_BATTERY_DESCRIPTION = SensorEntityDescription(

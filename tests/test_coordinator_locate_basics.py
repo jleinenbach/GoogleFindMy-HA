@@ -32,6 +32,7 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
+    OwnerKeyVersionUnavailableError,
     SharedKeyMismatchError,
     StaleOwnerKeyError,
 )
@@ -361,6 +362,33 @@ class TestAsyncLocateDeviceDecryptFailure:
         assert result == {}
         coord.note_decrypt_failure.assert_called_once()
         assert coord.note_decrypt_failure.call_args.kwargs.get("stale") is True
+        coord.config_entry.async_start_reauth.assert_not_called()
+
+    async def test_owner_key_version_gap_records_without_reauth(
+        self, coord: LocateStub
+    ) -> None:
+        """An owner-key version gap reaches note_decrypt_failure with the error
+        itself (stale=False), never starts a reauth, and returns an empty result."""
+        coord.note_decrypt_failure = MagicMock(return_value=False)
+        coord.note_error = MagicMock()
+        coord.config_entry.async_start_reauth = MagicMock()
+        gap = OwnerKeyVersionUnavailableError(
+            required_version=3,
+            current_version=3,
+            bundle_versions=(1, 2),
+            remedy="vault",
+        )
+        coord.api.async_get_device_location.side_effect = gap
+
+        result = await coord.async_locate_device("dev-1")
+
+        assert result == {}
+        coord.note_decrypt_failure.assert_called_once()
+        kwargs = coord.note_decrypt_failure.call_args.kwargs
+        assert kwargs["stale"] is False
+        assert kwargs["error"] is gap
+        coord.note_error.assert_called_once()
+        assert coord.note_error.call_args.args[0] is gap
         coord.config_entry.async_start_reauth.assert_not_called()
 
     async def test_decrypt_failure_below_threshold_returns_empty(

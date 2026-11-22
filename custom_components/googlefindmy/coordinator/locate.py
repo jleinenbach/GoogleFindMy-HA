@@ -37,6 +37,7 @@ from ..const import (
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
+    OwnerKeyVersionUnavailableError,
     StaleOwnerKeyError,
 )
 from ..NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -768,6 +769,14 @@ class LocateOperations(_MixinBase):
                     decode_err,
                 )
                 self.note_error(decode_err, where="async_locate_device", device=name)
+                return {}
+            except OwnerKeyVersionUnavailableError as gap_err:
+                # Owner-key version gap (issue #246): per tracker, never
+                # account-wide. Record it through the shared entry point (status
+                # owner_key_version_unavailable, no account counter) and return an
+                # empty result. Must precede the DecryptionError handler below.
+                self.note_decrypt_failure(stale=False, error=gap_err, device=name)
+                self.note_error(gap_err, where="async_locate_device", device=name)
                 return {}
             except StaleOwnerKeyError as stale_err:
                 # Per-tracker outdated owner key: an account-wide reauth would not

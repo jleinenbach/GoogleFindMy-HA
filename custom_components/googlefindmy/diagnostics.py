@@ -64,6 +64,7 @@ from .const import (
     coerce_changed_at_map,
     coerce_device_id_list,
 )
+from .KeyBackup.vault_web_api import OWNER_KEY_VERSIONS_FIELD, from_bundle_field
 from .redaction import REDACTED, async_redact_data
 from .shared_helpers import normalize_fcm_entry_snapshot, safe_fcm_health_snapshots
 
@@ -567,6 +568,35 @@ _UWT_EVENT_FIELDS = (
 )
 
 
+def _vault_key_versions_block(value: Any) -> dict[str, Any]:
+    """Summarize the bundle field ``owner_key_versions`` without its blobs.
+
+    Only domain, version and epoch per entry, plus the count. A field in a
+    foreign shape reads as present with no entries. The section must never be
+    named with the prefix ``owner_key`` or with ``ownerKeyVersion``: the final
+    redaction pass would blank it.
+    """
+    entries = from_bundle_field(value) if value is not None else ()
+    listed = [
+        {"domain": entry.domain, "version": entry.version, "epoch": entry.epoch}
+        for entry in entries or ()
+    ]
+    return {"present": value is not None, "count": len(listed), "entries": listed}
+
+
+async def _async_read_vault_key_versions(coordinator: Any) -> dict[str, Any] | None:
+    """Read the field from the coordinator's cache; ``None`` if unreadable."""
+    cache = getattr(coordinator, "cache", None)
+    reader = getattr(cache, "async_get_cached_value", None)
+    if not callable(reader):
+        return None
+    try:
+        value = await reader(OWNER_KEY_VERSIONS_FIELD)
+    except Exception:
+        return None
+    return _vault_key_versions_block(value)
+
+
 def _component_flags_block(hass: HomeAssistant, entry_id: str) -> list[dict[str, Any]]:
     """Return the last hashed flags per FMDN component series of an entry.
 
@@ -999,6 +1029,14 @@ async def async_get_config_entry_diagnostics(
 
     eik_cache_stats = get_eik_cache_stats()
 
+    # Owner-key versions the login bundle brought (domain, version, epoch and
+    # count only); ``None`` while no coordinator cache can be read.
+    vault_key_versions = (
+        await _async_read_vault_key_versions(coordinator)
+        if coordinator is not None
+        else None
+    )
+
     # Provisional P-256 readings of crowdsourced reports, per device of this
     # entry. The block carries no ID value (positional index only) and is meant
     # to be posted to the feedback issue on its own.
@@ -1032,6 +1070,7 @@ async def async_get_config_entry_diagnostics(
         },
         "concurrency": concurrency,
         "eik_cache": eik_cache_stats,
+        "vault_key_versions": vault_key_versions,
         "foreign_report_readings": foreign_report_readings,
         "uwt_transitions": uwt_transitions,
         "fmdn_component_flags": _component_flags_block(hass, entry.entry_id),

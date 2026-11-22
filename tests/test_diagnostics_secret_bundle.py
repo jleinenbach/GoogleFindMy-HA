@@ -781,3 +781,158 @@ def test_fcm_health_fields_survive() -> None:
     }
 
     assert _redact(payload) == payload
+
+
+# --- Owner-key versions -----------------------------------------
+
+
+def _okv_world() -> Any:
+    from tests.helpers.owner_key_vault_fixtures import make_vault_world
+
+    return make_vault_world(versions=(1, 2, 3), spot_version=3)
+
+
+def _okv_leaks(text: str, world: Any) -> list[str]:
+    """16-character windows of any textual form of the world's secrets."""
+    hits: list[str] = []
+    for form in world.all_secret_strings():
+        for start in range(len(form) - 15):
+            if form[start : start + 16] in text:
+                hits.append(form[start : start + 16])
+                break
+    return hits
+
+
+def test_the_owner_key_versions_field_is_redacted_at_the_top_level() -> None:
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+        OWNER_KEY_VERSIONS_FIELD,
+    )
+
+    world = _okv_world()
+
+    redacted = _redact({OWNER_KEY_VERSIONS_FIELD: world.bundle_field})
+
+    assert redacted[OWNER_KEY_VERSIONS_FIELD] == REDACTED
+    assert _okv_leaks(str(redacted), world) == []
+
+
+class _OkvCache:
+    def __init__(self, values: dict[str, Any]) -> None:
+        self.values = values
+
+    async def async_get_cached_value(self, name: str) -> Any:
+        return self.values.get(name)
+
+
+async def _okv_dump(
+    monkeypatch: pytest.MonkeyPatch, data: dict[str, Any], coordinator: Any
+) -> dict[str, Any]:
+    async def _fake_get_integration(_hass: Any, _domain: str) -> SimpleNamespace:
+        return SimpleNamespace(name="Test Integration", version="1.2.3")
+
+    monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
+    monkeypatch.setattr(
+        diagnostics.dr, "async_get", lambda _hass: SimpleNamespace(devices={})
+    )
+    monkeypatch.setattr(
+        diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
+    )
+    entry = make_config_entry(
+        domain=DOMAIN,
+        data=data,
+        runtime_data=SimpleNamespace(coordinator=coordinator),
+    )
+    hass = SimpleNamespace(data={DOMAIN: {}})
+    return await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+
+
+@pytest.mark.asyncio
+async def test_the_owner_key_versions_field_is_redacted_in_entry_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In ``entry.data`` and in its bundle the field reads as REDACTED."""
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+        OWNER_KEY_VERSIONS_FIELD,
+    )
+
+    world = _okv_world()
+    payload = await _okv_dump(
+        monkeypatch,
+        {
+            OWNER_KEY_VERSIONS_FIELD: world.bundle_field,
+            DATA_SECRET_BUNDLE: {OWNER_KEY_VERSIONS_FIELD: world.bundle_field},
+        },
+        None,
+    )
+
+    effective = payload["effective_config"]
+    assert effective[OWNER_KEY_VERSIONS_FIELD] == REDACTED
+    assert _okv_leaks(str(payload), world) == []
+    assert payload["vault_key_versions"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_vault_key_versions_section_lists_only_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Domain, version, epoch and count survive the final redaction.
+
+    A section named with the prefix ``owner_key`` would read as REDACTED here,
+    which is what this test catches.
+    """
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (
+        OWNER_KEY_VERSIONS_FIELD,
+    )
+
+    world = _okv_world()
+    coordinator = SimpleNamespace(
+        cache=_OkvCache({OWNER_KEY_VERSIONS_FIELD: world.bundle_field})
+    )
+
+    payload = await _okv_dump(monkeypatch, {}, coordinator)
+
+    section = payload["vault_key_versions"]
+    assert section == {
+        "present": True,
+        "count": 3,
+        "entries": [
+            {"domain": "finder_hw", "version": version, "epoch": item["epoch"]}
+            for version, item in ((int(k), v) for k, v in world.bundle_field.items())
+        ],
+    }
+    assert _okv_leaks(str(payload), world) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        pytest.param({}, {"present": False, "count": 0, "entries": []}, id="absent"),
+        pytest.param(
+            {"owner_key_versions": {"1": {"version": 2}}},
+            {"present": True, "count": 0, "entries": []},
+            id="foreign-shape",
+        ),
+    ],
+)
+async def test_the_vault_key_versions_section_without_usable_entries(
+    monkeypatch: pytest.MonkeyPatch, values: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    coordinator = SimpleNamespace(cache=_OkvCache(values))
+
+    payload = await _okv_dump(monkeypatch, {}, coordinator)
+
+    assert payload["vault_key_versions"] == expected
+
+
+@pytest.mark.asyncio
+async def test_the_vault_key_versions_section_survives_a_failing_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Broken:
+        async def async_get_cached_value(self, name: str) -> Any:
+            raise RuntimeError("closed")
+
+    payload = await _okv_dump(monkeypatch, {}, SimpleNamespace(cache=_Broken()))
+
+    assert payload["vault_key_versions"] is None

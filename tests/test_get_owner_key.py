@@ -509,6 +509,52 @@ async def test_rl20_wrong_length_clears_cache(
     assert _LEGACY_KEY not in cache._data
 
 
+# === NB-1: invalid-key error records name the account only masked =========
+_NB1_USER = "alice@example.com"
+
+
+def _assert_error_records_mask_account(caplog: pytest.LogCaptureFixture) -> None:
+    errors = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.name == _GOK_LOGGER and rec.levelno == logging.ERROR
+    ]
+    assert errors, "expected an ERROR record from get_owner_key"
+    assert any("a***@example.com" in message for message in errors), errors
+    for message in errors:
+        assert "alice" not in message, message
+
+
+async def test_invalid_length_error_masks_the_account(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A 31-byte key logs the account only through ``_mask_email_for_logs``."""
+    _patch_retrieval(monkeypatch)
+    cache = _FakeCache()
+    cache.seed(_user_cache_key(_NB1_USER), "ab" * 31)
+    caplog.set_level(logging.DEBUG, logger=_GOK_LOGGER)
+
+    with pytest.raises(RuntimeError, match="exactly 32 bytes"):
+        await gok.async_get_owner_key(cache=cache, username=_NB1_USER)
+
+    _assert_error_records_mask_account(caplog)
+
+
+async def test_invalid_format_error_masks_the_account(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A key that is neither hex nor base64 logs the account only masked."""
+    _patch_retrieval(monkeypatch)
+    cache = _FakeCache()
+    cache.seed(_user_cache_key(_NB1_USER), "z")
+    caplog.set_level(logging.DEBUG, logger=_GOK_LOGGER)
+
+    with pytest.raises(RuntimeError, match="Invalid owner_key format"):
+        await gok.async_get_owner_key(cache=cache, username=_NB1_USER)
+
+    _assert_error_records_mask_account(caplog)
+
+
 # === RL-21: raw value not dict-with-key nor str -> cleared + RuntimeError ===
 async def test_rl21_non_string_key_value_clears_cache(
     monkeypatch: pytest.MonkeyPatch,

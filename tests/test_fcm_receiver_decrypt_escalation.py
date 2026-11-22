@@ -20,6 +20,7 @@ from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
+    OwnerKeyVersionUnavailableError,
     StaleOwnerKeyError,
 )
 
@@ -145,6 +146,35 @@ async def test_decode_background_location_feeds_counter_on_decrypt_error(
     assert result == {}
     coordinator.note_decrypt_failure.assert_called_once()
     assert entry.async_start_reauth.called is expect_reauth
+
+
+@pytest.mark.asyncio
+async def test_decode_background_location_routes_owner_key_version_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An owner-key version gap reaches the coordinator with the error itself
+    (stale=False); the coordinator, not the receiver, rules out a reauth."""
+    receiver, coordinator, entry = _receiver_with_coordinator(escalate=False)
+    receiver._entry_caches["entry-1"] = MagicMock()
+    gap = OwnerKeyVersionUnavailableError(
+        required_version=3, current_version=3, bundle_versions=(1, 2), remedy="vault"
+    )
+    monkeypatch.setattr(
+        fcm_receiver_ha.decoder_module,
+        "parse_device_update_protobuf",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(
+        fcm_receiver_ha,
+        "async_decrypt_location_response_locations",
+        AsyncMock(side_effect=gap),
+    )
+
+    result = await receiver._decode_background_location_async("entry-1", "deadbeef")
+
+    assert result == {}
+    coordinator.note_decrypt_failure.assert_called_once_with(stale=False, error=gap)
+    entry.async_start_reauth.assert_not_called()
 
 
 @pytest.mark.asyncio

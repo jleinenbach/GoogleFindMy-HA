@@ -51,6 +51,7 @@ _REQUIRED_STATES = {
     "shared_key_invalid",
     "shared_key_missing",
     "tracker_key_outdated",
+    "owner_key_version_unavailable",
 }
 
 
@@ -199,13 +200,14 @@ def test_t9_sensor_attaches_to_service_device() -> None:
 
 
 def test_t9_options_cover_all_states_except_unknown() -> None:
-    """``options`` lists exactly the four concrete states; UNKNOWN is excluded."""
+    """``options`` lists exactly the five concrete states; UNKNOWN is excluded."""
 
     assert set(ENCRYPTION_KEY_STATUS_OPTIONS) == {
         CryptoStatus.OK,
         CryptoStatus.SHARED_KEY_INVALID,
         CryptoStatus.SHARED_KEY_MISSING,
         CryptoStatus.TRACKER_KEY_OUTDATED,
+        CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE,
     }
     assert CryptoStatus.UNKNOWN not in ENCRYPTION_KEY_STATUS_OPTIONS
 

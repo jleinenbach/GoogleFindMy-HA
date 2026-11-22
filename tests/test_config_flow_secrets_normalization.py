@@ -477,6 +477,9 @@ class _CapturingCache:
     def __init__(self) -> None:
         self.saved: dict[str, Any] = {}
 
+    async def async_get_cached_value(self, name: str) -> Any:
+        return self.saved.get(name)
+
     async def async_set_cached_value(self, name: str, value: Any) -> None:
         self.saved[name] = value
 

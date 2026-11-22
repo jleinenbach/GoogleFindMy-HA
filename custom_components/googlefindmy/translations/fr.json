@@ -777,7 +777,8 @@
           "ok": "OK",
           "shared_key_invalid": "Invalide (ré-authentification requise)",
           "shared_key_missing": "Manquante (lot incomplet)",
-          "tracker_key_outdated": "Clé du traceur obsolète"
+          "tracker_key_outdated": "Clé du traceur obsolète",
+          "owner_key_version_unavailable": "Version de la clé de propriétaire indisponible"
         }
       },
       "stat_background_updates": {
@@ -862,6 +863,14 @@
     "tracker_attributes_frozen_no_automations": {
       "title": "Les attributs du traceur conservent désormais la valeur de la dernière observation",
       "description": "Les traceurs d'appareil de **{entry_title}** ne mettent plus à jour les attributs `location_age` et `location_status` entre deux observations : ils conservent la valeur de la dernière observation et ne changent qu'avec la suivante (par exemple nouvelle position, passage à « Obsolète » ou changement de disponibilité). Le traceur principal conserve de la même manière les attributs `coarse_*`, et le traceur « Dernière position » ne les a plus. Ainsi, un traceur sans nouvelle position ne passe plus pour plus récent qu'un autre, par exemple pour une personne.\n\nPour les valeurs actuelles, utilisez ces entités :\n{replacement_sensors}\n\nCes attributs seront supprimés, au plus tard avec la première version de l'intégration à partir de Home Assistant {breaks_version}."
+    },
+    "owner_key_version_login_required": {
+      "title": "Un traceur a besoin d'une clé de propriétaire plus récente",
+      "description": "Un traceur a besoin de la version {required_version} de la clé de propriétaire, mais Google fournit la version {current_version} et le lot de secrets ne contient aucune clé utilisable pour cette version. Versions dans le lot : {bundle_versions}.\n\nExécutez à nouveau l'outil de connexion (assistant de connexion Docker ou `main.py`) et importez le nouveau `secrets.json`. Si l'outil conserve encore un `secrets.json` d'une connexion précédente, supprimez d'abord ce fichier ou lancez l'outil avec `--reauth` (assistant de connexion Docker : `GFMY_ARGS=--reauth`) ; sinon, il réutilise le fichier et ne relit pas le coffre de clés. Les autres traceurs ne sont pas concernés."
+    },
+    "owner_key_version_not_in_vault": {
+      "title": "Version de la clé de propriétaire absente du coffre du compte",
+      "description": "Un traceur a besoin de la version {required_version} de la clé de propriétaire, mais Google fournit la version {current_version} et le coffre de clés de ce compte Google ne contenait pas cette version lors de sa dernière lecture par l'outil de connexion. Versions dans le lot : {bundle_versions}.\n\nGoogle peut ajouter cette version au coffre plus tard ; seule une connexion ultérieure pourra alors la récupérer. Pour réessayer, exécutez l'outil de connexion (assistant de connexion Docker ou `main.py`) et importez le nouveau `secrets.json`. Si l'outil conserve encore un `secrets.json` d'une connexion précédente, supprimez d'abord ce fichier ou lancez l'outil avec `--reauth` (assistant de connexion Docker : `GFMY_ARGS=--reauth`) ; sinon, il réutilise le fichier et ne relit pas le coffre de clés. D'ici là, les positions du traceur restent indisponibles, sauf si Google commence à fournir la version {required_version}. Ce problème disparaît dès que le traceur peut de nouveau être déchiffré. Les autres traceurs ne sont pas concernés."
     }
   },
   "exceptions": {

@@ -31,6 +31,7 @@ _TESTS_DIR = _REPO_ROOT / "tests"
 # re-deriving the rule - which is what happened here: review had to point the
 # omission out on the module below before it was added to this set.
 NEW_PRODUCTION_MODULES: set[str] = {
+    "custom_components/googlefindmy/KeyBackup/vault_web_api.py",
     "custom_components/googlefindmy/NovaApi/ExecuteAction/LocatePhone/__init__.py",
     "custom_components/googlefindmy/NovaApi/ExecuteAction/LocatePhone/phone_action_request.py",
     "custom_components/googlefindmy/NovaApi/ExecuteAction/LocatePhone/phone_locate.py",

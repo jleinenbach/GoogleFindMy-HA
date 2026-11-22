@@ -777,7 +777,8 @@
           "ok": "OK",
           "shared_key_invalid": "Nieprawidłowy (wymagane ponowne uwierzytelnienie)",
           "shared_key_missing": "Brak (niekompletny pakiet)",
-          "tracker_key_outdated": "Nieaktualny klucz lokalizatora"
+          "tracker_key_outdated": "Nieaktualny klucz lokalizatora",
+          "owner_key_version_unavailable": "Wersja klucza właściciela niedostępna"
         }
       },
       "stat_background_updates": {
@@ -862,6 +863,14 @@
     "tracker_attributes_frozen_no_automations": {
       "title": "Atrybuty lokalizatora zachowują teraz wartość ostatniej obserwacji",
       "description": "Lokalizatory urządzeń w **{entry_title}** nie aktualizują już atrybutów `location_age` i `location_status` między dwiema obserwacjami: zachowują wartość ostatniej obserwacji i zmieniają się dopiero przy następnej (na przykład nowa lokalizacja, przejście do stanu „Nieaktualna” lub zmiana dostępności). Główny lokalizator zachowuje w ten sam sposób atrybuty `coarse_*`, a lokalizator „Ostatnia lokalizacja” już ich nie ma. Dzięki temu lokalizator bez nowej lokalizacji nie wydaje się już bardziej aktualny niż inny, na przykład dla osoby.\n\nAby zobaczyć bieżące wartości, użyj tych encji:\n{replacement_sensors}\n\nTe atrybuty zostaną usunięte, najpóźniej w pierwszym wydaniu integracji od Home Assistant {breaks_version}."
+    },
+    "owner_key_version_login_required": {
+      "title": "Lokalizator wymaga nowszego klucza właściciela",
+      "description": "Lokalizator wymaga wersji {required_version} klucza właściciela, ale Google udostępnia wersję {current_version}, a pakiet sekretów nie zawiera użytecznego klucza dla tej wersji. Wersje w pakiecie: {bundle_versions}.\n\nUruchom ponownie narzędzie logowania (pomocnik logowania Docker lub `main.py`) i zaimportuj nowy plik `secrets.json`. Jeśli narzędzie nadal przechowuje plik `secrets.json` z wcześniejszego logowania, najpierw usuń ten plik lub uruchom narzędzie z opcją `--reauth` (pomocnik logowania Docker: `GFMY_ARGS=--reauth`); w przeciwnym razie użyje tego pliku ponownie i nie odczyta ponownie sejfu kluczy. Pozostałe lokalizatory nie są objęte problemem."
+    },
+    "owner_key_version_not_in_vault": {
+      "title": "Brak wersji klucza właściciela w sejfie konta",
+      "description": "Lokalizator wymaga wersji {required_version} klucza właściciela, ale Google udostępnia wersję {current_version}, a sejf kluczy tego konta Google nie zawierał tej wersji, gdy narzędzie logowania ostatnio go odczytało. Wersje w pakiecie: {bundle_versions}.\n\nGoogle może później dodać tę wersję do sejfu; dopiero logowanie po tym czasie może ją pobrać. Aby spróbować ponownie, uruchom narzędzie logowania (pomocnik logowania Docker lub `main.py`) i zaimportuj nowy plik `secrets.json`. Jeśli narzędzie nadal przechowuje plik `secrets.json` z wcześniejszego logowania, najpierw usuń ten plik lub uruchom narzędzie z opcją `--reauth` (pomocnik logowania Docker: `GFMY_ARGS=--reauth`); w przeciwnym razie użyje tego pliku ponownie i nie odczyta ponownie sejfu kluczy. Do tego czasu położenie lokalizatora pozostanie niedostępne, chyba że Google zacznie udostępniać wersję {required_version}. Ten komunikat zniknie, gdy tylko lokalizator będzie można ponownie odszyfrować. Pozostałe lokalizatory nie są objęte problemem."
     }
   },
   "exceptions": {

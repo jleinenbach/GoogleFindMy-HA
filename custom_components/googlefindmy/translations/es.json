@@ -777,7 +777,8 @@
           "ok": "OK",
           "shared_key_invalid": "No válida (se requiere reautenticación)",
           "shared_key_missing": "Ausente (paquete incompleto)",
-          "tracker_key_outdated": "Clave del rastreador obsoleta"
+          "tracker_key_outdated": "Clave del rastreador obsoleta",
+          "owner_key_version_unavailable": "Versión de la clave de propietario no disponible"
         }
       },
       "stat_background_updates": {
@@ -862,6 +863,14 @@
     "tracker_attributes_frozen_no_automations": {
       "title": "Los atributos del rastreador conservan ahora el valor de la última observación",
       "description": "Los rastreadores de dispositivo de **{entry_title}** ya no actualizan los atributos `location_age` y `location_status` entre dos observaciones: conservan el valor de la última observación y solo cambian con la siguiente (por ejemplo, una ubicación nueva, el paso a «Desactualizada» o un cambio de disponibilidad). El rastreador principal conserva del mismo modo los atributos `coarse_*`, y el rastreador «Última ubicación» ya no los tiene. Así, un rastreador sin una ubicación nueva ya no parece más actual que otro, por ejemplo para una persona.\n\nPara los valores actuales, usa estas entidades:\n{replacement_sensors}\n\nEstos atributos se eliminarán, como muy tarde con la primera versión de la integración a partir de Home Assistant {breaks_version}."
+    },
+    "owner_key_version_login_required": {
+      "title": "Un rastreador necesita una clave de propietario más reciente",
+      "description": "Un rastreador necesita la versión {required_version} de la clave de propietario, pero Google entrega la versión {current_version} y el paquete de secretos no tiene una clave utilizable para esta versión. Versiones en el paquete: {bundle_versions}.\n\nVuelve a ejecutar la herramienta de inicio de sesión (asistente de inicio de sesión de Docker o `main.py`) e importa el nuevo `secrets.json`. Si la herramienta todavía conserva un `secrets.json` de un inicio de sesión anterior, elimina primero ese archivo o inicia la herramienta con `--reauth` (asistente de inicio de sesión de Docker: `GFMY_ARGS=--reauth`); de lo contrario, reutiliza el archivo y no vuelve a leer el almacén de claves. Los demás rastreadores no se ven afectados."
+    },
+    "owner_key_version_not_in_vault": {
+      "title": "Falta la versión de la clave de propietario en el almacén de la cuenta",
+      "description": "Un rastreador necesita la versión {required_version} de la clave de propietario, pero Google entrega la versión {current_version} y el almacén de claves de esta cuenta de Google no contenía esta versión cuando la herramienta de inicio de sesión lo leyó por última vez. Versiones en el paquete: {bundle_versions}.\n\nGoogle puede añadir esta versión al almacén más adelante; solo un inicio de sesión posterior podrá obtenerla. Para intentarlo de nuevo, ejecuta la herramienta de inicio de sesión (asistente de inicio de sesión de Docker o `main.py`) e importa el nuevo `secrets.json`. Si la herramienta todavía conserva un `secrets.json` de un inicio de sesión anterior, elimina primero ese archivo o inicia la herramienta con `--reauth` (asistente de inicio de sesión de Docker: `GFMY_ARGS=--reauth`); de lo contrario, reutiliza el archivo y no vuelve a leer el almacén de claves. Hasta entonces, las ubicaciones del rastreador seguirán sin estar disponibles, salvo que Google empiece a entregar la versión {required_version}. Este aviso desaparece en cuanto el rastreador pueda volver a descifrarse. Los demás rastreadores no se ven afectados."
     }
   },
   "exceptions": {

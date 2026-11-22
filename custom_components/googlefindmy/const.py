@@ -1309,6 +1309,35 @@ def issue_id_for(entry_id: str) -> str:
     return f"{ISSUE_AUTH_EXPIRED_KEY}_{entry_id}"
 
 
+# Repairs issue per config entry and owner-key version (issue #246): a tracker
+# needs an owner-key version that Spot does not serve and the secrets bundle
+# cannot supply. Two translation keys name the remedy: a fresh login, or the
+# version is missing from the account vault. The issue id carries entry and
+# version, so each gap version has its own issue.
+ISSUE_OWNER_KEY_VERSION_LOGIN_KEY: str = "owner_key_version_login_required"
+ISSUE_OWNER_KEY_VERSION_VAULT_KEY: str = "owner_key_version_not_in_vault"
+OWNER_KEY_VERSION_ISSUE_PREFIX: str = "owner_key_version_unavailable"
+
+
+def owner_key_version_issue_id(entry_id: str, version: int) -> str:
+    """Return the Repairs issue id of one owner-key version gap of an entry.
+
+    Pattern: 'owner_key_version_unavailable_<entry_id>_v<version>'
+    """
+    return f"{OWNER_KEY_VERSION_ISSUE_PREFIX}_{entry_id}_v{version}"
+
+
+def is_owner_key_version_issue_for(issue_id: str, entry_id: str) -> bool:
+    """Return True if ``issue_id`` is an owner-key version issue of ``entry_id``.
+
+    Only the exact pattern of :func:`owner_key_version_issue_id` matches, with a
+    decimal version after ``_v``. A bare prefix test would also match the issue
+    of another entry whose id merely starts with ``entry_id``.
+    """
+    rest = issue_id.removeprefix(f"{OWNER_KEY_VERSION_ISSUE_PREFIX}_{entry_id}_v")
+    return rest != issue_id and rest.isascii() and rest.isdigit()
+
+
 # --------------------------------------------------------------------------------------
 # Storage (entry-scoped key prefix; each entry gets its own Store file)
 # --------------------------------------------------------------------------------------
@@ -1497,6 +1526,11 @@ __all__ = [
     "TRANSLATION_KEY_DUPLICATE_ACCOUNT",
     "ISSUE_RESTART_REQUIRED_KEY",
     "ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY",
+    "ISSUE_OWNER_KEY_VERSION_LOGIN_KEY",
+    "ISSUE_OWNER_KEY_VERSION_VAULT_KEY",
+    "OWNER_KEY_VERSION_ISSUE_PREFIX",
+    "owner_key_version_issue_id",
+    "is_owner_key_version_issue_for",
     "frozen_attributes_issue_id",
     "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN",
     "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS",

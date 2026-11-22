@@ -777,7 +777,8 @@
           "ok": "OK",
           "shared_key_invalid": "Ungültig (Neuanmeldung nötig)",
           "shared_key_missing": "Fehlt (unvollständiges Bundle)",
-          "tracker_key_outdated": "Tracker-Schlüssel veraltet"
+          "tracker_key_outdated": "Tracker-Schlüssel veraltet",
+          "owner_key_version_unavailable": "Eigentümerschlüssel-Version nicht verfügbar"
         }
       },
       "stat_background_updates": {
@@ -862,6 +863,14 @@
     "tracker_attributes_frozen_no_automations": {
       "title": "Tracker-Attribute behalten jetzt den Wert der letzten Beobachtung",
       "description": "Die Geräte-Tracker von **{entry_title}** aktualisieren die Attribute `location_age` und `location_status` nicht mehr zwischen zwei Beobachtungen, sondern behalten den Wert der letzten Beobachtung und ändern sich erst mit der nächsten (zum Beispiel neue Ortung, Wechsel zu „Veraltet“ oder Wechsel der Verfügbarkeit). Der Haupt-Tracker behält die Attribute `coarse_*` auf dieselbe Weise, der Tracker „Letzter Standort“ hat sie nicht mehr. So wirkt ein Tracker ohne neue Ortung nicht mehr aktueller als ein anderer, zum Beispiel für eine Person.\n\nFür die aktuellen Werte nutze diese Entitäten:\n{replacement_sensors}\n\nDie Attribute werden entfernt, spätestens mit dem ersten Integrations-Release ab Home Assistant {breaks_version}."
+    },
+    "owner_key_version_login_required": {
+      "title": "Ein Tracker braucht einen neueren Eigentümerschlüssel",
+      "description": "Ein Tracker braucht die Eigentümerschlüssel-Version {required_version}, aber Google liefert Version {current_version}, und das Secrets-Bundle enthält für diese Version keinen nutzbaren Schlüssel. Versionen im Bundle: {bundle_versions}.\n\nFühre das Login-Werkzeug erneut aus (Docker-Login-Helfer oder `main.py`) und importiere die neue `secrets.json`. Liegt beim Werkzeug noch eine `secrets.json` aus einer früheren Anmeldung, lösche diese Datei vorher oder starte das Werkzeug mit `--reauth` (Docker-Login-Helfer: `GFMY_ARGS=--reauth`); sonst verwendet es die Datei weiter und liest den Schlüsseltresor nicht erneut. Andere Tracker sind nicht betroffen."
+    },
+    "owner_key_version_not_in_vault": {
+      "title": "Eigentümerschlüssel-Version fehlt im Tresor des Kontos",
+      "description": "Ein Tracker braucht die Eigentümerschlüssel-Version {required_version}, aber Google liefert Version {current_version}, und der Schlüsseltresor dieses Google-Kontos enthielt diese Version nicht, als das Login-Werkzeug ihn zuletzt gelesen hat. Versionen im Bundle: {bundle_versions}.\n\nGoogle kann diese Version später im Tresor ablegen; erst ein Login-Lauf danach kann sie holen. Für einen neuen Versuch führe das Login-Werkzeug aus (Docker-Login-Helfer oder `main.py`) und importiere die neue `secrets.json`. Liegt beim Werkzeug noch eine `secrets.json` aus einer früheren Anmeldung, lösche diese Datei vorher oder starte das Werkzeug mit `--reauth` (Docker-Login-Helfer: `GFMY_ARGS=--reauth`); sonst verwendet es die Datei weiter und liest den Schlüsseltresor nicht erneut. Bis dahin bleiben die Standorte des Trackers nicht verfügbar, außer Google liefert Version {required_version}. Diese Meldung verschwindet, sobald der Tracker wieder entschlüsselt werden kann. Andere Tracker sind nicht betroffen."
     }
   },
   "exceptions": {

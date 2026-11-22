@@ -14,7 +14,7 @@ import time
 from collections.abc import Sequence
 from importlib import import_module
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from cryptography.exceptions import InvalidTag
 from google.protobuf.unknown_fields import UnknownFieldSet
@@ -73,7 +73,14 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_inf
 )
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     OwnerKeyInfo,
+    VaultOwnerKeyLookup,
     async_get_owner_key,
+    async_get_vault_owner_key,
+    claim_owner_key_spot_refresh,
+    confirm_owner_key_spot_refresh,
+    owner_key_spot_refresh_confirmed,
+    record_owner_key_version_gap,
+    record_owner_key_version_resolved,
 )
 from custom_components.googlefindmy.SpotApi.spot_request import SpotError
 from custom_components.googlefindmy.unknown_field_tree import log_unknown_fields
@@ -445,6 +452,39 @@ class StaleOwnerKeyError(DecryptionError):
     """
 
 
+OwnerKeyRemedy = Literal["login", "vault"]
+
+
+class OwnerKeyVersionUnavailableError(DecryptionError):
+    """Raised when the tracker needs an owner-key version that is not available.
+
+    Issue #246: the tracker reports ``ownerKeyVersion`` N, Spot serves an older
+    version and the bundle field ``owner_key_versions`` holds no usable entry for
+    N. Neither a stale tracker (it is newer, not older) nor an account-wide
+    shared-key failure, so it inherits from neither class. ``remedy`` names the
+    fix: ``login`` (fresh secrets bundle) or ``vault`` (the vault lacks N). The
+    message carries numbers only, never keys, blobs, domains or the username.
+    """
+
+    def __init__(
+        self,
+        *,
+        required_version: int,
+        current_version: int | None,
+        bundle_versions: tuple[int, ...],
+        remedy: OwnerKeyRemedy,
+    ) -> None:
+        self.required_version = required_version
+        self.current_version = current_version
+        self.bundle_versions = bundle_versions
+        self.remedy: OwnerKeyRemedy = remedy
+        super().__init__(
+            f"Owner key version {required_version} not available (Spot serves "
+            f"version {current_version}, bundle holds {len(bundle_versions)} "
+            f"version(s), remedy={remedy})"
+        )
+
+
 class SharedKeyMismatchError(DecryptionError):
     """Raised when the shared key cannot decrypt the owner key (AES-GCM InvalidTag).
 
@@ -730,6 +770,47 @@ def create_google_maps_link(latitude: float, longitude: float) -> str | None:
     return f"https://www.google.com/maps/search/?api=1&query={lat_f},{lon_f}"
 
 
+def _owner_key_gap_remedy(
+    lookup: VaultOwnerKeyLookup | None, *, vault_key_used: bool
+) -> OwnerKeyRemedy:
+    """Map the vault outcome of a version gap to its remedy.
+
+    ``vault`` only when the vault did not hold the version at the last login;
+    every other outcome is ``login``. Known limit: if the vault entry opened
+    (``vault_key_used``) but the identity key still does not decrypt with it, a
+    new login reads the same entry again and cannot help; there is no remedy
+    text for that case yet. The first branch states this case explicitly; it
+    returns what the fall-through would.
+    """
+    if vault_key_used:
+        return "login"
+    if lookup is not None and lookup.status == "version_missing":
+        return "vault"
+    return "login"
+
+
+async def _force_refresh_owner_key(cache: TokenCache) -> OwnerKeyInfo:
+    """Force-refresh the owner key for a version gap, classifying failures."""
+    try:
+        return await async_get_owner_key(cache=cache, force_refresh=True)
+    except SpotError as exc:
+        # Typed transport/gRPC failure during the forced refresh: transient,
+        # never "stale" (caught before the generic block, Q5 invariant).
+        _LOGGER.debug(
+            "Owner-key lookup phase=%s hit a transient SpotError: %s",
+            "forced refresh",
+            type(exc).__name__,
+        )
+        raise OwnerKeyLookupTransientError(
+            "Owner key retrieval did not complete (transient): the SPOT "
+            "request failed at the transport/gRPC layer during refresh. The "
+            "crypto keys are presumed valid; this will be retried."
+        ) from exc
+    except (InvalidTag, RuntimeError) as exc:
+        _LOGGER.debug("Owner-key lookup phase=%s failed", "forced refresh")
+        raise _classify_owner_key_failure(exc, context="forced refresh") from exc
+
+
 async def async_retrieve_identity_key(
     device_registration: DeviceRegistration,
     *,
@@ -849,39 +930,100 @@ async def async_retrieve_identity_key(
                 ) from exc2
             raise reclassified from exc2
 
-    # --- Proactive Owner Key Version Mismatch Check ---
-    # If the tracker requires a newer owner key version than what we have cached,
-    # force-refresh the owner key BEFORE attempting decryption to avoid an
-    # unnecessary AES-GCM InvalidTag failure followed by a reactive retry.
-    if (
+    # Owner-key version gap (issue #246): measured after the initial lookup or
+    # the structural-defect re-derive, before the vault lookup and the refresh.
+    # It is the only source of the mismatch condition; it drives the gap entry,
+    # the vault lookup, the refresh claim and the raise site, never the
+    # success record (that one checks the register instead).
+    gap_entered = bool(
         owner_key_version
         and owner_key_info.version is not None
         and owner_key_version > owner_key_info.version
-    ):
-        _LOGGER.info(
-            "Owner Key Version mismatch detected: Tracker requires V%s, "
-            "Cache has V%s. Refreshing...",
-            owner_key_version,
-            owner_key_info.version,
+    )
+    gap_lookup: VaultOwnerKeyLookup | None = None
+    vault_key_used = False
+    version_gap = False
+    spot_owner_key_version = owner_key_info.version
+    # --- Proactive Owner Key Version Mismatch Check ---
+    # If the tracker requires a newer owner key version than what we have cached,
+    # try the vault entry of that version first (no Spot call). Otherwise
+    # force-refresh the owner key BEFORE attempting decryption, at most once per
+    # poll cycle or every 300 s per account (claim_owner_key_spot_refresh).
+    if gap_entered:
+        record_owner_key_version_gap(cache, owner_key_version)
+        gap_lookup = await async_get_vault_owner_key(
+            cache=cache, version=owner_key_version
         )
-        try:
-            owner_key_info = await async_get_owner_key(cache=cache, force_refresh=True)
-        except SpotError as exc:
-            # Typed transport/gRPC failure during the forced refresh: transient,
-            # never "stale" (caught before the generic block, Q5 invariant).
+        if gap_lookup.status == "found" and gap_lookup.key is not None:
+            _LOGGER.info(
+                "Owner key version gap: tracker requires V%s, Spot serves V%s; "
+                "using the vault entry.",
+                owner_key_version,
+                owner_key_info.version,
+            )
+            owner_key_info = OwnerKeyInfo(gap_lookup.key, owner_key_version)
+            vault_key_used = True
+        elif claim_owner_key_spot_refresh(cache):
+            _LOGGER.info(
+                "Owner Key Version mismatch detected: Tracker requires V%s, "
+                "Cache has V%s. Refreshing...",
+                owner_key_version,
+                owner_key_info.version,
+            )
+            owner_key_info = await _force_refresh_owner_key(cache)
+            confirm_owner_key_spot_refresh(cache)
+            spot_owner_key_version = owner_key_info.version
+        elif owner_key_spot_refresh_confirmed(cache):
+            # Throttled, but this window's refresh completed: its answer is the
+            # positive evidence. Re-read it, because this call may have read the
+            # cache before that refresh stored the new owner key.
             _LOGGER.debug(
-                "Owner-key lookup phase=%s hit a transient SpotError: %s",
-                "forced refresh",
-                type(exc).__name__,
+                "Owner-key refresh for version gap V%s skipped (throttled, "
+                "vault status=%s); using this window's refresh.",
+                owner_key_version,
+                gap_lookup.status,
+            )
+            try:
+                owner_key_info = await async_get_owner_key(cache=cache)
+            except (InvalidTag, RuntimeError) as exc:
+                # Same policy as the initial lookup: an InvalidTag is the one
+                # positive signal of a wrong shared key (L3) and must not be
+                # downgraded here. A structural defect stays transient; the
+                # claim of the next window re-derives it.
+                classified = _classify_owner_key_failure(exc, context="read-back")
+                if not isinstance(classified, _OwnerKeyRederiveRequired):
+                    raise classified from exc
+                raise OwnerKeyLookupTransientError(
+                    "Owner key retrieval did not complete (transient): the owner "
+                    "key refreshed in this window could not be read back. This "
+                    "will be retried."
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 - no evidence, so transient
+                raise OwnerKeyLookupTransientError(
+                    "Owner key retrieval did not complete (transient): the owner "
+                    "key refreshed in this window could not be read back. This "
+                    "will be retried."
+                ) from exc
+            spot_owner_key_version = owner_key_info.version
+        else:
+            # Throttled, and this window's refresh failed or is still running:
+            # nothing says what Spot serves now, so classifying a gap would rest
+            # on the stale cache (classifier discipline: positive evidence only).
+            _LOGGER.debug(
+                "Owner-key refresh for version gap V%s skipped (throttled, "
+                "window's refresh not confirmed, vault status=%s).",
+                owner_key_version,
+                gap_lookup.status,
             )
             raise OwnerKeyLookupTransientError(
-                "Owner key retrieval did not complete (transient): the SPOT "
-                "request failed at the transport/gRPC layer during refresh. The "
-                "crypto keys are presumed valid; this will be retried."
-            ) from exc
-        except (InvalidTag, RuntimeError) as exc:
-            _LOGGER.debug("Owner-key lookup phase=%s failed", "forced refresh")
-            raise _classify_owner_key_failure(exc, context="forced refresh") from exc
+                "Owner key retrieval did not complete (transient): the owner-key "
+                "refresh of this window has not completed, so the version gap "
+                "cannot be classified yet. This will be retried."
+            )
+        version_gap = vault_key_used or (
+            owner_key_info.version is not None
+            and owner_key_info.version < owner_key_version
+        )
 
     # Build key sources list (matches eid_resolver pattern: try owner + shared)
     key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]
@@ -973,8 +1115,23 @@ async def async_retrieve_identity_key(
             except Exception as exc:  # Capture and continue to try other states
                 decrypt_errors.append(exc)
 
-    if candidates and not decrypt_errors:
+    if candidates and vault_key_used:
+        # The vault entry opened the EIK: the shared-key source failing to do
+        # the same is expected, so skip the metadata call (no Spot call).
+        record_owner_key_version_resolved(cache, owner_key_version)
         return candidates
+
+    if candidates and not decrypt_errors:
+        record_owner_key_version_resolved(cache, owner_key_version)
+        return candidates
+
+    if gap_entered and version_gap and not candidates:
+        raise OwnerKeyVersionUnavailableError(
+            required_version=owner_key_version,
+            current_version=spot_owner_key_version,
+            bundle_versions=gap_lookup.versions if gap_lookup is not None else (),
+            remedy=_owner_key_gap_remedy(gap_lookup, vault_key_used=vault_key_used),
+        ) from (decrypt_errors[-1] if decrypt_errors else None)
 
     current_owner_key_version = None
     try:
@@ -1092,6 +1249,7 @@ async def async_retrieve_identity_key(
             _LOGGER.warning("Blind owner key refresh also failed: %s", refresh_exc)
 
     if candidates:
+        record_owner_key_version_resolved(cache, owner_key_version)
         return candidates
 
     _LOGGER.error(

@@ -509,8 +509,40 @@ Because HA and the login container run on the same box here, the produced
 ```bash
 bash login.sh       # or: docker compose run --service-ports --rm googlefindmy-login
 ```
-If `data/secrets.json` already holds valid tokens, the browser step is skipped
-and the CLI lists devices directly. You can ignore the noVNC link.
+If `data/secrets.json` already holds valid tokens and the owner-key version
+field (see below), the browser step is skipped and the CLI lists devices
+directly. You can ignore the noVNC link.
+
+A `secrets.json` written before that field existed does not have it yet. Then
+each run signs in to Google once more (no unlock page) to read the key vault,
+and waits up to 5 minutes for that sign-in, until one run has written the
+field. Open the noVNC link for it. Without a terminal (Container Station
+application) the CLI skips this step silently and lists devices as before.
+
+### Owner-key versions from the account vault
+
+Some trackers are encrypted with a newer owner-key version than the one Google's Spot service hands out. Home Assistant can still decrypt them when `secrets.json` carries the owner keys of every version, read from the account's key vault during the login run (field `owner_key_versions`).
+
+A login run writes this field when both conditions hold:
+
+- The vault was read in the same browser session. A full login (Google sign-in plus the unlock page) reads it together with the shared key; the unlock page waits up to 5 minutes for your PIN or pattern, then the run ends with a timeout. If the shared key is already cached but the field is missing, a normal run signs in to Google once more, without the unlock page, and reads only the vault.
+- A self-test passes: the vault entry of the version Spot serves right now must decrypt to the owner key Spot returns. If Spot's version is not in the vault, or the entry does not match, the field is not written and the run prints `Note: owner-key versions were not saved (cause=..., entries=...)`. The `secrets.json` stays usable either way.
+
+When a tracker needs a version that neither Spot nor the field can supply, Home Assistant raises a Repairs issue for that tracker instead of asking you to re-authenticate the whole account. Its text names one of two remedies:
+
+> A tracker needs owner key version {required_version}, but Google serves version {current_version} and the secrets bundle has no usable key for this version. Versions in the bundle: {bundle_versions}.
+>
+> Run the login tool again (Docker login helper or `main.py`) and import the new `secrets.json`. If the tool still keeps a `secrets.json` from an earlier login, delete that file first or start the tool with `--reauth` (Docker login helper: `GFMY_ARGS=--reauth`); otherwise it reuses the file and does not read the key vault again. Other trackers are not affected.
+
+> A tracker needs owner key version {required_version}, but Google serves version {current_version} and the key vault of this Google account did not hold this version when the login tool last read it. Versions in the bundle: {bundle_versions}.
+>
+> Google may add this version to the vault later; only a login run after that can fetch it. To try again, run the login tool (Docker login helper or `main.py`) and import the new `secrets.json`. If the tool still keeps a `secrets.json` from an earlier login, delete that file first or start the tool with `--reauth` (Docker login helper: `GFMY_ARGS=--reauth`); otherwise it reuses the file and does not read the key vault again. Until then the tracker's locations stay unavailable, unless Google starts serving version {required_version}. This issue disappears once the tracker can be decrypted again. Other trackers are not affected.
+
+To see what the vault and Spot report, run the read-only diagnosis. It prints domain, version and epoch of each vault entry, their count, a cause class and the versions Spot serves, never key material, and it never writes the owner-key version field. Like any login run, it signs in first and may refresh the login tokens in `secrets.json`:
+
+```bash
+GFMY_ARGS="--diagnose-owner-key-versions" bash login.sh
+```
 
 ## Forcing a fresh login
 
