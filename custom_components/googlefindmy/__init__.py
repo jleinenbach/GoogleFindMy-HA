@@ -217,6 +217,7 @@ from .const import (
     coerce_device_id_list,
     coerce_ignored_mapping,
     frozen_attributes_issue_id,
+    is_owner_key_version_issue_for,
     map_token_hex_digest,
     map_token_secret_seed,
     service_device_identifier,
@@ -231,6 +232,7 @@ from .entry_self_write import (
     discard_self_write,
 )
 from .ha_typing import CloudDiscoveryRuntime, callback
+from .KeyBackup.vault_web_api import OWNER_KEY_VERSIONS_FIELD
 from .SpotApi.spot_grpc_transport import SPOT_GRPC_TRANSPORT
 
 # Shared FCM provider (HA-managed singleton)
@@ -9582,8 +9584,6 @@ async def _async_save_secrets_data(
     # import belong to an older shared_key and would only produce wrong
     # diagnoses, so they go. A bundle without a shared_key leaves them alone:
     # it says nothing about which shared_key they belong to.
-    from .KeyBackup.vault_web_api import OWNER_KEY_VERSIONS_FIELD
-
     if secrets_data.get("shared_key") and OWNER_KEY_VERSIONS_FIELD not in secrets_data:
         try:
             if await cache.async_get_cached_value(OWNER_KEY_VERSIONS_FIELD) is not None:
@@ -10906,8 +10906,6 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # run again to retire them. Exact match only: another entry whose id starts
     # with this one keeps its issues.
     try:
-        from .const import is_owner_key_version_issue_for
-
         registry = ir.async_get(hass)
         issues_attr = getattr(registry, "issues", None)
         if not isinstance(issues_attr, Mapping):

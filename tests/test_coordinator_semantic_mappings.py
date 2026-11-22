@@ -1415,7 +1415,7 @@ async def test_poll_cycle_mixed_gap_and_success_keeps_owner_key_version_unavaila
 
     assert coordinator.crypto_status.state == CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE
     assert coordinator._consecutive_decrypt_failures == 0
-    # N8: the gap branch raises its Repairs issue on this very hass object.
+    # The gap branch raises its Repairs issue on this very hass object.
     registry = coordinator.hass._issue_registry
     assert (
         registry.async_get_issue(DOMAIN, "owner_key_version_unavailable_entry-test_v2")

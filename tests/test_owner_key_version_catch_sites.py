@@ -1,5 +1,5 @@
 # tests/test_owner_key_version_catch_sites.py
-"""AP9a / AE-6 / PB-6: every decision catch site handles the owner-key version gap.
+"""Every decision catch site handles the owner-key version gap.
 
 ``OwnerKeyVersionUnavailableError`` is a ``DecryptionError`` subclass. A catch
 site that decides between "per tracker" and "account-wide" (it names the bare

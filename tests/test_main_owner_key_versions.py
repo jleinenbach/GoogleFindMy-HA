@@ -44,7 +44,7 @@ from tests.helpers.owner_key_vault_fixtures import (
 
 _FLOW_MODULE = "custom_components.googlefindmy.KeyBackup.shared_key_flow"
 _USERNAME = "user@example.com"
-_HYGIENE_WINDOW = 16  # AE-14: 16 hex or Base64 characters (8 bytes)
+_HYGIENE_WINDOW = 16  # 16 hex or Base64 characters (8 bytes)
 
 
 def test_field_name_matches_fixture() -> None:
@@ -219,7 +219,7 @@ def _console(capsys: pytest.CaptureFixture[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# L-15: self-test before the single write
+# Self-test before the single write
 # ---------------------------------------------------------------------------
 
 
@@ -361,7 +361,7 @@ async def test_self_test_reads_legacy_user_scoped_shared_key(
 
 
 # ---------------------------------------------------------------------------
-# L-1: failed fetch, domain filter
+# Failed fetch, domain filter
 # ---------------------------------------------------------------------------
 
 
@@ -448,7 +448,7 @@ async def test_mixed_domains_keep_finder_hw_only(
 
 
 # ---------------------------------------------------------------------------
-# L-16: field replaced, removed with a new shared key
+# Field replaced, removed with a new shared key
 # ---------------------------------------------------------------------------
 
 
@@ -517,7 +517,7 @@ async def test_new_shared_key_without_fetch_and_without_field_writes_nothing(
 
 
 # ---------------------------------------------------------------------------
-# V-8 (c): cached shared key without the field
+# Cached shared key without the field
 # ---------------------------------------------------------------------------
 
 
@@ -619,7 +619,7 @@ async def test_vault_only_browser_packages_unusable_reports_once(
 
 
 # ---------------------------------------------------------------------------
-# L-5: output hygiene over every outcome of the owner-key version step
+# Output hygiene over every outcome of the owner-key version step
 # ---------------------------------------------------------------------------
 
 
@@ -709,7 +709,7 @@ async def test_ensure_owner_key_versions_output_hygiene(
 
 
 # ---------------------------------------------------------------------------
-# AE-4: the uncached Spot owner key of the run
+# The uncached Spot owner key of the run
 # ---------------------------------------------------------------------------
 
 

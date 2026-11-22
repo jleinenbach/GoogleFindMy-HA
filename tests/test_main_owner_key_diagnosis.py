@@ -1,12 +1,12 @@
 # tests/test_main_owner_key_diagnosis.py
-"""AP11: the CLI diagnosis ``--diagnose-owner-key-versions`` (L-7, AE-10, L-9).
+"""The CLI diagnosis ``--diagnose-owner-key-versions``.
 
 The diagnosis lists the vault entries (domain, version, epoch), their count and
 cause class, the owner-key version Spot serves by default and for explicit
-versions. It must never print key material (L-5, CA-C32: ``print`` escapes the
+versions. It must never print key material (``print`` escapes the
 logging guards, hence ``capsys``), return 0 even for an empty result and 2 only
 for a session that may not open a browser. The runtime never asks Spot for an
-explicit version (L-9, V-5 (a)); an AST test pins that.
+explicit version; an AST test pins that.
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ def _key_windows(world: Any) -> set[str]:
 async def test_diagnosis_prints_entries_and_spot_versions(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """L-7: entries, count, cause, M and every vault version above M; no material."""
+    """Entries, count, cause, M and every vault version above M; no material."""
     world, result = _world_result()
     spot = _Spot(default=1, answers={2: 2, 3: 1})
 
@@ -131,7 +131,7 @@ async def test_diagnosis_prints_entries_and_spot_versions(
 async def test_diagnosis_empty_result_returns_zero(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """L-7: rc 0 for an empty vault; a failing Spot call shows its class only."""
+    """Rc 0 for an empty vault; a failing Spot call shows its class only."""
     spot = _Spot(default=1, answers={})
     spot.default = RuntimeError("secret body")  # type: ignore[assignment]
 
@@ -155,7 +155,7 @@ async def test_diagnosis_empty_result_returns_zero(
 async def test_diagnosis_without_higher_vault_version_asks_m_plus_one(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """AE-10: no vault version above M -> ask Spot for M+1."""
+    """No vault version above M -> ask Spot for M+1."""
     spot = _Spot(default=4, answers={5: 4})
 
     rc = await cli_main._run_owner_key_diagnosis(
@@ -174,7 +174,7 @@ async def test_diagnosis_without_higher_vault_version_asks_m_plus_one(
 async def test_diagnosis_requested_version_only(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """AE-10: with N, Spot is asked for N only."""
+    """With N, Spot is asked for N only."""
     _world, result = _world_result()
     spot = _Spot(default=1, answers={7: 1})
 
@@ -210,7 +210,7 @@ async def test_diagnosis_fetch_failure_reports_cause_class(
 async def test_diagnosis_without_attended_session_returns_two(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """AE-10: no attended session -> rc 2, no Spot call."""
+    """No attended session -> rc 2, no Spot call."""
 
     async def _refuse(*, on_start: Any = None) -> VaultFetchResult:
         raise SharedKeyUnavailableError("not attended")
@@ -285,7 +285,7 @@ def test_build_request_bytes_carries_requested_version() -> None:
 
 
 # ---------------------------------------------------------------------------
-# L-9: no runtime caller asks Spot for an explicit owner-key version (M3-5)
+# No runtime caller asks Spot for an explicit owner-key version
 # ---------------------------------------------------------------------------
 
 _SPOT_REQUEST_FUNCS = frozenset({"async_get_eid_info", "_build_request_bytes"})
@@ -313,7 +313,7 @@ def _explicit_version_calls(source: str) -> list[int]:
 
 
 def test_no_runtime_owner_key_version() -> None:
-    """L-9: outside ``main.py`` no call passes ``owner_key_version`` to Spot."""
+    """Outside ``main.py`` no call passes ``owner_key_version`` to Spot."""
     offenders = {
         str(path.relative_to(_PACKAGE)): hits
         for path in sorted(_PACKAGE.rglob("*.py"))

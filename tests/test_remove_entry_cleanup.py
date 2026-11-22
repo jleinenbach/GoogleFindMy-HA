@@ -243,7 +243,7 @@ async def test_async_remove_entry_deletes_owner_key_version_issues(
     issue_registry_capture: Any,
     _no_fcm_release: list[None],
 ) -> None:
-    """F6: removal retires this entry's owner-key version issues, and only them.
+    """Removal retires this entry's owner-key version issues, and only them.
 
     ``…_entry-remove_x_v2`` shares the prefix of this entry's issues but belongs
     to an entry whose id merely starts with ``entry-remove``; a bare prefix test

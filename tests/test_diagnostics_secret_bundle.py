@@ -783,7 +783,7 @@ def test_fcm_health_fields_survive() -> None:
     assert _redact(payload) == payload
 
 
-# --- Owner-key versions (AE-11, L-5) -----------------------------------------
+# --- Owner-key versions -----------------------------------------
 
 
 def _okv_world() -> Any:
@@ -793,7 +793,7 @@ def _okv_world() -> Any:
 
 
 def _okv_leaks(text: str, world: Any) -> list[str]:
-    """16-character windows (AE-14) of any textual form of the world's secrets."""
+    """16-character windows of any textual form of the world's secrets."""
     hits: list[str] = []
     for form in world.all_secret_strings():
         for start in range(len(form) - 15):
@@ -850,7 +850,7 @@ async def _okv_dump(
 async def test_the_owner_key_versions_field_is_redacted_in_entry_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AE-11: in ``entry.data`` and in its bundle the field reads as REDACTED."""
+    """In ``entry.data`` and in its bundle the field reads as REDACTED."""
     from custom_components.googlefindmy.KeyBackup.vault_web_api import (
         OWNER_KEY_VERSIONS_FIELD,
     )
@@ -875,10 +875,10 @@ async def test_the_owner_key_versions_field_is_redacted_in_entry_data(
 async def test_the_vault_key_versions_section_lists_only_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AE-11: domain, version, epoch and count survive the final redaction.
+    """Domain, version, epoch and count survive the final redaction.
 
-    A section named with the prefix ``owner_key`` would read as REDACTED here
-    (CA-C17), which is what this test catches.
+    A section named with the prefix ``owner_key`` would read as REDACTED here,
+    which is what this test catches.
     """
     from custom_components.googlefindmy.KeyBackup.vault_web_api import (
         OWNER_KEY_VERSIONS_FIELD,

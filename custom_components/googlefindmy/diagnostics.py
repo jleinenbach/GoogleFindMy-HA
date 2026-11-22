@@ -64,6 +64,7 @@ from .const import (
     coerce_changed_at_map,
     coerce_device_id_list,
 )
+from .KeyBackup.vault_web_api import OWNER_KEY_VERSIONS_FIELD, from_bundle_field
 from .redaction import REDACTED, async_redact_data
 from .shared_helpers import normalize_fcm_entry_snapshot, safe_fcm_health_snapshots
 
@@ -575,8 +576,6 @@ def _vault_key_versions_block(value: Any) -> dict[str, Any]:
     named with the prefix ``owner_key`` or with ``ownerKeyVersion``: the final
     redaction pass would blank it.
     """
-    from .KeyBackup.vault_web_api import from_bundle_field
-
     entries = from_bundle_field(value) if value is not None else ()
     listed = [
         {"domain": entry.domain, "version": entry.version, "epoch": entry.epoch}
@@ -591,8 +590,6 @@ async def _async_read_vault_key_versions(coordinator: Any) -> dict[str, Any] | N
     reader = getattr(cache, "async_get_cached_value", None)
     if not callable(reader):
         return None
-    from .KeyBackup.vault_web_api import OWNER_KEY_VERSIONS_FIELD
-
     try:
         value = await reader(OWNER_KEY_VERSIONS_FIELD)
     except Exception:

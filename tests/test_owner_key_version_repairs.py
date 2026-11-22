@@ -1,5 +1,5 @@
 # tests/test_owner_key_version_repairs.py
-"""AP9b: Repairs issues for owner-key version gaps (issue #246, L-4, L-17).
+"""Repairs issues for owner-key version gaps (issue #246).
 
 A tracker that needs an owner-key version that Spot does not serve and the
 secrets bundle cannot supply gets one Repairs issue per entry and version. These
@@ -11,8 +11,8 @@ tests pin the full life cycle:
   resolved, and after a background (push) success;
 * the push path heals ``owner_key_version_unavailable`` only when a version was
   resolved and no other gap version of the account is still open;
-* the coordinator scope equals the token cache scope (AE-8);
-* unloading the parent entry drops the process-wide register (PB-5).
+* the coordinator scope equals the token cache scope;
+* unloading the parent entry drops the process-wide register.
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ def _fail(stub: PollingStub, version: int, **kwargs: Any) -> None:
     ],
 )
 def test_gap_failure_creates_one_issue(remedy: str, translation_key: str) -> None:
-    """L-4: one issue per entry and version, three version placeholders, remedy text."""
+    """One issue per entry and version, three version placeholders, remedy text."""
     stub = _make_stub()
     _fail(stub, 2, remedy=remedy)
     _fail(stub, 2, remedy=remedy)
@@ -194,7 +194,7 @@ def test_registry_failure_never_breaks_bookkeeping(
 
 
 def test_background_success_deletes_issue() -> None:
-    """A6: a push success retires the issue of every resolved version."""
+    """A push success retires the issue of every resolved version."""
     stub = _make_stub()
     _fail(stub, 2)
     assert _issue_id(2) in _owner_key_issues(stub.hass)
@@ -206,7 +206,7 @@ def test_background_success_deletes_issue() -> None:
 
 
 def test_background_success_heals_owner_key_version_status() -> None:
-    """F8: resolved version and no open gap: status and error class go to OK."""
+    """Resolved version and no open gap: status and error class go to OK."""
     stub = _make_stub()
     _fail(stub, 2)
     assert stub.crypto_status.state == CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE
@@ -219,7 +219,7 @@ def test_background_success_heals_owner_key_version_status() -> None:
 
 
 def test_background_success_without_resolved_version_keeps_status() -> None:
-    """F8: no resolved version, no open gap: the status stays.
+    """No resolved version, no open gap: the status stays.
 
     The gap is reported without entering the register, so ``resolved`` is the
     only condition that decides; a heal without it would turn this red.
@@ -239,7 +239,7 @@ def test_background_success_without_resolved_version_keeps_status() -> None:
 
 
 def test_background_success_keeps_status_while_other_gap_open() -> None:
-    """N6: two gap versions, one heals: its issue goes, the status stays."""
+    """Two gap versions, one heals: its issue goes, the status stays."""
     stub = _make_stub()
     _fail(stub, 2)
     _fail(stub, 3)
@@ -255,7 +255,7 @@ def test_background_success_keeps_status_while_other_gap_open() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Deletion at the end of a real poll cycle (F1)
+# Deletion at the end of a real poll cycle
 # ---------------------------------------------------------------------------
 
 
@@ -352,7 +352,7 @@ async def _cycle(
 async def test_issue_deleted_after_spot_serves_required_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F1: cycle 1 raises the issue, cycle 2 resolves N and deletes it."""
+    """Cycle 1 raises the issue, cycle 2 resolves N and deletes it."""
     api = _TwoCycleAPI()
     coordinator = _make_coordinator(monkeypatch, asyncio.get_running_loop(), api)
     devices = [{"id": "dev-gap", "name": "New Tag"}]
@@ -368,12 +368,12 @@ async def test_issue_deleted_after_spot_serves_required_version(
 
 
 # ---------------------------------------------------------------------------
-# Scope (AE-8) and unload (PB-5)
+# Scope and unload
 # ---------------------------------------------------------------------------
 
 
 def test_scope_matches_entry_id() -> None:
-    """AE-8: the coordinator scope equals the scope of the entry's token cache."""
+    """The coordinator scope equals the scope of the entry's token cache."""
     entry = make_config_entry(entry_id="entry-scope", title="Scope Entry")
     stub = PollingStub(hass=_Hass(), config_entry=entry)
     cache = TokenCache(SimpleNamespace(loop=MagicMock()), entry.entry_id)
@@ -386,7 +386,7 @@ def test_scope_matches_entry_id() -> None:
 async def test_unload_parent_forgets_owner_key_refresh_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PB-5: unloading the parent entry drops its owner-key refresh register."""
+    """Unloading the parent entry drops its owner-key refresh register."""
     entry = make_config_entry(entry_id="entry-unload", title="Unload Entry")
     record_owner_key_version_gap(_Scope("entry-unload"), 2)
     record_owner_key_version_gap(_Scope("entry-other"), 2)

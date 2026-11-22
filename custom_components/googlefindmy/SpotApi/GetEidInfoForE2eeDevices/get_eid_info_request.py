@@ -169,7 +169,7 @@ async def async_get_eid_info(
         DecodeError: if the protobuf payload cannot be parsed.
         RuntimeError: for lower-level Spot API request failures or missing helpers.
     """
-    # The runtime call stays exactly as before (L-9: always -1); only the CLI
+    # The runtime call stays exactly as before (always -1); only the CLI
     # diagnosis passes an explicit version.
     serialized_request = (
         _build_request_bytes()

@@ -1,9 +1,9 @@
 # tests/test_owner_key_version_coordinator.py
-"""AP9a: the owner-key version gap passes the coordinator without any reauth.
+"""The owner-key version gap passes the coordinator without any reauth.
 
 Issue #246: ``OwnerKeyVersionUnavailableError`` is a ``DecryptionError`` subclass,
 but unlike every other subclass except the own-report class it is per tracker and
-possibly permanent. These tests pin the coordinator side of L-4:
+possibly permanent. These tests pin the coordinator side:
 
 * ``note_decrypt_failure`` classifies it from the error itself, sets
   ``owner_key_version_unavailable`` and never touches the reauth counter;
@@ -11,7 +11,7 @@ possibly permanent. These tests pin the coordinator side of L-4:
 * the cycle flag ``cycle_had_owner_key_version_gap`` reaches the OK gate;
 * a gap cycle marks the poll failed but never fails the coordinator update, so
   a permanent gap cannot make every entity of the account unavailable;
-* error text and diagnostics carry numbers only (AE-6, AE-14).
+* error text and diagnostics carry numbers only.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def _make_stub() -> PollingStub:
 
 
 def test_gap_branch_never_touches_reauth_counter() -> None:
-    """L-4: the gap sets its own status and never advances the reauth counter.
+    """The gap sets its own status and never advances the reauth counter.
 
     Called with ``stale=False`` (the value every catch site passes), past the
     threshold: without the ``isinstance`` branch the counter would count and the
@@ -90,7 +90,7 @@ def test_gap_branch_never_touches_reauth_counter() -> None:
 
 
 def test_gap_is_not_account_wide() -> None:
-    """L-4: neither with nor without a decrypting sibling is the gap account-wide."""
+    """Neither with nor without a decrypting sibling is the gap account-wide."""
     stub = _make_stub()
     gap = _gap_error()
 
@@ -110,7 +110,7 @@ def test_gap_is_not_account_wide() -> None:
 
 
 def test_finalize_forwards_gap_flag() -> None:
-    """F7: ``_finalize_cycle_decrypt_state`` hands the flag to the OK gate."""
+    """``_finalize_cycle_decrypt_state`` hands the flag to the OK gate."""
     stub = _make_stub()
     stub._set_crypto_status(CryptoStatus.OWNER_KEY_VERSION_UNAVAILABLE)
 
@@ -142,7 +142,7 @@ def test_finalize_forwards_gap_flag() -> None:
 async def test_error_text_hygiene(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """M3-14 / AE-6 / AE-14: error text, diagnostic and warning hold numbers only.
+    """Error text, diagnostic and warning hold numbers only.
 
     The error comes from the real raise site in ``async_retrieve_identity_key``,
     so a raise site that appended key material would be caught here.
@@ -190,7 +190,7 @@ async def test_error_text_hygiene(
 
 
 # ---------------------------------------------------------------------------
-# Real coordinator: a gap cycle never fails the coordinator update (N1)
+# Real coordinator: a gap cycle never fails the coordinator update
 # ---------------------------------------------------------------------------
 
 
@@ -302,7 +302,7 @@ def _assert_gap_cycle(coordinator: GoogleFindMyCoordinator) -> None:
 async def test_gap_only_cycle_keeps_update_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N1: a cycle with only a gap device fails the poll, not the update."""
+    """A cycle with only a gap device fails the poll, not the update."""
     coordinator = await _run_cycle(monkeypatch, [{"id": "dev-gap", "name": "New Tag"}])
     _assert_gap_cycle(coordinator)
 
@@ -311,7 +311,7 @@ async def test_gap_only_cycle_keeps_update_success(
 async def test_mixed_gap_and_success_cycle_keeps_update_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N1: gap plus a decrypting sibling: update succeeds, the status stays."""
+    """Gap plus a decrypting sibling: update succeeds, the status stays."""
     coordinator = await _run_cycle(
         monkeypatch,
         [{"id": "dev-gap", "name": "New Tag"}, {"id": "dev-ok", "name": "Hub"}],

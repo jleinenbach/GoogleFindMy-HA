@@ -2,8 +2,8 @@
 """The bundle field ``owner_key_versions`` through the HA import.
 
 ``_async_save_secrets_data`` stores every field a bundle carries, so the field
-reaches the ``TokenCache`` without a dedicated branch (L-2). What the import adds
-is the removal (L-16, amendment A5): a bundle that carries a ``shared_key`` and no
+reaches the ``TokenCache`` without a dedicated branch. What the import adds
+is the removal: a bundle that carries a ``shared_key`` and no
 versions drops versions an earlier import left in the cache; a bundle without a
 ``shared_key`` leaves them alone.
 
@@ -31,7 +31,7 @@ from custom_components.googlefindmy.KeyBackup.vault_web_api import (
 from tests.helpers import owner_key_vault_fixtures as fixtures
 from tests.helpers.owner_key_vault_fixtures import VaultWorld, make_vault_world
 
-_HYGIENE_WINDOW = 16  # AE-14: 16 hex or Base64 characters, at least 8 bytes
+_HYGIENE_WINDOW = 16  # 16 hex or Base64 characters, at least 8 bytes
 
 
 async def _new_cache(entry_id: str = "entry-okv") -> TokenCache:
@@ -67,7 +67,7 @@ def test_the_fixture_and_the_module_name_the_same_field() -> None:
 
 
 def test_the_field_name_is_loggable_and_not_runtime_refreshed() -> None:
-    """M3-15: nothing renews the field at run time, so a bundle's copy is final.
+    """Nothing renews the field at run time, so a bundle's copy is final.
 
     In ``_RUNTIME_REFRESHED_BUNDLE_FIELDS`` the field would be skipped when the
     entry is seeded from the cache's bundle copy. In ``_LOGGABLE_BUNDLE_FIELDS``
@@ -82,7 +82,7 @@ def test_the_field_name_is_loggable_and_not_runtime_refreshed() -> None:
 
 @pytest.mark.asyncio
 async def test_every_vault_entry_lands_with_the_same_bytes() -> None:
-    """L-2: each entry stays encrypted and byte-identical in the TokenCache."""
+    """Each entry stays encrypted and byte-identical in the TokenCache."""
 
     world = make_vault_world(versions=(1, 2, 3), spot_version=3)
     cache = await _new_cache()
@@ -100,7 +100,7 @@ async def test_every_vault_entry_lands_with_the_same_bytes() -> None:
 
 @pytest.mark.asyncio
 async def test_two_epochs_of_one_version_keep_only_the_higher() -> None:
-    """L-2: ``to_bundle_field`` keeps the higher epoch, and the import keeps it."""
+    """``to_bundle_field`` keeps the higher epoch, and the import keeps it."""
 
     world = make_vault_world(versions=(1, 2), spot_version=2)
     older = VaultEntry(2, 100, "finder_hw", world.wrapped_owner_keys[1])
@@ -125,7 +125,7 @@ async def test_two_epochs_of_one_version_keep_only_the_higher() -> None:
 
 @pytest.mark.asyncio
 async def test_a_bundle_without_the_field_into_an_empty_cache_adds_nothing() -> None:
-    """L-2: without the field the import writes what it wrote before."""
+    """Without the field the import writes what it wrote before."""
 
     world = make_vault_world()
     cache = await _new_cache()
@@ -141,7 +141,7 @@ async def test_a_bundle_without_the_field_into_an_empty_cache_adds_nothing() -> 
 
 @pytest.mark.asyncio
 async def test_a_new_field_replaces_the_old_one_whole() -> None:
-    """L-16: a successful fetch replaces the field, never mixes in old entries."""
+    """A successful fetch replaces the field, never mixes in old entries."""
 
     old_world = make_vault_world(versions=(1, 2), spot_version=2)
     new_world = make_vault_world(versions=(3,), spot_version=3)
@@ -161,7 +161,7 @@ async def test_a_new_field_replaces_the_old_one_whole() -> None:
 async def test_stale_field_removed_by_a_bundle_with_shared_key_and_no_versions(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A5: versions of an older shared_key go; the log names only the field."""
+    """Versions of an older shared_key go; the log names only the field."""
 
     old_world = make_vault_world(versions=(1, 2), spot_version=2)
     new_world = make_vault_world(versions=(1,), spot_version=1)
@@ -206,7 +206,7 @@ async def test_no_field_in_the_cache_means_no_removal_log(
     [pytest.param(None, id="absent"), pytest.param("  \n ", id="blank")],
 )
 async def test_bundle_without_shared_key_keeps_field(shared_key: str | None) -> None:
-    """A5: a bundle without a shared_key says nothing about the versions' key."""
+    """A bundle without a shared_key says nothing about the versions' key."""
 
     world = make_vault_world(versions=(1, 2), spot_version=2)
     cache = await _new_cache()

@@ -190,7 +190,7 @@ async def test_try_decrypt_identity_key_gap_uses_vault_entry_without_refresh(
 
 
 # ---------------------------------------------------------------------------
-# AP10: the resolver uses its own clock claim, never the poll-cycle claim (F5)
+# The resolver uses its own clock claim, never the poll-cycle claim
 # ---------------------------------------------------------------------------
 
 _CYCLE_CLAIM = "claim_owner_key_spot_refresh"
@@ -260,7 +260,7 @@ def _field_less_cache(world: Any) -> DummyCache:
 async def test_resolver_refresh_does_not_consume_poll_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F5: a resolver refresh that fails leaves the cycle's claim to the poll."""
+    """A resolver refresh that fails leaves the cycle's claim to the poll."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     forced = _install_invalid_tag_refresh(monkeypatch, world)
     cache = _field_less_cache(world)
@@ -279,7 +279,7 @@ async def test_resolver_refresh_does_not_consume_poll_claim(
 async def test_resolver_invalid_tag_then_poll_raises_shared_key_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F5: after the resolver swallowed ``InvalidTag``, the poll still refreshes.
+    """After the resolver swallowed ``InvalidTag``, the poll still refreshes.
 
     With the claim intact the poll's forced refresh meets the same rejection and
     reports the shared-key defect; a consumed claim would skip the refresh and
@@ -301,12 +301,12 @@ async def test_resolver_invalid_tag_then_poll_raises_shared_key_mismatch(
 
 
 def test_resolver_never_takes_cycle_claim() -> None:
-    """F5, N4: ``eid_resolver.py`` never names the poll-cycle claim."""
+    """``eid_resolver.py`` never names the poll-cycle claim."""
     assert _cycle_claim_hits(inspect.getsource(eid_resolver)) == []
 
 
 def test_cycle_claim_ast_detector_controls() -> None:
-    """N4: the detector finds call, attribute and aliased import; exact name only."""
+    """The detector finds call, attribute and aliased import; exact name only."""
     path = (
         "custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key"
     )
@@ -328,7 +328,7 @@ def test_cycle_claim_ast_detector_controls() -> None:
 async def test_resolver_clock_claim_throttles_spot_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N3, L-4: one forced refresh per 300 s by the resolver's clock."""
+    """One forced refresh per 300 s by the resolver's clock."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     now = [1_000.0]
     monkeypatch.setattr(_gok, "_monotonic", lambda: now[0])
@@ -426,7 +426,7 @@ def _envelope_success(monkeypatch: pytest.MonkeyPatch) -> DeviceIdentity:
 async def test_resolver_success_records_open_gap_version(
     monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
-    """N2: a resolver success moves an open gap version to resolved, both returns."""
+    """A resolver success moves an open gap version to resolved, both returns."""
     identity = (
         _plain_success(monkeypatch)
         if path == "plain"
@@ -448,7 +448,7 @@ async def test_resolver_success_records_open_gap_version(
 async def test_resolver_success_without_open_gap_records_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N2: without an open gap a success records nothing."""
+    """Without an open gap a success records nothing."""
     identity = _plain_success(monkeypatch)
     cache = DummyCache()
 

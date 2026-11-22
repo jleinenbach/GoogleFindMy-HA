@@ -868,7 +868,7 @@ class PollingOperations(_MixinBase):
         """Raise the Repairs issue of one owner-key version gap (issue #246).
 
         One issue per entry and required version, not fixable; the translation
-        key names the remedy. Placeholders carry version numbers only (L-5).
+        key names the remedy. Placeholders carry version numbers only.
         Best effort: a registry failure is logged by type and never breaks the
         decrypt-failure bookkeeping.
         """

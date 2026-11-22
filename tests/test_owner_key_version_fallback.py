@@ -56,7 +56,7 @@ pytestmark = pytest.mark.asyncio
 class _SpotDouble:
     """Spot-side doubles that count every call that would reach Spot.
 
-    Counted as Spot calls (L-3): ``async_get_owner_key(force_refresh=True)`` and
+    Counted as Spot calls: ``async_get_owner_key(force_refresh=True)`` and
     every ``async_get_eid_info`` call. A non-forced owner-key lookup returns the
     served key without being counted; that models a warm entry cache, where the
     lookup is a cache read. With a cold cache the production lookup reaches Spot
@@ -155,7 +155,7 @@ def _make_polling_stub() -> PollingStub:
 async def test_tracker_newer_than_spot_decrypts_from_vault_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """L-3: entry N present -> EIK from the vault entry, no Spot call at all.
+    """Entry N present -> EIK from the vault entry, no Spot call at all.
 
     No Spot call means neither a forced owner-key refresh nor the metadata call
     ``async_get_eid_info``; the vault path must return before both. No key is
@@ -180,7 +180,7 @@ async def test_tracker_newer_than_spot_decrypts_from_vault_entry(
 async def test_tracker_newer_than_spot_without_field_raises_version_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """L-4: no bundle field -> dedicated error with the login remedy.
+    """No bundle field -> dedicated error with the login remedy.
 
     No key is cleared from the entry cache. That the error stays out of the
     account reauth is pinned by
@@ -203,7 +203,7 @@ async def test_tracker_newer_than_spot_without_field_raises_version_unavailable(
 async def test_version_missing_in_field_raises_version_unavailable_with_vault_remedy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """L-4: field present but entry N missing -> dedicated error, vault remedy.
+    """Field present but entry N missing -> dedicated error, vault remedy.
 
     No key is cleared from the entry cache; the reauth verdict is pinned as in the
     field-missing case.
@@ -226,7 +226,7 @@ async def test_version_missing_in_field_raises_version_unavailable_with_vault_re
 async def test_tracker_older_than_spot_keeps_stale_owner_key_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """L-3 sentence 2: N < M keeps ``StaleOwnerKeyError``, even with a vault field."""
+    """N < M keeps ``StaleOwnerKeyError``, even with a vault field."""
     world = make_vault_world(versions=(1, 2), spot_version=2)
     _install(monkeypatch, world)
     cache = _seeded_cache(world, world.bundle_field)
@@ -240,7 +240,7 @@ async def test_tracker_older_than_spot_keeps_stale_owner_key_error(
 async def test_version_unavailable_error_never_drives_account_reauth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """L-4: the gap error never advances the reauth counter and never escalates.
+    """The gap error never advances the reauth counter and never escalates.
 
     The error that ``async_retrieve_identity_key`` raises for the field-missing
     case is fed into both entry points of the poll verdict:
@@ -276,7 +276,7 @@ async def test_version_unavailable_error_never_drives_account_reauth(
 
 
 # ---------------------------------------------------------------------------
-# Throttle, vault lookup and gap register (AP8)
+# Throttle, vault lookup and gap register
 # ---------------------------------------------------------------------------
 
 _STRUCTURE_DEFECT_MSG = "Owner key is missing or invalid; please re-authenticate."
@@ -331,7 +331,7 @@ def _field_without(world: VaultWorld, version: int) -> dict[str, dict[str, Any]]
 async def test_spot_calls_per_cycle(
     monkeypatch: pytest.MonkeyPatch, clock: list[float]
 ) -> None:
-    """L-4 / A6: eleven gap reports in one cycle at a standing clock -> one refresh."""
+    """Eleven gap reports in one cycle at a standing clock -> one refresh."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     spot = _install(monkeypatch, world)
     cache = _ScopedCache("entry-1")
@@ -367,7 +367,7 @@ async def test_push_without_cycle_throttled_by_clock(
 async def test_vault_key_found_but_eik_fails_keeps_shared_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PB-2: vault key opens, the EIK does not -> login remedy, no Spot call at all."""
+    """Vault key opens, the EIK does not -> login remedy, no Spot call at all."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     spot = _install(monkeypatch, world)
 
@@ -395,7 +395,7 @@ async def test_vault_key_found_but_eik_fails_keeps_shared_key(
 
 
 async def test_scope_without_entry_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PB-5: caches without, with empty or blank entry id never raise."""
+    """Caches without, with empty or blank entry id never raise."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     _install(monkeypatch, world)
     bare = _seeded_cache(world, None)
@@ -412,7 +412,7 @@ async def test_scope_without_entry_id(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_gap_resolved_after_spot_serves_required_version(
     monkeypatch: pytest.MonkeyPatch, clock: list[float]
 ) -> None:
-    """F1: cycle 1 fails (vault lacks N), cycle 2 Spot serves N -> resolved via 1094."""
+    """Cycle 1 fails (vault lacks N), cycle 2 Spot serves N -> resolved via 1094."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     spot = _install(monkeypatch, world)
     cache = _ScopedCache("entry-1")
@@ -437,7 +437,7 @@ async def test_gap_resolved_after_spot_serves_required_version(
 async def test_gap_resolved_on_clean_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F1: Spot serves N and every EIK source opens -> resolved at the clean return."""
+    """Spot serves N and every EIK source opens -> resolved at the clean return."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     spot = _install(monkeypatch, world)
     spot.refresh_version = 2
@@ -457,7 +457,7 @@ async def test_gap_resolved_on_clean_success(
 async def test_vault_hit_records_resolved_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F1: the early vault return records N as resolved and leaves no open gap."""
+    """The early vault return records N as resolved and leaves no open gap."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     _install(monkeypatch, world)
     cache = _ScopedCache("entry-1")
@@ -512,7 +512,7 @@ def _never_raises_case(
 async def test_vault_lookup_never_raises(
     case: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F2: every failure maps to a status, ``key`` stays ``None``, nothing raises."""
+    """Every failure maps to a status, ``key`` stays ``None``, nothing raises."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     cache, expected = _never_raises_case(case, world, monkeypatch)
 
@@ -528,7 +528,7 @@ async def test_vault_lookup_never_raises(
 async def test_vault_lookup_logs_only_class_name(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """F2: the DEBUG line names the exception class, never its text."""
+    """The DEBUG line names the exception class, never its text."""
     cache = _RaisingCache("owner_key_versions", message="SENTINEL-7f3a")
     with caplog.at_level(logging.DEBUG, logger=_gok.__name__):
         lookup = await _gok.async_get_vault_owner_key(
@@ -542,7 +542,7 @@ async def test_vault_lookup_logs_only_class_name(
 
 
 async def test_vault_lookup_repr_hides_key() -> None:
-    """F4 / AE-14: repr and str of a found lookup show no key bytes; it is frozen."""
+    """Repr and str of a found lookup show no key bytes; it is frozen."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     cache = DummyCache()
     world.seed_entry_cache(cache.values, world.bundle_field)
@@ -570,7 +570,7 @@ async def test_vault_lookup_repr_hides_key() -> None:
 async def test_reset_owner_key_refresh_state_clears_register(
     clock: list[float],
 ) -> None:
-    """F3: the reset seam empties the register, so a denied claim is granted again."""
+    """The reset seam empties the register, so a denied claim is granted again."""
     cache = SimpleNamespace(entry_id="x")
     assert _gok.claim_owner_key_spot_refresh(cache) is True
     assert _gok.claim_owner_key_spot_refresh(cache) is False
@@ -581,12 +581,12 @@ async def test_reset_owner_key_refresh_state_clears_register(
 async def test_refresh_state_reset_fixture_is_autouse(
     request: pytest.FixtureRequest,
 ) -> None:
-    """F3: the conftest fixture isolates the register for every test."""
+    """The conftest fixture isolates the register for every test."""
     assert "isolate_owner_key_refresh_state" in request.fixturenames
 
 
 async def test_resolver_clock_claim_keeps_poll_claim(clock: list[float]) -> None:
-    """F5: the resolver's clock claim never consumes the poll-cycle claim."""
+    """The resolver's clock claim never consumes the poll-cycle claim."""
     cycle_cache = SimpleNamespace(entry_id="e")
     _gok.begin_owner_key_poll_cycle("e")
     assert _gok.claim_owner_key_spot_refresh_by_clock(cycle_cache) is True
@@ -606,7 +606,7 @@ async def test_resolver_clock_claim_keeps_poll_claim(clock: list[float]) -> None
 async def test_rederive_success_records_open_gap_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N2: a structural-defect re-derive that yields N records the open gap of N."""
+    """A structural-defect re-derive that yields N records the open gap of N."""
     world = make_vault_world(versions=(1, 2), spot_version=2)
     spot = _install(monkeypatch, world)
     calls = {"refresh": 0}
@@ -641,7 +641,7 @@ async def test_rederive_success_records_open_gap_version(
 
 
 async def test_record_without_open_gap_is_noop() -> None:
-    """N2: recording a version that never opened a gap changes nothing.
+    """Recording a version that never opened a gap changes nothing.
 
     The scope exists (version 3 is open), so the membership check is what keeps
     version 5 out, not a missing register entry.
@@ -658,7 +658,7 @@ async def test_record_without_open_gap_is_noop() -> None:
 async def test_gap_entry_opens_version_until_success(
     monkeypatch: pytest.MonkeyPatch, clock: list[float]
 ) -> None:
-    """N2: the raised gap stays open in its scope until a later success heals it."""
+    """The raised gap stays open in its scope until a later success heals it."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
     spot = _install(monkeypatch, world)
     cache = _ScopedCache("entry-1")

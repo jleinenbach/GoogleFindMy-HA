@@ -3,7 +3,7 @@
 
 The vault fetch handles the owner keys of every key version, still wrapped with
 the shared key, plus the shared key itself. Only domain, version, epoch, count
-and cause may leave the module (L-5).
+and cause may leave the module.
 
 A static check walks every logger call in the package, as in
 ``tests/test_log_hygiene_auth.py``: no format string carries credential wording
@@ -13,7 +13,7 @@ The behavioural checks drive ``shared_key_flow`` through every outcome of the
 vault fetch (success, each failure, a raising sink, the sign-in-only flow and
 the alert deadline) and search ``caplog``, ``capsys`` (``print`` is invisible to
 the logging guards) and ``repr``/``str`` of every ``VaultFetchResult`` for any
-16-character window of any textual form of the synthetic secrets (AE-14). The
+16-character window of any textual form of the synthetic secrets. The
 forms and their gaps are listed in ``VaultWorld.all_secret_strings``.
 """
 

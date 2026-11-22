@@ -771,7 +771,7 @@ def create_google_maps_link(latitude: float, longitude: float) -> str | None:
 def _owner_key_gap_remedy(
     lookup: VaultOwnerKeyLookup | None, *, vault_key_used: bool
 ) -> OwnerKeyRemedy:
-    """Map the vault outcome of a version gap to its remedy (AE-8, A2)."""
+    """Map the vault outcome of a version gap to its remedy."""
     if vault_key_used:
         return "login"
     if lookup is not None and lookup.status == "version_missing":
@@ -1066,7 +1066,7 @@ async def async_retrieve_identity_key(
 
     if candidates and vault_key_used:
         # The vault entry opened the EIK: the shared-key source failing to do
-        # the same is expected, so skip the metadata call (no Spot call, L-3).
+        # the same is expected, so skip the metadata call (no Spot call).
         record_owner_key_version_resolved(cache, owner_key_version)
         return candidates
 
