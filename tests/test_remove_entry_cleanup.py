@@ -287,6 +287,72 @@ async def test_async_remove_entry_deletes_owner_key_version_issues(
     assert forgotten == ["entry-remove"]
 
 
+class _TupleKeyRegistry:
+    """Registry whose mapping is keyed like Home Assistant's: (domain, issue_id)."""
+
+    def __init__(self, keys: list[tuple[str, str]]) -> None:
+        self.issues = {key: object() for key in keys}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["tuple_keys", "no_mapping", "raises"])
+async def test_async_remove_entry_owner_key_issue_registry_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    issue_registry_capture: Any,
+    _no_fcm_release: list[None],
+    caplog: pytest.LogCaptureFixture,
+    shape: str,
+) -> None:
+    """Tuple keys are matched by domain; an unusable registry never stops removal."""
+    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
+        get_owner_key,
+    )
+
+    monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
+    forgotten: list[str] = []
+    monkeypatch.setattr(
+        get_owner_key, "forget_owner_key_refresh_state", forgotten.append
+    )
+    own = "owner_key_version_unavailable_entry-remove_v2"
+    if shape == "tuple_keys":
+        registry: object = _TupleKeyRegistry(
+            [
+                (DOMAIN, own),
+                ("other_domain", "owner_key_version_unavailable_entry-remove_v3"),
+            ]
+        )
+        monkeypatch.setattr(integration.ir, "async_get", lambda _hass: registry)
+    elif shape == "no_mapping":
+        monkeypatch.setattr(integration.ir, "async_get", lambda _hass: object())
+    else:
+
+        def _boom(_hass: Any) -> object:
+            raise RuntimeError("SENTINEL-registry")
+
+        monkeypatch.setattr(integration.ir, "async_get", _boom)
+
+    entry = make_config_entry(entry_id="entry-remove", title="Find My Entry")
+    _coordinator, _token_cache, _filter, runtime_data = _setup_runtime(entry)
+    hass = _HassStub(entry, runtime_data)
+
+    with caplog.at_level(logging.DEBUG, logger=integration.__name__):
+        await integration.async_remove_entry(hass, entry)
+
+    owner_key_deleted = [
+        item
+        for item in issue_registry_capture.deleted
+        if "owner_key_version_unavailable" in item[1]
+    ]
+    if shape == "tuple_keys":
+        assert owner_key_deleted == [(DOMAIN, own)]
+    else:
+        assert owner_key_deleted == []
+    if shape == "raises":
+        assert "RuntimeError" in caplog.text
+        assert "SENTINEL-registry" not in caplog.text
+    assert forgotten == ["entry-remove"]
+
+
 def test_async_remove_entry_respects_retention_option(
     monkeypatch: pytest.MonkeyPatch,
     issue_registry_capture: Any,

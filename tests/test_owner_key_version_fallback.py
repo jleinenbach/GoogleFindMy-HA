@@ -405,6 +405,15 @@ async def test_scope_without_entry_id(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _gok.owner_key_scope(SimpleNamespace(entry_id=" ", namespace="ns")) == "ns"
     assert _gok.owner_key_scope(SimpleNamespace(entry_id="e1", namespace="ns")) == "e1"
 
+    class _RaisingEntryId:
+        namespace = "ns-fallback"
+
+        @property
+        def entry_id(self) -> str:
+            raise RuntimeError("synthetic")
+
+    assert _gok.owner_key_scope(_RaisingEntryId()) == "ns-fallback"
+
     error = await _expect_gap(bare, world)
     assert error.remedy == "login"
 
@@ -470,6 +479,31 @@ async def test_vault_hit_records_resolved_version(
     assert _gok.consume_resolved_owner_key_versions("entry-1") == ()
 
 
+_PATCHED_CASES = frozenset({"field_parse_raises", "empty_shared_key"})
+
+
+def _patched_never_raises_case(
+    case: str, world: VaultWorld, monkeypatch: pytest.MonkeyPatch
+) -> tuple[object, str]:
+    """Cases whose failure comes from a patched helper of ``get_owner_key``."""
+    cache = DummyCache()
+    world.seed_entry_cache(cache.values, world.bundle_field)
+    if case == "field_parse_raises":
+
+        def _parse_boom(_value: object) -> object:
+            raise ValueError("synthetic")
+
+        monkeypatch.setattr(_gok, "from_bundle_field", _parse_boom)
+    else:
+        assert case == "empty_shared_key"
+
+        async def _empty(**_kwargs: object) -> bytes:
+            return b""
+
+        monkeypatch.setattr(_gok, "async_get_shared_key", _empty)
+    return cache, "undecryptable"
+
+
 def _never_raises_case(
     case: str, world: VaultWorld, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[object, str]:
@@ -507,6 +541,8 @@ def _never_raises_case(
         "foreign_field",
         "invalid_tag",
         "short_result",
+        "field_parse_raises",
+        "empty_shared_key",
     ],
 )
 async def test_vault_lookup_never_raises(
@@ -514,7 +550,8 @@ async def test_vault_lookup_never_raises(
 ) -> None:
     """Every failure maps to a status, ``key`` stays ``None``, nothing raises."""
     world = make_vault_world(versions=(1, 2), spot_version=1)
-    cache, expected = _never_raises_case(case, world, monkeypatch)
+    build = _patched_never_raises_case if case in _PATCHED_CASES else _never_raises_case
+    cache, expected = build(case, world, monkeypatch)
 
     lookup = await _gok.async_get_vault_owner_key(
         cache=cache,  # type: ignore[arg-type]
@@ -648,6 +685,8 @@ async def test_record_without_open_gap_is_noop() -> None:
     """
     cache = SimpleNamespace(entry_id="entry-1")
     _gok.record_owner_key_version_gap(cache, 3)
+    _gok.record_owner_key_version_gap(cache, None)
+    _gok.record_owner_key_version_gap(cache, 0)
     _gok.record_owner_key_version_resolved(cache, 5)
     _gok.record_owner_key_version_resolved(cache, None)
     _gok.record_owner_key_version_resolved(cache, 0)

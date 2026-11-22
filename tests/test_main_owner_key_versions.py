@@ -11,6 +11,7 @@ fed in there, never an output of the code under test.
 
 from __future__ import annotations
 
+import base64
 import sys
 from collections.abc import Callable
 from types import ModuleType
@@ -757,3 +758,126 @@ async def test_fetch_owner_key_uncached_rejects_unusable_payload(
 
     with pytest.raises(RuntimeError):
         await gok.async_fetch_owner_key_uncached(cache=object(), username="u")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Edge paths of the CLI helpers
+# ---------------------------------------------------------------------------
+
+
+def test_vault_sink_keeps_only_the_first_result() -> None:
+    """A second browser result never replaces the first one."""
+    sink = cli_main._VaultSink()
+    first = VaultFetchResult((), VaultCause.NO_FRAME)
+    second = VaultFetchResult((), VaultCause.EMPTY_PAYLOAD)
+
+    sink(first)
+    sink(second)
+
+    assert sink.results == [first]
+    assert sink.browser_ran is True
+
+
+async def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+    raise AssertionError("must not run")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["entry", "user"])
+async def test_ensure_shared_key_without_sink_keeps_cached_key(
+    monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    """Without a sink a cached key ends the step: no fetch and no vault call."""
+    monkeypatch.setattr(skr, "async_get_shared_key", _forbidden)
+    monkeypatch.setattr(cli_main, "_fetch_vault_for_cached_shared_key", _forbidden)
+    data: dict[str, object] = (
+        {"shared_key": "ab" * 32}
+        if scope == "entry"
+        else {"username": _USERNAME, f"shared_key_{_USERNAME}": "ab" * 32}
+    )
+    cache = _CountingCache(data)
+
+    await cli_main._ensure_shared_key(cache)
+
+    assert cache.sets == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_shared_key_without_sink_fetches_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a cached key the fetch runs once and gets no sink."""
+    calls: list[dict[str, Any]] = []
+
+    async def _fetch(**kwargs: Any) -> bytes:
+        calls.append(kwargs)
+        return b"\x01" * 32
+
+    monkeypatch.setattr(skr, "async_get_shared_key", _fetch)
+
+    await cli_main._ensure_shared_key(_CountingCache({"username": _USERNAME}))
+
+    assert len(calls) == 1
+    assert calls[0]["vault_sink"] is None
+    assert calls[0]["username"] == _USERNAME
+
+
+_KEY = bytes(range(32))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"shared_key": base64.b64encode(_KEY).decode()}, _KEY),
+        ({"shared_key": "not a key"}, None),
+        ({"username": None}, None),
+        ({"username": 7, "shared_key_7": "ab" * 32}, None),
+    ],
+    ids=["base64", "invalid", "no_username", "username_not_text"],
+)
+async def test_read_run_shared_key_edge_values(
+    data: dict[str, object], expected: bytes | None
+) -> None:
+    assert await cli_main._read_run_shared_key(_CountingCache(data)) == expected
+
+
+@pytest.mark.asyncio
+async def test_owner_key_versions_write_error_reports_self_test_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A raising write is reported as a failed self-test, by cause and count only."""
+    world = make_vault_world(versions=(1, 2), spot_version=1)
+    sink = cli_main._VaultSink()
+    sink(_ok(_entries(world)))
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("SENTINEL-write")
+
+    monkeypatch.setattr(cli_main, "_write_owner_key_versions", _boom)
+    cache = _CountingCache(_base(world))
+
+    await cli_main._ensure_owner_key_versions(cache, sink)
+
+    err = capsys.readouterr().err
+    assert f"cause={VaultCause.SELF_TEST_FAILED.value}" in err
+    assert "entries=2" in err
+    assert "SENTINEL-write" not in err
+    assert cache.field_sets() == 0
+
+
+class _GetRaisingCache(_CountingCache):
+    async def get(self, name: str) -> object:
+        raise RuntimeError("cache down")
+
+
+@pytest.mark.asyncio
+async def test_field_removal_error_after_new_shared_key_is_swallowed() -> None:
+    """A cache that cannot be read never breaks the run after a new shared key."""
+    sink = cli_main._VaultSink()
+    sink.shared_key_refreshed = True
+    cache = _GetRaisingCache({})
+
+    await cli_main._ensure_owner_key_versions(cache, sink)
+
+    assert cache.sets == []

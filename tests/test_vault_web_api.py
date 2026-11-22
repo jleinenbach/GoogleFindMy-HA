@@ -577,3 +577,39 @@ def test_result_repr_names_only_count_and_cause(world: VaultWorld) -> None:
         == "VaultFetchResult(entries=3, cause=None)"
     )
     assert str(parse_batchexecute("")) == "VaultFetchResult(entries=0, cause=no_frame)"
+
+
+# --------------------------------------------------------------------------- #
+# Chunk end and the defensive net
+# --------------------------------------------------------------------------- #
+
+
+def test_frame_chunk_without_trailing_newline_parses(world: VaultWorld) -> None:
+    # A body that ends right after the JSON of the frame chunk leaves no newline
+    # to skip; the frame must still be read.
+    item = ["wrb.fr", RPC_ID, _payload(_entry_rows(world)), None, None, None, "generic"]
+    body = json.dumps([item])
+
+    result = parse_batchexecute(f")]}}'\n\n{len(body)}\n{body}")
+
+    assert result.cause is None
+    assert len(result.entries) == len(world.wrapped_owner_keys)
+
+
+@pytest.mark.parametrize(
+    "exc", [ValueError, TypeError, IndexError, KeyError, RecursionError]
+)
+def test_unexpected_error_inside_the_parser_is_a_foreign_shape(
+    world: VaultWorld, monkeypatch: pytest.MonkeyPatch, exc: type[Exception]
+) -> None:
+    """The "never raises" contract holds for errors no shape check anticipated."""
+
+    def _boom(_payload: object) -> tuple[object, ...]:
+        raise exc("synthetic")
+
+    monkeypatch.setattr(vault_web_api, "_parse_payload", _boom)
+
+    result = parse_batchexecute(_success_text(world))
+
+    assert result.entries == ()
+    assert result.cause is VaultCause.FOREIGN_SHAPE

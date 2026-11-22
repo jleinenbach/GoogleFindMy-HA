@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -203,6 +204,27 @@ def test_background_success_deletes_issue() -> None:
     stub.note_background_decrypt_success()
 
     assert _owner_key_issues(stub.hass) == {}
+
+
+def test_issue_deletion_failure_is_logged_by_type(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising delete is logged by class only; the version is still consumed."""
+    stub = _make_stub()
+    _fail(stub, 2)
+    record_owner_key_version_resolved(_Scope(), 2)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("SENTINEL-delete")
+
+    monkeypatch.setattr(ir, "async_delete_issue", _boom)
+    with caplog.at_level(logging.DEBUG):
+        resolved = stub._delete_resolved_owner_key_version_issues()
+
+    assert resolved == (2,)
+    assert "RuntimeError" in caplog.text
+    assert "SENTINEL-delete" not in caplog.text
+    assert stub._delete_resolved_owner_key_version_issues() == ()
 
 
 def test_background_success_heals_owner_key_version_status() -> None:

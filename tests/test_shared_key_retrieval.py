@@ -718,3 +718,23 @@ async def test_vault_entries_interactive_reports_missing_packages_by_type(
 
     assert INSTALL_COMMAND in str(excinfo.value)
     assert started == []
+
+
+async def test_retrieve_shared_key_reraises_unusable_browser_packages(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `BrowserPackagesUnusable` from the flow leaves unchanged, same instance."""
+    from custom_components.googlefindmy.browser_deps import BrowserPackagesUnusable
+
+    original = BrowserPackagesUnusable("chrome is installed but broken")
+
+    async def _flow(*, vault_sink: object = None) -> str:
+        raise original
+
+    monkeypatch.setattr(skr, "_interactive_flow_hex", _flow)
+    monkeypatch.setattr(skr, "_browser_flow_attempted", False)
+
+    with pytest.raises(BrowserPackagesUnusable) as excinfo:
+        await skr._retrieve_shared_key_hex()
+
+    assert excinfo.value is original

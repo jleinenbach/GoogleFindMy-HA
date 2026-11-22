@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy import main as cli_main
+from custom_components.googlefindmy.browser_deps import BrowserPackagesUnusable
 from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (
     SharedKeyUnavailableError,
 )
@@ -368,3 +369,65 @@ async def test_async_get_eid_info_forwards_explicit_version_only(
             pass
 
     assert built == [(), (5,)]
+
+
+@pytest.mark.asyncio
+async def test_diagnosis_unusable_browser_packages_prints_the_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Unusable browser packages print their hint and count as an HTTP cause."""
+
+    async def _unusable(*, on_start: Any = None) -> VaultFetchResult:
+        raise BrowserPackagesUnusable("install the browser packages first")
+
+    rc = await cli_main._run_owner_key_diagnosis(
+        object(), 0, fetch=_unusable, eid_info=_Spot(default=1, answers={})
+    )
+
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "cause=http_status" in out.out.splitlines()
+    assert "install the browser packages first" in out.err
+
+
+def test_diagnosis_cli_signs_in_and_runs_with_the_file_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sign-in, entry id, file cache and token come first; the rc is passed on."""
+    calls: list[object] = []
+    file_cache = object()
+
+    def _entry_id(arg: object, env: object) -> str:
+        calls.append(("entry", arg, env))
+        return "entry-9"
+
+    def _register(entry_id: str) -> object:
+        calls.append(("cache", entry_id))
+        return file_cache
+
+    async def _aas(cache: object) -> None:
+        calls.append(("aas", cache is file_cache))
+
+    async def _diagnosis(cache: object, requested: int) -> int:
+        calls.append(("diagnosis", cache is file_cache, requested))
+        return 3
+
+    monkeypatch.setattr(cli_main, "_ensure_authenticated", lambda: calls.append("auth"))
+    monkeypatch.setattr(cli_main, "_resolve_effective_entry_id", _entry_id)
+    monkeypatch.setattr(cli_main, "_register_file_cache", _register)
+    monkeypatch.setattr(cli_main, "_ensure_aas_token", _aas)
+    monkeypatch.setattr(cli_main, "_run_owner_key_diagnosis", _diagnosis)
+    monkeypatch.setenv("GOOGLEFINDMY_ENTRY_ID", "env-entry")
+
+    rc = cli_main._owner_key_diagnosis_cli(
+        SimpleNamespace(entry="arg-entry", diagnose_owner_key_versions=5)
+    )
+
+    assert rc == 3
+    assert calls == [
+        "auth",
+        ("entry", "arg-entry", "env-entry"),
+        ("cache", "entry-9"),
+        ("aas", True),
+        ("diagnosis", True, 5),
+    ]
