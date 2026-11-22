@@ -261,6 +261,9 @@ def test_main_routes_to_diagnosis_without_bootstrap(
     monkeypatch.setattr(cli_main, "_ensure_authenticated", _no_bootstrap)
     monkeypatch.setattr(cli_main, "_run_cli_bootstrap", _no_bootstrap)
     monkeypatch.setattr(cli_main, "_configure_cli_logging", lambda **_kwargs: None)
+    # ``_main`` marks the process as the CLI in os.environ; registering the
+    # variable with monkeypatch first lets teardown restore the prior state.
+    monkeypatch.setenv("GOOGLEFINDMY_CLI_PROCESS", "")
 
     with pytest.raises(SystemExit) as ei:
         cli_main._main(["--diagnose-owner-key-versions", "2"])
@@ -328,3 +331,40 @@ def test_no_runtime_owner_key_version_detector_controls() -> None:
     assert _explicit_version_calls("api._build_request_bytes(owner_key_version=3)\n")
     assert _explicit_version_calls("await async_get_eid_info(cache=c)\n") == []
     assert _explicit_version_calls("other(owner_key_version=3)\n") == []
+
+
+@pytest.mark.asyncio
+async def test_async_get_eid_info_forwards_explicit_version_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime call builds the request without arguments; N is forwarded."""
+    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
+        get_eid_info_request as module,
+    )
+
+    built: list[tuple[int, ...]] = []
+
+    def _spy(*args: int) -> bytes:
+        built.append(args)
+        return b"request"
+
+    async def _spot(_scope: str, _payload: bytes, *, cache: object) -> bytes:
+        return b""
+
+    class _Response:
+        def ParseFromString(self, _data: bytes) -> None:
+            return None
+
+    monkeypatch.setattr(module, "_build_request_bytes", _spy)
+    monkeypatch.setattr(module, "_spot_call_async", _spot)
+    monkeypatch.setattr(
+        module.DeviceUpdate_pb2, "GetEidInfoForE2eeDevicesResponse", _Response
+    )
+
+    for kwargs in ({}, {"owner_key_version": 5}):
+        try:
+            await module.async_get_eid_info(cache=object(), **kwargs)
+        except Exception:  # noqa: BLE001 - an empty body may raise after the build
+            pass
+
+    assert built == [(), (5,)]
