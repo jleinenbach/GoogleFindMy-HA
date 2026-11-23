@@ -1325,6 +1325,30 @@ class SecretsJSONWatcher:
         # reset it.
         self._settled_signatures.discard(signature)
 
+    @callback
+    def rearm_account(self, stable_key: str, *, keep_digest: str | None) -> int:
+        """Forget the dispatched bundles of one account except ``keep_digest``.
+
+        Called after a discovery card of the account was answered. The other
+        cards of that account are closed at that moment, but their bundles may
+        still be on disk and are remembered here as dispatched, so the next scan
+        would skip them for good. Dropping their signatures makes the newest one
+        come back as a card; the answered bundle (``keep_digest``) stays
+        remembered. The retry budgets are left untouched: this is not a failed
+        attempt. Lock-free for the same reason as :meth:`_invalidate_signature`.
+
+        Returns the number of forgotten signatures.
+        """
+
+        stale = {
+            signature
+            for signature in self._settled_signatures
+            if signature.rpartition(":")[0] == stable_key
+            and signature.rpartition(":")[2] != keep_digest
+        }
+        self._settled_signatures -= stale
+        return len(stale)
+
     async def _scan(self, *, reason: str) -> None:
         async with self._lock:
             candidates = await self._hass.async_add_executor_job(self._read_bundles)
@@ -1686,6 +1710,14 @@ class DiscoveryManager:
         # shutdown (it does not raise, so the try/except there never saw it).
         self._stop_unsub = None
         await self.async_stop()
+
+    def rearm_account(self, stable_key: str, *, keep_digest: str | None) -> int:
+        """Forward :meth:`SecretsJSONWatcher.rearm_account` to every watcher."""
+
+        return sum(
+            watcher.rearm_account(stable_key, keep_digest=keep_digest)
+            for watcher in self._watchers
+        )
 
     async def async_force_secrets_scan(self) -> None:
         for watcher in self._watchers:

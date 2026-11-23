@@ -3935,6 +3935,10 @@ class ConfigFlow(
         self._subentry_key_core_tracking = TRACKER_SUBENTRY_KEY
         self._subentry_key_service = SERVICE_SUBENTRY_KEY
         self._pending_discovery_payload: CloudDiscoveryData | None = None
+        # The discovered bundle the user confirmed as a new account; read when
+        # the device selection creates the entry (see
+        # _async_abort_sibling_discovery_flows).
+        self._confirmed_discovery_payload: CloudDiscoveryData | None = None
         # The credential *delta*, not a merged entry payload: what a form
         # carries across a user's think time must not be a snapshot of another
         # object's state (see _merge_credential_updates).
@@ -4513,6 +4517,91 @@ class ConfigFlow(
         """
         return {}
 
+    def _abort_other_discovery_flows(self, *, spare_answered: bool) -> int:
+        """Abort the other open discovery flows of this flow's account.
+
+        Shared by the two moments that end cards: a fresher payload replaces the
+        open card (``spare_answered=True``: a card the user has already answered,
+        marked ``dismiss_protected``, is left alone), and a confirmation ends
+        every other card of the account (``spare_answered=False``). Only flows
+        from discovery sources are touched; flows of other accounts do not share
+        the unique id. A flow manager without the needed methods (a lightweight
+        test double) aborts nothing. Returns the number of aborted flows.
+        """
+
+        hass = getattr(self, "hass", None)
+        manager = getattr(getattr(hass, "config_entries", None), "flow", None)
+        abort_flow = getattr(manager, "async_abort", None)
+        progress_by_handler = getattr(manager, "async_progress_by_handler", None)
+        unique_id = self.unique_id
+        if (
+            not unique_id
+            or not callable(abort_flow)
+            or not callable(progress_by_handler)
+        ):
+            return 0
+
+        own_flow_id = getattr(self, "flow_id", None)
+        aborted = 0
+        for progress in progress_by_handler(
+            DOMAIN,
+            include_uninitialized=True,
+            match_context={"unique_id": unique_id},
+        ):
+            flow_id = progress.get("flow_id")
+            if not flow_id or flow_id == own_flow_id:
+                continue
+            flow_context = progress.get("context") or {}
+            if flow_context.get("source") not in _SUPERSEDABLE_DISCOVERY_SOURCES:
+                continue
+            if spare_answered and flow_context.get("dismiss_protected"):
+                continue
+            abort_flow(flow_id)
+            aborted += 1
+        return aborted
+
+    def _async_abort_sibling_discovery_flows(
+        self, payload: CloudDiscoveryData | None
+    ) -> None:
+        """End the account's other cards once one card has been answered.
+
+        After a confirmation -- credentials replaced, credentials kept, or a new
+        entry created -- no other card of the account may stay open, answered or
+        not. On a created entry Home Assistant would abort them as well, but
+        silently; closing them here first is what makes the INFO line with the
+        number appear on every one of the three outcomes.
+
+        The closed cards may have carried a bundle that is younger than the
+        confirmed one and is still on disk. The watcher remembers every bundle
+        it has dispatched, so it would never offer that bundle again; the
+        discovery manager is therefore told to forget the account's other
+        bundles, which makes the younger one come back as exactly one new card.
+        """
+
+        closed = self._abort_other_discovery_flows(spare_answered=False)
+        if closed:
+            _LOGGER.info(
+                "Discovery for %s confirmed; closed %d other discovery card(s) "
+                "for the same account",
+                _mask_email_for_logs(payload.email if payload is not None else None),
+                closed,
+            )
+
+        stable_key = _stable_key_for_discovery_payload(payload)
+        if stable_key is None:
+            return
+        domain_data = getattr(getattr(self, "hass", None), "data", None)
+        bucket = domain_data.get(DOMAIN) if isinstance(domain_data, Mapping) else None
+        manager = (
+            bucket.get("discovery_manager") if isinstance(bucket, Mapping) else None
+        )
+        if manager is None or not callable(getattr(manager, "rearm_account", None)):
+            _LOGGER.debug("No discovery manager to re-arm after a confirmation")
+            return
+        manager.rearm_account(
+            stable_key, keep_digest=_digest_for_discovery_payload(payload)
+        )
+
     async def _async_supersede_discovery_flows(self) -> int:
         """Abort the other open discovery cards of this flow's account.
 
@@ -4530,36 +4619,7 @@ class ConfigFlow(
         methods (a lightweight test double) aborts nothing.
         """
 
-        hass = getattr(self, "hass", None)
-        manager = getattr(getattr(hass, "config_entries", None), "flow", None)
-        abort_flow = getattr(manager, "async_abort", None)
-        progress_by_handler = getattr(manager, "async_progress_by_handler", None)
-        unique_id = self.unique_id
-        if (
-            not unique_id
-            or not callable(abort_flow)
-            or not callable(progress_by_handler)
-        ):
-            return 0
-
-        own_flow_id = getattr(self, "flow_id", None)
-        superseded = 0
-        for progress in progress_by_handler(
-            DOMAIN,
-            include_uninitialized=True,
-            match_context={"unique_id": unique_id},
-        ):
-            flow_id = progress.get("flow_id")
-            if not flow_id or flow_id == own_flow_id:
-                continue
-            flow_context = progress.get("context") or {}
-            if flow_context.get("source") not in _SUPERSEDABLE_DISCOVERY_SOURCES:
-                continue
-            if flow_context.get("dismiss_protected"):
-                continue
-            abort_flow(flow_id)
-            superseded += 1
-
+        superseded = self._abort_other_discovery_flows(spare_answered=True)
         if superseded:
             _LOGGER.debug(
                 "Discovery replaced %d older card(s) of the same account",
@@ -4730,6 +4790,7 @@ class ConfigFlow(
         that to "stage no key", which is what the absent payload means.
         """
 
+        self._confirmed_discovery_payload = payload
         result = await self.async_step_device_selection()
         # Delete-after-import: STAGED here, executed in
         # async_setup_entry. A CREATE_ENTRY FlowResult is only a
@@ -4895,6 +4956,7 @@ class ConfigFlow(
                     "Discovery for %s declined: stored credentials kept",
                     _mask_email_for_logs(payload.email),
                 )
+                self._async_abort_sibling_discovery_flows(payload)
                 return self.async_abort(reason="credentials_kept")
 
             rebased = self._async_rebase_credential_updates(payload.email, auth_data)
@@ -5036,6 +5098,7 @@ class ConfigFlow(
                 "Discovery for %s confirmed: stored credentials replaced",
                 _mask_email_for_logs(payload.email),
             )
+            self._async_abort_sibling_discovery_flows(payload)
             return self.async_abort(reason="credentials_updated")
 
         return self.async_show_form(
@@ -6096,6 +6159,13 @@ class ConfigFlow(
             # job after this result (async_step_discovery does) marks again at
             # its own site rather than relying on this one.
             self._async_mark_own_cleanup_ticket_entry_promised()
+            if self._confirmed_discovery_payload is not None:
+                # The entry is created on the submit of the device selection,
+                # not where the discovered bundle was confirmed, so the other
+                # cards of the account are closed here.
+                self._async_abort_sibling_discovery_flows(
+                    self._confirmed_discovery_payload
+                )
             return created
 
         return self.async_show_form(
