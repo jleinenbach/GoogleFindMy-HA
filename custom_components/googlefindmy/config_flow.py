@@ -3939,6 +3939,9 @@ class ConfigFlow(
         # the device selection creates the entry (see
         # _async_abort_sibling_discovery_flows).
         self._confirmed_discovery_payload: CloudDiscoveryData | None = None
+        # Whether this flow already staged the delete of the bundle it imported
+        # as a new account (see _async_stage_discovery_import_cleanup).
+        self._discovery_import_cleanup_staged = False
         # The credential *delta*, not a merged entry payload: what a form
         # carries across a user's think time must not be a snapshot of another
         # object's state (see _merge_credential_updates).
@@ -4775,6 +4778,32 @@ class ConfigFlow(
 
         return await self._async_import_discovered_account(pending_payload)
 
+    def _async_stage_discovery_import_cleanup(
+        self, payload: CloudDiscoveryData | None
+    ) -> None:
+        """Stage the delete of the bundle a new discovered account imported.
+
+        Called where the entry is created: on the submit of the device
+        selection, and in :meth:`_async_import_discovered_account` when the
+        device selection returns ``CREATE_ENTRY`` straight away. A flow stages
+        this job at most once, so both sites can call it without doubling it.
+        The caller marks the ticket as promised afterwards; a ticket only
+        exists once a job was staged.
+        """
+
+        if self._discovery_import_cleanup_staged:
+            return
+        self._discovery_import_cleanup_staged = True
+        _async_stage_container_cleanup(
+            getattr(self, "hass", None),
+            flow_id=self._async_cleanup_ticket_id(),
+            unique_id=self.unique_id,
+            job=PendingContainerCleanup(
+                imported_stable_key=_stable_key_for_discovery_payload(payload),
+                imported_digest=_digest_for_discovery_payload(payload),
+            ),
+        )
+
     async def _async_import_discovered_account(
         self, payload: CloudDiscoveryData | None
     ) -> FlowResult:
@@ -4807,15 +4836,7 @@ class ConfigFlow(
             isinstance(result, Mapping)
             and result.get("type") == data_entry_flow.FlowResultType.CREATE_ENTRY
         ):
-            _async_stage_container_cleanup(
-                getattr(self, "hass", None),
-                flow_id=self._async_cleanup_ticket_id(),
-                unique_id=self.unique_id,
-                job=PendingContainerCleanup(
-                    imported_stable_key=_stable_key_for_discovery_payload(payload),
-                    imported_digest=_digest_for_discovery_payload(payload),
-                ),
-            )
+            self._async_stage_discovery_import_cleanup(payload)
             # This staging happens AFTER the CREATE_ENTRY result, so
             # the mark the create path set in async_step_device_selection
             # predates the ticket this call may just have created. Mark
@@ -6149,6 +6170,13 @@ class ConfigFlow(
             # ``found_local_bundle`` is deleted from disk only after the entry
             # has been observed in storage (two-phase delete, F4/P2).
             self._async_stage_local_bundle_cleanup()
+            if self._confirmed_discovery_payload is not None:
+                # A confirmed discovery card becomes an entry here, on the
+                # submit of the device selection, so the bundle it consumed is
+                # staged for deletion here too.
+                self._async_stage_discovery_import_cleanup(
+                    self._confirmed_discovery_payload
+                )
             # ... and pin the ticket to that promise BEFORE Home Assistant runs
             # async_finish_flow. From here on the flow's removal no longer means
             # "no entry": the first async_setup_entry runs inside

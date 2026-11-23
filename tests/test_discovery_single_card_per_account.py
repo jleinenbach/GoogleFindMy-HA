@@ -454,6 +454,24 @@ async def test_declining_one_card_closes_the_others_too(
     assert _ACCOUNT_A not in records[0].getMessage()
 
 
+def _stub_entry_creation(hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the device probe and the entry setup; both talk to Google."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    async def _no_devices(*_args: Any, **_kwargs: Any) -> list[Any]:
+        return []
+
+    async def _api(self: Any) -> tuple[Any, str, str]:
+        return object(), _ACCOUNT_A, _TOKEN
+
+    monkeypatch.setattr(config_flow, "_try_probe_devices", _no_devices)
+    monkeypatch.setattr(config_flow.ConfigFlow, "_async_build_api_and_username", _api)
+    monkeypatch.setattr(
+        hass.config_entries, "async_setup", AsyncMock(return_value=True)
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_new_entry_logs_the_cards_it_closes(
     hass: HomeAssistant,
@@ -471,18 +489,7 @@ async def test_a_new_entry_logs_the_cards_it_closes(
 
     from custom_components.googlefindmy import config_flow  # noqa: PLC0415
 
-    async def _no_devices(*_args: Any, **_kwargs: Any) -> list[Any]:
-        return []
-
-    async def _api(self: Any) -> tuple[Any, str, str]:
-        return object(), _ACCOUNT_A, _TOKEN
-
-    monkeypatch.setattr(config_flow, "_try_probe_devices", _no_devices)
-    monkeypatch.setattr(config_flow.ConfigFlow, "_async_build_api_and_username", _api)
-    monkeypatch.setattr(
-        hass.config_entries, "async_setup", AsyncMock(return_value=True)
-    )
-
+    _stub_entry_creation(hass, monkeypatch)
     first = await _submitted_card(hass, _ACCOUNT_A, "M1M1")
     await _discover(hass, _payload(_ACCOUNT_A, shared_key="M2M2"))
     assert len(_cards(hass, _ACCOUNT_A)) == 2
@@ -496,6 +503,50 @@ async def test_a_new_entry_logs_the_cards_it_closes(
     assert len(records) == 1
     assert "closed 1 other" in records[0].getMessage()
     assert _ACCOUNT_A not in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_new_entry_from_a_card_stages_deleting_the_bundle_it_imported(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entry created from a card stages the delete of exactly that bundle.
+
+    The entry is created on the submit of the device selection. The staged job
+    must name the confirmed bundle's account and content digest, and its ticket
+    must survive the flow removal Home Assistant performs right after the
+    entry is created; otherwise the consumed bundle stays on disk and the
+    watcher offers it again after a restart.
+    """
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    _stub_entry_creation(hass, monkeypatch)
+    card = await _discover(hass, _payload(_ACCOUNT_A, shared_key="C1C1"))
+    # The content the card carries is the bundle the entry will import.
+    confirmed = hass.config_entries.flow._progress[
+        card["flow_id"]
+    ]._pending_discovery_payload
+    assert confirmed is not None
+    await hass.config_entries.flow.async_configure(card["flow_id"], {})
+
+    result = await hass.config_entries.flow.async_configure(card["flow_id"], {})
+    assert result["type"] == "create_entry"
+
+    tickets = hass.data.get(config_flow.DOMAIN, {}).get(
+        config_flow.PENDING_CONTAINER_CLEANUP_KEY
+    )
+    assert tickets, "no cleanup ticket survived the created entry"
+    jobs = [job for ticket in tickets for job in ticket.jobs]
+    assert len(jobs) == 1
+    assert jobs[0].imported_stable_key == (
+        config_flow._stable_key_for_discovery_payload(confirmed)
+    )
+    assert jobs[0].imported_digest == config_flow._digest_for_discovery_payload(
+        confirmed
+    )
+    assert jobs[0].imported_digest is not None
 
 
 # --- After a confirmation: a younger bundle on disk comes back ----------------
