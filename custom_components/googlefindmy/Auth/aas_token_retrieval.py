@@ -56,7 +56,7 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
-from .log_safety import describe_exception, exception_origin
+from .log_safety import describe_exception, exception_origin, is_ephemeral_cache
 from .token_cache import TokenCache
 from .username_provider import username_string
 
@@ -231,10 +231,16 @@ async def _get_or_generate_android_id(
         return cached_android_id
 
     android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
-    _LOGGER.warning(
-        "Generated new android_id for %s; cache was missing a stored identifier.",
-        _mask_email_for_logs(username),
-    )
+    if is_ephemeral_cache(cache):
+        _LOGGER.debug(
+            "Probe-only android_id generated for %s; nothing is stored",
+            _mask_email_for_logs(username),
+        )
+    else:
+        _LOGGER.warning(
+            "Generated new android_id for %s; cache was missing a stored identifier.",
+            _mask_email_for_logs(username),
+        )
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001

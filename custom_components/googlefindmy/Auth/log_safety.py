@@ -139,3 +139,14 @@ def exception_origin(exc: BaseException) -> str:
         return f"{PurePath(frame.filename).name}:{frame.lineno} in {frame.name}"
     except BaseException:  # noqa: BLE001 - the traceback is the producer's too
         return "no traceback (unprintable)"
+
+
+def is_ephemeral_cache(cache: object) -> bool:
+    """Return whether ``cache`` holds values in memory for one probe only.
+
+    Such a cache stores nothing: an identifier generated against it lives as
+    long as the probe, so generating one there is expected rather than a sign
+    of a missing stored value.
+    """
+
+    return getattr(cache, "ephemeral", False) is True

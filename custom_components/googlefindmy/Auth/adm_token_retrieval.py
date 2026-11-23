@@ -67,7 +67,7 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
-from .log_safety import describe_exception, exception_origin
+from .log_safety import describe_exception, exception_origin, is_ephemeral_cache
 from .token_cache import TokenCache
 from .token_retrieval import (
     InvalidAasTokenError,
@@ -264,10 +264,16 @@ async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> 
         return cached_android_id
 
     android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
-    _LOGGER.warning(
-        "Generated new android_id for %s; cache was missing a stored identifier.",
-        _mask_email(username),
-    )
+    if is_ephemeral_cache(cache):
+        _LOGGER.debug(
+            "Probe-only android_id generated for %s; nothing is stored",
+            _mask_email(username),
+        )
+    else:
+        _LOGGER.warning(
+            "Generated new android_id for %s; cache was missing a stored identifier.",
+            _mask_email(username),
+        )
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
@@ -345,6 +351,27 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _log_isolated_android_id(
+    username: str, cache_set: Callable[[str, Any], Awaitable[None]] | None
+) -> None:
+    """Log a generated android_id of an isolated exchange at the right level.
+
+    Without a setter nothing is stored; with one, its owner decides whether the
+    value outlives the probe (see ``log_safety.is_ephemeral_cache``).
+    """
+
+    if cache_set is None or is_ephemeral_cache(getattr(cache_set, "__self__", None)):
+        _LOGGER.debug(
+            "Probe-only android_id generated for %s; nothing is stored",
+            _mask_email(username),
+        )
+    else:
+        _LOGGER.warning(
+            "Generated new android_id for %s during isolated exchange; cache was missing a stored identifier.",
+            _mask_email(username),
+        )
+
+
 async def _resolve_android_id_for_isolated_flow(
     username: str,
     *,
@@ -402,10 +429,7 @@ async def _resolve_android_id_for_isolated_flow(
         return cached_android_id
 
     android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
-    _LOGGER.warning(
-        "Generated new android_id for %s during isolated exchange; cache was missing a stored identifier.",
-        _mask_email(username),
-    )
+    _log_isolated_android_id(username, cache_set)
     if cache_set is not None:
         try:
             await cache_set(cache_key, android_id)
