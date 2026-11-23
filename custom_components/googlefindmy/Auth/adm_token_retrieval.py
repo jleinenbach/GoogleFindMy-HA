@@ -67,7 +67,12 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
-from .log_safety import describe_exception, exception_origin, is_ephemeral_cache
+from .log_safety import (
+    describe_exception,
+    entry_label_for_log,
+    exception_origin,
+    is_ephemeral_cache,
+)
 from .token_cache import TokenCache
 from .token_retrieval import (
     InvalidAasTokenError,
@@ -271,7 +276,9 @@ async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> 
         )
     else:
         _LOGGER.warning(
+            "entry_id=%s: "
             "Generated new android_id for %s; cache was missing a stored identifier.",
+            entry_label_for_log(cache),
             _mask_email(username),
         )
     try:
@@ -367,7 +374,9 @@ def _log_isolated_android_id(
         )
     else:
         _LOGGER.warning(
+            "entry_id=%s: "
             "Generated new android_id for %s during isolated exchange; cache was missing a stored identifier.",
+            entry_label_for_log(getattr(cache_set, "__self__", None)),
             _mask_email(username),
         )
 
@@ -566,15 +575,19 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                         continue
 
                     _LOGGER.error(
+                        "entry_id=%s: "
                         "ADM token: generation failed. No OAuth fallback available. "
                         "Error: %s",
+                        entry_label_for_log(cache),
                         auth_err,
                     )
                     break
 
                 _LOGGER.error(
+                    "entry_id=%s: "
                     "ADM token: generation failed. AAS token invalid and unrecoverable. "
                     "Error: %s",
+                    entry_label_for_log(cache),
                     auth_err,
                 )
                 break
@@ -590,15 +603,18 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 if not retryable:
                     if retry_num > 0:
                         _LOGGER.error(
+                            "entry_id=%s: "
                             "ADM exchange failed (retry %d/%d). No more retries. "
                             "Error: %s",
+                            entry_label_for_log(cache),
                             retry_num,
                             max_retries,
                             describe_exception(exc),
                         )
                     else:
                         _LOGGER.error(
-                            "ADM exchange failed. Error: %s",
+                            "entry_id=%s: ADM exchange failed. Error: %s",
+                            entry_label_for_log(cache),
                             describe_exception(exc),
                         )
                     break
@@ -612,13 +628,16 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "ADM exchange failed. Error: %s. Retrying...",
+                        "entry_id=%s: ADM exchange failed. Error: %s. Retrying...",
+                        entry_label_for_log(cache),
                         describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
+                        "entry_id=%s: "
                         "ADM exchange failed (retry %d/%d). Error: %s. "
                         "Retrying in %.0fs...",
+                        entry_label_for_log(cache),
                         retry_num,
                         max_retries,
                         describe_exception(exc),
@@ -855,7 +874,8 @@ async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
             last_exc = exc
             if _is_non_retryable_auth(exc) or attempt >= attempts - 1:
                 _LOGGER.error(
-                    "Isolated ADM exchange failed%s for %s: %s",
+                    "entry_id=%s: Isolated ADM exchange failed%s for %s: %s",
+                    entry_label_for_log(getattr(cache_set, "__self__", None)),
                     "" if attempt >= attempts - 1 else " (non-retryable)",
                     _mask_email(user),
                     describe_exception(exc),

@@ -150,3 +150,15 @@ def is_ephemeral_cache(cache: object) -> bool:
     """
 
     return getattr(cache, "ephemeral", False) is True
+
+
+def entry_label_for_log(cache: object) -> str:
+    """Return the config entry id of ``cache`` for a log line, or ``-``.
+
+    The entry-scoped token cache carries ``entry_id``; the file cache and the
+    in-memory probe cache have none (or an empty one) and log ``-``. The
+    entry id is not account data, so it may appear in the message itself.
+    """
+
+    entry_id = getattr(cache, "entry_id", None)
+    return entry_id if isinstance(entry_id, str) and entry_id else "-"
