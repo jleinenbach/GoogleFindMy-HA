@@ -552,25 +552,19 @@ async def test_a_new_entry_from_a_card_stages_deleting_the_bundle_it_imported(
 # --- After a confirmation: a younger bundle on disk comes back ----------------
 
 
-@pytest.fixture
-async def watched_bundle(
-    hass: HomeAssistant,
-    configured_accounts: set[str],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> AsyncIterator[tuple[Path, Any]]:
-    """Run the real watcher over one file and let it start real flows.
+async def _start_watcher(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, paths: list[Path]
+) -> Any:
+    """Run the real watcher over ``paths`` and let it start real flows.
 
     Only the hop through Home Assistant's discovery helper is replaced: the
     watcher's dispatch builds the payload with the production helper and starts
-    the flow through ``async_init``. The account counts as configured, so a
-    confirmed card waits in the overwrite question.
+    the flow through ``async_init``.
     """
 
     from custom_components.googlefindmy import config_flow, discovery  # noqa: PLC0415
 
-    path = tmp_path / "data" / "secrets.json"
-    monkeypatch.setattr(discovery, "_default_watch_paths", lambda: [path])
+    monkeypatch.setattr(discovery, "_default_watch_paths", lambda: list(paths))
     monkeypatch.setattr(discovery, "_collect_extra_watch_paths", lambda *_a, **_k: [])
     monkeypatch.setattr(discovery, "async_track_time_interval", lambda *_: lambda: None)
 
@@ -588,22 +582,41 @@ async def watched_bundle(
         return discovery.CloudDiscoveryOutcome.ACCEPTED
 
     monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _trigger)
-    configured_accounts.add(_ACCOUNT_A)
 
     manager = discovery.DiscoveryManager(hass)
     await manager.async_start()
     hass.data.setdefault(config_flow.DOMAIN, {})["discovery_manager"] = manager
+    return manager
+
+
+@pytest.fixture
+async def watched_bundle(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> AsyncIterator[tuple[Path, Any]]:
+    """One watched file; the account counts as configured.
+
+    A confirmed card therefore waits in the overwrite question.
+    """
+
+    path = tmp_path / "data" / "secrets.json"
+    configured_accounts.add(_ACCOUNT_A)
+    manager = await _start_watcher(hass, monkeypatch, [path])
     try:
         yield path, manager
     finally:
         await manager.async_stop()
 
 
-def _write_bundle(path: Path, shared_key: str, mtime: int) -> None:
+def _write_bundle(
+    path: Path, shared_key: str, mtime: int, *, token: str = _TOKEN
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
-            {"google_email": _ACCOUNT_A, "aas_token": _TOKEN, "shared_key": shared_key}
+            {"google_email": _ACCOUNT_A, "aas_token": token, "shared_key": shared_key}
         ),
         encoding="utf-8",
     )
@@ -702,3 +715,253 @@ def test_rearm_keeps_the_confirmed_digest_settled(tmp_path: Path) -> None:
     assert rearm("email:a", keep_digest="confirmed") == 2
     assert watcher._settled_signatures == {"email:a:confirmed", "email:b:x"}
     assert watcher._retry_attempts == {"email:a:younger": 1}
+
+
+# --- A confirmation imports the newest bundle of the account ------------------
+
+_OLDER_TOKEN = "aas_et/" + "O" * 80
+_YOUNGER_TOKEN = "aas_et/" + "Y" * 80
+
+
+@pytest.fixture
+async def two_watched_files(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> AsyncIterator[tuple[Path, Path, Any, set[str]]]:
+    """Two watched files and a credential check that keeps the token apart.
+
+    The stubbed check returns the bundle's own token as ``oauth_token``, so the
+    entry tells which bundle was imported. Tokens in the yielded set fail the
+    check with ``cannot_connect``.
+    """
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+    from custom_components.googlefindmy.const import (  # noqa: PLC0415
+        CONF_GOOGLE_EMAIL,
+        CONF_OAUTH_TOKEN,
+    )
+
+    failing: set[str] = set()
+
+    async def _ingest(
+        flow: Any,
+        normalized: Any,
+        *,
+        existing_entry: Any | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        token = normalized.secrets_bundle["aas_token"]
+        if token in failing:
+            raise config_flow.DiscoveryFlowError("cannot_connect")
+        auth = {CONF_OAUTH_TOKEN: token, CONF_GOOGLE_EMAIL: normalized.email}
+        updates = dict(auth) if normalized.email in configured_accounts else None
+        return auth, updates
+
+    monkeypatch.setattr(config_flow, "_ingest_discovery_credentials", _ingest)
+    _stub_entry_creation(hass, monkeypatch)
+    first = tmp_path / "auth" / "secrets.json"
+    second = tmp_path / "data" / "secrets.json"
+    manager = await _start_watcher(hass, monkeypatch, [first, second])
+    try:
+        yield first, second, manager, failing
+    finally:
+        await manager.async_stop()
+
+
+def _imported_token(hass: HomeAssistant) -> Any:
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+    from custom_components.googlefindmy.const import (  # noqa: PLC0415
+        CONF_OAUTH_TOKEN,
+    )
+
+    (entry,) = hass.config_entries.async_entries(config_flow.DOMAIN)
+    return entry.data.get(CONF_OAUTH_TOKEN)
+
+
+async def _card_for_older_bundle(hass: HomeAssistant, first: Path, manager: Any) -> str:
+    _write_bundle(first, "O1O1", 1_000, token=_OLDER_TOKEN)
+    await _scan(hass, manager)
+    (card,) = _cards(hass, _ACCOUNT_A)
+    return str(card["flow_id"])
+
+
+@pytest.mark.asyncio
+async def test_confirmation_imports_the_younger_of_two_bundles(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The card carries the older bundle; the younger one on disk is imported."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    _write_bundle(second, "Y1Y1", 2_000, token=_YOUNGER_TOKEN)
+
+    caplog.set_level(logging.INFO, logger=config_flow.__name__)
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+    replaced = [
+        record
+        for record in caplog.records
+        if "newer sign-in bundle replaced" in record.getMessage()
+    ]
+    assert len(replaced) == 1
+    assert _ACCOUNT_A not in replaced[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_an_older_bundle_on_disk_does_not_replace_the_confirmed_one(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """Only a bundle that is newer than the confirmed content counts."""
+
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    _write_bundle(second, "Y1Y1", 500, token=_YOUNGER_TOKEN)
+
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _OLDER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_accepting_the_overwrite_imports_a_bundle_written_meanwhile(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """A bundle written while the overwrite question is open is the one written."""
+
+    configured_accounts.add(_ACCOUNT_A)
+    _add_configured_entry(hass, _ACCOUNT_A)
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    question = await hass.config_entries.flow.async_configure(card, {})
+    assert question["step_id"] == "discovery_overwrite"
+
+    _write_bundle(second, "Y1Y1", 2_000, token=_YOUNGER_TOKEN)
+    result = await hass.config_entries.flow.async_configure(
+        card, {"overwrite_credentials": True}
+    )
+
+    assert result["reason"] == "credentials_updated"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_a_younger_bundle_that_fails_its_check_imports_nothing(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """The older bundle is not imported instead; the younger one comes back."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    first, second, manager, failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    _write_bundle(second, "Y1Y1", 2_000, token=_YOUNGER_TOKEN)
+    failing.add(_YOUNGER_TOKEN)
+
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "cannot_connect"
+    assert hass.config_entries.async_entries(config_flow.DOMAIN) == []
+
+    failing.clear()
+    await _scan(hass, manager)
+    cards = _cards(hass, _ACCOUNT_A)
+    assert len(cards) == 1
+    assert _shared_key_of(hass, cards[0]["flow_id"]) == "Y1Y1"
+
+
+@pytest.mark.asyncio
+async def test_replacing_while_confirming_imports_once_without_error(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """New content and the confirmation in the same loop turn: one import, no card."""
+
+    configured_accounts.add(_ACCOUNT_A)
+    _add_configured_entry(hass, _ACCOUNT_A)
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    await hass.config_entries.flow.async_configure(card, {})
+
+    _write_bundle(second, "Y1Y1", 2_000, token=_YOUNGER_TOKEN)
+    results = await asyncio.gather(
+        _scan(hass, manager),
+        hass.config_entries.flow.async_configure(card, {"overwrite_credentials": True}),
+    )
+    await hass.async_block_till_done()
+
+    confirmed = results[1]
+    assert confirmed["type"] == "abort"
+    assert confirmed["reason"] == "credentials_updated"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+    assert _cards(hass, _ACCOUNT_A) == []
+
+
+@pytest.mark.asyncio
+async def test_a_card_for_the_bundle_just_answered_is_dropped(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+) -> None:
+    """The same bundle arriving right after the answer raises no new card.
+
+    This is the deterministic half of the race above: whichever order the scan
+    and the confirmation take, a card for the answered content must not stay.
+    A different bundle of the account still raises its card.
+    """
+
+    configured_accounts.add(_ACCOUNT_A)
+    card = await _submitted_card(hass, _ACCOUNT_A, "D1D1")
+    result = await hass.config_entries.flow.async_configure(
+        card["flow_id"], {"overwrite_credentials": False}
+    )
+    assert result["reason"] == "credentials_kept"
+
+    again = await _discover(hass, _payload(_ACCOUNT_A, shared_key="D1D1"))
+
+    assert again["type"] == "abort"
+    assert again["reason"] == "already_configured"
+    assert _cards(hass, _ACCOUNT_A) == []
+    other = await _discover(hass, _payload(_ACCOUNT_A, shared_key="D2D2"))
+    assert other["type"] == "form"
+
+
+@pytest.mark.asyncio
+async def test_a_younger_copy_of_the_confirmed_bundle_is_not_a_newer_one(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same content written again later is not reported as a replacement."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    _write_bundle(second, "O1O1", 3_000, token=_OLDER_TOKEN)
+
+    caplog.set_level(logging.INFO, logger=config_flow.__name__)
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _OLDER_TOKEN
+    assert not [
+        record
+        for record in caplog.records
+        if "newer sign-in bundle replaced" in record.getMessage()
+    ]

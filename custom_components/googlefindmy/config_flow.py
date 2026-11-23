@@ -1039,6 +1039,57 @@ async def _async_delete_watched_secrets(
         )
 
 
+async def _async_freshest_watched_bundle(
+    hass: HomeAssistant | None,
+    *,
+    stable_key: str | None,
+    digest: str | None,
+) -> Any | None:
+    """Return the account's newest watched bundle if it is newer than ``digest``.
+
+    Scans the watched paths with :func:`discovery.scan_secrets_bundles`, the
+    ordering the watcher and the delete-after-import hook use as well, and
+    returns the newest bundle of ``stable_key`` whose content differs from
+    ``digest`` and whose modification time is later than the oldest on-disk
+    copy of the ``digest`` content. If that content is no longer on disk, any
+    bundle of the account counts as newer. Returns ``None`` when there is no
+    such bundle, no discovery manager, or no identity to compare against.
+    """
+
+    if hass is None or stable_key is None or digest is None:
+        return None
+    domain_data = getattr(hass, "data", None)
+    if not isinstance(domain_data, Mapping):
+        return None
+    bucket = domain_data.get(DOMAIN)
+    manager = bucket.get("discovery_manager") if isinstance(bucket, Mapping) else None
+    watch_paths = getattr(manager, "watch_paths", None)
+    if not watch_paths:
+        return None
+
+    # Imported inside the function to avoid a circular import at module load
+    # (discovery imports config_flow).
+    from . import discovery as discovery_module
+
+    paths = [Path(str(path)) for path in watch_paths]
+    scanned = await hass.async_add_executor_job(
+        discovery_module.scan_secrets_bundles, paths
+    )
+    same_account = [
+        result for _path, result in scanned if result.stable_key == stable_key
+    ]
+    confirmed_mtimes = [
+        result.mtime for result in same_account if result.digest == digest
+    ]
+    oldest_confirmed = min(confirmed_mtimes) if confirmed_mtimes else None
+    for result in same_account:
+        if result.digest == digest:
+            continue
+        if oldest_confirmed is None or result.mtime > oldest_confirmed:
+            return result
+    return None
+
+
 def _stable_key_for_discovery_payload(
     payload: CloudDiscoveryData | None,
 ) -> str | None:
@@ -1929,6 +1980,10 @@ def _format_bundle_age(mtime: float) -> str:
 
 
 PENDING_CONTAINER_CLEANUP_KEY = "pending_container_cleanup"
+# In-memory only: per account stable key, the content digest of the discovered
+# bundle a card was last answered with (see
+# ConfigFlow._async_remember_answered_bundle).
+ANSWERED_DISCOVERY_BUNDLES_KEY = "answered_discovery_bundles"
 """``hass.data[DOMAIN]`` key holding the staged, in-memory cleanup tickets."""
 
 PERSIST_PROOF_TIMEOUT = 60.0
@@ -4581,6 +4636,7 @@ class ConfigFlow(
         bundles, which makes the younger one come back as exactly one new card.
         """
 
+        self._async_remember_answered_bundle(payload)
         closed = self._abort_other_discovery_flows(spare_answered=False)
         if closed:
             _LOGGER.info(
@@ -4589,6 +4645,58 @@ class ConfigFlow(
                 _mask_email_for_logs(payload.email if payload is not None else None),
                 closed,
             )
+
+        self._async_rearm_account_bundles(payload)
+
+    def _async_remember_answered_bundle(
+        self, payload: CloudDiscoveryData | None
+    ) -> None:
+        """Record which bundle of the account a card was answered with.
+
+        The watcher can dispatch that same bundle a moment after the answer,
+        when its scan and the confirmation run in the same loop turn; the card
+        it raises would then outlive the closing of the other cards and ask
+        about content that is already answered. ``async_step_discovery`` drops
+        such a card. The record lives in memory only, so after a restart an
+        unchanged bundle is offered again, which is what consumes it.
+        """
+
+        stable_key = _stable_key_for_discovery_payload(payload)
+        digest = _digest_for_discovery_payload(payload)
+        hass_obj = getattr(self, "hass", None)
+        domain_data = getattr(hass_obj, "data", None)
+        if stable_key is None or digest is None or not isinstance(domain_data, dict):
+            return
+        bucket = cast(MutableMapping[str, Any], domain_data.setdefault(DOMAIN, {}))
+        answered = cast(
+            dict[str, str], bucket.setdefault(ANSWERED_DISCOVERY_BUNDLES_KEY, {})
+        )
+        answered[stable_key] = digest
+
+    def _bundle_already_answered(self, payload: CloudDiscoveryData) -> bool:
+        """Return whether ``payload`` is the bundle the account was answered with."""
+
+        domain_data = getattr(getattr(self, "hass", None), "data", None)
+        bucket = domain_data.get(DOMAIN) if isinstance(domain_data, Mapping) else None
+        answered = (
+            bucket.get(ANSWERED_DISCOVERY_BUNDLES_KEY)
+            if isinstance(bucket, Mapping)
+            else None
+        )
+        if not isinstance(answered, Mapping):
+            return False
+        stable_key = _stable_key_for_discovery_payload(payload)
+        return stable_key is not None and answered.get(
+            stable_key
+        ) == _digest_for_discovery_payload(payload)
+
+    def _async_rearm_account_bundles(self, payload: CloudDiscoveryData | None) -> None:
+        """Let the watcher offer the account's bundles other than ``payload`` again.
+
+        The watcher remembers every bundle it has dispatched. A bundle whose
+        card was closed, or that a confirmation could not import, would never
+        be offered again; forgetting it makes it come back as one new card.
+        """
 
         stable_key = _stable_key_for_discovery_payload(payload)
         if stable_key is None:
@@ -4604,6 +4712,70 @@ class ConfigFlow(
         manager.rearm_account(
             stable_key, keep_digest=_digest_for_discovery_payload(payload)
         )
+
+    async def _async_take_freshest_bundle(
+        self, payload: CloudDiscoveryData, auth_data: dict[str, Any]
+    ) -> tuple[CloudDiscoveryData, dict[str, Any]] | None:
+        """Swap in the account's newest watched bundle before it is imported.
+
+        A card shows the content it was raised with, but the login container
+        may have written a newer bundle of the same account since. Importing
+        the card's content would then put older credentials over newer ones.
+        So the newest bundle on disk is validated here and replaces the card's
+        content; without a newer one, ``payload`` and ``auth_data`` come back
+        unchanged.
+
+        Returns ``None`` when the newer bundle fails its check. The caller ends
+        the confirmation then rather than importing the older content, and the
+        newer bundle is re-armed so it comes back as a card of its own.
+        """
+
+        hass_obj = getattr(self, "hass", None)
+        fresher = await _async_freshest_watched_bundle(
+            hass_obj,
+            stable_key=_stable_key_for_discovery_payload(payload),
+            digest=_digest_for_discovery_payload(payload),
+        )
+        if fresher is None:
+            return payload, auth_data
+
+        from . import discovery as discovery_module
+
+        info = discovery_module._assemble_cloud_discovery_payload(
+            email=fresher.email,
+            token=fresher.token,
+            secrets_bundle=fresher.bundle,
+            discovery_ns="",
+            discovery_stable_key=fresher.stable_key,
+            title=payload.title,
+            source=payload.source,
+        )
+        existing_entry: ConfigEntry | None = None
+        if hass_obj is not None and hasattr(hass_obj, "config_entries"):
+            existing_entry = _find_entry_by_email(
+                cast(HomeAssistant, hass_obj), payload.email
+            )
+        try:
+            normalized = _normalize_and_validate_discovery_payload(info)
+            new_auth, _updates = await _ingest_discovery_credentials(
+                self, normalized, existing_entry=existing_entry
+            )
+        except DiscoveryFlowError as err:
+            _LOGGER.warning(
+                "Discovery for %s: the newer sign-in bundle on disk failed its "
+                "check (%s); nothing was imported",
+                _mask_email_for_logs(payload.email),
+                err.reason,
+            )
+            self._async_rearm_account_bundles(payload)
+            return None
+
+        _LOGGER.info(
+            "Discovery for %s: a newer sign-in bundle replaced the confirmed one",
+            _mask_email_for_logs(payload.email),
+        )
+        self._auth_data = new_auth
+        return normalized, dict(new_auth)
 
     async def _async_supersede_discovery_flows(self) -> int:
         """Abort the other open discovery cards of this flow's account.
@@ -4689,6 +4861,16 @@ class ConfigFlow(
             )
             return self.async_abort(reason="invalid_discovery_info")
 
+        # Checked before the first await, so a card for this content either
+        # exists when the answer closes the other cards, or sees the record.
+        if self._bundle_already_answered(normalized):
+            _LOGGER.debug(
+                "Discovery for %s ignored: another card was just answered with "
+                "this bundle",
+                _mask_email_for_logs(normalized.email),
+            )
+            return self.async_abort(reason="already_configured")
+
         existing_entry = await self._async_prepare_account_context(
             email=normalized.email,
             preferred_unique_id=normalized.unique_id,
@@ -4755,6 +4937,14 @@ class ConfigFlow(
             return self.async_abort(reason="invalid_discovery_info")
 
         self._clear_discovery_confirmation_state()
+
+        if pending_auth is not None:
+            freshest = await self._async_take_freshest_bundle(
+                pending_payload, pending_auth
+            )
+            if freshest is None:
+                return self.async_abort(reason="cannot_connect")
+            pending_payload, pending_auth = freshest
 
         if entry_exists and pending_auth is not None:
             # The account is already configured and someone supplied
@@ -4979,6 +5169,11 @@ class ConfigFlow(
                 )
                 self._async_abort_sibling_discovery_flows(payload)
                 return self.async_abort(reason="credentials_kept")
+
+            freshest = await self._async_take_freshest_bundle(payload, auth_data)
+            if freshest is None:
+                return self.async_abort(reason="cannot_connect")
+            payload, auth_data = freshest
 
             rebased = self._async_rebase_credential_updates(payload.email, auth_data)
             if rebased is None:
