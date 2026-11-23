@@ -3218,6 +3218,11 @@ def _extract_shell_block(
     return "\n".join(block)
 
 
+# A PID that is alive for the whole test: the display wait checks that
+# supervisord still runs, and the pytest process stands in for it.
+_LIVE_SUPERVISOR_ENV = {"DISPLAY": ":99", "SUPERVISOR_PID": str(os.getpid())}
+
+
 def _extract_display_wait(entrypoint: str) -> str:
     """Return the X-display wait, from its banner through its warning."""
 
@@ -3226,7 +3231,7 @@ def _extract_display_wait(entrypoint: str) -> str:
         banner='echo "[entrypoint] Waiting for X display',
         opener='if [ -z "${_display_ready}"',
         must_contain=("xdpyinfo", "_display_ready", "did not come up within"),
-        max_lines=30,
+        max_lines=40,
         label="the X-display wait",
     )
 
@@ -3427,15 +3432,17 @@ def test_a_display_that_never_comes_up_says_so(tmp_path: Path) -> None:
 
     A silent expiry here surfaces later as a keyboard layout that will not apply
     and a browser that never appears -- two symptoms, no cause. Not fatal on
-    purpose: Chrome may still come up a moment later, and aborting would turn a
-    slow start into a failed login.
+    purpose while supervisord is alive: Chrome may still come up a moment
+    later, and aborting would turn a slow start into a failed login. A dead
+    supervisord is the other case, see
+    ``test_a_dead_supervisord_aborts_the_display_wait_at_once``.
     """
 
     bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
     _stub_bin(tmp_path, "xdpyinfo", "exit 1\n")
     fragment = _extract_display_wait(_read("entrypoint.sh"))
 
-    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+    proc = _run_shell_fragment(fragment, ":", bin_dir, _LIVE_SUPERVISOR_ENV)
 
     assert "REACHED_END" in proc.stdout, (
         f"the wait must not abort the script (stderr={proc.stderr!r})"
@@ -3455,7 +3462,7 @@ def test_a_display_that_comes_up_stays_quiet(tmp_path: Path) -> None:
     _stub_bin(tmp_path, "xdpyinfo", "exit 0\n")
     fragment = _extract_display_wait(_read("entrypoint.sh"))
 
-    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+    proc = _run_shell_fragment(fragment, ":", bin_dir, _LIVE_SUPERVISOR_ENV)
 
     assert proc.stdout.count("Display ready.") == 1, (
         "the loop must stop at the first answer; without the `break` it reports "
@@ -3463,6 +3470,93 @@ def test_a_display_that_comes_up_stays_quiet(tmp_path: Path) -> None:
     )
     assert "did not come up" not in proc.stderr, (
         f"a ready display must not warn (stderr={proc.stderr!r})"
+    )
+
+
+def test_a_dead_supervisord_aborts_the_display_wait_at_once(tmp_path: Path) -> None:
+    """A supervisord that already exited must end the wait now, loudly.
+
+    Selenium images built since 2026-11-20 ship a ``recorder.conf`` that
+    supervisord refuses without ``SE_VIDEO_READY_ENABLED``
+    (BSkando/GoogleFindMy-HA#248). The old wait then spent its full bound and
+    printed only "continuing anyway", while nothing could ever start: no display,
+    no VNC, no browser. A dead PID must abort on the first failed probe, name
+    supervisord as the cause, and return nonzero.
+    """
+
+    tries = tmp_path / "xdpyinfo.tries"
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "xdpyinfo", f'printf x >> "{tries}"\nexit 1\n')
+    # As in the real entrypoint, supervisord is this shell's own background
+    # child; here it exits at once and is reaped before the wait begins.
+    dead_child = (
+        "sh -c 'exit 2' &\nSUPERVISOR_PID=$!\nwait \"${SUPERVISOR_PID}\" || true\n"
+    )
+    fragment = dead_child + _extract_display_wait(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+
+    assert proc.returncode != 0, (
+        f"a dead supervisord must fail the run (stdout={proc.stdout!r})"
+    )
+    assert "REACHED_END" not in proc.stdout, (
+        "the entrypoint must not continue past a dead supervisord"
+    )
+    assert "ERROR: supervisord exited" in proc.stderr, (
+        f"the abort must name supervisord as the cause (stderr={proc.stderr!r})"
+    )
+    assert tries.read_text(encoding="utf-8") == "x", (
+        "the liveness check belongs INSIDE the loop: one failed probe, then stop, "
+        "not the whole bound of waiting for a display that cannot come"
+    )
+
+
+def test_entrypoint_exports_video_ready_flag_before_supervisord(
+    tmp_path: Path,
+) -> None:
+    """supervisord must inherit ``SE_VIDEO_READY_ENABLED``, defaulting to false.
+
+    The base image's own entry_point.sh exports it; ours replaces that script,
+    so without this line supervisord rejects ``recorder.conf`` and no display
+    starts (BSkando/GoogleFindMy-HA#248). Checked in a CHILD process: a plain
+    assignment without ``export`` reads back fine in the same shell yet never
+    reaches supervisord. An explicit value from the environment must win.
+    """
+
+    code = [line.strip() for line in _code_lines(_read("entrypoint.sh"))]
+    export_at = [
+        i
+        for i, line in enumerate(code)
+        if line.startswith("export SE_VIDEO_READY_ENABLED=")
+    ]
+    assert len(export_at) == 1, (
+        f"expected exactly one export of SE_VIDEO_READY_ENABLED, got {export_at!r}"
+    )
+    lines = [code[export_at[0]]]
+    launch_at = [
+        i for i, line in enumerate(code) if 'bin/supervisord" --configuration' in line
+    ]
+    assert launch_at, "entrypoint.sh must launch supervisord"
+    export_idx, launch_idx = export_at[0], launch_at[0]
+    assert export_idx < launch_idx, (
+        "SE_VIDEO_READY_ENABLED must be exported BEFORE supervisord starts"
+    )
+
+    def child_value(env: dict[str, str]) -> str:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, test-local env
+            ["bash", "-c", f"{lines[0]}\nprintenv SE_VIDEO_READY_ENABLED || true"],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", **env},
+            check=False,
+        )
+        return proc.stdout.strip()
+
+    assert child_value({}) == "false", (
+        "unset, the helper (which never records video) must hand supervisord false"
+    )
+    assert child_value({"SE_VIDEO_READY_ENABLED": "true"}) == "true", (
+        "an explicit value from the environment must win over the default"
     )
 
 
@@ -3574,7 +3668,7 @@ def test_the_warnings_report_the_bound_their_loop_actually_used(
     display = _extract_display_wait(entrypoint)
     display, subs = re.subn(r"_display_wait_secs=\d+", "_display_wait_secs=2", display)
     assert subs == 1, "the X-display wait must take its bound from `_display_wait_secs`"
-    proc = _run_shell_fragment(display, ":", bin_dir, {"DISPLAY": ":99"})
+    proc = _run_shell_fragment(display, ":", bin_dir, _LIVE_SUPERVISOR_ENV)
     assert "did not come up within 2s" in proc.stderr, (
         "the display warning must quote the bound the loop ran, not a literal "
         f"(stderr={proc.stderr!r})"

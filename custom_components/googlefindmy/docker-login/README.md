@@ -649,7 +649,9 @@ there is no separate image to rebuild for code changes.
   executable in the repository. `bash login.sh` needs no execute bit and survives
   every HACS update; that is why the commands above use this form.
 - **noVNC page won't load:** give the container a few seconds; check
-  `docker compose logs` for `[entrypoint] Display ready.`
+  `docker compose logs` for `[entrypoint] Display ready.` If it shows
+  `[entrypoint] ERROR: supervisord exited` instead, the lines above it name
+  the cause.
 - **A character will not type ("@", "\\", "|", "€"):** those are AltGr
   characters, which a VNC viewer handles differently from the rest. Paste them
   instead — the panel on the left edge of the noVNC window has a *Clipboard*
