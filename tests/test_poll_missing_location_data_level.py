@@ -138,3 +138,20 @@ async def test_missing_location_data_level_is_kept_per_tracker(
     )
     assert levels_a == [logging.INFO, logging.DEBUG, logging.INFO]
     assert levels_b == [logging.INFO, logging.DEBUG, logging.DEBUG]
+
+
+def test_missing_location_data_state_starts_on_a_bare_coordinator(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A coordinator built without ``__init__`` creates the state on first use."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    assert getattr(coordinator, "_missing_location_data_noted", None) is None
+
+    with caplog.at_level(logging.DEBUG, logger=_POLLING_LOGGER):
+        coordinator._note_missing_location_data("dev-bare", "Tag dev-bare")
+        coordinator._note_missing_location_data("dev-bare", "Tag dev-bare")
+
+    levels = [rec.levelno for rec in _missing_records(caplog, "dev-bare")]
+    assert levels == [logging.INFO, logging.DEBUG]
+    assert coordinator._missing_location_data_noted == {"dev-bare"}

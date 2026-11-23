@@ -345,8 +345,8 @@ class PollingOperations(_MixinBase):
         logs at INFO by the device id only and every further one at DEBUG,
         until an answer of the poll cycle carries a location again and
         ``_clear_missing_location_data`` runs (log-when-unavailable). A
-        location from a push or a manual locate does not reset it. The display name stays at DEBUG (AGENTS.md
-        section 5 (b)).
+        location from a push or a manual locate does not reset it. The
+        display name stays at DEBUG (AGENTS.md section 5 (b)).
         """
         noted = getattr(self, "_missing_location_data_noted", None)
         if noted is None:
