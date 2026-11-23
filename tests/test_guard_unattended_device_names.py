@@ -100,10 +100,11 @@ _DEBUG_LEVEL_SPELLINGS = frozenset(
 )
 
 # (path relative to the package, qualified name, minimum number of log calls
-# above DEBUG measured on 2026-10-18, the last two rows on 2026-11-08). The
-# minimum is the vacuum guard: a function that shrinks below it was renamed,
-# moved or rewritten, and the guard would no longer see what it was written
-# for.
+# above DEBUG measured on 2026-10-18, the last two rows on 2026-11-08; the
+# poll-cycle rows on 2026-11-23, when the "no location data" record moved into
+# its own helper). The minimum is the vacuum guard: a function that shrinks
+# below it was renamed, moved or rewritten, and the guard would no longer see
+# what it was written for.
 _UNATTENDED_FUNCTIONS: tuple[tuple[str, str, int], ...] = (
     ("api.py", "GoogleFindMyAPI.async_get_device_location", 11),
     ("ProtoDecoders/decoder.py", "get_devices_with_location", 7),
@@ -112,7 +113,8 @@ _UNATTENDED_FUNCTIONS: tuple[tuple[str, str, int], ...] = (
         "RegistryOperations._ensure_registry_for_devices._heal_tracker_device_subentry",
         1,
     ),
-    ("coordinator/polling.py", "PollingOperations._async_start_poll_cycle", 15),
+    ("coordinator/polling.py", "PollingOperations._async_start_poll_cycle", 14),
+    ("coordinator/polling.py", "PollingOperations._note_missing_location_data", 1),
     ("google_home_filter.py", "GoogleHomeFilter.should_filter_detection", 2),
 )
 

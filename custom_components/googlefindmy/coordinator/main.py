@@ -991,6 +991,9 @@ class GoogleFindMyCoordinator(
         # Consecutive empty location results per device id; drives the
         # once-only INFO record for a silent device (log-when-unavailable).
         self._empty_location_streak: dict[str, int] = {}
+        # Device ids already reported at INFO for an answer without coordinates
+        # or semantic name; cleared when a location arrives again.
+        self._missing_location_data_noted: set[str] = set()
 
         # Granular status tracking (API polling vs. push transport)
         self._api_status_state: str = ApiStatus.UNKNOWN
@@ -2851,6 +2854,10 @@ class GoogleFindMyCoordinator(
         silence_streaks = getattr(self, "_empty_location_streak", None)
         if silence_streaks is not None:
             silence_streaks.pop(device_id, None)
+        # Nor the "already reported" state of an answer without location data.
+        noted = getattr(self, "_missing_location_data_noted", None)
+        if noted is not None:
+            noted.discard(device_id)
         # The tally claim is keyed by device id and is PERSISTED, so it outlives the
         # purge unless it is dropped here: a deleted device would keep an entry in the
         # store indefinitely, and one re-added under the same id would have its first

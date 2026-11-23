@@ -108,6 +108,7 @@ class _MixinBase:
     _consecutive_timeouts: int
     _last_poll_result: str | None
     _empty_location_streak: dict[str, int]
+    _missing_location_data_noted: set[str]
     _last_device_list: list[dict[str, Any]]
     _empty_list_streak: int
     _stale_device_misses: dict[str, int]
