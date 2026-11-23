@@ -6690,14 +6690,14 @@ types-webencodings = "*"
 
 [[package]]
 name = "types-pysocks"
-version = "1.7.1.20260518"
+version = "1.7.1.20261115"
 description = "Typing stubs for PySocks"
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "types_pysocks-1.7.1.20260518-py3-none-any.whl", hash = "sha256:2adc0bb2f696017ea6a8ed834d3f74d4d8b347b19a0ef25e96e939737f222295"},
-    {file = "types_pysocks-1.7.1.20260518.tar.gz", hash = "sha256:0ef3ae07bff70b2baa21b2ee323a724ceb7b242d13102528c5b495bbf2dc053c"},
+    {file = "types_pysocks-1.7.1.20261115-py3-none-any.whl", hash = "sha256:5b3cc8cb647963aa5e6e7e7443339c54fbdad7be54d4e12dfcf1e56fb86aa1b2"},
+    {file = "types_pysocks-1.7.1.20261115.tar.gz", hash = "sha256:45359c6e948abae4837e37c82cc4c36c2e4ccdd519f74e300d5c93791cdaf856"},
 ]
 
 [[package]]
