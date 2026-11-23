@@ -7517,9 +7517,45 @@ async def _ensure_post_migration_consistency(
 # executing the previously imported module. We surface that mismatch as a global,
 # non-fixable Repairs issue so the user knows a *Home Assistant restart* (not merely an
 # integration reload) is required to activate the installed version.
+#
+# HACS and the Home Assistant core ``marketplace`` component raise their own fixable
+# restart issue (with a restart button) for the integration they just updated. While
+# such an issue is active, this watchdog stays silent so the user does not see the same
+# notice twice; it remains the only notice for manual installations.
 # --------------------------------------------------------------------------------------
 _RESTART_CHECK_INITIAL_DELAY: float = 30.0
 _RESTART_CHECK_INTERVAL: timedelta = timedelta(hours=1)
+
+# Issue domains and issue-id prefix used by the providers that raise their own restart
+# issue: HACS (``custom_components/hacs/repositories/integration.py``) and Home
+# Assistant core (``homeassistant/components/marketplace/repositories/integration.py``).
+# Both create ``restart_required_<repository id>_<ref>`` with ``issue_domain`` set to
+# the updated integration's domain.
+_RESTART_ISSUE_PROVIDERS: frozenset[str] = frozenset({"hacs", "marketplace"})
+_RESTART_ISSUE_PROVIDER_PREFIX = "restart_required_"
+
+
+def _provider_restart_issue_pending(hass: HomeAssistant) -> bool:
+    """Return True if HACS or Marketplace holds an active restart issue for us.
+
+    A dismissed provider issue still counts: the user has acknowledged the restart
+    notice once, and a second issue for the same restart would duplicate it. Any
+    failure while reading the registry returns False, so the watchdog falls back to
+    raising its own issue.
+    """
+
+    try:
+        registry = ir.async_get(hass)
+        return any(
+            entry.domain in _RESTART_ISSUE_PROVIDERS
+            and entry.issue_domain == DOMAIN
+            and entry.active
+            and entry.issue_id.startswith(_RESTART_ISSUE_PROVIDER_PREFIX)
+            for entry in registry.issues.values()
+        )
+    except Exception as err:  # noqa: BLE001 - fall back to our own issue
+        _LOGGER.debug("Restart check: could not inspect provider issues: %s", err)
+        return False
 
 
 def _read_installed_version_sync() -> str | None:
@@ -7549,7 +7585,9 @@ async def _async_check_restart_required(hass: HomeAssistant) -> None:
     """Raise or clear the global "restart required" Repairs issue.
 
     The running module carries ``INTEGRATION_VERSION``; the on-disk manifest reflects what
-    HACS has installed. A mismatch means a restart is pending. On equality or any read
+    HACS has installed. A mismatch means a restart is pending. If HACS or the
+    Marketplace already show their own restart issue for this integration, our issue
+    is cleared instead of raised, so the user sees one notice. On equality or any read
     error the issue is cleared (self-healing, create/delete symmetric). This coroutine
     never raises into Home Assistant.
     """
@@ -7563,6 +7601,9 @@ async def _async_check_restart_required(hass: HomeAssistant) -> None:
             # is popped by _teardown_restart_required_check (Codex-P1 class:
             # tick firing after unload).
             if not _domain_data(hass).get("restart_check_registered"):
+                return
+            if _provider_restart_issue_pending(hass):
+                ir.async_delete_issue(hass, DOMAIN, ISSUE_RESTART_REQUIRED_KEY)
                 return
             issue_severity = getattr(ir, "IssueSeverity", None)
             if issue_severity is not None:
