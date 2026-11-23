@@ -263,6 +263,14 @@ else
   echo "[entrypoint] Keyboard fix disabled (GFMY_KEYBOARD_FIX=0)."
 fi
 
+# Selenium images built since 2026-11-20 ship the video stage's recorder.conf,
+# whose [program:video-ready] reads %(ENV_SE_VIDEO_READY_ENABLED)s. The image's
+# own entry_point.sh exports it; this entrypoint replaces that script, so it
+# must export it too, or supervisord rejects its whole config and no display
+# starts (BSkando/GoogleFindMy-HA#248). The helper never records video, hence
+# the default false; an explicit value from the environment still wins. Older
+# images without recorder.conf never read it.
+export SE_VIDEO_READY_ENABLED="${SE_VIDEO_READY_ENABLED:-false}"
 "${VENV_PATH}/bin/supervisord" --configuration /etc/supervisord.conf &
 SUPERVISOR_PID=$!
 
@@ -389,10 +397,19 @@ for i in $(seq 1 "${_display_wait_secs}"); do
     _display_ready=1
     break
   fi
+  # supervisord runs in the foreground (nodaemon=true) for the whole login, so
+  # a dead one failed to start (e.g. a rejected config): no display can come.
+  if ! kill -0 "${SUPERVISOR_PID}" 2>/dev/null; then
+    echo "[entrypoint] ERROR: supervisord exited before display ${DISPLAY} came up;" >&2
+    echo "[entrypoint] no virtual display, VNC or noVNC can start. Its error is" >&2
+    echo "[entrypoint] printed above (docker compose logs)." >&2
+    exit 1
+  fi
   sleep 1
 done
-# Not fatal -- Chrome may still come up moments later, and aborting here would
-# turn a slow start into a failed login. But it must not be silent either: a
+# Not fatal while supervisord is alive (a dead one aborted inside the loop) --
+# Chrome may still come up moments later, and aborting here would turn a slow
+# start into a failed login. But it must not be silent either: a
 # keyboard layout that will not apply and a browser that never appears are both
 # symptoms of this, and nothing else in the run names it. (Not the only possible
 # cause of a missing browser: the grid wait below can expire too, and still does
