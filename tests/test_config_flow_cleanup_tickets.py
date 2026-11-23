@@ -87,6 +87,7 @@ def _install_delete_recorder(
         *,
         imported_stable_key: str | None = None,
         imported_digest: str | None = None,
+        entry_id: str | None = None,
     ) -> None:
         recorder.delete_calls.append(
             {"stable_key": imported_stable_key, "digest": imported_digest}
@@ -589,7 +590,7 @@ async def test_scheduler_hands_the_watermark_to_the_gate(
 
     executed: list[list[Any]] = []
 
-    async def _fake_execute(_hass: Any, jobs: list[Any]) -> None:
+    async def _fake_execute(_hass: Any, jobs: list[Any], **_kwargs: Any) -> None:
         executed.append(jobs)
 
     monkeypatch.setattr(config_flow, "_async_config_entry_is_persisted", _fake_probe)

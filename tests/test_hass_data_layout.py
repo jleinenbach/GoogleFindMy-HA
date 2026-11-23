@@ -1284,6 +1284,7 @@ def _install_cleanup_recorder(
         *,
         imported_stable_key: str | None = None,
         imported_digest: str | None = None,
+        entry_id: str | None = None,
     ) -> None:
         recorded.append(imported_digest or "")
 

@@ -744,7 +744,7 @@ async def test_delete_keeps_newer_same_account_bundle_written_during_confirmatio
     The account key collapses to ``email:<addr>``, so a key-only match would also
     hit a bundle the container wrote *while* the user was still confirming the
     discovery flow. Only the copies carrying the imported content are removed;
-    the newer bundle stays on disk and the watcher imports it on its next scan.
+    the newer bundle stays on disk and is offered as a new discovery card.
     """
 
     import logging

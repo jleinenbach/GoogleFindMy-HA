@@ -855,6 +855,7 @@ async def _async_delete_watched_secrets(
     *,
     imported_stable_key: str | None = None,
     imported_digest: str | None = None,
+    entry_id: str | None = None,
 ) -> None:
     """Delete the watched secrets.json copies the import actually consumed.
 
@@ -986,7 +987,9 @@ async def _async_delete_watched_secrets(
             return
         except OSError:
             _LOGGER.warning(
-                "Failed to remove watched bundle file after import: %s",
+                "Failed to remove watched bundle file after import for entry %s: "
+                "%s; delete the file by hand, the account is already imported",
+                entry_id or "-",
                 path_str,
             )
 
@@ -1034,7 +1037,7 @@ async def _async_delete_watched_secrets(
             continue
         _LOGGER.info(
             "Keeping watched secrets bundle: it is not older than the imported "
-            "one for the same account; the watcher imports it on its next scan: %s",
+            "one for the same account; it is offered as a new discovery card: %s",
             path_str,
         )
 
@@ -2721,7 +2724,7 @@ async def _async_run_container_cleanup_when_persisted(
         )
         return
 
-    await _async_execute_container_cleanup(hass, jobs)
+    await _async_execute_container_cleanup(hass, jobs, job_entry_id=entry_id)
 
 
 @_typed_callback
@@ -2779,7 +2782,10 @@ def async_schedule_pending_container_cleanup(
 
 
 async def _async_execute_container_cleanup(
-    hass: HomeAssistant, jobs: list[PendingContainerCleanup]
+    hass: HomeAssistant,
+    jobs: list[PendingContainerCleanup],
+    *,
+    job_entry_id: str | None = None,
 ) -> None:
     """Execute already claimed cleanup jobs (best effort, isolated per job).
 
@@ -2795,6 +2801,7 @@ async def _async_execute_container_cleanup(
                     hass,
                     imported_stable_key=job.imported_stable_key,
                     imported_digest=job.imported_digest,
+                    entry_id=job_entry_id,
                 )
             except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
                 _LOGGER.warning("Deferred watched-bundle cleanup failed: %s", err)
