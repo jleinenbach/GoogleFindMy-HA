@@ -75,6 +75,14 @@ new loop inside a test causes fixture clashes and resource leaks. Mark coroutine
 with `@pytest.mark.asyncio` (or set `pytestmark = pytest.mark.asyncio` in the module)
 and `await` the coroutine directly.
 
+### Watched bundles and discovery cards
+
+* A `secrets.json` bundle found on a watched path raises a discovery card. Each account keeps at most one open discovery card: a newer bundle closes the account's unanswered card, and a card the user has answered (`dismiss_protected`) is never taken away.
+* Once a card is answered (credentials replaced, kept, or a new entry created), every other card of the account closes with one INFO line that carries the number, and `DiscoveryManager.rearm_account` lets the watcher offer a younger bundle on disk again as exactly one new card.
+* Confirming a card imports the newest bundle of the account on disk (same ordering as `discovery.scan_secrets_bundles`). If that newer bundle fails its check, the confirmation ends with `cannot_connect` and the older content is not imported.
+* `hass.data[DOMAIN]["answered_discovery_bundles"]` remembers, in memory only, which bundle each account was answered with, so a card the watcher raises for that same bundle in the same loop turn is dropped. After a restart the record is empty on purpose: an unchanged bundle is offered again, which is what consumes it.
+* The delete-after-import warning names the `entry_id` and tells the user to delete the file by hand.
+
 ### Nova API cache provider registration
 
 When decrypting FCM background location payloads, **always** register the active entry cache with
