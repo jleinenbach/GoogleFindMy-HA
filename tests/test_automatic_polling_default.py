@@ -115,7 +115,7 @@ class _Entry:
 
 
 # ---------------------------------------------------------------------------
-# (c) (d): the stored choice
+# The stored choice
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +123,7 @@ class _Entry:
 async def test_turning_off_a_tracker_without_a_choice_is_stored(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """(c) "Off" for a tracker that is off only for lack of a choice is stored.
+    """The choice "off" is stored for a tracker that is off only for lack of a choice.
 
     Without the stored "off" the tracker would turn on as soon as a later
     version changed the default again; the user's choice must survive that.
@@ -145,7 +145,7 @@ async def test_turning_off_a_tracker_without_a_choice_is_stored(
 async def test_both_lists_never_hold_one_id(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """(d) Each switch moves the id from one list to the other, never into both."""
+    """Each switch moves the id from one list to the other, never into both."""
     entry = _core_entry(hass, {})
     coord = _switch_coordinator(monkeypatch, hass, entry)
 
@@ -164,12 +164,12 @@ async def test_both_lists_never_hold_one_id(
 
 
 # ---------------------------------------------------------------------------
-# (e) (e2): the one-time update of an entry from before this default
+# The one-time update of an entry from before this default
 # ---------------------------------------------------------------------------
 
 
 def test_update_keeps_trackers_turned_back_on() -> None:
-    """(e) A tracker switched off and on again before the update stays on.
+    """A tracker switched off and on again before the update stays on.
 
     Its change time is stored without an entry in the off list. A tracker that
     is off stays off, and an entry-scoped key counts as the canonical id.
@@ -191,7 +191,7 @@ def test_update_keeps_trackers_turned_back_on() -> None:
 def test_update_runs_once_per_entry(
     monkeypatch: pytest.MonkeyPatch, issue_registry_capture: Any
 ) -> None:
-    """(e2) The update runs once: the stored on list marks it as done.
+    """The update runs once: the stored on list marks it as done.
 
     After the first run the key is written to the entry. On a later start the
     stored on list is left alone even with a change time that the update would
@@ -210,14 +210,14 @@ def test_update_runs_once_per_entry(
 
 
 # ---------------------------------------------------------------------------
-# (g): the notice counts the trackers that lost automatic polling
+# The notice counts the trackers that lost automatic polling
 # ---------------------------------------------------------------------------
 
 
 def test_update_notice_counts_trackers_without_a_choice(
     monkeypatch: pytest.MonkeyPatch, issue_registry_capture: Any
 ) -> None:
-    """(g) Only enabled trackers without a choice count; a new entry gets no notice.
+    """Only enabled trackers without a choice count; a new entry gets no notice.
 
     Not counted: the service device, an ignored tracker, a disabled device, and
     trackers whose choice is stored as on or off.
@@ -253,13 +253,13 @@ def test_update_notice_counts_trackers_without_a_choice(
 
 
 # ---------------------------------------------------------------------------
-# (i1) to (i4): how the notice goes away
+# How the notice goes away
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_update_notice_closes_with_got_it(hass: Any) -> None:
-    """(i1) The notice opens a confirmation, not the re-authentication flow."""
+    """The notice opens a confirmation, not the re-authentication flow."""
     flow = await repairs.async_create_fix_flow(hass, _NOTICE_ID, None)
 
     assert isinstance(flow, ConfirmRepairFlow)
@@ -268,7 +268,7 @@ async def test_update_notice_closes_with_got_it(hass: Any) -> None:
 def test_update_notice_goes_when_the_entry_is_disabled(
     issue_registry_capture: Any,
 ) -> None:
-    """(i2) Disabling the entry deletes its notice; another entry keeps its own."""
+    """Disabling the entry deletes its notice; another entry keeps its own."""
     hass = SimpleNamespace()
     kept, disabled = _Entry("entry-a"), _Entry("entry-b")
     for entry in (kept, disabled):
@@ -287,7 +287,7 @@ def test_update_notice_goes_when_the_entry_is_disabled(
 
 
 def test_update_notice_survives_a_reload(issue_registry_capture: Any) -> None:
-    """(i3) A plain unload (reload, shutdown) keeps the notice; so does the next one."""
+    """A plain unload (reload, shutdown) keeps the notice; so does the next one."""
     hass = SimpleNamespace()
     entry = _Entry("entry-a")
     integration._async_create_automatic_polling_notice(hass, entry, 3)
@@ -309,7 +309,7 @@ async def test_update_notice_goes_with_the_entry(
     issue_registry_capture: Any,
     _no_fcm_release: list[None],  # noqa: F811 - fixture
 ) -> None:
-    """(i4) Removing the entry deletes its notice."""
+    """Removing the entry deletes its notice."""
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
     entry = make_config_entry(entry_id="entry-remove", title="Find My Entry")
     _coordinator, _cache, _filter, runtime_data = _setup_runtime(entry)

@@ -343,8 +343,9 @@ class PollingOperations(_MixinBase):
         A tracker out of reach (for example with a flat battery) answers every
         poll with metadata only. That is not a fault, so the first such answer
         logs at INFO by the device id only and every further one at DEBUG,
-        until ``_clear_missing_location_data`` sees a location again
-        (log-when-unavailable). The display name stays at DEBUG (AGENTS.md
+        until an answer of the poll cycle carries a location again and
+        ``_clear_missing_location_data`` runs (log-when-unavailable). A
+        location from a push or a manual locate does not reset it. The display name stays at DEBUG (AGENTS.md
         section 5 (b)).
         """
         noted = getattr(self, "_missing_location_data_noted", None)

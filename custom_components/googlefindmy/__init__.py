@@ -5631,9 +5631,12 @@ def _automatic_polling_notice_count(
             if ids and not ids & excluded:
                 count += 1
     except Exception as err:  # defensive: the notice is advisory
-        _LOGGER.debug(
-            "Counting trackers for the automatic-polling notice failed: %s", err
+        _LOGGER.warning(
+            "Counting trackers for the automatic-polling notice failed (%s); "
+            "no notice is shown",
+            type(err).__name__,
         )
+        _LOGGER.debug("Counting failure detail: %s", err)
         return 0
     return count
 

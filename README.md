@@ -306,6 +306,9 @@ select **Got it** to close it. A new installation gets no notice. Limits:
   again after the next update.
 - A tracker that gets a new id (new pairing, or location sharing turned off and
   on again) loses its choice and is off afterwards.
+- Disabling an account that is not loaded at that moment (for example while
+  its setup retries) does not remove its notice; select **Got it** or remove
+  the account instead.
 
 The three options store only the Google ids of your own trackers and the time of
 the last change, in the integration's options. Removing a tracker from Home
