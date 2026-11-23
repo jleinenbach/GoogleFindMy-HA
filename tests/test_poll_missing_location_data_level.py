@@ -15,13 +15,13 @@ code before and after the change. The setup reuses the coordinator builder of
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 
 import pytest
 
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from tests.helpers import drain_loop
 from tests.test_poll_timeout_hardening import _make_coordinator
 
 _POLLING_LOGGER = "custom_components.googlefindmy.coordinator.polling"
@@ -68,7 +68,7 @@ def _missing_records(
     ]
 
 
-def _run_cycles(
+async def _run_cycles(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     script: dict[str, list[str]],
@@ -77,30 +77,34 @@ def _run_cycles(
 ) -> GoogleFindMyCoordinator:
     """Run one poll cycle per scripted step for every device in ``script``."""
 
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
     devices = [{"id": dev_id, "name": f"Tag {dev_id}"} for dev_id in script]
     coordinator = _make_coordinator(monkeypatch, loop, _ScriptedAPI(script), devices)
     coordinator.is_automatic_polling_enabled = lambda _device_id: True
     cycles = len(next(iter(script.values())))
-    try:
-        with caplog.at_level(logging.DEBUG, logger=_POLLING_LOGGER):
-            for cycle in range(cycles):
-                loop.run_until_complete(
-                    coordinator._async_start_poll_cycle(devices, force=True)
-                )
-                if purge_after and cycle in purge_after:
-                    coordinator.purge_device(purge_after[cycle])
-    finally:
-        drain_loop(loop)
+    with caplog.at_level(logging.DEBUG, logger=_POLLING_LOGGER):
+        for cycle in range(cycles):
+            await coordinator._async_start_poll_cycle(devices, force=True)
+            if purge_after and cycle in purge_after:
+                coordinator.purge_device(purge_after[cycle])
+    # The cycle schedules a debounced stats save; end it with the test.
+    save_task = getattr(coordinator, "_stats_save_task", None)
+    if save_task is not None:
+        save_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await save_task
     return coordinator
 
 
-def test_missing_location_data_logs_info_once_then_debug(
+@pytest.mark.asyncio
+async def test_missing_location_data_logs_info_once_then_debug(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Without, without, location, without: INFO, DEBUG, then INFO again."""
 
-    _run_cycles(monkeypatch, caplog, {"dev-flat": ["meta", "meta", "fix", "meta"]})
+    await _run_cycles(
+        monkeypatch, caplog, {"dev-flat": ["meta", "meta", "fix", "meta"]}
+    )
 
     records = _missing_records(caplog, "dev-flat")
     assert not [rec for rec in records if rec.levelno >= logging.WARNING], (
@@ -114,12 +118,13 @@ def test_missing_location_data_logs_info_once_then_debug(
     assert all("Tag dev-flat" not in rec.getMessage() for rec in records)
 
 
-def test_missing_location_data_level_is_kept_per_tracker(
+@pytest.mark.asyncio
+async def test_missing_location_data_level_is_kept_per_tracker(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Each tracker gets its own first INFO; a purge starts the tracker afresh."""
 
-    _run_cycles(
+    await _run_cycles(
         monkeypatch,
         caplog,
         {"dev-a": ["meta", "meta", "meta"], "dev-b": ["meta", "meta", "meta"]},
