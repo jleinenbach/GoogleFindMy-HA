@@ -1274,11 +1274,11 @@ class PollingOperations(_MixinBase):
         if not history_store:
             return None
 
-        excluded = self._get_ignored_set() | self._get_automatic_polling_disabled_set()
+        excluded = self._get_ignored_set()
         predictions: list[float] = []
 
         for dev_id, history in history_store.items():
-            if dev_id in excluded:
+            if dev_id in excluded or not self.is_automatic_polling_enabled(dev_id):
                 continue
             if len(history) < 2:
                 continue
@@ -1790,15 +1790,12 @@ class PollingOperations(_MixinBase):
             # Build list of devices to POLL:
             # Poll devices that have at least one enabled DR entry for this config entry;
             # if a device has no DR entry yet, include it to allow initial discovery.
-            # Trackers whose automatic location requests are switched off
-            # (#242) stay out of every automatic path; read once per refresh.
-            automatic_off = self._get_automatic_polling_disabled_set()
+            # Only trackers whose automatic location requests were turned on
+            # (#242) enter an automatic path; a tracker without a choice is off.
             devices_to_poll: list[dict[str, Any]] = []
             for dev in filtered_devices:
                 dev_id = dev["id"]
-                if dev_id in ignored:
-                    continue
-                if dev_id in automatic_off:
+                if dev_id in ignored or not self.is_automatic_polling_enabled(dev_id):
                     continue
                 if (
                     dev_id in self._enabled_poll_device_ids

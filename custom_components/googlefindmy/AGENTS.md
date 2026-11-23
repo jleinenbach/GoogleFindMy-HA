@@ -715,6 +715,11 @@ switched-off tracker without sending; the manual locate does NOT check the switc
 automatic requests. A new send site therefore needs the switch check (if it is automatic), both arguments, and an
 update of that test; one that skips them bypasses the switch or drops out of the counters.
 
+Read the effective state of the switch through `is_automatic_polling_enabled`, never the raw option lists
+`automatic_polling_enabled` and `automatic_polling_disabled`: a tracker without a stored choice is off, and an id in
+both lists is off. The candidate list of the poll cycle, the poll prediction and the diagnostics rows all go through
+that method.
+
 ### Phones without a canonical ID (phone actions 1, 4, 5)
 
 Google lists some phones without a canonical ID; the integration addresses them by their Android ID (row id

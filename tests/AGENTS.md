@@ -847,6 +847,11 @@ Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
 
+A test that expects automatic location requests for a tracker must store the
+choice "on" for it (option ``automatic_polling_enabled``, or
+``coordinator.is_automatic_polling_enabled`` replaced in a self-contained test):
+a tracker without a stored choice is not polled automatically.
+
 #### Deferred subentry identifier assignment helper
 
 Use :func:`tests.helpers.homeassistant.deferred_subentry_entry_id_assignment` to

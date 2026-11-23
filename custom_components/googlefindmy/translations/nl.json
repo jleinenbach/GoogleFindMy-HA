@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Versie van de eigenaarssleutel ontbreekt in de kluis van het account",
       "description": "Een tracker heeft versie {required_version} van de eigenaarssleutel nodig, maar Google levert versie {current_version} en de sleutelkluis van dit Google-account bevatte deze versie niet toen de inlogtool hem voor het laatst las. Versies in de bundel: {bundle_versions}.\n\nGoogle kan deze versie later aan de kluis toevoegen; alleen een aanmelding daarna kan hem ophalen. Om het opnieuw te proberen, voer je de inlogtool uit (Docker-inloghulp of `main.py`) en importeer je het nieuwe `secrets.json`. Bewaart de tool nog een `secrets.json` van een eerdere aanmelding, verwijder dat bestand dan eerst of start de tool met `--reauth` (Docker-inloghulp: `GFMY_ARGS=--reauth`); anders gebruikt hij het bestand opnieuw en leest hij de sleutelkluis niet opnieuw. Tot die tijd blijven de locaties van de tracker onbeschikbaar, tenzij Google versie {required_version} gaat leveren. Deze melding verdwijnt zodra de tracker weer ontsleuteld kan worden. Andere trackers worden niet beïnvloed."
+    },
+    "automatic_polling_default_off": {
+      "title": "Automatische locatie-polling staat nu uit voor trackers die je niet hebt ingeschakeld",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Automatische locatie-polling staat nu uit",
+            "description": "Sinds deze update vraagt de integratie een tracker alleen nog automatisch op als je de schakelaar *Automatische locatie-polling* ervan inschakelt. Trackers van dit account die niet meer automatisch worden opgevraagd: {count}. Deze melding betekent niet dat een locatie verouderd is of dat een tracker defect is; handmatig lokaliseren blijft werken. Om een tracker weer op te vragen, open je de apparaatpagina en schakel je de schakelaar in. Selecteer **Begrepen** om deze melding te sluiten.",
+            "submit": "Begrepen"
+          }
+        }
+      }
     }
   },
   "exceptions": {

@@ -52,7 +52,12 @@ class _DummyCache:
         return None  # pragma: no cover
 
 
-pytestmark = pytest.mark.asyncio
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.usefixtures("automatic_polling_on"),
+]
 
 
 class _DummyBus:

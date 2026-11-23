@@ -117,12 +117,14 @@ async def test_receiver_self_write_schedules_no_reload(
     )
     receiver = FcmReceiverHA()
     receiver.attach_hass(hass)
+    # The setup may write options of its own; count the receiver's write only.
+    writes_before = len(hass.config_entries.entry_update_calls)
 
     receiver._persist_credentials_to_entry(
         entry.entry_id, _registration("regenerated-registration")
     )
 
-    assert len(hass.config_entries.entry_update_calls) == 1
+    assert len(hass.config_entries.entry_update_calls) == writes_before + 1
     persisted = entry.data[DATA_SECRET_BUNDLE]["fcm_credentials"]
     assert persisted["fcm"]["registration"]["token"] == "regenerated-registration"
 
@@ -161,13 +163,15 @@ async def test_two_receiver_writes_before_the_listener_runs_schedule_no_reload(
         monkeypatch, stub_coordinator_factory
     )
     receiver = _receiver_for(hass, entry)
+    # The setup may write options of its own; count the receiver's writes only.
+    writes_before = len(hass.config_entries.entry_update_calls)
 
     receiver._persist_credentials_to_entry(entry.entry_id, _registration("first"))
     receiver._persist_credentials_to_entry(entry.entry_id, _registration("second"))
     await notify(hass, entry)
     await notify(hass, entry)
 
-    assert len(hass.config_entries.entry_update_calls) == 2
+    assert len(hass.config_entries.entry_update_calls) == writes_before + 2
     assert hass.config_entries.scheduled_reloads == []
     assert _receipts(hass) == {}
 

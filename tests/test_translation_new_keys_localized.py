@@ -29,6 +29,10 @@ NEW_KEYS: tuple[str, ...] = (
     "issues.owner_key_version_not_in_vault.title",
     "issues.owner_key_version_not_in_vault.description",
     "entity.sensor.encryption_key_status.state.owner_key_version_unavailable",
+    "issues.automatic_polling_default_off.title",
+    "issues.automatic_polling_default_off.fix_flow.step.confirm.title",
+    "issues.automatic_polling_default_off.fix_flow.step.confirm.description",
+    "issues.automatic_polling_default_off.fix_flow.step.confirm.submit",
 )
 
 # (language file name, key) -> reason why the English value is correct there.

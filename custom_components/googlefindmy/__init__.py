@@ -178,6 +178,7 @@ from .const import (
     DOMAIN,
     FEATURE_FMDN_FINDER_ENABLED,
     INTEGRATION_VERSION,
+    ISSUE_AUTOMATIC_POLLING_DEFAULT_OFF_KEY,
     ISSUE_MULTIPLE_CONFIG_ENTRIES,
     ISSUE_RESTART_REQUIRED_KEY,
     LEGACY_SERVICE_IDENTIFIER,
@@ -187,6 +188,7 @@ from .const import (
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_AUTOMATIC_POLLING_CHANGED_AT,
     OPT_AUTOMATIC_POLLING_DISABLED,
+    OPT_AUTOMATIC_POLLING_ENABLED,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_DEVICE_POLL_DELAY,
@@ -198,6 +200,7 @@ from .const import (
     OPTION_KEYS,
     OPTIONAL_CREDENTIAL_KEYS,
     SECRETS_EXTRA_WATCH_PATHS,
+    SERVICE_DEVICE_IDENTIFIER_PREFIX,
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -213,6 +216,7 @@ from .const import (
     TRANSLATION_KEY_DUPLICATE_ACCOUNT,
     TRANSLATION_KEY_RESTART_REQUIRED,
     TRANSLATION_KEY_UNIQUE_ID_COLLISION,
+    automatic_polling_notice_issue_id,
     coerce_changed_at_map,
     coerce_device_id_list,
     coerce_ignored_mapping,
@@ -5542,6 +5546,24 @@ def _normalize_automatic_polling_options(
         if normalized_list != raw_list:
             options[OPT_AUTOMATIC_POLLING_DISABLED] = normalized_list
             changed = True
+    raw_enabled = options.get(OPT_AUTOMATIC_POLLING_ENABLED)
+    if raw_enabled is not None:
+        disabled_ids = set(
+            coerce_device_id_list(options.get(OPT_AUTOMATIC_POLLING_DISABLED))
+        )
+        stripped_enabled = [
+            _strip_entry_namespace(entry_id, candidate)
+            for candidate in coerce_device_id_list(raw_enabled)
+        ]
+        # An id in both lists is off; keep it only in the off list.
+        normalized_enabled = [
+            device_id
+            for device_id in coerce_device_id_list(stripped_enabled)
+            if device_id not in disabled_ids
+        ]
+        if normalized_enabled != raw_enabled:
+            options[OPT_AUTOMATIC_POLLING_ENABLED] = normalized_enabled
+            changed = True
     if OPT_AUTOMATIC_POLLING_CHANGED_AT in options:
         raw_map = options[OPT_AUTOMATIC_POLLING_CHANGED_AT]
         normalized_map: dict[str, str] = {}
@@ -5555,6 +5577,120 @@ def _normalize_automatic_polling_options(
             options[OPT_AUTOMATIC_POLLING_CHANGED_AT] = normalized_map
             changed = True
     return changed
+
+
+def _automatic_polling_notice_count(
+    hass: HomeAssistant, entry: ConfigEntry, options: dict[str, Any]
+) -> int:
+    """Count the trackers of ``entry`` that are off only for lack of a choice.
+
+    A tracker counts when its device is enabled, has an enabled
+    ``device_tracker`` entity of this integration, and none of its ids is
+    ignored or carries a stored choice. The service device falls out through
+    ``parse_device_identifier``. Any failure counts as 0: the notice is only
+    advisory, and a ``hass`` without registries must not stop the setup.
+    """
+    from .coordinator.helpers.registry import parse_device_identifier
+
+    try:
+        ignored_map, _ = coerce_ignored_mapping(options.get(OPT_IGNORED_DEVICES))
+        excluded = set(ignored_map)
+        excluded.update(
+            coerce_device_id_list(options.get(OPT_AUTOMATIC_POLLING_DISABLED))
+        )
+        excluded.update(
+            coerce_device_id_list(options.get(OPT_AUTOMATIC_POLLING_ENABLED))
+        )
+        dev_reg = dr.async_get(hass)
+        ent_reg = er.async_get(hass)
+        tracked_devices = {
+            ent.device_id
+            for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+            if ent.platform == DOMAIN
+            and ent.domain == "device_tracker"
+            and ent.disabled_by is None
+            and ent.device_id
+        }
+        count = 0
+        for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+            if device.disabled_by is not None or device.id not in tracked_devices:
+                continue
+            ids = {
+                device_id
+                for identifier in device.identifiers
+                if (
+                    device_id := parse_device_identifier(
+                        identifier,
+                        DOMAIN,
+                        entry.entry_id,
+                        SERVICE_DEVICE_IDENTIFIER_PREFIX,
+                        LEGACY_SERVICE_IDENTIFIER,
+                    )
+                )
+            }
+            if ids and not ids & excluded:
+                count += 1
+    except Exception as err:  # defensive: the notice is advisory
+        _LOGGER.debug(
+            "Counting trackers for the automatic-polling notice failed: %s", err
+        )
+        return 0
+    return count
+
+
+def _apply_automatic_polling_default_migration(
+    hass: HomeAssistant, entry: ConfigEntry, options: dict[str, Any]
+) -> int | None:
+    """Store the on list once per entry and return the notice count (#242).
+
+    An entry from before this default has no on list. A tracker that was
+    switched off and on again (a change time without an entry in the off list)
+    stays on; every other tracker without a choice is off from now on. Returns
+    None when the entry already has the on list, so this runs once per entry.
+    Rewrites ``options`` in place; it is the caller's copy.
+    """
+    if OPT_AUTOMATIC_POLLING_ENABLED in options:
+        return None
+    disabled = coerce_device_id_list(options.get(OPT_AUTOMATIC_POLLING_DISABLED))
+    changed_at = coerce_changed_at_map(options.get(OPT_AUTOMATIC_POLLING_CHANGED_AT))
+    kept_on = [device_id for device_id in changed_at if device_id not in disabled]
+    options[OPT_AUTOMATIC_POLLING_ENABLED] = coerce_device_id_list(kept_on)
+    return _automatic_polling_notice_count(hass, entry, options)
+
+
+def _async_create_automatic_polling_notice(
+    hass: HomeAssistant, entry: ConfigEntry, count: int
+) -> None:
+    """Raise the notice that trackers without a choice are no longer polled."""
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        automatic_polling_notice_issue_id(entry.entry_id),
+        is_fixable=True,
+        is_persistent=True,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_AUTOMATIC_POLLING_DEFAULT_OFF_KEY,
+        translation_placeholders={"count": str(count)},
+    )
+
+
+def _register_automatic_polling_notice_cleanup(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Retire the automatic-polling notice when the user disables the entry.
+
+    Registered at every setup, so it is still in place after a reload. A plain
+    unload (reload, shutdown) keeps the notice.
+    """
+    issue_id = automatic_polling_notice_issue_id(entry.entry_id)
+
+    @callback
+    def _delete_notice_if_disabled() -> None:
+        # Home Assistant sets ``disabled_by`` before it unloads the entry.
+        if getattr(entry, "disabled_by", None) is not None:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+    entry.async_on_unload(_delete_notice_if_disabled)
 
 
 def _migrate_entry_identifier_namespaces(
@@ -5579,8 +5715,13 @@ def _migrate_entry_identifier_namespaces(
         options[OPT_OPTIONS_SCHEMA_VERSION] = 2
     if _normalize_automatic_polling_options(entry.entry_id, options):
         options_changed = True
+    notice_count = _apply_automatic_polling_default_migration(hass, entry, options)
+    if notice_count is not None:
+        options_changed = True
     if options_changed and options != entry.options:
         hass.config_entries.async_update_entry(entry, options=options)
+    if notice_count:
+        _async_create_automatic_polling_notice(hass, entry, notice_count)
 
     subentries = getattr(entry, "subentries", None)
     if not isinstance(subentries, Mapping):
@@ -8890,6 +9031,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Soft-migrate mutable settings from data -> options and unique_ids
     _migrate_entry_identifier_namespaces(hass, entry)
+    _register_automatic_polling_notice_cleanup(hass, entry)
     await _async_soft_migrate_data_to_options(hass, entry)
     await _async_migrate_unique_ids(hass, entry)
     await _async_relink_button_devices(hass, entry)
@@ -10949,6 +11091,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # The held-attributes issue outlives unloads on purpose, so that a reload
     # keeps the user's "ignore". Only the removal of the entry retires it.
     ir.async_delete_issue(hass, DOMAIN, frozen_attributes_issue_id(entry.entry_id))
+
+    # The automatic-polling notice goes with the entry.
+    ir.async_delete_issue(
+        hass, DOMAIN, automatic_polling_notice_issue_id(entry.entry_id)
+    )
 
     # Owner-key version issues (issue #246) carry entry and version in their id;
     # no poll or push will run again to retire them.

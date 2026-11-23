@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Version de la clé de propriétaire absente du coffre du compte",
       "description": "Un traceur a besoin de la version {required_version} de la clé de propriétaire, mais Google fournit la version {current_version} et le coffre de clés de ce compte Google ne contenait pas cette version lors de sa dernière lecture par l'outil de connexion. Versions dans le lot : {bundle_versions}.\n\nGoogle peut ajouter cette version au coffre plus tard ; seule une connexion ultérieure pourra alors la récupérer. Pour réessayer, exécutez l'outil de connexion (assistant de connexion Docker ou `main.py`) et importez le nouveau `secrets.json`. Si l'outil conserve encore un `secrets.json` d'une connexion précédente, supprimez d'abord ce fichier ou lancez l'outil avec `--reauth` (assistant de connexion Docker : `GFMY_ARGS=--reauth`) ; sinon, il réutilise le fichier et ne relit pas le coffre de clés. D'ici là, les positions du traceur restent indisponibles, sauf si Google commence à fournir la version {required_version}. Ce problème disparaît dès que le traceur peut de nouveau être déchiffré. Les autres traceurs ne sont pas concernés."
+    },
+    "automatic_polling_default_off": {
+      "title": "L'interrogation automatique de position est désormais désactivée pour les traceurs que vous n'avez pas activés",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "L'interrogation automatique de position est désormais désactivée",
+            "description": "Depuis cette mise à jour, l'intégration n'interroge automatiquement un traceur que si vous activez son interrupteur *Interrogation automatique de position*. Traceurs de ce compte qui ne sont plus interrogés automatiquement : {count}. Cet avis ne signifie pas qu'une position est obsolète ni qu'un traceur est défectueux ; la localisation manuelle continue de fonctionner. Pour interroger à nouveau un traceur, ouvrez sa page d'appareil et activez l'interrupteur. Sélectionnez **Compris** pour fermer cet avis.",
+            "submit": "Compris"
+          }
+        }
+      }
     }
   },
   "exceptions": {

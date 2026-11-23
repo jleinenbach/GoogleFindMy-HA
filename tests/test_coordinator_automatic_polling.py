@@ -62,6 +62,7 @@ from tests.test_diagnostics_p1_per_device import (
 # The option keys are spelled out here on purpose: the stored option is a
 # contract with existing installations, so the string itself is under test.
 _OPT_DISABLED = "automatic_polling_disabled"
+_OPT_ENABLED = "automatic_polling_enabled"
 _OPT_CHANGED_AT = "automatic_polling_changed_at"
 _ENTRY_ID = "entry-auto"
 _DEV_ON = {"id": "dev-on", "name": "Tag Polled"}
@@ -163,7 +164,11 @@ def _make_coordinator(
     *,
     options: dict[str, Any],
     api: _DispatchingAPI,
+    devices: list[dict[str, str]] | None = None,
 ) -> GoogleFindMyCoordinator:
+    # A tracker without a stored choice is not polled automatically; the
+    # tracker these tests expect to be polled carries the choice "on".
+    options = {_OPT_ENABLED: [_DEV_ON["id"]], **options}
     monkeypatch.setattr(
         "custom_components.googlefindmy.coordinator.GoogleFindMyCoordinator._async_load_stats",
         AsyncMock(return_value=None),
@@ -192,7 +197,7 @@ def _make_coordinator(
     coord.async_set_update_error = lambda _exc: None
     coord._get_google_home_filter = lambda: None
     coord._is_fcm_ready_soft = lambda: True
-    coord._last_device_list = [dict(dev) for dev in _DEVICES]
+    coord._last_device_list = [dict(dev) for dev in devices or _DEVICES]
     coord._last_list_poll_mono = time.monotonic()
     monkeypatch.setattr(coord, "_ensure_service_device_exists", lambda: None)
     monkeypatch.setattr(coord, "_ensure_registry_for_devices", lambda *_a, **_k: 0)
@@ -239,7 +244,11 @@ class _ShiftedTime:
         return getattr(time, name)
 
 
-async def _refresh(coord: GoogleFindMyCoordinator, trigger: str) -> None:
+async def _refresh(
+    coord: GoogleFindMyCoordinator,
+    trigger: str,
+    devices: list[dict[str, str]] | None = None,
+) -> None:
     """Run one refresh in the state each automatic trigger produces."""
     now = time.monotonic()
     clock: contextlib.AbstractContextManager[Any] = contextlib.nullcontext()
@@ -248,7 +257,7 @@ async def _refresh(coord: GoogleFindMyCoordinator, trigger: str) -> None:
         coord._last_poll_mono = 0.0
         coord._device_location_data.clear()
     else:
-        for dev in _DEVICES:
+        for dev in devices or _DEVICES:
             coord._device_location_data[dev["id"]] = {"last_seen": time.time()}
         if trigger == "restart":
             # First refresh after a restart: locations restored, never polled.
@@ -335,6 +344,64 @@ async def test_counter_auto_stays_zero_for_switched_off_tracker(
     assert _auto_count(coord, _DEV_ON["id"]) == 1
     counts = _require(coord, "_locate_request_counts")
     assert _UTC_STAMP.match(counts.since)
+
+
+# ---------------------------------------------------------------------------
+# Default: a tracker is polled automatically only after it was turned on
+# ---------------------------------------------------------------------------
+
+_DEV_NO_CHOICE = {"id": "dev-no-choice", "name": "Tag Untouched"}
+_DEV_TURNED_ON = {"id": "dev-turned-on", "name": "Tag Turned On"}
+_DEV_IN_BOTH = {"id": "dev-in-both", "name": "Tag Conflicting"}
+_DEV_TURNED_OFF = {"id": "dev-turned-off", "name": "Tag Turned Off"}
+_DEFAULT_DEVICES = [_DEV_NO_CHOICE, _DEV_TURNED_ON, _DEV_IN_BOTH, _DEV_TURNED_OFF]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", _AUTOMATIC_TRIGGERS)
+async def test_only_trackers_turned_on_are_polled(
+    monkeypatch: pytest.MonkeyPatch, trigger: str
+) -> None:
+    """Without a stored choice a tracker is off; the off list wins over the on list.
+
+    Four trackers in one refresh: one without a choice, one turned on, one in
+    both lists, one turned off. Only the tracker turned on is requested. The
+    request for it is the control half: the test cannot pass with no cycle.
+    """
+    api = _DispatchingAPI()
+    coord = _make_coordinator(
+        monkeypatch,
+        options={
+            _OPT_ENABLED: [_DEV_TURNED_ON["id"], _DEV_IN_BOTH["id"]],
+            _OPT_DISABLED: [_DEV_IN_BOTH["id"], _DEV_TURNED_OFF["id"]],
+        },
+        api=api,
+        devices=_DEFAULT_DEVICES,
+    )
+
+    await _refresh(coord, trigger, devices=_DEFAULT_DEVICES)
+
+    assert api.calls == [_DEV_TURNED_ON["id"]], (
+        "only trackers turned on are polled automatically"
+    )
+
+
+@pytest.mark.asyncio
+async def test_trackers_without_a_choice_start_no_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No tracker carries a choice: the refresh schedules no poll cycle at all.
+
+    ``api.calls == []`` alone would also hold if a cycle started and skipped
+    every tracker inside; the empty background list shows that none started.
+    """
+    api = _DispatchingAPI()
+    coord = _make_coordinator(monkeypatch, options={_OPT_ENABLED: []}, api=api)
+
+    await _refresh(coord, "tick")
+
+    assert api.calls == []
+    assert coord.hass.background == []
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +557,8 @@ async def test_prediction_ignores_switched_off_and_ignored_histories(
     coord._device_update_history.clear()
     coord._device_update_history["dev-off"] = _regular_history(now)
     coord._device_update_history["dev-ign"] = _regular_history(now)
+    # A tracker without a stored choice is off and must not steer it either.
+    coord._device_update_history["dev-no-choice"] = _regular_history(now)
 
     assert coord._get_predicted_poll_time() is None
 
@@ -670,9 +739,13 @@ async def test_legacy_entry_scoped_ids_are_normalized(
 
     assert entry.options[_OPT_DISABLED] == ["dev-off", "dev-other"]
     assert entry.options[_OPT_CHANGED_AT] == {"dev-off": "2026-11-10T20:00:00Z"}
+    # The tracker switched off stays off through the default update too.
+    assert entry.options[_OPT_ENABLED] == []
 
     api = _DispatchingAPI()
-    coord = _make_coordinator(monkeypatch, options=dict(entry.options), api=api)
+    # Control: a tracker turned on is still on, so "off" is not the only answer.
+    options = {**entry.options, _OPT_ENABLED: ["dev-on"]}
+    coord = _make_coordinator(monkeypatch, options=options, api=api)
     is_enabled = _require(coord, "is_automatic_polling_enabled")
     assert is_enabled("dev-off") is False
     assert is_enabled("dev-on") is True
@@ -824,7 +897,10 @@ async def test_switch_change_writes_one_info_line_without_name(
 async def test_changed_at_survives_a_new_coordinator(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """(o) The time of the last change comes back after a restart; never switched is null."""
+    """(o) The time of the last change comes back after a restart; never switched is null.
+
+    A tracker that was never switched has no stored choice and is reported off.
+    """
     entry = _core_entry(hass, {})
     first = _switch_coordinator(monkeypatch, hass, entry)
     _require(first, "async_set_automatic_polling")(_DEV_OFF["id"], False)
@@ -837,7 +913,7 @@ async def test_changed_at_survives_a_new_coordinator(
     assert len(rows) == 2
     assert rows[0]["automatic_polling"] is False
     assert rows[0]["automatic_polling_changed_at"] == stored
-    assert rows[1]["automatic_polling"] is True
+    assert rows[1]["automatic_polling"] is False
     assert rows[1]["automatic_polling_changed_at"] is None
     assert const.DEFAULT_OPTIONS[_OPT_CHANGED_AT] == {}
 
@@ -860,7 +936,8 @@ def test_coordinator_without_init_reports_zero_counts_and_full_rows() -> None:
     assert len(rows) == 2
     for row in rows:
         assert set(row) >= _EXPECTED_DEVICE_KEYS | _NEW_DEVICE_KEYS
-        assert row["automatic_polling"] is True
+        # No entry, so no tracker was turned on.
+        assert row["automatic_polling"] is False
         assert row["locate_requests_auto"] == 0
         assert row["locate_requests_manual"] == 0
         assert row["last_locate_request_age_s"] is None
@@ -935,7 +1012,7 @@ def test_dump_links_device_rows_to_uwt_events_from_one_snapshot(
 def test_dump_counts_and_redacts_the_switch_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """(u) Config shows a count only; both options carry ids and are redacted.
+    """(u) Config shows counts only; all three options carry ids and are redacted.
 
     The coordinator block names the start of the in-memory request counters,
     and the device row of a switched-off tracker reports it as off.
@@ -946,6 +1023,7 @@ def test_dump_counts_and_redacts_the_switch_options(
     entry, hass = _make_entry_and_hass(coordinator)
     entry.options = {
         _OPT_DISABLED: ["dev-a", "dev-c"],
+        _OPT_ENABLED: ["dev-b"],
         _OPT_CHANGED_AT: {"dev-a": "2026-11-10T20:00:00Z"},
     }
     coordinator.config_entry = entry
@@ -955,10 +1033,13 @@ def test_dump_counts_and_redacts_the_switch_options(
     payload = _run(diagnostics.async_get_config_entry_diagnostics(hass, entry))
 
     assert payload["config"]["automatic_polling_disabled_count"] == 2
+    assert payload["config"]["automatic_polling_enabled_count"] == 1
     effective = payload["effective_config"]
     assert effective[_OPT_DISABLED] == [diagnostics.REDACTED] * 2
+    assert effective[_OPT_ENABLED] == [diagnostics.REDACTED]
     assert effective[_OPT_CHANGED_AT] == [diagnostics.REDACTED]
     assert "dev-a" not in repr(effective)
+    assert "dev-b" not in repr(effective)
     since = payload["coordinator"]["locate_requests_counted_since"]
     assert since == coordinator._locate_request_counts.since
     assert _UTC_STAMP.match(since)
@@ -1115,7 +1196,10 @@ def test_canonical_switch_options_are_left_alone(key: str) -> None:
     assert options == {key: value}
     assert options[key] is value
 
-    entry = make_config_entry(entry_id=_ENTRY_ID, options={key: value})
+    # An entry after the default update: the on list is already stored.
+    entry = make_config_entry(
+        entry_id=_ENTRY_ID, options={key: value, _OPT_ENABLED: []}
+    )
     hass = SimpleNamespace(config_entries=_CoreLikeConfigEntries())
     integration._migrate_entry_identifier_namespaces(hass, entry)
     assert hass.config_entries.updates == []

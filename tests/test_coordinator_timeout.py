@@ -15,6 +15,10 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_inf
 )
 from tests.helpers import drain_loop
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 
 class _DummyCache:
     """Minimal cache stub satisfying the coordinator constructor."""

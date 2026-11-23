@@ -44,6 +44,10 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 from custom_components.googlefindmy.NovaApi.nova_request import NovaAuthError
 from tests.helpers import drain_loop
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 
 class _DummyBus:
     """Capture fired events for assertions."""

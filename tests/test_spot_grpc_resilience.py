@@ -26,6 +26,10 @@ from tests.test_spot_grpc_client import (  # package-relative reuse per AGENTS g
     _prepare_coordinator,
 )
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 
 class _DummyCache:
     """Minimal async cache stub used for SPOT resilience tests."""

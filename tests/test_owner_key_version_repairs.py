@@ -51,6 +51,10 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.polling_mixin_stub import PollingStub
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 _ENTRY_ID = "entry-id"
 
 

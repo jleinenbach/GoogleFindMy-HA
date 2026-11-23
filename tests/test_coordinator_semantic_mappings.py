@@ -44,6 +44,10 @@ from custom_components.googlefindmy.SpotApi.spot_request import (
 )
 from tests.helpers.homeassistant import GoogleFindMyConfigEntryStub
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 
 class _DummyAPI:
     def __init__(self, payload: dict[str, Any]) -> None:

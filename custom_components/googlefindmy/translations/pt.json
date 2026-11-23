@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Versão da chave do proprietário em falta no cofre da conta",
       "description": "Um localizador precisa da versão {required_version} da chave do proprietário, mas a Google fornece a versão {current_version} e o cofre de chaves desta conta Google não continha esta versão quando a ferramenta de início de sessão o leu pela última vez. Versões no pacote: {bundle_versions}.\n\nA Google pode adicionar esta versão ao cofre mais tarde; só um início de sessão posterior a conseguirá obter. Para tentar novamente, execute a ferramenta de início de sessão (assistente de início de sessão do Docker ou `main.py`) e importe o novo `secrets.json`. Se a ferramenta ainda guardar um `secrets.json` de um início de sessão anterior, elimine primeiro esse ficheiro ou inicie a ferramenta com `--reauth` (assistente de início de sessão do Docker: `GFMY_ARGS=--reauth`); caso contrário, reutiliza o ficheiro e não volta a ler o cofre de chaves. Até lá, a posição do localizador continua indisponível, a menos que a Google comece a fornecer a versão {required_version}. Este aviso desaparece assim que for possível desencriptar novamente o localizador. Os outros localizadores não são afetados."
+    },
+    "automatic_polling_default_off": {
+      "title": "A pesquisa automática de localização está agora desativada para os rastreadores que não ativou",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "A pesquisa automática de localização está agora desativada",
+            "description": "Desde esta atualização, a integração consulta um rastreador automaticamente apenas se ativar o respetivo interruptor *Pesquisa automática de localização*. Rastreadores desta conta que já não são consultados automaticamente: {count}. Este aviso não significa que uma localização está desatualizada nem que um rastreador está avariado; a localização manual continua a funcionar. Para voltar a consultar um rastreador, abra a página do dispositivo e ative o interruptor. Selecione **Entendido** para fechar este aviso.",
+            "submit": "Entendido"
+          }
+        }
+      }
     }
   },
   "exceptions": {

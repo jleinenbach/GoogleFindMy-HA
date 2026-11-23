@@ -1,16 +1,19 @@
 # custom_components/googlefindmy/switch.py
 """Switch entities for Google Find My tracker subentries.
 
-One configuration switch per tracker: **Automatic location polling**. When it
-is off, the coordinator sends no automatic location request for the tracker
+One configuration switch per tracker: **Automatic location polling**, off by
+default for every tracker. When it is off, the coordinator sends no automatic
+location request for the tracker
 (regular tick, cold start, requested refresh, ``force_poll_due``). A manual
 locate (button, ``googlefindmy.locate_device``) stays possible, and the device
 list is still fetched for the whole account.
 
 Design notes
 ------------
-* The state lives in the entry options (``automatic_polling_disabled``); the
-  coordinator owns reading and writing them. The entity holds no state of its
+* The state lives in the entry options: ``automatic_polling_enabled`` for
+  trackers turned on, ``automatic_polling_disabled`` for trackers turned off.
+  A tracker in neither list is off; an id in both is off. The coordinator owns
+  reading and writing them. The entity holds no state of its
   own, so a restart needs no ``RestoreEntity``.
 * Writing the options never reloads the entry: the options update listener
   only reloads on changed credentials.

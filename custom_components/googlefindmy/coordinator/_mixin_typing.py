@@ -213,6 +213,9 @@ class _MixinBase:
     def _get_automatic_polling_disabled_set(self) -> set[str]:
         raise NotImplementedError
 
+    def _get_automatic_polling_enabled_set(self) -> set[str]:
+        raise NotImplementedError
+
     def is_automatic_polling_enabled(self, device_id: str) -> bool:
         raise NotImplementedError
 

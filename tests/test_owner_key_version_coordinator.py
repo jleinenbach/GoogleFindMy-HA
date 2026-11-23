@@ -38,6 +38,10 @@ from tests.helpers.owner_key_vault_fixtures import make_vault_world
 from tests.helpers.polling_mixin_stub import PollingStub
 from tests.test_owner_key_version_fallback import _install, _seeded_cache
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 _HEX_WINDOW = 16
 
 

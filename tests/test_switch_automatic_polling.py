@@ -330,6 +330,7 @@ async def test_toggle_does_not_reload_entry(
         "async_set_automatic_polling",
         "is_automatic_polling_enabled",
         "_get_automatic_polling_disabled_set",
+        "_get_automatic_polling_enabled_set",
     ):
         setattr(
             coordinator,

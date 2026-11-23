@@ -638,6 +638,10 @@ OPT_ACCURACY_GATE_ENABLED: str = "accuracy_gate_enabled"
 # Canonical device ids whose automatic location requests are switched off (#242).
 # Manual locate requests stay allowed; the device list is still fetched per account.
 OPT_AUTOMATIC_POLLING_DISABLED: str = "automatic_polling_disabled"
+# Canonical device ids whose automatic location requests were turned on. A tracker
+# in neither list is off; an id in both lists is off. The key is absent from
+# DEFAULT_OPTIONS on purpose: its absence marks an entry from before this default.
+OPT_AUTOMATIC_POLLING_ENABLED: str = "automatic_polling_enabled"
 # Canonical device id -> UTC time of the last change of that switch
 # (``YYYY-MM-DDTHH:MM:SSZ``), kept so a comparison window survives a restart.
 OPT_AUTOMATIC_POLLING_CHANGED_AT: str = "automatic_polling_changed_at"
@@ -665,6 +669,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_ROUNDTRIP_CONFIRM,
     OPT_ACCURACY_GATE_ENABLED,
     OPT_AUTOMATIC_POLLING_DISABLED,
+    OPT_AUTOMATIC_POLLING_ENABLED,
     OPT_AUTOMATIC_POLLING_CHANGED_AT,
 )
 
@@ -1301,6 +1306,20 @@ def frozen_attributes_issue_id(entry_id: str) -> str:
     return f"{ISSUE_TRACKER_ATTRIBUTES_FROZEN_KEY}_{entry_id}"
 
 
+# Repairs issue per config entry, raised once on the first start after the
+# update that turned automatic location polling off for trackers without a
+# stored choice. It stays until the user confirms it or the entry goes away.
+ISSUE_AUTOMATIC_POLLING_DEFAULT_OFF_KEY: str = "automatic_polling_default_off"
+
+
+def automatic_polling_notice_issue_id(entry_id: str) -> str:
+    """Return the Repairs issue id of the automatic-polling notice.
+
+    Pattern: 'automatic_polling_default_off_<entry_id>'
+    """
+    return f"{ISSUE_AUTOMATIC_POLLING_DEFAULT_OFF_KEY}_{entry_id}"
+
+
 def issue_id_for(entry_id: str) -> str:
     """Return a stable Repairs issue_id for a given config entry.
 
@@ -1457,6 +1476,7 @@ __all__ = [
     "OPT_ROUNDTRIP_CONFIRM",
     "OPT_ACCURACY_GATE_ENABLED",
     "OPT_AUTOMATIC_POLLING_DISABLED",
+    "OPT_AUTOMATIC_POLLING_ENABLED",
     "OPT_AUTOMATIC_POLLING_CHANGED_AT",
     "OPT_STALE_THRESHOLD_ENABLED",
     "MIGRATE_DATA_KEYS_TO_OPTIONS",
@@ -1532,6 +1552,8 @@ __all__ = [
     "owner_key_version_issue_id",
     "is_owner_key_version_issue_for",
     "frozen_attributes_issue_id",
+    "ISSUE_AUTOMATIC_POLLING_DEFAULT_OFF_KEY",
+    "automatic_polling_notice_issue_id",
     "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN",
     "TRANSLATION_KEY_TRACKER_ATTRIBUTES_FROZEN_NO_AUTOMATIONS",
     "TRACKER_ATTRS_BREAKS_IN_HA_VERSION",

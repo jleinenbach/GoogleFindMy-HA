@@ -51,6 +51,7 @@ from .const import (
     DOMAIN,
     OPT_AUTOMATIC_POLLING_CHANGED_AT,
     OPT_AUTOMATIC_POLLING_DISABLED,
+    OPT_AUTOMATIC_POLLING_ENABLED,
     OPT_DEVICE_POLL_DELAY,
     OPT_ENABLE_STATS_ENTITIES,
     OPT_GOOGLE_HOME_FILTER_ENABLED,
@@ -774,6 +775,9 @@ async def async_get_config_entry_diagnostics(
     automatic_off = coerce_device_id_list(
         effective_config.get(OPT_AUTOMATIC_POLLING_DISABLED)
     )
+    automatic_on = coerce_device_id_list(
+        effective_config.get(OPT_AUTOMATIC_POLLING_ENABLED)
+    )
     automatic_changed_at = coerce_changed_at_map(
         effective_config.get(OPT_AUTOMATIC_POLLING_CHANGED_AT)
     )
@@ -794,10 +798,14 @@ async def async_get_config_entry_diagnostics(
     elif OPT_IGNORED_DEVICES in effective_config_for_diag:
         effective_config_for_diag[OPT_IGNORED_DEVICES] = []
 
-    # Both carry canonical device ids: counts only, like the ignore list.
+    # All three carry canonical device ids: counts only, like the ignore list.
     if OPT_AUTOMATIC_POLLING_DISABLED in effective_config_for_diag:
         effective_config_for_diag[OPT_AUTOMATIC_POLLING_DISABLED] = [REDACTED] * len(
             automatic_off
+        )
+    if OPT_AUTOMATIC_POLLING_ENABLED in effective_config_for_diag:
+        effective_config_for_diag[OPT_AUTOMATIC_POLLING_ENABLED] = [REDACTED] * len(
+            automatic_on
         )
     if OPT_AUTOMATIC_POLLING_CHANGED_AT in effective_config_for_diag:
         effective_config_for_diag[OPT_AUTOMATIC_POLLING_CHANGED_AT] = [REDACTED] * len(
@@ -855,6 +863,7 @@ async def async_get_config_entry_diagnostics(
         "google_home_filter_keywords_count": keywords_count,
         "ignored_devices_count": ignored_count,
         "automatic_polling_disabled_count": len(automatic_off),
+        "automatic_polling_enabled_count": len(automatic_on),
     }
 
     # --- Device & entity registry counts (anonymized) ---

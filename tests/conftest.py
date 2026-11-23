@@ -657,6 +657,23 @@ def hass_executor_stub() -> Callable[..., SimpleNamespace]:
 
 
 @pytest.fixture
+def automatic_polling_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn automatic location polling on for every tracker of the test.
+
+    A tracker without a stored choice is not polled automatically. Tests that
+    examine what an automatic request does, not the switch, use this fixture
+    instead of storing the choice for each tracker they create.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    monkeypatch.setattr(
+        GoogleFindMyCoordinator,
+        "is_automatic_polling_enabled",
+        lambda _self, _device_id: True,
+    )
+
+
+@pytest.fixture
 def issue_registry_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> IssueRegistryCapture:

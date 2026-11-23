@@ -62,6 +62,10 @@ from tests.helpers import drain_loop
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.core_shutdown_state import seed_core_shutdown_state
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 # ~5.5 km apart: far beyond any accuracy sum used here, so the clear-jump branch
 # (dist > radius_sum) executes, and slow enough over the timespans below that the
 # speed gate never fires (that gate is exercised in its own suite).
