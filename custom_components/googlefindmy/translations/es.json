@@ -5,6 +5,7 @@
     }
   },
   "config": {
+    "flow_title": "{email}",
     "step": {
       "user": {
         "title": "Autenticación de Google Find My Device",

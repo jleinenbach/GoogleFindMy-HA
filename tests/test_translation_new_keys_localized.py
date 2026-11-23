@@ -33,10 +33,25 @@ NEW_KEYS: tuple[str, ...] = (
     "issues.automatic_polling_default_off.fix_flow.step.confirm.title",
     "issues.automatic_polling_default_off.fix_flow.step.confirm.description",
     "issues.automatic_polling_default_off.fix_flow.step.confirm.submit",
+    "config.flow_title",
 )
 
+# The discovery card title is the account address alone; there is no word to
+# translate.
+_PLACEHOLDER_ONLY = "placeholder only, no translatable text"
+
 # (language file name, key) -> reason why the English value is correct there.
-ALLOWED_IDENTICAL: Mapping[tuple[str, str], str] = {}
+ALLOWED_IDENTICAL: Mapping[tuple[str, str], str] = {
+    ("de.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+    ("es.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+    ("fr.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+    ("he.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+    ("it.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+    ("nl.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+    ("pl.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+    ("pt-BR.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+    ("pt.json", "config.flow_title"): _PLACEHOLDER_ONLY,
+}
 
 _MISSING = object()
 

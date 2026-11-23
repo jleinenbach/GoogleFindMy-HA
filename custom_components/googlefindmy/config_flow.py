@@ -797,6 +797,10 @@ else:
 # Standard discovery update info source exposed for helper-triggered updates.
 DISCOVERY_UPDATE_SOURCE = "discovery_update_info"
 LEGACY_DISCOVERY_UPDATE_SOURCE = "discovery_update"
+# Sources whose open card a fresher payload of the same account replaces.
+_SUPERSEDABLE_DISCOVERY_SOURCES = frozenset(
+    {SOURCE_DISCOVERY, DISCOVERY_UPDATE_SOURCE, LEGACY_DISCOVERY_UPDATE_SOURCE}
+)
 
 OPT_GOOGLE_HOME_FILTER_ENABLED: str | None
 OPT_GOOGLE_HOME_FILTER_KEYWORDS: str | None
@@ -4509,6 +4513,60 @@ class ConfigFlow(
         """
         return {}
 
+    async def _async_supersede_discovery_flows(self) -> int:
+        """Abort the other open discovery cards of this flow's account.
+
+        One login run rewrites the bundle several times and every rewrite that
+        passes the payload gate raises its own flow; without this, each stayed
+        open as a separate card. The flow carrying the newest payload is the one
+        that remains, so the card the user sees always holds the latest content.
+
+        Only cards from discovery sources are aborted, and never one marked
+        ``dismiss_protected``: that marker means the user has already answered
+        the card, and taking it away would cut off the overwrite question.
+        Cards of other accounts do not share the unique id and are not touched.
+
+        Returns the number of aborted flows. A flow manager without the needed
+        methods (a lightweight test double) aborts nothing.
+        """
+
+        hass = getattr(self, "hass", None)
+        manager = getattr(getattr(hass, "config_entries", None), "flow", None)
+        abort_flow = getattr(manager, "async_abort", None)
+        progress_by_handler = getattr(manager, "async_progress_by_handler", None)
+        unique_id = self.unique_id
+        if (
+            not unique_id
+            or not callable(abort_flow)
+            or not callable(progress_by_handler)
+        ):
+            return 0
+
+        own_flow_id = getattr(self, "flow_id", None)
+        superseded = 0
+        for progress in progress_by_handler(
+            DOMAIN,
+            include_uninitialized=True,
+            match_context={"unique_id": unique_id},
+        ):
+            flow_id = progress.get("flow_id")
+            if not flow_id or flow_id == own_flow_id:
+                continue
+            flow_context = progress.get("context") or {}
+            if flow_context.get("source") not in _SUPERSEDABLE_DISCOVERY_SOURCES:
+                continue
+            if flow_context.get("dismiss_protected"):
+                continue
+            abort_flow(flow_id)
+            superseded += 1
+
+        if superseded:
+            _LOGGER.debug(
+                "Discovery replaced %d older card(s) of the same account",
+                superseded,
+            )
+        return superseded
+
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
     ) -> FlowResult:
@@ -4573,6 +4631,7 @@ class ConfigFlow(
             preferred_unique_id=normalized.unique_id,
             abort_on_duplicate=False,
         )
+        await self._async_supersede_discovery_flows()
         try:
             auth_data, updates = await _ingest_discovery_credentials(
                 self, normalized, existing_entry=existing_entry
@@ -4617,6 +4676,12 @@ class ConfigFlow(
         longer re-enters the entry point and no longer has to be told apart from
         an incoming payload.
         """
+
+        # The user has answered this card: a fresher payload of the same account
+        # must not take it away while the overwrite question is open. Current
+        # Home Assistant sets this marker itself when the form is submitted;
+        # older releases do not, so the flow sets it here as well.
+        self.context["dismiss_protected"] = True
 
         pending_payload = self._pending_discovery_payload
         pending_auth = self._pending_discovery_auth
