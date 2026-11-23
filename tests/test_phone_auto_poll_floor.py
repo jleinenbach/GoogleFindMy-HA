@@ -47,6 +47,7 @@ pytestmark = pytest.mark.asyncio
 _PHONE = {"id": _PHONE_A1, "name": "Phone A1", "locate_route": "phone"}
 _TRACKER = {"id": "tracker-1", "name": "Tag 1"}
 _OPT_DISABLED = "automatic_polling_disabled"
+_OPT_ENABLED = "automatic_polling_enabled"
 
 
 def _floor() -> int:
@@ -65,10 +66,13 @@ def _coordinator(
     api: Any = None,
 ) -> tuple[Any, Any]:
     api = api if api is not None else _DispatchingAPI()
-    coord = _make_coordinator(monkeypatch, options=options or {}, api=api)
+    devices = devices or [_PHONE, _TRACKER]
+    # Every device here is turned on unless the test stores its own choice.
+    options = {_OPT_ENABLED: [d["id"] for d in devices], **(options or {})}
+    coord = _make_coordinator(monkeypatch, options=options, api=api)
     coord.location_poll_interval = interval
     coord.min_poll_interval = const.DEFAULT_MIN_POLL_INTERVAL
-    coord._last_device_list = [dict(d) for d in (devices or [_PHONE, _TRACKER])]
+    coord._last_device_list = [dict(d) for d in devices]
     return coord, api
 
 
@@ -98,12 +102,24 @@ async def test_constant_is_the_single_source_and_others_are_unchanged() -> None:
     assert const.DEFAULT_LOCATION_POLL_INTERVAL == 300
 
 
-async def test_phone_is_polled_without_a_choice(
+async def test_phone_turned_on_is_polled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     coord, api = _coordinator(monkeypatch, interval=300)
     await _cycle(coord, 0.0)
     assert _calls_of(api, _PHONE_A1) == 1
+    assert _calls_of(api, _TRACKER["id"]) == 1
+
+
+async def test_phone_without_a_choice_is_not_polled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A phone is off by default like every tracker; the tracker turned on is polled."""
+    coord, api = _coordinator(
+        monkeypatch, interval=300, options={_OPT_ENABLED: [_TRACKER["id"]]}
+    )
+    await _cycle(coord, 0.0)
+    assert _calls_of(api, _PHONE_A1) == 0
     assert _calls_of(api, _TRACKER["id"]) == 1
 
 

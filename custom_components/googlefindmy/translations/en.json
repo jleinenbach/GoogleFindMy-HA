@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Owner key version missing from the account vault",
       "description": "A tracker needs owner key version {required_version}, but Google serves version {current_version} and the key vault of this Google account did not hold this version when the login tool last read it. Versions in the bundle: {bundle_versions}.\n\nGoogle may add this version to the vault later; only a login run after that can fetch it. To try again, run the login tool (Docker login helper or `main.py`) and import the new `secrets.json`. If the tool still keeps a `secrets.json` from an earlier login, delete that file first or start the tool with `--reauth` (Docker login helper: `GFMY_ARGS=--reauth`); otherwise it reuses the file and does not read the key vault again. Until then the tracker's locations stay unavailable, unless Google starts serving version {required_version}. This issue disappears once the tracker can be decrypted again. Other trackers are not affected."
+    },
+    "automatic_polling_default_off": {
+      "title": "Automatic location polling is now off for trackers you have not turned on",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Automatic location polling is now off",
+            "description": "Since this update, the integration polls a tracker automatically only if you turn on its *Automatic location polling* switch. Trackers of this account that are no longer polled automatically: {count}. This notice does not mean that a location is outdated or that a tracker is faulty; a manual locate keeps working. To poll a tracker again, open its device page and turn the switch on. Select **Got it** to close this notice.",
+            "submit": "Got it"
+          }
+        }
+      }
     }
   },
   "exceptions": {

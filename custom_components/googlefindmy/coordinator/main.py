@@ -158,6 +158,7 @@ from ..const import (
     EVENT_AUTH_OK,
     OPT_AUTOMATIC_POLLING_CHANGED_AT,
     OPT_AUTOMATIC_POLLING_DISABLED,
+    OPT_AUTOMATIC_POLLING_ENABLED,
     OPT_IGNORED_DEVICES,
     OPT_SEMANTIC_LOCATIONS,
     UPDATE_INTERVAL,
@@ -991,6 +992,9 @@ class GoogleFindMyCoordinator(
         # Consecutive empty location results per device id; drives the
         # once-only INFO record for a silent device (log-when-unavailable).
         self._empty_location_streak: dict[str, int] = {}
+        # Device ids already reported at INFO for an answer without coordinates
+        # or semantic name; cleared when a location arrives again.
+        self._missing_location_data_noted: set[str] = set()
 
         # Granular status tracking (API polling vs. push transport)
         self._api_status_state: str = ApiStatus.UNKNOWN
@@ -1762,7 +1766,8 @@ class GoogleFindMyCoordinator(
 
         Read live from ``config_entry.options`` on every call, like
         ``_get_ignored_set``, so a switch flipped during a running cycle is seen
-        at the next device. A coordinator without an entry has nothing off.
+        at the next device. A coordinator without an entry has nothing in this
+        list; its trackers are still off, because none was turned on.
         """
         try:
             entry = getattr(self, "config_entry", None)
@@ -1775,7 +1780,29 @@ class GoogleFindMyCoordinator(
         except Exception as err:  # defensive: a corrupt option must not stop a refresh
             _LOGGER.debug(
                 "Reading the automatic-polling switch option failed; "
-                "treating every tracker as on: %s",
+                "treating no tracker as switched off: %s",
+                err,
+            )
+        return set()
+
+    def _get_automatic_polling_enabled_set(self) -> set[str]:
+        """Return the device IDs whose automatic location requests were turned on.
+
+        Read live like ``_get_automatic_polling_disabled_set``. Without an entry
+        or a stored list the set is empty, so no tracker is on by default.
+        """
+        try:
+            entry = getattr(self, "config_entry", None)
+            if entry is not None:
+                return set(
+                    coerce_device_id_list(
+                        entry.options.get(OPT_AUTOMATIC_POLLING_ENABLED)
+                    )
+                )
+        except Exception as err:  # defensive: a corrupt option must not stop a refresh
+            _LOGGER.debug(
+                "Reading the automatic-polling switch option failed; "
+                "treating no tracker as turned on: %s",
                 err,
             )
         return set()
@@ -1797,8 +1824,14 @@ class GoogleFindMyCoordinator(
         return {}
 
     def is_automatic_polling_enabled(self, device_id: str) -> bool:
-        """Return True unless automatic location requests are off for the device."""
-        return device_id not in self._get_automatic_polling_disabled_set()
+        """Return True only if automatic location requests were turned on.
+
+        A tracker without a stored choice is off; the off list wins over the
+        on list.
+        """
+        if device_id in self._get_automatic_polling_disabled_set():
+            return False
+        return device_id in self._get_automatic_polling_enabled_set()
 
     @callback
     def async_set_automatic_polling(self, device_id: str, enabled: bool) -> None:
@@ -1808,8 +1841,9 @@ class GoogleFindMyCoordinator(
         ``async_update_entry`` compares old and new options with ``!=``, so an
         in-place change would compare equal, not be stored, and be lost at the
         next restart. Read and write run without an ``await`` in between, so two
-        switches cannot interleave. Without a change of state nothing is written
-        and nothing is logged. A stored change writes one INFO line with the
+        switches cannot interleave. Every explicit choice is stored, also "off"
+        for a tracker that is off only because it has no choice yet; a choice
+        that is already stored writes and logs nothing. A stored change writes one INFO line with the
         canonical id (the same id as ``canonical=`` in ``FMDN_UWT_TRANSITION``)
         and never the device name.
         """
@@ -1819,11 +1853,18 @@ class GoogleFindMyCoordinator(
         disabled = coerce_device_id_list(
             entry.options.get(OPT_AUTOMATIC_POLLING_DISABLED)
         )
-        if (device_id not in disabled) == bool(enabled):
+        enabled_ids = coerce_device_id_list(
+            entry.options.get(OPT_AUTOMATIC_POLLING_ENABLED)
+        )
+        stored_on = device_id in enabled_ids and device_id not in disabled
+        stored = stored_on if enabled else device_id in disabled
+        if stored:
             return
         if enabled:
+            new_enabled = sorted({*enabled_ids, device_id})
             new_disabled = [dev for dev in disabled if dev != device_id]
         else:
+            new_enabled = [dev for dev in enabled_ids if dev != device_id]
             new_disabled = sorted({*disabled, device_id})
         changed = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         changed_at = coerce_changed_at_map(
@@ -1832,6 +1873,7 @@ class GoogleFindMyCoordinator(
         changed_at[device_id] = changed
         new_options = dict(entry.options)
         new_options[OPT_AUTOMATIC_POLLING_DISABLED] = new_disabled
+        new_options[OPT_AUTOMATIC_POLLING_ENABLED] = new_enabled
         new_options[OPT_AUTOMATIC_POLLING_CHANGED_AT] = changed_at
         if self.hass.config_entries.async_update_entry(entry, options=new_options):
             _LOGGER.info(
@@ -2632,7 +2674,6 @@ class GoogleFindMyCoordinator(
 
             now_epoch = time.time()
             now_mono = time.monotonic()
-            disabled = self._get_automatic_polling_disabled_set()
             changed_at = self._get_automatic_polling_changed_at()
             order = uwt_order or {}
 
@@ -2690,7 +2731,7 @@ class GoogleFindMyCoordinator(
                         "has_key": bool(slot.get("encrypted_identity_key")),
                         "coarse_fix_accuracy_bucket": coarse_bucket,
                         "coarse_fix_age_s": coarse_age_s,
-                        "automatic_polling": dev_id not in disabled,
+                        "automatic_polling": self.is_automatic_polling_enabled(dev_id),
                         "automatic_polling_changed_at": changed_at.get(dev_id),
                         "locate_requests_auto": auto_count,
                         "locate_requests_manual": manual_count,
@@ -2851,6 +2892,10 @@ class GoogleFindMyCoordinator(
         silence_streaks = getattr(self, "_empty_location_streak", None)
         if silence_streaks is not None:
             silence_streaks.pop(device_id, None)
+        # Nor the "already reported" state of an answer without location data.
+        noted = getattr(self, "_missing_location_data_noted", None)
+        if noted is not None:
+            noted.discard(device_id)
         # The tally claim is keyed by device id and is PERSISTED, so it outlives the
         # purge unless it is dropped here: a deleted device would keep an entry in the
         # store indefinitely, and one re-added under the same id would have its first

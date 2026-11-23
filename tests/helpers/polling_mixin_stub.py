@@ -13,10 +13,11 @@ PR 1.A.3 (Phase 2, AP-B): exercise the simple polling mixin methods
 runtime-empty, so a minimal subclass seeds every attribute the mixin reads
 and pre-mocks cross-mixin methods (``_entry_id``, ``get_metric``,
 ``_get_duration``, ``async_set_updated_data``,
-``_reindex_poll_targets_from_device_registry``, and the two sets the
-prediction skips, ``_get_ignored_set`` and
-``_get_automatic_polling_disabled_set``) to dodge the
-``NotImplementedError`` traps that come from ``_MixinBase``.
+``_reindex_poll_targets_from_device_registry``, and what the prediction
+reads to skip a tracker, ``_get_ignored_set`` and
+``is_automatic_polling_enabled``) to dodge the ``NotImplementedError`` traps
+that come from ``_MixinBase``. Every tracker of the stub is turned on, so the
+prediction sees each history it is given.
 
 The complex async methods (``_async_update_data``,
 ``_async_start_poll_cycle``, ``_handle_dr_event``,
@@ -121,7 +122,7 @@ class PollingStub(PollingOperations):
         self._reindex_poll_targets_from_device_registry = MagicMock(return_value=None)
         # Owned by the main coordinator; read by ``_get_predicted_poll_time``.
         self._get_ignored_set = MagicMock(return_value=set())
-        self._get_automatic_polling_disabled_set = MagicMock(return_value=set())
+        self.is_automatic_polling_enabled = MagicMock(return_value=True)
 
 
 __all__ = ["PollingStub", "make_hass_stub"]

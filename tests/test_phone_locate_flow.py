@@ -763,7 +763,12 @@ async def test_next_automatic_request_only_after_the_interval(
             )
 
     api = _FailingAPI()
-    coord = _make_coordinator(monkeypatch, options={}, api=cast(Any, api))
+    coord = _make_coordinator(
+        monkeypatch,
+        # The phone is turned on; without a stored choice it is not polled.
+        options={"automatic_polling_enabled": [_PHONE_A1]},
+        api=cast(Any, api),
+    )
     coord._last_device_list = [dict(phone)]
     stored = {"last_seen": time.time() - 600, "latitude": 1.0, "longitude": 2.0}
     coord._device_location_data[_PHONE_A1] = dict(stored)

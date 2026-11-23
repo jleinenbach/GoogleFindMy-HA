@@ -7,11 +7,12 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.components.repairs import RepairsFlow
+from homeassistant.components.repairs import ConfirmRepairFlow, RepairsFlow
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
 from ._reauth_reason import ReauthReasonCode
+from .const import ISSUE_AUTOMATIC_POLLING_DEFAULT_OFF_KEY
 from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -159,10 +160,14 @@ async def async_create_fix_flow(
 ) -> RepairsFlow:
     """Create the fix flow for a fixable Google Find My Device issue.
 
-    Currently every fixable issue (``fcm_reauth_required_{entry_id}``) maps to
-    the reauth repair. The affected entry id is read from the issue ``data``
-    payload set by ``_async_raise_reauth_issue`` in ``Auth/fcm_receiver_ha.py``.
+    The automatic-polling notice (``automatic_polling_default_off_{entry_id}``)
+    only needs a confirmation. Every other fixable issue
+    (``fcm_reauth_required_{entry_id}``) maps to the reauth repair; the affected
+    entry id is read from the issue ``data`` payload set by
+    ``_async_raise_reauth_issue`` in ``Auth/fcm_receiver_ha.py``.
     """
+    if issue_id.startswith(f"{ISSUE_AUTOMATIC_POLLING_DEFAULT_OFF_KEY}_"):
+        return ConfirmRepairFlow()
     entry_id_raw = (data or {}).get("entry_id")
     entry_id = entry_id_raw if isinstance(entry_id_raw, str) else None
     return FcmReauthRepairFlow(entry_id)

@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Brak wersji klucza właściciela w sejfie konta",
       "description": "Lokalizator wymaga wersji {required_version} klucza właściciela, ale Google udostępnia wersję {current_version}, a sejf kluczy tego konta Google nie zawierał tej wersji, gdy narzędzie logowania ostatnio go odczytało. Wersje w pakiecie: {bundle_versions}.\n\nGoogle może później dodać tę wersję do sejfu; dopiero logowanie po tym czasie może ją pobrać. Aby spróbować ponownie, uruchom narzędzie logowania (pomocnik logowania Docker lub `main.py`) i zaimportuj nowy plik `secrets.json`. Jeśli narzędzie nadal przechowuje plik `secrets.json` z wcześniejszego logowania, najpierw usuń ten plik lub uruchom narzędzie z opcją `--reauth` (pomocnik logowania Docker: `GFMY_ARGS=--reauth`); w przeciwnym razie użyje tego pliku ponownie i nie odczyta ponownie sejfu kluczy. Do tego czasu położenie lokalizatora pozostanie niedostępne, chyba że Google zacznie udostępniać wersję {required_version}. Ten komunikat zniknie, gdy tylko lokalizator będzie można ponownie odszyfrować. Pozostałe lokalizatory nie są objęte problemem."
+    },
+    "automatic_polling_default_off": {
+      "title": "Automatyczne odpytywanie lokalizacji jest teraz wyłączone dla lokalizatorów, których nie włączono",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Automatyczne odpytywanie lokalizacji jest teraz wyłączone",
+            "description": "Od tej aktualizacji integracja odpytuje lokalizator automatycznie tylko wtedy, gdy włączysz jego przełącznik *Automatyczne odpytywanie lokalizacji*. Lokalizatory tego konta, które nie są już odpytywane automatycznie: {count}. Ten komunikat nie oznacza, że lokalizacja jest nieaktualna ani że lokalizator jest uszkodzony; ręczne lokalizowanie nadal działa. Aby ponownie odpytywać lokalizator, otwórz jego stronę urządzenia i włącz przełącznik. Wybierz **Rozumiem**, aby zamknąć ten komunikat.",
+            "submit": "Rozumiem"
+          }
+        }
+      }
     }
   },
   "exceptions": {

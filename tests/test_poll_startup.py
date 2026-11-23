@@ -24,6 +24,10 @@ from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.test_coordinator_predictive_polling import coordinator as coordinator_fixture
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 coordinator = coordinator_fixture
 
 
@@ -53,7 +57,8 @@ async def test_pending_poll_does_not_block_startup_and_is_cancelled(
     coord.config_entry = entry
     coord._last_device_list = [{"id": "dev-id"}]
     coord._last_list_poll_mono = time.monotonic()
-    coord._last_poll_mono = 0.0
+    # Make the poll due without depending on the host uptime (monotonic clock).
+    coord._last_poll_mono = time.monotonic() - 1000.0
     coord._device_location_data["dev-id"] = {"last_seen": time.time()}
 
     monkeypatch.setattr(coord, "_ensure_service_device_exists", lambda: None)

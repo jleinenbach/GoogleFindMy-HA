@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Versione della chiave del proprietario assente dall'archivio dell'account",
       "description": "Un tracker richiede la versione {required_version} della chiave del proprietario, ma Google fornisce la versione {current_version} e l'archivio delle chiavi di questo account Google non conteneva questa versione quando lo strumento di accesso lo ha letto l'ultima volta. Versioni nel bundle: {bundle_versions}.\n\nGoogle potrebbe aggiungere questa versione all'archivio in seguito; solo un accesso successivo potrà recuperarla. Per riprovare, esegui lo strumento di accesso (assistente di accesso Docker o `main.py`) e importa il nuovo `secrets.json`. Se lo strumento conserva ancora un `secrets.json` di un accesso precedente, elimina prima quel file oppure avvia lo strumento con `--reauth` (assistente di accesso Docker: `GFMY_ARGS=--reauth`); altrimenti riutilizza il file e non rilegge l'archivio delle chiavi. Fino ad allora le posizioni del tracker restano non disponibili, a meno che Google non inizi a fornire la versione {required_version}. Questa segnalazione scompare non appena il tracker può essere di nuovo decifrato. Gli altri tracker non sono interessati."
+    },
+    "automatic_polling_default_off": {
+      "title": "Il polling automatico della posizione ora è disattivato per i tracker che non hai attivato",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Il polling automatico della posizione ora è disattivato",
+            "description": "Da questo aggiornamento, l'integrazione interroga automaticamente un tracker solo se attivi il suo interruttore *Polling automatico della posizione*. Tracker di questo account che non vengono più interrogati automaticamente: {count}. Questo avviso non significa che una posizione sia obsoleta o che un tracker sia guasto; la localizzazione manuale continua a funzionare. Per interrogare di nuovo un tracker, apri la sua pagina del dispositivo e attiva l'interruttore. Seleziona **Ho capito** per chiudere questo avviso.",
+            "submit": "Ho capito"
+          }
+        }
+      }
     }
   },
   "exceptions": {

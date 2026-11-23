@@ -52,6 +52,10 @@ from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.locate_mixin_stub import LocateStub, make_hass_stub
 from tests.helpers.registry_mixin_stub import RegistryStub
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 
 class _DummyCache:
     async def async_get_cached_value(self, _key: str) -> None:  # pragma: no cover

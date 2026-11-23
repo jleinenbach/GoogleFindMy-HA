@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Falta la versión de la clave de propietario en el almacén de la cuenta",
       "description": "Un rastreador necesita la versión {required_version} de la clave de propietario, pero Google entrega la versión {current_version} y el almacén de claves de esta cuenta de Google no contenía esta versión cuando la herramienta de inicio de sesión lo leyó por última vez. Versiones en el paquete: {bundle_versions}.\n\nGoogle puede añadir esta versión al almacén más adelante; solo un inicio de sesión posterior podrá obtenerla. Para intentarlo de nuevo, ejecuta la herramienta de inicio de sesión (asistente de inicio de sesión de Docker o `main.py`) e importa el nuevo `secrets.json`. Si la herramienta todavía conserva un `secrets.json` de un inicio de sesión anterior, elimina primero ese archivo o inicia la herramienta con `--reauth` (asistente de inicio de sesión de Docker: `GFMY_ARGS=--reauth`); de lo contrario, reutiliza el archivo y no vuelve a leer el almacén de claves. Hasta entonces, las ubicaciones del rastreador seguirán sin estar disponibles, salvo que Google empiece a entregar la versión {required_version}. Este aviso desaparece en cuanto el rastreador pueda volver a descifrarse. Los demás rastreadores no se ven afectados."
+    },
+    "automatic_polling_default_off": {
+      "title": "El sondeo automático de ubicación ahora está desactivado para los rastreadores que no has activado",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "El sondeo automático de ubicación ahora está desactivado",
+            "description": "Desde esta actualización, la integración solo consulta un rastreador automáticamente si activas su interruptor *Sondeo automático de ubicación*. Rastreadores de esta cuenta que ya no se consultan automáticamente: {count}. Este aviso no significa que una ubicación esté desactualizada ni que un rastreador esté averiado; la localización manual sigue funcionando. Para volver a consultar un rastreador, abre su página de dispositivo y activa el interruptor. Selecciona **Entendido** para cerrar este aviso.",
+            "submit": "Entendido"
+          }
+        }
+      }
     }
   },
   "exceptions": {

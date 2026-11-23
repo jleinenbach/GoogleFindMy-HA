@@ -35,6 +35,10 @@ from custom_components.googlefindmy.const import OPT_SEMANTIC_LOCATIONS
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_entries_stub import make_config_entry
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 _DEVICE = "dev-1"
 _SIBLING = "dev-2"
 _SHARED_KEY = bytes(range(32))

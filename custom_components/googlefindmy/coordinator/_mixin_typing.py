@@ -108,6 +108,7 @@ class _MixinBase:
     _consecutive_timeouts: int
     _last_poll_result: str | None
     _empty_location_streak: dict[str, int]
+    _missing_location_data_noted: set[str]
     _last_device_list: list[dict[str, Any]]
     _empty_list_streak: int
     _stale_device_misses: dict[str, int]
@@ -210,6 +211,9 @@ class _MixinBase:
         raise NotImplementedError
 
     def _get_automatic_polling_disabled_set(self) -> set[str]:
+        raise NotImplementedError
+
+    def _get_automatic_polling_enabled_set(self) -> set[str]:
         raise NotImplementedError
 
     def is_automatic_polling_enabled(self, device_id: str) -> bool:

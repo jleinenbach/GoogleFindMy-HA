@@ -70,6 +70,10 @@ from tests.helpers import drain_loop
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.locate_mixin_stub import LocateStub
 
+# These tests examine what an automatic location request does, so every
+# tracker in them is turned on; without a stored choice none would be polled.
+pytestmark = pytest.mark.usefixtures("automatic_polling_on")
+
 _LOCATE_TRACKER_DIR = (
     Path(__file__).resolve().parents[1]
     / "custom_components"

@@ -645,7 +645,8 @@ async def test_async_setup_entry_leaves_modern_entries_intact(
     entry = harness.entry
     hass = harness.hass
 
-    entry.options = {"tracked_devices": ["existing"]}
+    # A modern entry already carries the list of trackers turned on.
+    entry.options = {"tracked_devices": ["existing"], "automatic_polling_enabled": []}
     entry.data[DATA_SECRET_BUNDLE] = {"username": "cached@example.com"}
     harness.cache.values = {integration.username_string: "cached@example.com"}
 
@@ -653,7 +654,10 @@ async def test_async_setup_entry_leaves_modern_entries_intact(
     assert await integration.async_setup_entry(hass, entry) is True
 
     assert hass.config_entries.entry_update_calls == []
-    assert entry.options == {"tracked_devices": ["existing"]}
+    assert entry.options == {
+        "tracked_devices": ["existing"],
+        "automatic_polling_enabled": [],
+    }
     assert (
         harness.cache.values.get(integration.username_string)
         == entry.data[CONF_GOOGLE_EMAIL]

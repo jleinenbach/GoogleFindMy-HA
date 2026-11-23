@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Eigentümerschlüssel-Version fehlt im Tresor des Kontos",
       "description": "Ein Tracker braucht die Eigentümerschlüssel-Version {required_version}, aber Google liefert Version {current_version}, und der Schlüsseltresor dieses Google-Kontos enthielt diese Version nicht, als das Login-Werkzeug ihn zuletzt gelesen hat. Versionen im Bundle: {bundle_versions}.\n\nGoogle kann diese Version später im Tresor ablegen; erst ein Login-Lauf danach kann sie holen. Für einen neuen Versuch führe das Login-Werkzeug aus (Docker-Login-Helfer oder `main.py`) und importiere die neue `secrets.json`. Liegt beim Werkzeug noch eine `secrets.json` aus einer früheren Anmeldung, lösche diese Datei vorher oder starte das Werkzeug mit `--reauth` (Docker-Login-Helfer: `GFMY_ARGS=--reauth`); sonst verwendet es die Datei weiter und liest den Schlüsseltresor nicht erneut. Bis dahin bleiben die Standorte des Trackers nicht verfügbar, außer Google liefert Version {required_version}. Diese Meldung verschwindet, sobald der Tracker wieder entschlüsselt werden kann. Andere Tracker sind nicht betroffen."
+    },
+    "automatic_polling_default_off": {
+      "title": "Automatische Standortabfragen sind jetzt für Tracker aus, die du nicht eingeschaltet hast",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Automatische Standortabfragen sind jetzt aus",
+            "description": "Seit diesem Update fragt die Integration einen Tracker nur noch automatisch ab, wenn du seinen Schalter *Automatische Standortabfragen* einschaltest. Tracker dieses Kontos, die nicht mehr automatisch abgefragt werden: {count}. Der Hinweis bedeutet nicht, dass ein Standort veraltet oder ein Tracker defekt ist; die manuelle Ortung funktioniert weiter. Um einen Tracker wieder abfragen zu lassen, öffne seine Geräteseite und schalte den Schalter ein. Wähle **Verstanden**, um diesen Hinweis zu schließen.",
+            "submit": "Verstanden"
+          }
+        }
+      }
     }
   },
   "exceptions": {

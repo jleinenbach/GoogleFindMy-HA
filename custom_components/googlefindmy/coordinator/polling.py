@@ -337,6 +337,40 @@ class PollingOperations(_MixinBase):
                 streak,
             )
 
+    def _note_missing_location_data(self, dev_id: str, dev_name: str) -> None:
+        """Log an answer without coordinates or semantic name, once at INFO.
+
+        A tracker out of reach (for example with a flat battery) answers every
+        poll with metadata only. That is not a fault, so the first such answer
+        logs at INFO by the device id only and every further one at DEBUG,
+        until an answer of the poll cycle carries a location again and
+        ``_clear_missing_location_data`` runs (log-when-unavailable). A
+        location from a push or a manual locate does not reset it. The
+        display name stays at DEBUG (AGENTS.md section 5 (b)).
+        """
+        noted = getattr(self, "_missing_location_data_noted", None)
+        if noted is None:
+            # Coordinators built via __new__ in tests skip __init__.
+            noted = self._missing_location_data_noted = set()
+        if dev_id in noted:
+            _LOGGER.debug(
+                "No location data (coordinates or semantic name) available for %s in this update.",
+                dev_id,
+            )
+        else:
+            noted.add(dev_id)
+            _LOGGER.info(
+                "No location data (coordinates or semantic name) available for %s in this update.",
+                dev_id,
+            )
+        _LOGGER.debug("Device %s is named %s", dev_id, dev_name)
+
+    def _clear_missing_location_data(self, dev_id: str) -> None:
+        """Forget the INFO record of ``_note_missing_location_data`` for a device."""
+        noted = getattr(self, "_missing_location_data_noted", None)
+        if noted is not None:
+            noted.discard(dev_id)
+
     def _note_location_content(self, dev_id: str, dev_name: str) -> None:
         """Clear the silence streak and report the recovery of a silent device.
 
@@ -1241,11 +1275,11 @@ class PollingOperations(_MixinBase):
         if not history_store:
             return None
 
-        excluded = self._get_ignored_set() | self._get_automatic_polling_disabled_set()
+        excluded = self._get_ignored_set()
         predictions: list[float] = []
 
         for dev_id, history in history_store.items():
-            if dev_id in excluded:
+            if dev_id in excluded or not self.is_automatic_polling_enabled(dev_id):
                 continue
             if len(history) < 2:
                 continue
@@ -1757,15 +1791,12 @@ class PollingOperations(_MixinBase):
             # Build list of devices to POLL:
             # Poll devices that have at least one enabled DR entry for this config entry;
             # if a device has no DR entry yet, include it to allow initial discovery.
-            # Trackers whose automatic location requests are switched off
-            # (#242) stay out of every automatic path; read once per refresh.
-            automatic_off = self._get_automatic_polling_disabled_set()
+            # Only trackers whose automatic location requests were turned on
+            # (#242) enter an automatic path; a tracker without a choice is off.
             devices_to_poll: list[dict[str, Any]] = []
             for dev in filtered_devices:
                 dev_id = dev["id"]
-                if dev_id in ignored:
-                    continue
-                if dev_id in automatic_off:
+                if dev_id in ignored or not self.is_automatic_polling_enabled(dev_id):
                     continue
                 if (
                     dev_id in self._enabled_poll_device_ids
@@ -2592,13 +2623,14 @@ class PollingOperations(_MixinBase):
                         self._persist_anchor_metadata(
                             dev_id, location, clear_metadata_only=clear_metadata_only
                         )
-                        if not self._normalize_coords(location, device_label=dev_name):
+                        coords_ok = self._normalize_coords(
+                            location, device_label=dev_name
+                        )
+                        if coords_ok or location.get("semantic_name"):
+                            self._clear_missing_location_data(dev_id)
+                        if not coords_ok:
                             if not location.get("semantic_name"):
-                                _LOGGER.warning(
-                                    "No location data (coordinates or semantic name) available for %s in this update.",
-                                    dev_id,
-                                )
-                                _LOGGER.debug("Device %s is named %s", dev_id, dev_name)
+                                self._note_missing_location_data(dev_id, dev_name)
                             # Nothing to commit/update in cache
                             # Strip any internal hint before dropping to avoid accidental exposure
                             location.pop("_report_hint", None)

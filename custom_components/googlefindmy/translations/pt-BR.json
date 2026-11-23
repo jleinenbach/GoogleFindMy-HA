@@ -871,6 +871,18 @@
     "owner_key_version_not_in_vault": {
       "title": "Versão da chave do proprietário ausente do cofre da conta",
       "description": "Um rastreador precisa da versão {required_version} da chave do proprietário, mas o Google fornece a versão {current_version} e o cofre de chaves desta conta do Google não continha essa versão quando a ferramenta de login o leu pela última vez. Versões no pacote: {bundle_versions}.\n\nO Google pode adicionar essa versão ao cofre mais tarde; só um login depois disso conseguirá obtê-la. Para tentar novamente, execute a ferramenta de login (assistente de login do Docker ou `main.py`) e importe o novo `secrets.json`. Se a ferramenta ainda guardar um `secrets.json` de um login anterior, exclua esse arquivo primeiro ou inicie a ferramenta com `--reauth` (assistente de login do Docker: `GFMY_ARGS=--reauth`); caso contrário, ela reutiliza o arquivo e não lê o cofre de chaves novamente. Até lá, as localizações do rastreador continuam indisponíveis, a menos que o Google comece a fornecer a versão {required_version}. Este aviso desaparece assim que o rastreador puder ser descriptografado novamente. Os outros rastreadores não são afetados."
+    },
+    "automatic_polling_default_off": {
+      "title": "A pesquisa automática de localização agora está desativada para rastreadores que você não ativou",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "A pesquisa automática de localização agora está desativada",
+            "description": "Desde esta atualização, a integração consulta um rastreador automaticamente somente se você ativar o interruptor *Pesquisa automática de localização* dele. Rastreadores desta conta que não são mais consultados automaticamente: {count}. Este aviso não significa que uma localização está desatualizada ou que um rastreador está com defeito; a localização manual continua funcionando. Para consultar um rastreador novamente, abra a página do dispositivo e ative o interruptor. Selecione **Entendi** para fechar este aviso.",
+            "submit": "Entendi"
+          }
+        }
+      }
     }
   },
   "exceptions": {

@@ -847,6 +847,15 @@ Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
 
+A test that expects automatic location requests for a tracker must store the
+choice "on" for it: a tracker without a stored choice is not polled
+automatically. Store it in the option ``automatic_polling_enabled`` when the
+test is about the switch or the default. A test that examines what an automatic
+request does, not the switch, may instead use the ``automatic_polling_on``
+fixture from ``tests/conftest.py`` (``pytestmark =
+pytest.mark.usefixtures("automatic_polling_on")``), which turns every tracker
+of the test on.
+
 #### Deferred subentry identifier assignment helper
 
 Use :func:`tests.helpers.homeassistant.deferred_subentry_entry_id_assignment` to
