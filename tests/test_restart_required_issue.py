@@ -449,3 +449,211 @@ async def test_ensure_rearms_watchdog_after_teardown(
     assert (counts["later"], counts["interval"]) == (2, 2)
     assert callable(bucket["restart_check_initial_unsub"])
     assert callable(bucket["restart_check_unsub"])
+
+
+# --- HACS / Marketplace already own the restart notice (fork issue #1475) ---
+#
+# Both HACS (``custom_components/hacs/repositories/integration.py``) and the Home
+# Assistant core ``marketplace`` component raise their own fixable
+# ``restart_required_<id>_<ref>`` issue with ``issue_domain`` set to the updated
+# integration. The watchdog must stay silent while such an issue is active, and
+# keep its own notice for manual installations.
+
+
+class _IssueEntryStub:
+    """Attribute shape of ``homeassistant.helpers.issue_registry.IssueEntry``."""
+
+    def __init__(
+        self,
+        *,
+        domain: str,
+        issue_domain: str | None,
+        issue_id: str,
+        active: bool = True,
+        dismissed_version: str | None = None,
+    ) -> None:
+        self.domain = domain
+        self.issue_domain = issue_domain
+        self.issue_id = issue_id
+        self.active = active
+        self.dismissed_version = dismissed_version
+
+
+class _IssueRegistryStub:
+    """Registry double exposing ``issues`` like the real ``IssueRegistry``."""
+
+    def __init__(self, *entries: _IssueEntryStub) -> None:
+        self.issues: dict[tuple[str, str], _IssueEntryStub] = {
+            (entry.domain, entry.issue_id): entry for entry in entries
+        }
+
+
+def _install_registry(
+    monkeypatch: pytest.MonkeyPatch, *entries: _IssueEntryStub
+) -> None:
+    registry = _IssueRegistryStub(*entries)
+    monkeypatch.setattr(gfm.ir, "async_get", lambda _hass: registry)
+
+
+async def _mismatched_version(_hass: Any) -> str:
+    return "9.9.9-disk"
+
+
+async def test_check_creates_issue_with_empty_real_shaped_registry(
+    monkeypatch: pytest.MonkeyPatch, issue_calls: dict[str, list[Any]]
+) -> None:
+    hass = _active_hass()
+    _install_registry(monkeypatch)
+    monkeypatch.setattr(gfm, "_async_read_installed_version", _mismatched_version)
+
+    await gfm._async_check_restart_required(hass)
+
+    assert [c["issue_id"] for c in issue_calls["created"]] == [
+        ISSUE_RESTART_REQUIRED_KEY
+    ]
+    assert issue_calls["deleted"] == []
+
+
+@pytest.mark.parametrize("provider", ["hacs", "marketplace"])
+async def test_check_defers_to_provider_restart_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    issue_calls: dict[str, list[Any]],
+    provider: str,
+) -> None:
+    hass = _active_hass()
+    _install_registry(
+        monkeypatch,
+        _IssueEntryStub(
+            domain=provider,
+            issue_domain=DOMAIN,
+            issue_id="restart_required_123_v1.15.43",
+        ),
+    )
+    monkeypatch.setattr(gfm, "_async_read_installed_version", _mismatched_version)
+
+    await gfm._async_check_restart_required(hass)
+
+    assert issue_calls["created"] == []
+    assert issue_calls["deleted"] == [ISSUE_RESTART_REQUIRED_KEY]
+
+
+async def test_check_ignores_provider_issue_for_other_integration(
+    monkeypatch: pytest.MonkeyPatch, issue_calls: dict[str, list[Any]]
+) -> None:
+    hass = _active_hass()
+    _install_registry(
+        monkeypatch,
+        _IssueEntryStub(
+            domain="hacs",
+            issue_domain="other_integration",
+            issue_id="restart_required_456_v2.0.0",
+        ),
+    )
+    monkeypatch.setattr(gfm, "_async_read_installed_version", _mismatched_version)
+
+    await gfm._async_check_restart_required(hass)
+
+    assert [c["issue_id"] for c in issue_calls["created"]] == [
+        ISSUE_RESTART_REQUIRED_KEY
+    ]
+
+
+async def test_check_ignores_provider_issue_of_other_kind(
+    monkeypatch: pytest.MonkeyPatch, issue_calls: dict[str, list[Any]]
+) -> None:
+    hass = _active_hass()
+    _install_registry(
+        monkeypatch,
+        _IssueEntryStub(domain="hacs", issue_domain=DOMAIN, issue_id="removed_123"),
+    )
+    monkeypatch.setattr(gfm, "_async_read_installed_version", _mismatched_version)
+
+    await gfm._async_check_restart_required(hass)
+
+    assert [c["issue_id"] for c in issue_calls["created"]] == [
+        ISSUE_RESTART_REQUIRED_KEY
+    ]
+
+
+async def test_check_creates_issue_when_registry_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, issue_calls: dict[str, list[Any]]
+) -> None:
+    hass = _active_hass()
+
+    def _broken_registry(_hass: Any) -> Any:
+        raise RuntimeError("issue registry unavailable")
+
+    monkeypatch.setattr(gfm.ir, "async_get", _broken_registry)
+    monkeypatch.setattr(gfm, "_async_read_installed_version", _mismatched_version)
+
+    await gfm._async_check_restart_required(hass)
+
+    assert [c["issue_id"] for c in issue_calls["created"]] == [
+        ISSUE_RESTART_REQUIRED_KEY
+    ]
+
+
+async def test_check_ignores_restart_issue_of_other_provider_domain(
+    monkeypatch: pytest.MonkeyPatch, issue_calls: dict[str, list[Any]]
+) -> None:
+    hass = _active_hass()
+    _install_registry(
+        monkeypatch,
+        _IssueEntryStub(
+            domain="other_integration",
+            issue_domain=DOMAIN,
+            issue_id="restart_required_1_v1",
+        ),
+    )
+    monkeypatch.setattr(gfm, "_async_read_installed_version", _mismatched_version)
+
+    await gfm._async_check_restart_required(hass)
+
+    assert [c["issue_id"] for c in issue_calls["created"]] == [
+        ISSUE_RESTART_REQUIRED_KEY
+    ]
+
+
+async def test_check_ignores_inactive_provider_restart_issue(
+    monkeypatch: pytest.MonkeyPatch, issue_calls: dict[str, list[Any]]
+) -> None:
+    hass = _active_hass()
+    _install_registry(
+        monkeypatch,
+        _IssueEntryStub(
+            domain="hacs",
+            issue_domain=DOMAIN,
+            issue_id="restart_required_123_v1.15.43",
+            active=False,
+        ),
+    )
+    monkeypatch.setattr(gfm, "_async_read_installed_version", _mismatched_version)
+
+    await gfm._async_check_restart_required(hass)
+
+    assert [c["issue_id"] for c in issue_calls["created"]] == [
+        ISSUE_RESTART_REQUIRED_KEY
+    ]
+
+
+async def test_check_defers_to_dismissed_provider_restart_issue(
+    monkeypatch: pytest.MonkeyPatch, issue_calls: dict[str, list[Any]]
+) -> None:
+    """A provider issue the user dismissed still counts as the restart notice."""
+
+    hass = _active_hass()
+    _install_registry(
+        monkeypatch,
+        _IssueEntryStub(
+            domain="hacs",
+            issue_domain=DOMAIN,
+            issue_id="restart_required_123_v1.15.43",
+            dismissed_version="2026.11.2",
+        ),
+    )
+    monkeypatch.setattr(gfm, "_async_read_installed_version", _mismatched_version)
+
+    await gfm._async_check_restart_required(hass)
+
+    assert issue_calls["created"] == []
+    assert issue_calls["deleted"] == [ISSUE_RESTART_REQUIRED_KEY]
