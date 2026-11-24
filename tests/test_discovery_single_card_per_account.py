@@ -1268,3 +1268,89 @@ async def test_the_same_bundle_dropped_again_later_raises_a_card(
     again = await _discover(hass, _payload(_ACCOUNT_A, shared_key="G1G1"))
 
     assert again["type"] == "form"
+
+
+@pytest.mark.asyncio
+async def test_without_a_confirmed_copy_or_a_boundary_nothing_counts_as_newer(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """With the confirmed content gone and no mtime boundary, no bundle is newer.
+
+    The same bundle does count once the card carries a boundary below its
+    mtime, so the ``None`` comes from the missing yardstick, not the bundle.
+    """
+
+    from custom_components.googlefindmy import config_flow, discovery  # noqa: PLC0415
+
+    _first, second, _manager, _failing = two_watched_files
+    _write_bundle(second, "Y1Y1", 2_000, token=_YOUNGER_TOKEN)
+    ((_path, scanned),) = discovery.scan_secrets_bundles([second])
+
+    without = await config_flow._async_freshest_watched_bundle(
+        hass, stable_key=scanned.stable_key, digest="not-on-disk", not_before=None
+    )
+    with_boundary = await config_flow._async_freshest_watched_bundle(
+        hass, stable_key=scanned.stable_key, digest="not-on-disk", not_before=1_500
+    )
+
+    assert without is None
+    assert with_boundary is not None
+    assert with_boundary.digest == scanned.digest
+
+
+@pytest.mark.asyncio
+async def test_a_younger_bundle_failing_its_check_at_the_overwrite_writes_nothing(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """Accepting the overwrite aborts when the newest bundle fails its check.
+
+    The older bundle of the card is not written into the entry instead.
+    """
+
+    from custom_components.googlefindmy.const import (  # noqa: PLC0415
+        CONF_OAUTH_TOKEN,
+    )
+
+    configured_accounts.add(_ACCOUNT_A)
+    entry = _add_configured_entry(hass, _ACCOUNT_A)
+    first, second, manager, failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    question = await hass.config_entries.flow.async_configure(card, {})
+    assert question["step_id"] == "discovery_overwrite"
+
+    _write_bundle(second, "Y1Y1", 2_000, token=_YOUNGER_TOKEN)
+    failing.add(_YOUNGER_TOKEN)
+    result = await hass.config_entries.flow.async_configure(
+        card, {"overwrite_credentials": True}
+    )
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "cannot_connect"
+    assert CONF_OAUTH_TOKEN not in entry.data
+
+
+@pytest.mark.asyncio
+async def test_the_import_cleanup_is_staged_at_most_once_per_flow(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both entry-creation sites may call the staging; only the first stages."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    staged: list[Any] = []
+    monkeypatch.setattr(
+        config_flow,
+        "_async_stage_container_cleanup",
+        lambda *args, **kwargs: staged.append(kwargs.get("job")),
+    )
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+
+    flow._async_stage_discovery_import_cleanup(None)
+    flow._async_stage_discovery_import_cleanup(None)
+
+    assert len(staged) == 1
