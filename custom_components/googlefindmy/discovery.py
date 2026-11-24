@@ -459,6 +459,7 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
         stable_key = payload.get("discovery_stable_key")
         source = payload.get("discovery_source")
         title = payload.get("title")
+        bundle_mtime = payload.get("discovery_bundle_mtime")
 
         coro = _trigger_cloud_discovery(
             self._hass,
@@ -470,6 +471,14 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             source=source if isinstance(source, str) else None,
             title=title if isinstance(title, str) else None,
             entry=self._entry,
+            # Passed on as is; the config flow drops anything that is not a
+            # finite number (see config_flow._finite_bundle_mtime).
+            bundle_mtime=(
+                bundle_mtime
+                if isinstance(bundle_mtime, int | float)
+                and not isinstance(bundle_mtime, bool)
+                else None
+            ),
         )
         self._schedule(coro, on_failure=on_failure)
 
@@ -726,8 +735,15 @@ def _assemble_cloud_discovery_payload(
     discovery_stable_key: str,
     title: str | None,
     source: str | None,
+    bundle_mtime: float | None = None,
 ) -> dict[str, Any]:
-    """Prepare the payload forwarded to the config flow discovery handler."""
+    """Prepare the payload forwarded to the config flow discovery handler.
+
+    ``bundle_mtime`` is the modification time of the secrets file the bundle
+    was read from. The config flow takes it as the card's freshness boundary:
+    only a bundle of the account written at or after it can be newer than the
+    card's content (see ``config_flow._async_freshest_watched_bundle``).
+    """
 
     clean_email = normalize_email(email if isinstance(email, str) else None)
     payload: dict[str, Any] = {
@@ -751,6 +767,9 @@ def _assemble_cloud_discovery_payload(
 
     if source:
         payload["discovery_source"] = source
+
+    if bundle_mtime is not None:
+        payload["discovery_bundle_mtime"] = bundle_mtime
 
     return payload
 
@@ -782,6 +801,7 @@ async def _trigger_cloud_discovery(
     source: str | None = None,
     title: str | None = None,
     entry: ConfigEntry | None = None,
+    bundle_mtime: float | None = None,
 ) -> CloudDiscoveryOutcome:
     """Create or resume a config flow based on cloud-scan discovery data.
 
@@ -808,6 +828,7 @@ async def _trigger_cloud_discovery(
         discovery_stable_key=stable_key,
         title=title,
         source=source,
+        bundle_mtime=bundle_mtime,
     )
 
     # The in-flight guard dedups identical *payloads*, not accounts: keying it on
@@ -1325,6 +1346,30 @@ class SecretsJSONWatcher:
         # reset it.
         self._settled_signatures.discard(signature)
 
+    @callback
+    def rearm_account(self, stable_key: str, *, keep_digest: str | None) -> int:
+        """Forget the dispatched bundles of one account except ``keep_digest``.
+
+        Called after a discovery card of the account was answered. The other
+        cards of that account are closed at that moment, but their bundles may
+        still be on disk and are remembered here as dispatched, so the next scan
+        would skip them for good. Dropping their signatures makes the newest one
+        come back as a card; the answered bundle (``keep_digest``) stays
+        remembered. The retry budgets are left untouched: this is not a failed
+        attempt. Lock-free for the same reason as :meth:`_invalidate_signature`.
+
+        Returns the number of forgotten signatures.
+        """
+
+        stale = {
+            signature
+            for signature in self._settled_signatures
+            if signature.rpartition(":")[0] == stable_key
+            and signature.rpartition(":")[2] != keep_digest
+        }
+        self._settled_signatures -= stale
+        return len(stale)
+
     async def _scan(self, *, reason: str) -> None:
         async with self._lock:
             candidates = await self._hass.async_add_executor_job(self._read_bundles)
@@ -1430,6 +1475,9 @@ class SecretsJSONWatcher:
                 discovery_stable_key=result.stable_key,
                 title=title,
                 source=source,
+                # Taken with the read, so it precedes the title await above
+                # and the flow start: a rewrite in between is not older.
+                bundle_mtime=result.mtime,
             )
 
             runtime = _cloud_discovery_runtime(self._hass, existing_entry)
@@ -1686,6 +1734,14 @@ class DiscoveryManager:
         # shutdown (it does not raise, so the try/except there never saw it).
         self._stop_unsub = None
         await self.async_stop()
+
+    def rearm_account(self, stable_key: str, *, keep_digest: str | None) -> int:
+        """Forward :meth:`SecretsJSONWatcher.rearm_account` to every watcher."""
+
+        return sum(
+            watcher.rearm_account(stable_key, keep_digest=keep_digest)
+            for watcher in self._watchers
+        )
 
     async def async_force_secrets_scan(self) -> None:
         for watcher in self._watchers:

@@ -56,7 +56,12 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
-from .log_safety import describe_exception, exception_origin
+from .log_safety import (
+    describe_exception,
+    entry_label_for_log,
+    exception_origin,
+    is_ephemeral_cache,
+)
 from .token_cache import TokenCache
 from .username_provider import username_string
 
@@ -231,10 +236,18 @@ async def _get_or_generate_android_id(
         return cached_android_id
 
     android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
-    _LOGGER.warning(
-        "Generated new android_id for %s; cache was missing a stored identifier.",
-        _mask_email_for_logs(username),
-    )
+    if is_ephemeral_cache(cache):
+        _LOGGER.debug(
+            "Probe-only android_id generated for %s; nothing is stored",
+            _mask_email_for_logs(username),
+        )
+    else:
+        _LOGGER.warning(
+            "entry_id=%s: "
+            "Generated new android_id for %s; cache was missing a stored identifier.",
+            entry_label_for_log(cache),
+            _mask_email_for_logs(username),
+        )
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
@@ -249,8 +262,31 @@ async def _get_or_generate_android_id(
 # ---------------------------------------------------------------------------
 
 
+async def _stored_aas_form_value(cache: TokenCache) -> str | None:
+    """Return the stored OAuth value if it already has the AAS form.
+
+    Mirrors the shortcut in :func:`_generate_aas_token` without its side
+    effects: a value that passes the negative filter and starts with
+    ``aas_et/`` is used as it is, and no exchange runs for it.
+    """
+
+    oauth_val = await cache.get(CONF_OAUTH_TOKEN)
+    if not isinstance(oauth_val, str) or not oauth_val.startswith("aas_et/"):
+        return None
+    # Unreachable today: the filter only rejects JWT-shaped values ("eyJ..."),
+    # and an ``aas_et/`` value never has that form. Kept so this mirror stays
+    # in step with ``_generate_aas_token`` if the filter grows.
+    if _disqualifies_oauth_for_exchange(oauth_val):  # pragma: no cover
+        return None
+    return oauth_val
+
+
 async def _exchange_oauth_for_aas(
-    username: str, oauth_token: str, android_id: int
+    username: str,
+    oauth_token: str,
+    android_id: int,
+    *,
+    cache: object | None = None,
 ) -> dict[str, Any]:
     """Run the blocking gpsoauth exchange in an executor.
 
@@ -289,7 +325,8 @@ async def _exchange_oauth_for_aas(
             # text out of the record; surface a sanitized ``error_kind`` via
             # ``extra`` and the type plus frame instead of a traceback.
             _LOGGER.warning(
-                "gpsoauth authentication error. (%s at %s)",
+                "entry_id=%s: gpsoauth authentication error. (%s at %s)",
+                entry_label_for_log(cache),
                 describe_exception(err),
                 exception_origin(err),
                 extra={
@@ -355,7 +392,9 @@ async def _exchange_oauth_for_aas(
         classified = classify_gpsoauth_error(error_value)
         error_kind = classified or "(none)"
         _LOGGER.warning(
+            "entry_id=%s: "
             "gpsoauth response missing the AAS result field (user=%s, keys=%d)",
+            entry_label_for_log(cache),
             _mask_email_for_logs(username),
             key_count,
             extra={
@@ -419,13 +458,17 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
             # the one that applied, so a new filter reason cannot be mislabelled.
             if _looks_like_jwt(oauth_token):
                 _LOGGER.warning(
+                    "entry_id=%s: "
                     "Ignoring the configured OAuth value: it looks like a JWT "
-                    "(possibly an installation or ID token), not an OAuth token."
+                    "(possibly an installation or ID token), not an OAuth token.",
+                    entry_label_for_log(cache),
                 )
             else:
                 _LOGGER.warning(
+                    "entry_id=%s: "
                     "Ignoring the configured OAuth value: the negative filter "
-                    "disqualifies it for the AAS exchange."
+                    "disqualifies it for the AAS exchange.",
+                    entry_label_for_log(cache),
                 )
             oauth_token = None  # Force fallback path
 
@@ -483,14 +526,18 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
 
     # 3) Exchange OAuth → AAS (blocking call executed in executor).
     try:
-        resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
+        resp = await _exchange_oauth_for_aas(
+            username, oauth_token, android_id, cache=cache
+        )
     except RuntimeError:
         if not oauth_token.startswith("aas_et/"):
             _LOGGER.error(
+                "entry_id=%s: "
                 "AAS token exchange failed with a likely-expired OAuth cookie. "
                 "The Chrome OAuth cookie is single-use and cannot be reused. "
                 "Please re-authenticate: "
                 "python -m custom_components.googlefindmy --reauth",
+                entry_label_for_log(cache),
             )
         raise
 
@@ -548,15 +595,25 @@ async def async_get_aas_token(
     existing_token = await cache.get(DATA_AAS_TOKEN)
     was_cached = existing_token is not None and isinstance(existing_token, str)
 
+    reused = False
+
     async def _gen_with_retries() -> str:
-        _LOGGER.info("AAS token: generating new token via OAuth exchange.")
+        nonlocal reused
+        # Same condition as the shortcut in _generate_aas_token: a stored value
+        # that already has the AAS form is returned there without an exchange.
+        reused = await _stored_aas_form_value(cache) is not None
+        if reused:
+            _LOGGER.info("AAS: reusing the stored value, no exchange ran")
+        else:
+            _LOGGER.info("AAS token: generating new token via OAuth exchange.")
         last_exc: Exception | None = None
         attempts = max(1, retries + 1)
         max_retries = attempts - 1  # = retries parameter
         for attempt in range(attempts):
             try:
                 token = await _generate_aas_token(cache=cache)
-                _LOGGER.info("AAS token: successfully generated.")
+                if not reused:
+                    _LOGGER.info("AAS token: successfully generated.")
                 return token
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
@@ -567,15 +624,18 @@ async def async_get_aas_token(
                 if not retryable:
                     if retry_num > 0:
                         _LOGGER.error(
+                            "entry_id=%s: "
                             "AAS retrieval failed (retry %d/%d). No more retries. "
                             "Error: %s",
+                            entry_label_for_log(cache),
                             retry_num,
                             max_retries,
                             describe_exception(exc),
                         )
                     else:
                         _LOGGER.error(
-                            "AAS retrieval failed. Error: %s",
+                            "entry_id=%s: AAS retrieval failed. Error: %s",
+                            entry_label_for_log(cache),
                             describe_exception(exc),
                         )
                     break
@@ -583,13 +643,16 @@ async def async_get_aas_token(
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "AAS retrieval failed. Error: %s. Retrying...",
+                        "entry_id=%s: AAS retrieval failed. Error: %s. Retrying...",
+                        entry_label_for_log(cache),
                         describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
+                        "entry_id=%s: "
                         "AAS retrieval failed (retry %d/%d). Error: %s. "
                         "Retrying in %.0fs...",
+                        entry_label_for_log(cache),
                         retry_num,
                         max_retries,
                         describe_exception(exc),
@@ -602,8 +665,9 @@ async def async_get_aas_token(
     token: str = await cache.get_or_set(DATA_AAS_TOKEN, _gen_with_retries)
 
     # Record AAS token issuance timestamp if a fresh token was generated
-    # This enables TTL learning for proactive AAS refresh
-    if not was_cached:
+    # This enables TTL learning for proactive AAS refresh. A reused stored
+    # value was not issued now, so it gets no timestamp.
+    if not was_cached and not reused:
         username_val = await cache.get(username_string)
         if isinstance(username_val, str) and username_val:
             issued_key = f"aas_token_issued_at_{username_val.strip().lower()}"

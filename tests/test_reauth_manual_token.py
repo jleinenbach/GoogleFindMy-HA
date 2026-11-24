@@ -180,7 +180,9 @@ def test_manual_reauth_clears_cached_aas_and_mints_new_token(
 
         observed: dict[str, Any] = {}
 
-        async def _fake_exchange(username: str, oauth_token: str, android_id: int):
+        async def _fake_exchange(
+            username: str, oauth_token: str, android_id: int, **_kwargs: Any
+        ):
             observed["oauth_token"] = oauth_token
             return {"Token": "aas-new", "Email": username}
 

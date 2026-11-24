@@ -55,6 +55,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -797,6 +798,10 @@ else:
 # Standard discovery update info source exposed for helper-triggered updates.
 DISCOVERY_UPDATE_SOURCE = "discovery_update_info"
 LEGACY_DISCOVERY_UPDATE_SOURCE = "discovery_update"
+# Sources whose open card a fresher payload of the same account replaces.
+_SUPERSEDABLE_DISCOVERY_SOURCES = frozenset(
+    {SOURCE_DISCOVERY, DISCOVERY_UPDATE_SOURCE, LEGACY_DISCOVERY_UPDATE_SOURCE}
+)
 
 OPT_GOOGLE_HOME_FILTER_ENABLED: str | None
 OPT_GOOGLE_HOME_FILTER_KEYWORDS: str | None
@@ -851,6 +856,7 @@ async def _async_delete_watched_secrets(
     *,
     imported_stable_key: str | None = None,
     imported_digest: str | None = None,
+    entry_id: str | None = None,
 ) -> None:
     """Delete the watched secrets.json copies the import actually consumed.
 
@@ -891,7 +897,7 @@ async def _async_delete_watched_secrets(
     - Same account but a **different** digest: removed only if the file is
       provably stale, i.e. its mtime is strictly older than the mtime of *every*
       on-disk copy of the imported content. Anything younger or equal (including
-      the mtime tie) is kept with an info log; the watcher imports it on its next
+      the mtime tie) is kept with an info log; the watcher offers it on its next
       scan, so the system converges.
     - Fail-safe: with ``imported_stable_key`` or ``imported_digest`` ``None``
       nothing is deleted (debug log). A payload without a secrets bundle has no
@@ -982,7 +988,9 @@ async def _async_delete_watched_secrets(
             return
         except OSError:
             _LOGGER.warning(
-                "Failed to remove watched bundle file after import: %s",
+                "Failed to remove watched bundle file after import for entry %s: "
+                "%s; delete the file by hand, the account is already imported",
+                entry_id or "-",
                 path_str,
             )
 
@@ -1030,9 +1038,85 @@ async def _async_delete_watched_secrets(
             continue
         _LOGGER.info(
             "Keeping watched secrets bundle: it is not older than the imported "
-            "one for the same account; the watcher imports it on its next scan: %s",
+            "one for the same account; it is offered as a new discovery card: %s",
             path_str,
         )
+
+
+async def _async_freshest_watched_bundle(
+    hass: HomeAssistant | None,
+    *,
+    stable_key: str | None,
+    digest: str | None,
+    not_before: float | None = None,
+) -> _SecretsScanResult | None:
+    """Return the account's newest watched bundle if it is newer than ``digest``.
+
+    Scans the watched paths with :func:`discovery.scan_secrets_bundles`, the
+    ordering the watcher and the delete-after-import hook use as well, and
+    returns the newest bundle of ``stable_key`` whose content differs from
+    ``digest`` and whose modification time is later than the newest on-disk
+    copy of the ``digest`` content, so a bundle written between two copies of
+    the confirmed content does not count as newer. A bundle stamped exactly like
+    that copy is not newer either: the tie is undecidable (the scan order breaks
+    it on the digest, a coin flip with respect to age), and the confirmed
+    content is still on disk, so the card keeps what the user confirmed. If that
+    content is no longer
+    on disk, the bundle must be written at or after ``not_before``: the
+    modification time of the file the card's content was read from (or, for a
+    payload without one, the moment the card's discovery step began). The card
+    carried the account's newest bundle when it was read, so anything written
+    earlier is not newer. Without ``not_before`` nothing counts as newer in that
+    case. Returns ``None`` when
+    there is no such bundle, no discovery manager, or no identity to compare
+    against.
+    """
+
+    if hass is None or stable_key is None or digest is None:
+        return None
+    domain_data = getattr(hass, "data", None)
+    if not isinstance(domain_data, Mapping):
+        return None
+    bucket = domain_data.get(DOMAIN)
+    manager = bucket.get("discovery_manager") if isinstance(bucket, Mapping) else None
+    watch_paths = getattr(manager, "watch_paths", None)
+    if not watch_paths:
+        return None
+
+    # Imported inside the function to avoid a circular import at module load
+    # (discovery imports config_flow).
+    from . import discovery as discovery_module
+
+    paths = [Path(str(path)) for path in watch_paths]
+    scanned: list[tuple[Path, _SecretsScanResult]] = await hass.async_add_executor_job(
+        discovery_module.scan_secrets_bundles, paths
+    )
+    same_account = [
+        result for _path, result in scanned if result.stable_key == stable_key
+    ]
+    confirmed_mtimes = [
+        result.mtime for result in same_account if result.digest == digest
+    ]
+    if confirmed_mtimes:
+        threshold = max(confirmed_mtimes)
+        inclusive = False
+    elif not_before is not None:
+        # The confirmed content has left the disk, so something replaced it.
+        # A bundle stamped exactly at the boundary is most likely that
+        # replacement: under coarse mtimes, or rewritten between the watcher's
+        # read and its stat() (which then carries the newer file's mtime). A
+        # different file stamped in the same tick may also be older; the tie
+        # cannot be decided, and taking it keeps the replacement.
+        threshold = not_before
+        inclusive = True
+    else:
+        return None
+    for result in same_account:
+        if result.digest == digest:
+            continue
+        if result.mtime > threshold or (inclusive and result.mtime == threshold):
+            return result
+    return None
 
 
 def _stable_key_for_discovery_payload(
@@ -1927,6 +2011,14 @@ def _format_bundle_age(mtime: float) -> str:
 PENDING_CONTAINER_CLEANUP_KEY = "pending_container_cleanup"
 """``hass.data[DOMAIN]`` key holding the staged, in-memory cleanup tickets."""
 
+# In-memory only: per account stable key, the content digest of the discovered
+# bundle a card was last answered with and the monotonic time of the answer
+# (see ConfigFlow._async_remember_answered_bundle).
+ANSWERED_DISCOVERY_BUNDLES_KEY = "answered_discovery_bundles"
+# How long, in seconds, a card for the bundle an account was just answered with
+# is dropped. It covers a scan racing the answer, not a later re-drop.
+ANSWERED_DISCOVERY_BUNDLE_GRACE = 30.0
+
 PERSIST_PROOF_TIMEOUT = 60.0
 """Seconds the durability gate waits for the entry to appear in HA storage.
 
@@ -2662,7 +2754,7 @@ async def _async_run_container_cleanup_when_persisted(
         )
         return
 
-    await _async_execute_container_cleanup(hass, jobs)
+    await _async_execute_container_cleanup(hass, jobs, job_entry_id=entry_id)
 
 
 @_typed_callback
@@ -2720,7 +2812,10 @@ def async_schedule_pending_container_cleanup(
 
 
 async def _async_execute_container_cleanup(
-    hass: HomeAssistant, jobs: list[PendingContainerCleanup]
+    hass: HomeAssistant,
+    jobs: list[PendingContainerCleanup],
+    *,
+    job_entry_id: str | None = None,
 ) -> None:
     """Execute already claimed cleanup jobs (best effort, isolated per job).
 
@@ -2736,6 +2831,7 @@ async def _async_execute_container_cleanup(
                     hass,
                     imported_stable_key=job.imported_stable_key,
                     imported_digest=job.imported_digest,
+                    entry_id=job_entry_id,
                 )
             except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
                 _LOGGER.warning("Deferred watched-bundle cleanup failed: %s", err)
@@ -3568,6 +3664,22 @@ class CloudDiscoveryData:
     # carried no marker, which is treated as a credential import: asking one
     # question too many beats replacing working credentials unasked.
     source: str | None = None
+    # Modification time of the secrets file the watcher read the bundle from
+    # (``discovery_bundle_mtime``); the card's freshness boundary. ``None`` when
+    # the producer read no file or sent no usable value.
+    bundle_mtime: float | None = None
+
+
+def _finite_bundle_mtime(value: Any) -> float | None:
+    """Return ``value`` as a finite float, or ``None`` when it is no usable mtime."""
+
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _normalize_and_validate_discovery_payload(
@@ -3667,6 +3779,7 @@ def _normalize_and_validate_discovery_payload(
         raise DiscoveryFlowError("invalid_discovery_info")
 
     source = payload_dict.get("discovery_source")
+    bundle_mtime = _finite_bundle_mtime(payload_dict.get("discovery_bundle_mtime"))
     return CloudDiscoveryData(
         email=email_candidate,
         unique_id=unique_id,
@@ -3674,6 +3787,7 @@ def _normalize_and_validate_discovery_payload(
         secrets_bundle=secrets_bundle,
         title=str(title) if isinstance(title, str) else None,
         source=source if isinstance(source, str) and source else None,
+        bundle_mtime=bundle_mtime,
     )
 
 
@@ -3931,6 +4045,18 @@ class ConfigFlow(
         self._subentry_key_core_tracking = TRACKER_SUBENTRY_KEY
         self._subentry_key_service = SERVICE_SUBENTRY_KEY
         self._pending_discovery_payload: CloudDiscoveryData | None = None
+        # The discovered bundle the user confirmed as a new account; read when
+        # the device selection creates the entry (see
+        # _async_abort_sibling_discovery_flows).
+        self._confirmed_discovery_payload: CloudDiscoveryData | None = None
+        # The freshness boundary of the content this flow's card carries: the
+        # modification time of the file the watcher read it from, or, without
+        # one, when the discovery step began. Moves to the swapped-in bundle's
+        # mtime on a swap (see _async_freshest_watched_bundle).
+        self._discovery_card_not_before: float | None = None
+        # Whether this flow already staged the delete of the bundle it imported
+        # as a new account (see _async_stage_discovery_import_cleanup).
+        self._discovery_import_cleanup_staged = False
         # The credential *delta*, not a merged entry payload: what a form
         # carries across a user's think time must not be a snapshot of another
         # object's state (see _merge_credential_updates).
@@ -4509,6 +4635,252 @@ class ConfigFlow(
         """
         return {}
 
+    def _abort_other_discovery_flows(self, *, spare_answered: bool) -> int:
+        """Abort the other open discovery flows of this flow's account.
+
+        Shared by the two moments that end cards: a fresher payload replaces the
+        open card (``spare_answered=True``: a card the user has already answered,
+        marked ``dismiss_protected``, is left alone), and a confirmation ends
+        every other card of the account (``spare_answered=False``). Only flows
+        from discovery sources are touched; flows of other accounts do not share
+        the unique id. A flow manager without the needed methods (a lightweight
+        test double) aborts nothing. Returns the number of aborted flows.
+        """
+
+        hass = getattr(self, "hass", None)
+        manager = getattr(getattr(hass, "config_entries", None), "flow", None)
+        abort_flow = getattr(manager, "async_abort", None)
+        progress_by_handler = getattr(manager, "async_progress_by_handler", None)
+        unique_id = self.unique_id
+        if (
+            not unique_id
+            or not callable(abort_flow)
+            or not callable(progress_by_handler)
+        ):
+            return 0
+
+        own_flow_id = getattr(self, "flow_id", None)
+        aborted = 0
+        for progress in progress_by_handler(
+            DOMAIN,
+            include_uninitialized=True,
+            match_context={"unique_id": unique_id},
+        ):
+            flow_id = progress.get("flow_id")
+            if not flow_id or flow_id == own_flow_id:
+                continue
+            flow_context = progress.get("context") or {}
+            if flow_context.get("source") not in _SUPERSEDABLE_DISCOVERY_SOURCES:
+                continue
+            if spare_answered and flow_context.get("dismiss_protected"):
+                continue
+            abort_flow(flow_id)
+            aborted += 1
+        return aborted
+
+    def _async_abort_sibling_discovery_flows(
+        self, payload: CloudDiscoveryData | None
+    ) -> None:
+        """End the account's other cards once one card has been answered.
+
+        After a confirmation -- credentials replaced, credentials kept, or a new
+        entry created -- no other card of the account may stay open, answered or
+        not. On a created entry Home Assistant would abort them as well, but
+        silently; closing them here first is what makes the INFO line with the
+        number appear on every one of the three outcomes.
+
+        The closed cards may have carried a bundle that is younger than the
+        confirmed one and is still on disk. The watcher remembers every bundle
+        it has dispatched, so it would never offer that bundle again; the
+        discovery manager is therefore told to forget the account's other
+        bundles, which makes the younger one come back as exactly one new card.
+        """
+
+        self._async_remember_answered_bundle(payload)
+        closed = self._abort_other_discovery_flows(spare_answered=False)
+        if closed:
+            _LOGGER.info(
+                "Discovery for %s confirmed; closed %d other discovery card(s) "
+                "for the same account",
+                _mask_email_for_logs(payload.email if payload is not None else None),
+                closed,
+            )
+
+        self._async_rearm_account_bundles(payload)
+
+    def _async_remember_answered_bundle(
+        self, payload: CloudDiscoveryData | None
+    ) -> None:
+        """Record which bundle of the account a card was answered with.
+
+        The watcher can dispatch that same bundle a moment after the answer,
+        when its scan and the confirmation run in the same loop turn; the card
+        it raises would then outlive the closing of the other cards and ask
+        about content that is already answered. ``async_step_discovery`` drops
+        such a card for :data:`ANSWERED_DISCOVERY_BUNDLE_GRACE` seconds after
+        the answer; a later re-drop of the same bundle raises a card again. The
+        record lives in memory only.
+        """
+
+        stable_key = _stable_key_for_discovery_payload(payload)
+        digest = _digest_for_discovery_payload(payload)
+        hass_obj = getattr(self, "hass", None)
+        domain_data = getattr(hass_obj, "data", None)
+        if stable_key is None or digest is None or not isinstance(domain_data, dict):
+            return
+        bucket = cast(MutableMapping[str, Any], domain_data.setdefault(DOMAIN, {}))
+        answered = cast(
+            dict[str, tuple[str, float]],
+            bucket.setdefault(ANSWERED_DISCOVERY_BUNDLES_KEY, {}),
+        )
+        answered[stable_key] = (digest, time.monotonic())
+
+    def _bundle_already_answered(self, payload: CloudDiscoveryData) -> bool:
+        """Return whether ``payload`` is the bundle the account was answered with."""
+
+        domain_data = getattr(getattr(self, "hass", None), "data", None)
+        bucket = domain_data.get(DOMAIN) if isinstance(domain_data, Mapping) else None
+        answered = (
+            bucket.get(ANSWERED_DISCOVERY_BUNDLES_KEY)
+            if isinstance(bucket, Mapping)
+            else None
+        )
+        if not isinstance(answered, Mapping):
+            return False
+        stable_key = _stable_key_for_discovery_payload(payload)
+        record = answered.get(stable_key) if stable_key is not None else None
+        if not isinstance(record, tuple) or len(record) != 2:
+            return False
+        digest, answered_at = record
+        if not isinstance(answered_at, float):
+            return False
+        return bool(
+            digest == _digest_for_discovery_payload(payload)
+            and time.monotonic() - answered_at < ANSWERED_DISCOVERY_BUNDLE_GRACE
+        )
+
+    def _async_rearm_account_bundles(self, payload: CloudDiscoveryData | None) -> None:
+        """Let the watcher offer the account's bundles other than ``payload`` again.
+
+        The watcher remembers every bundle it has dispatched. A bundle whose
+        card was closed, or that a confirmation could not import, would never
+        be offered again; forgetting it makes it come back as one new card.
+        """
+
+        stable_key = _stable_key_for_discovery_payload(payload)
+        if stable_key is None:
+            return
+        domain_data = getattr(getattr(self, "hass", None), "data", None)
+        bucket = domain_data.get(DOMAIN) if isinstance(domain_data, Mapping) else None
+        manager = (
+            bucket.get("discovery_manager") if isinstance(bucket, Mapping) else None
+        )
+        if manager is None or not callable(getattr(manager, "rearm_account", None)):
+            _LOGGER.debug("No discovery manager to re-arm after a confirmation")
+            return
+        manager.rearm_account(
+            stable_key, keep_digest=_digest_for_discovery_payload(payload)
+        )
+
+    async def _async_take_freshest_bundle(
+        self, payload: CloudDiscoveryData, auth_data: dict[str, Any]
+    ) -> tuple[CloudDiscoveryData, dict[str, Any]] | None:
+        """Swap in the account's newest watched bundle before it is imported.
+
+        A card shows the content it was raised with, but the login container
+        may have written a newer bundle of the same account since. Importing
+        the card's content would then put older credentials over newer ones.
+        So the newest bundle on disk is validated here and replaces the card's
+        content; without a newer one, ``payload`` and ``auth_data`` come back
+        unchanged.
+
+        Returns ``None`` when the newer bundle fails its check. The caller ends
+        the confirmation then rather than importing the older content, and the
+        newer bundle is re-armed so it comes back as a card of its own.
+        """
+
+        hass_obj = getattr(self, "hass", None)
+        fresher = await _async_freshest_watched_bundle(
+            hass_obj,
+            stable_key=_stable_key_for_discovery_payload(payload),
+            digest=_digest_for_discovery_payload(payload),
+            not_before=self._discovery_card_not_before,
+        )
+        if fresher is None:
+            return payload, auth_data
+
+        from . import discovery as discovery_module
+
+        info = discovery_module._assemble_cloud_discovery_payload(
+            email=fresher.email,
+            token=fresher.token,
+            secrets_bundle=fresher.bundle,
+            discovery_ns="",
+            discovery_stable_key=fresher.stable_key,
+            title=payload.title,
+            source=payload.source,
+            bundle_mtime=fresher.mtime,
+        )
+        existing_entry: ConfigEntry | None = None
+        if hass_obj is not None and hasattr(hass_obj, "config_entries"):
+            existing_entry = _find_entry_by_email(
+                cast(HomeAssistant, hass_obj), payload.email
+            )
+        try:
+            normalized = _normalize_and_validate_discovery_payload(info)
+            new_auth, _updates = await _ingest_discovery_credentials(
+                self, normalized, existing_entry=existing_entry
+            )
+        except DiscoveryFlowError as err:
+            _LOGGER.warning(
+                "Discovery for %s: the newer sign-in bundle on disk failed its "
+                "check (%s); nothing was imported",
+                _mask_email_for_logs(payload.email),
+                err.reason,
+            )
+            self._async_rearm_account_bundles(payload)
+            return None
+
+        _LOGGER.info(
+            "Discovery for %s: a newer sign-in bundle replaced the confirmed one",
+            _mask_email_for_logs(payload.email),
+        )
+        self._auth_data = new_auth
+        # The swapped-in content is the card's content now; an older bundle
+        # must not count as newer than it in a later comparison.
+        self._discovery_card_not_before = fresher.mtime
+        return normalized, dict(new_auth)
+
+    async def _async_supersede_discovery_flows(self) -> int:
+        """Abort the other open discovery cards of this flow's account.
+
+        One login run rewrites the bundle several times and every rewrite that
+        passes the payload gate raises its own flow; without this, each stayed
+        open as a separate card. The flow carrying the newest payload is the one
+        that remains, so the card the user sees always holds the latest content.
+
+        Only cards from discovery sources are aborted, and never one marked
+        ``dismiss_protected``: that marker means the user has already answered
+        the card, and taking it away would cut off the overwrite question.
+        Cards of other accounts do not share the unique id and are not touched.
+
+        The older card closes before the new bundle is validated. If the new
+        bundle then fails with a reason the watcher does not retry (for example
+        ``invalid_auth``), no card of the account is left until the next
+        bundle arrives.
+
+        Returns the number of aborted flows. A flow manager without the needed
+        methods (a lightweight test double) aborts nothing.
+        """
+
+        superseded = self._abort_other_discovery_flows(spare_answered=True)
+        if superseded:
+            _LOGGER.debug(
+                "Discovery replaced %d older card(s) of the same account",
+                superseded,
+            )
+        return superseded
+
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
     ) -> FlowResult:
@@ -4568,11 +4940,32 @@ class ConfigFlow(
             )
             return self.async_abort(reason="invalid_discovery_info")
 
+        # Checked before the first await, so a card for this content either
+        # exists when the answer closes the other cards, or sees the record.
+        if self._bundle_already_answered(normalized):
+            _LOGGER.debug(
+                "Discovery for %s ignored: another card was just answered with "
+                "this bundle",
+                _mask_email_for_logs(normalized.email),
+            )
+            return self.async_abort(reason="already_configured")
+
+        # The read file's mtime travels with the payload: a bundle written
+        # after the watcher read this one, even before this step began, is
+        # younger than the card's content. Without it, the clock is taken
+        # before the first await, so a bundle written while the credentials
+        # below are being checked still counts as younger.
+        not_before = (
+            normalized.bundle_mtime
+            if normalized.bundle_mtime is not None
+            else time.time()
+        )
         existing_entry = await self._async_prepare_account_context(
             email=normalized.email,
             preferred_unique_id=normalized.unique_id,
             abort_on_duplicate=False,
         )
+        await self._async_supersede_discovery_flows()
         try:
             auth_data, updates = await _ingest_discovery_credentials(
                 self, normalized, existing_entry=existing_entry
@@ -4598,6 +4991,7 @@ class ConfigFlow(
         self._pending_discovery_payload = normalized
         self._pending_discovery_auth = dict(auth_data)
         self._pending_discovery_entry_exists = updates is not None
+        self._discovery_card_not_before = not_before
         self._set_confirm_only()
         return self.async_show_form(
             step_id="discovery_confirm",
@@ -4618,6 +5012,12 @@ class ConfigFlow(
         an incoming payload.
         """
 
+        # The user has answered this card: a fresher payload of the same account
+        # must not take it away while the overwrite question is open. Current
+        # Home Assistant sets this marker itself when the form is submitted;
+        # older releases do not, so the flow sets it here as well.
+        self.context["dismiss_protected"] = True
+
         pending_payload = self._pending_discovery_payload
         pending_auth = self._pending_discovery_auth
         entry_exists = self._pending_discovery_entry_exists
@@ -4627,6 +5027,14 @@ class ConfigFlow(
             return self.async_abort(reason="invalid_discovery_info")
 
         self._clear_discovery_confirmation_state()
+
+        if pending_auth is not None:
+            freshest = await self._async_take_freshest_bundle(
+                pending_payload, pending_auth
+            )
+            if freshest is None:
+                return self.async_abort(reason="cannot_connect")
+            pending_payload, pending_auth = freshest
 
         if entry_exists and pending_auth is not None:
             # The account is already configured and someone supplied
@@ -4650,6 +5058,32 @@ class ConfigFlow(
 
         return await self._async_import_discovered_account(pending_payload)
 
+    def _async_stage_discovery_import_cleanup(
+        self, payload: CloudDiscoveryData | None
+    ) -> None:
+        """Stage the delete of the bundle a new discovered account imported.
+
+        Called where the entry is created: on the submit of the device
+        selection, and in :meth:`_async_import_discovered_account` when the
+        device selection returns ``CREATE_ENTRY`` straight away. A flow stages
+        this job at most once, so both sites can call it without doubling it.
+        The caller marks the ticket as promised afterwards; a ticket only
+        exists once a job was staged.
+        """
+
+        if self._discovery_import_cleanup_staged:
+            return
+        self._discovery_import_cleanup_staged = True
+        _async_stage_container_cleanup(
+            getattr(self, "hass", None),
+            flow_id=self._async_cleanup_ticket_id(),
+            unique_id=self.unique_id,
+            job=PendingContainerCleanup(
+                imported_stable_key=_stable_key_for_discovery_payload(payload),
+                imported_digest=_digest_for_discovery_payload(payload),
+            ),
+        )
+
     async def _async_import_discovered_account(
         self, payload: CloudDiscoveryData | None
     ) -> FlowResult:
@@ -4665,6 +5099,7 @@ class ConfigFlow(
         that to "stage no key", which is what the absent payload means.
         """
 
+        self._confirmed_discovery_payload = payload
         result = await self.async_step_device_selection()
         # Delete-after-import: STAGED here, executed in
         # async_setup_entry. A CREATE_ENTRY FlowResult is only a
@@ -4681,15 +5116,7 @@ class ConfigFlow(
             isinstance(result, Mapping)
             and result.get("type") == data_entry_flow.FlowResultType.CREATE_ENTRY
         ):
-            _async_stage_container_cleanup(
-                getattr(self, "hass", None),
-                flow_id=self._async_cleanup_ticket_id(),
-                unique_id=self.unique_id,
-                job=PendingContainerCleanup(
-                    imported_stable_key=_stable_key_for_discovery_payload(payload),
-                    imported_digest=_digest_for_discovery_payload(payload),
-                ),
-            )
+            self._async_stage_discovery_import_cleanup(payload)
             # This staging happens AFTER the CREATE_ENTRY result, so
             # the mark the create path set in async_step_device_selection
             # predates the ticket this call may just have created. Mark
@@ -4784,8 +5211,8 @@ class ConfigFlow(
     ) -> FlowResult:
         """Ask before replacing the credentials of an already configured account.
 
-        Reached from :meth:`async_step_discovery` once the discovery card has
-        been confirmed and the account turns out to have an entry already. The
+        Reached from :meth:`async_step_discovery_confirm` once the discovery card
+        has been confirmed and the account turns out to have an entry already. The
         answer decides between two aborts, both of which say what happened:
         ``credentials_updated`` or ``credentials_kept``. Neither is
         ``already_configured``, which used to end both outcomes and told the user
@@ -4794,6 +5221,12 @@ class ConfigFlow(
         Declining writes nothing at all: the entry keeps the credentials it has,
         and nothing is staged for cleanup, so the discovered bundle stays on
         disk.
+
+        Accepting first swaps in the account's newest bundle on disk (see
+        :meth:`_async_take_freshest_bundle`), so what is written can be a bundle
+        written after the question was asked rather than the one it was asked
+        about; if that newer bundle fails its check, the step ends with
+        ``cannot_connect`` and writes nothing.
 
         Accepting reports ``credentials_updated`` only where credentials were
         actually written, and that is read off the entry rather than inferred
@@ -4830,7 +5263,13 @@ class ConfigFlow(
                     "Discovery for %s declined: stored credentials kept",
                     _mask_email_for_logs(payload.email),
                 )
+                self._async_abort_sibling_discovery_flows(payload)
                 return self.async_abort(reason="credentials_kept")
+
+            freshest = await self._async_take_freshest_bundle(payload, auth_data)
+            if freshest is None:
+                return self.async_abort(reason="cannot_connect")
+            payload, auth_data = freshest
 
             rebased = self._async_rebase_credential_updates(payload.email, auth_data)
             if rebased is None:
@@ -4971,6 +5410,7 @@ class ConfigFlow(
                 "Discovery for %s confirmed: stored credentials replaced",
                 _mask_email_for_logs(payload.email),
             )
+            self._async_abort_sibling_discovery_flows(payload)
             return self.async_abort(reason="credentials_updated")
 
         return self.async_show_form(
@@ -6021,6 +6461,13 @@ class ConfigFlow(
             # ``found_local_bundle`` is deleted from disk only after the entry
             # has been observed in storage (two-phase delete, F4/P2).
             self._async_stage_local_bundle_cleanup()
+            if self._confirmed_discovery_payload is not None:
+                # A confirmed discovery card becomes an entry here, on the
+                # submit of the device selection, so the bundle it consumed is
+                # staged for deletion here too.
+                self._async_stage_discovery_import_cleanup(
+                    self._confirmed_discovery_payload
+                )
             # ... and pin the ticket to that promise BEFORE Home Assistant runs
             # async_finish_flow. From here on the flow's removal no longer means
             # "no entry": the first async_setup_entry runs inside
@@ -6031,6 +6478,13 @@ class ConfigFlow(
             # job after this result (async_step_discovery does) marks again at
             # its own site rather than relying on this one.
             self._async_mark_own_cleanup_ticket_entry_promised()
+            if self._confirmed_discovery_payload is not None:
+                # The entry is created on the submit of the device selection,
+                # not where the discovered bundle was confirmed, so the other
+                # cards of the account are closed here.
+                self._async_abort_sibling_discovery_flows(
+                    self._confirmed_discovery_payload
+                )
             return created
 
         return self.async_show_form(

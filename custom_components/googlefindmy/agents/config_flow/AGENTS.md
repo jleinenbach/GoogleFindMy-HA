@@ -114,6 +114,13 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
   )
   ```
 
+## Discovery cards from watched bundles
+
+* Test discovery cards through Home Assistant's real flow manager (`hass.config_entries.flow.async_init` and `async_configure`) and count open flows with `include_uninitialized=True`; a hand-driven handler misses the aborts the manager performs.
+* A new entry from a discovery card is created on the submit of the device selection, not in `async_step_discovery_confirm`. Code that must run "when the entry is created" (closing the account's other cards, staging the delete of the consumed bundle) belongs at that creation site; `_confirmed_discovery_payload` carries the confirmed bundle there.
+* `_async_take_freshest_bundle` swaps in the account's newest watched bundle before an import or an overwrite; keep a single call path to the scan so one change covers both steps.
+* Log a discovery account only masked (`_mask_email_for_logs`), never in `extra`; the `entry_id` may appear in the message.
+
 ## Device ownership in flow code
 
 The config flow binds the service device itself. Any such binding is an **ownership**

@@ -29,7 +29,12 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
-from .log_safety import describe_exception, exception_origin
+from .log_safety import (
+    describe_exception,
+    entry_label_for_log,
+    exception_origin,
+    is_ephemeral_cache,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -207,10 +212,18 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
         return android_id
 
     android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
-    _LOGGER.warning(
-        "Generated new android_id for %s; cache was missing a stored identifier.",
-        _mask_email_for_logs(username),
-    )
+    if is_ephemeral_cache(cache):
+        _LOGGER.debug(
+            "Probe-only android_id generated for %s; nothing is stored",
+            _mask_email_for_logs(username),
+        )
+    else:
+        _LOGGER.warning(
+            "entry_id=%s: "
+            "Generated new android_id for %s; cache was missing a stored identifier.",
+            entry_label_for_log(cache),
+            _mask_email_for_logs(username),
+        )
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
@@ -481,7 +494,9 @@ async def async_request_token(  # noqa: PLR0913
         )
     except InvalidAasTokenError:
         _LOGGER.warning(
+            "entry_id=%s: "
             "gpsoauth rejected the cached AAS token; a fresh AAS token will be required.",
+            entry_label_for_log(cache),
             extra={"oauth_scope": scope},
         )
         raise

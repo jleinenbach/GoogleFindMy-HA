@@ -3149,6 +3149,12 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     # after that proof. See ``config_flow._StagedCleanupTicket`` and
     # ``config_flow.async_schedule_pending_container_cleanup``.
     pending_container_cleanup: list[_StagedCleanupTicket]
+    # In-memory only: per account stable key, the content digest of the bundle a
+    # discovery card was last answered with and the monotonic time of the
+    # answer. Lets the config flow drop a card the watcher raises for that same
+    # bundle shortly after the answer. See
+    # ``config_flow.ConfigFlow._async_remember_answered_bundle``.
+    answered_discovery_bundles: dict[str, tuple[str, float]]
 
 
 # Typed hass.data key for the global domain bucket (HA 2024.6+ HassKey).

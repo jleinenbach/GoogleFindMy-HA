@@ -241,6 +241,8 @@ When reading cookies from external authentication flows (for example, Selenium-m
 
 * Do not attach a traceback in this package: no `exc_info=` value other than `False` or `None` (a name, `True`, an alias bound outside the handler, a tuple, `sys.exc_info()`) and no `logger.exception(...)`. The last rendered line of a traceback is `str(err)`, which for `gpsoauth`, `requests` or `aiohttp` may echo a token or a response body, and an exception this package raises `from` a foreign one renders the chained cause as well. Log `describe_exception(err)` and, for the location, `exception_origin(err)` instead.
 * When referencing account identifiers in logs, always mask them via `_mask_email_for_logs` (available from `aas_token_retrieval`) instead of embedding raw usernames or email addresses.
+* Every `error`, `warning` and `exception` line in `aas_token_retrieval.py`, `adm_token_retrieval.py` and `token_retrieval.py` starts with its own literal `"entry_id=%s: "` and takes `entry_label_for_log(cache)` (from `log_safety`) as the first argument; a cache without an entry logs `-`. Keep the prefix as a separate literal on the first line of the format string, so the credential-wording rule keeps passing. Pass the cache down to helpers that log; do not look it up globally. `tests/test_auth_log_entry_id.py` checks this statically.
+* The in-memory validation cache (`api._EphemeralCache`) declares `ephemeral = True`; `log_safety.is_ephemeral_cache` reads it. An `android_id` generated against such a cache is logged at debug level, because nothing is stored.
 
 ### Preferred logger pattern
 

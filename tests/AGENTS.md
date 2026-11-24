@@ -979,6 +979,21 @@ The helper returns a manager object exposing ``.flow`` for parity with Home
 Assistant's runtime contract—reuse that attribute instead of constructing
 inline wrappers in individual tests.
 
+#### Discovery cards through the real flow manager
+
+``tests/test_discovery_single_card_per_account.py`` starts discovery flows with
+``hass.config_entries.flow.async_init`` and answers them with
+``async_configure``. Some tests in the suite leave a stubbed
+``homeassistant.loader`` behind, so the fixture replaces only the two manager
+functions that read the loader, in the globals of
+``type(hass.config_entries.flow).async_create_flow``: ``_async_get_flow_handler``
+returns this integration's ``ConfigFlow``, and ``_support_single_config_entry_only``
+returns the manifest's answer (``False``), which core asks for as soon as an
+entry of the domain exists. Everything else stays Home Assistant's own code. Watcher tests run the real ``DiscoveryManager`` over files in
+``tmp_path`` and replace only ``discovery._trigger_cloud_discovery`` with a
+function that builds the payload through
+``discovery._assemble_cloud_discovery_payload`` and calls ``async_init``.
+
 #### Cloud discovery discovery-key fallback coverage
 
 ``tests/test_cloud_discovery_trigger.py`` now asserts that

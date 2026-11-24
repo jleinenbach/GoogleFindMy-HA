@@ -1501,6 +1501,11 @@ class GoogleFindMyCoordinator(
             # Repairs + event
             self._create_auth_issue()
             entry_id = self.config_entry.entry_id if self.config_entry else ""
+            # The reason is not logged: it can carry raw producer text.
+            _LOGGER.error(
+                "Authentication for entry %s failed; re-authentication is required",
+                entry_id or "-",
+            )
             self.hass.bus.async_fire(
                 EVENT_AUTH_ERROR,
                 {
@@ -1514,6 +1519,11 @@ class GoogleFindMyCoordinator(
                 self.async_set_updated_data(self.data)
             except Exception:
                 pass
+        elif failed:
+            _LOGGER.debug(
+                "Authentication for entry %s still failing",
+                self.config_entry.entry_id if self.config_entry else "-",
+            )
         elif not failed:
             issue_dismissed = self._dismiss_auth_issue()
             state_changed = False

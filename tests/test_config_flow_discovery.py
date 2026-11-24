@@ -160,6 +160,9 @@ def test_async_step_discovery_new_entry(
 
     class _FlowHass:
         def __init__(self) -> None:
+            # The created entry stages the delete of the confirmed bundle,
+            # which lives in hass.data like on a real instance.
+            self.data: dict[str, Any] = {}
             prepare_flow_hass_config_entries(
                 self,
                 _ConfigEntries,

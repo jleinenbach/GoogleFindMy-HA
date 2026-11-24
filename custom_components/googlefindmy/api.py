@@ -52,7 +52,7 @@ import time
 import warnings
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Final, Protocol, cast, runtime_checkable
 
 from aiohttp import ClientError, ClientSession
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -469,6 +469,9 @@ class _EphemeralCache:
     It implements the CacheProtocol subset that the API needs. Values are kept
     in-memory only and never persisted to disk.
     """
+
+    # Read by ``Auth.log_safety.is_ephemeral_cache``: nothing set here is stored.
+    ephemeral: Final[bool] = True
 
     def __init__(
         self,
