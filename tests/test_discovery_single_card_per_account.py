@@ -1017,6 +1017,53 @@ async def test_an_older_bundle_between_two_copies_of_the_confirmed_one_is_not_ne
 
 
 @pytest.mark.asyncio
+async def test_a_bundle_rewritten_in_place_while_the_card_validates_is_imported(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card's time boundary is taken before its credential check, not after."""
+
+    import time  # noqa: PLC0415
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    first, _second, manager, _failing = two_watched_files
+    validate = config_flow._ingest_discovery_credentials
+    rewrites: list[float] = []
+
+    async def _rewrite_during_check(*args: Any, **kwargs: Any) -> Any:
+        if not rewrites:
+            now = time.time()
+            rewrites.append(now)
+            first.write_text(
+                json.dumps(
+                    {
+                        "google_email": _ACCOUNT_A,
+                        "aas_token": _YOUNGER_TOKEN,
+                        "shared_key": "Y1Y1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.utime(first, (now, now))
+        return await validate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        config_flow, "_ingest_discovery_credentials", _rewrite_during_check
+    )
+    card = await _card_for_older_bundle(hass, first, manager)
+    assert _shared_key_of(hass, card) == "O1O1"
+    assert len(rewrites) == 1
+
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+
+
+@pytest.mark.asyncio
 async def test_an_older_bundle_does_not_replace_a_confirmed_one_that_left_the_disk(
     hass: HomeAssistant,
     two_watched_files: tuple[Path, Path, Any, set[str]],

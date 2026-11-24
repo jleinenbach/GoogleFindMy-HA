@@ -1057,11 +1057,12 @@ async def _async_freshest_watched_bundle(
     ``digest`` and whose modification time is later than the newest on-disk
     copy of the ``digest`` content, so a bundle written between two copies of
     the confirmed content does not count as newer. If that content is no longer
-    on disk, the bundle must be younger than ``not_before``, the moment the card
-    was raised: the card then carried the account's newest bundle, so anything
-    written earlier is not newer. Without ``not_before`` nothing counts as newer
-    in that case. Returns ``None`` when there is no such bundle, no discovery manager,
-    or no identity to compare against.
+    on disk, the bundle must be younger than ``not_before``, the moment the card's
+    discovery step began (before its credential check): the card then carried the
+    account's newest bundle, so anything written earlier is not newer. Without
+    ``not_before`` nothing counts as newer in that case. Returns ``None`` when
+    there is no such bundle, no discovery manager, or no identity to compare
+    against.
     """
 
     if hass is None or stable_key is None or digest is None:
@@ -4011,8 +4012,9 @@ class ConfigFlow(
         # the device selection creates the entry (see
         # _async_abort_sibling_discovery_flows).
         self._confirmed_discovery_payload: CloudDiscoveryData | None = None
-        # When this flow last showed its discovery card (wall clock, comparable
-        # with file modification times; see _async_freshest_watched_bundle).
+        # When this flow began the discovery step that showed its card, taken
+        # before the credential check (wall clock, comparable with file
+        # modification times; see _async_freshest_watched_bundle).
         self._discovery_card_raised_at: float | None = None
         # Whether this flow already staged the delete of the bundle it imported
         # as a new account (see _async_stage_discovery_import_cleanup).
@@ -4906,6 +4908,9 @@ class ConfigFlow(
             )
             return self.async_abort(reason="already_configured")
 
+        # Taken before the first await: a bundle written while the credentials
+        # below are being checked is younger than this card's content.
+        raised_at = time.time()
         existing_entry = await self._async_prepare_account_context(
             email=normalized.email,
             preferred_unique_id=normalized.unique_id,
@@ -4937,7 +4942,7 @@ class ConfigFlow(
         self._pending_discovery_payload = normalized
         self._pending_discovery_auth = dict(auth_data)
         self._pending_discovery_entry_exists = updates is not None
-        self._discovery_card_raised_at = time.time()
+        self._discovery_card_raised_at = raised_at
         self._set_confirm_only()
         return self.async_show_form(
             step_id="discovery_confirm",
