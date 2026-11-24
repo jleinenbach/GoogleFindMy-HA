@@ -1354,3 +1354,128 @@ async def test_the_import_cleanup_is_staged_at_most_once_per_flow(
     flow._async_stage_discovery_import_cleanup(None)
 
     assert len(staged) == 1
+
+
+def _normalized(email: str) -> Any:
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    return config_flow._normalize_and_validate_discovery_payload(
+        _payload(email, shared_key="S1S1")
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_freshest_bundle_helper_needs_a_data_mapping() -> None:
+    """A Home Assistant object without a ``data`` mapping yields no bundle."""
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    result = await config_flow._async_freshest_watched_bundle(
+        SimpleNamespace(data=None), stable_key="key", digest="digest"
+    )
+
+    assert result is None
+
+
+def test_an_answer_for_one_account_does_not_count_for_another(
+    hass: HomeAssistant,
+) -> None:
+    """Only the answered account's bundle counts as already answered."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    answered, other = _normalized(_ACCOUNT_A), _normalized(_ACCOUNT_B)
+    flow._async_remember_answered_bundle(answered)
+
+    assert flow._bundle_already_answered(answered) is True
+    assert flow._bundle_already_answered(other) is False
+
+
+def test_an_answer_record_without_a_float_time_is_ignored(
+    hass: HomeAssistant,
+) -> None:
+    """A record whose time is not a monotonic float does not count."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    payload = _normalized(_ACCOUNT_A)
+    flow._async_remember_answered_bundle(payload)
+    records = hass.data[config_flow.DOMAIN][config_flow.ANSWERED_DISCOVERY_BUNDLES_KEY]
+    ((key, (digest, answered_at)),) = records.items()
+
+    # Still inside the grace period, only no longer a float.
+    records[key] = (digest, int(answered_at))
+
+    assert flow._bundle_already_answered(payload) is False
+
+
+def test_rearming_without_a_payload_leaves_the_watcher_alone(
+    hass: HomeAssistant,
+) -> None:
+    """Without a payload there is no account, so nothing is re-armed."""
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    calls: list[tuple[Any, Any]] = []
+    manager = SimpleNamespace(
+        rearm_account=lambda key, keep_digest=None: calls.append((key, keep_digest))
+    )
+    hass.data.setdefault(config_flow.DOMAIN, {})["discovery_manager"] = manager
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+
+    flow._async_rearm_account_bundles(None)
+    assert calls == []
+
+    flow._async_rearm_account_bundles(_normalized(_ACCOUNT_A))
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_bundle_swap_runs_without_a_config_entries_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host without ``config_entries`` checks the newer bundle as a new account.
+
+    No existing entry is looked up then; the check still runs, and its failure
+    still ends the swap with ``None``.
+    """
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    fresher = SimpleNamespace(
+        email=_ACCOUNT_A,
+        token=_TOKEN,
+        bundle={"aas_token": _TOKEN, "shared_key": "S1S1"},
+        stable_key="key",
+        mtime=2_000.0,
+    )
+
+    async def _fresher(*_args: Any, **_kwargs: Any) -> Any:
+        return fresher
+
+    seen: list[Any] = []
+
+    async def _ingest(_flow: Any, _payload: Any, *, existing_entry: Any) -> Any:
+        seen.append(existing_entry)
+        raise config_flow.DiscoveryFlowError("invalid_auth")
+
+    monkeypatch.setattr(config_flow, "_async_freshest_watched_bundle", _fresher)
+    monkeypatch.setattr(config_flow, "_ingest_discovery_credentials", _ingest)
+    flow = config_flow.ConfigFlow()
+    flow.hass = SimpleNamespace(data={})  # type: ignore[assignment]
+
+    result = await flow._async_take_freshest_bundle(_normalized(_ACCOUNT_A), {})
+
+    assert result is None
+    assert seen == [None]

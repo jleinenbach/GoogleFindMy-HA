@@ -273,7 +273,10 @@ async def _stored_aas_form_value(cache: TokenCache) -> str | None:
     oauth_val = await cache.get(CONF_OAUTH_TOKEN)
     if not isinstance(oauth_val, str) or not oauth_val.startswith("aas_et/"):
         return None
-    if _disqualifies_oauth_for_exchange(oauth_val):
+    # Unreachable today: the filter only rejects JWT-shaped values ("eyJ..."),
+    # and an ``aas_et/`` value never has that form. Kept so this mirror stays
+    # in step with ``_generate_aas_token`` if the filter grows.
+    if _disqualifies_oauth_for_exchange(oauth_val):  # pragma: no cover
         return None
     return oauth_val
 
