@@ -985,8 +985,8 @@ the login container's `docker-login/data/secrets.json`. The advanced option
 `secrets_extra_watch_paths` adds any further paths you configure
 (`discovery.py` → `_collect_extra_watch_paths`), and those are watched the same
 way. A bundle found on any of them starts a discovery flow. Each account has at
-most one open discovery card: a newer bundle of the same account replaces the
-content of the card you have not answered yet, and confirming a card imports
+most one unanswered discovery card: a newer bundle of the same account replaces
+the content of the card you have not answered yet, and confirming a card imports
 the newest bundle of that account that is on disk at that moment. The copy is
 deleted once Home Assistant is observed to hold the imported credentials
 (`config_flow.py` → `_async_delete_watched_secrets`, armed by

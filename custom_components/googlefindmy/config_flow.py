@@ -896,7 +896,7 @@ async def _async_delete_watched_secrets(
     - Same account but a **different** digest: removed only if the file is
       provably stale, i.e. its mtime is strictly older than the mtime of *every*
       on-disk copy of the imported content. Anything younger or equal (including
-      the mtime tie) is kept with an info log; the watcher imports it on its next
+      the mtime tie) is kept with an info log; the watcher offers it on its next
       scan, so the system converges.
     - Fail-safe: with ``imported_stable_key`` or ``imported_digest`` ``None``
       nothing is deleted (debug log). A payload without a secrets bundle has no
@@ -1047,6 +1047,7 @@ async def _async_freshest_watched_bundle(
     *,
     stable_key: str | None,
     digest: str | None,
+    not_before: float | None = None,
 ) -> Any | None:
     """Return the account's newest watched bundle if it is newer than ``digest``.
 
@@ -1054,9 +1055,12 @@ async def _async_freshest_watched_bundle(
     ordering the watcher and the delete-after-import hook use as well, and
     returns the newest bundle of ``stable_key`` whose content differs from
     ``digest`` and whose modification time is later than the oldest on-disk
-    copy of the ``digest`` content. If that content is no longer on disk, any
-    bundle of the account counts as newer. Returns ``None`` when there is no
-    such bundle, no discovery manager, or no identity to compare against.
+    copy of the ``digest`` content. If that content is no longer on disk, the
+    bundle must be younger than ``not_before``, the moment the card was raised:
+    the card then carried the account's newest bundle, so anything written
+    earlier is not newer. Without ``not_before`` nothing counts as newer in that
+    case. Returns ``None`` when there is no such bundle, no discovery manager,
+    or no identity to compare against.
     """
 
     if hass is None or stable_key is None or digest is None:
@@ -1084,11 +1088,13 @@ async def _async_freshest_watched_bundle(
     confirmed_mtimes = [
         result.mtime for result in same_account if result.digest == digest
     ]
-    oldest_confirmed = min(confirmed_mtimes) if confirmed_mtimes else None
+    threshold = min(confirmed_mtimes) if confirmed_mtimes else not_before
+    if threshold is None:
+        return None
     for result in same_account:
         if result.digest == digest:
             continue
-        if oldest_confirmed is None or result.mtime > oldest_confirmed:
+        if result.mtime > threshold:
             return result
     return None
 
@@ -1987,6 +1993,9 @@ PENDING_CONTAINER_CLEANUP_KEY = "pending_container_cleanup"
 # bundle a card was last answered with (see
 # ConfigFlow._async_remember_answered_bundle).
 ANSWERED_DISCOVERY_BUNDLES_KEY = "answered_discovery_bundles"
+# How long, in seconds, a card for the bundle an account was just answered with
+# is dropped. It covers a scan racing the answer, not a later re-drop.
+ANSWERED_DISCOVERY_BUNDLE_GRACE = 30.0
 """``hass.data[DOMAIN]`` key holding the staged, in-memory cleanup tickets."""
 
 PERSIST_PROOF_TIMEOUT = 60.0
@@ -4001,6 +4010,9 @@ class ConfigFlow(
         # the device selection creates the entry (see
         # _async_abort_sibling_discovery_flows).
         self._confirmed_discovery_payload: CloudDiscoveryData | None = None
+        # When this flow last showed its discovery card (wall clock, comparable
+        # with file modification times; see _async_freshest_watched_bundle).
+        self._discovery_card_raised_at: float | None = None
         # Whether this flow already staged the delete of the bundle it imported
         # as a new account (see _async_stage_discovery_import_cleanup).
         self._discovery_import_cleanup_staged = False
@@ -4664,8 +4676,9 @@ class ConfigFlow(
         when its scan and the confirmation run in the same loop turn; the card
         it raises would then outlive the closing of the other cards and ask
         about content that is already answered. ``async_step_discovery`` drops
-        such a card. The record lives in memory only, so after a restart an
-        unchanged bundle is offered again, which is what consumes it.
+        such a card for :data:`ANSWERED_DISCOVERY_BUNDLE_GRACE` seconds after
+        the answer; a later re-drop of the same bundle raises a card again. The
+        record lives in memory only.
         """
 
         stable_key = _stable_key_for_discovery_payload(payload)
@@ -4676,9 +4689,10 @@ class ConfigFlow(
             return
         bucket = cast(MutableMapping[str, Any], domain_data.setdefault(DOMAIN, {}))
         answered = cast(
-            dict[str, str], bucket.setdefault(ANSWERED_DISCOVERY_BUNDLES_KEY, {})
+            dict[str, tuple[str, float]],
+            bucket.setdefault(ANSWERED_DISCOVERY_BUNDLES_KEY, {}),
         )
-        answered[stable_key] = digest
+        answered[stable_key] = (digest, time.monotonic())
 
     def _bundle_already_answered(self, payload: CloudDiscoveryData) -> bool:
         """Return whether ``payload`` is the bundle the account was answered with."""
@@ -4693,9 +4707,16 @@ class ConfigFlow(
         if not isinstance(answered, Mapping):
             return False
         stable_key = _stable_key_for_discovery_payload(payload)
-        return stable_key is not None and answered.get(
-            stable_key
-        ) == _digest_for_discovery_payload(payload)
+        record = answered.get(stable_key) if stable_key is not None else None
+        if not isinstance(record, tuple) or len(record) != 2:
+            return False
+        digest, answered_at = record
+        if not isinstance(answered_at, float):
+            return False
+        return bool(
+            digest == _digest_for_discovery_payload(payload)
+            and time.monotonic() - answered_at < ANSWERED_DISCOVERY_BUNDLE_GRACE
+        )
 
     def _async_rearm_account_bundles(self, payload: CloudDiscoveryData | None) -> None:
         """Let the watcher offer the account's bundles other than ``payload`` again.
@@ -4742,6 +4763,7 @@ class ConfigFlow(
             hass_obj,
             stable_key=_stable_key_for_discovery_payload(payload),
             digest=_digest_for_discovery_payload(payload),
+            not_before=self._discovery_card_raised_at,
         )
         if fresher is None:
             return payload, auth_data
@@ -4796,6 +4818,11 @@ class ConfigFlow(
         ``dismiss_protected``: that marker means the user has already answered
         the card, and taking it away would cut off the overwrite question.
         Cards of other accounts do not share the unique id and are not touched.
+
+        The older card closes before the new bundle is validated. If the new
+        bundle then fails with a reason the watcher does not retry (for example
+        ``invalid_auth``), no card of the account is left until the next
+        bundle arrives.
 
         Returns the number of aborted flows. A flow manager without the needed
         methods (a lightweight test double) aborts nothing.
@@ -4909,6 +4936,7 @@ class ConfigFlow(
         self._pending_discovery_payload = normalized
         self._pending_discovery_auth = dict(auth_data)
         self._pending_discovery_entry_exists = updates is not None
+        self._discovery_card_raised_at = time.time()
         self._set_confirm_only()
         return self.async_show_form(
             step_id="discovery_confirm",

@@ -34,24 +34,60 @@ _PREFIX = "entry_id=%s: "
 _USER = "entry.user@example.com"
 
 
-def _failure_calls(path: Path) -> list[ast.Call]:
+_FAILURE_METHODS = {"error", "warning", "warn", "exception", "critical"}
+_FAILURE_LEVELS = {"WARNING", "WARN", "ERROR", "CRITICAL", "FATAL"}
+
+
+def _is_logger(receiver: ast.expr) -> bool:
+    """A name containing ``logger`` (``_LOGGER``, ``logger``) or ``getLogger(...)``."""
+
+    if isinstance(receiver, ast.Name):
+        return "logger" in receiver.id.lower()
+    return (
+        isinstance(receiver, ast.Call)
+        and isinstance(receiver.func, ast.Attribute)
+        and receiver.func.attr == "getLogger"
+    )
+
+
+def _is_failure_level(level: ast.expr) -> bool:
+    """``logging.WARNING`` and up, a number from 30 up, or a level not known statically."""
+
+    if isinstance(level, ast.Attribute):
+        return level.attr in _FAILURE_LEVELS
+    if isinstance(level, ast.Constant) and isinstance(level.value, int):
+        return level.value >= logging.WARNING
+    return True
+
+
+def _failure_calls(path: Path) -> list[tuple[ast.Call, int]]:
+    """Failure-level logger calls with the index of their format argument.
+
+    Blind spots, named on purpose: a logger bound to a name without ``logger``
+    in it (``log = _LOGGER``), a bound method stored first and called later
+    (``warn = _LOGGER.warning``), and calls built through ``getattr``. None of
+    these forms occurs in the three modules today.
+    """
+
     calls = []
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if (
+        if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"error", "warning", "exception"}
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "_LOGGER"
+            and _is_logger(node.func.value)
         ):
-            calls.append(node)
+            continue
+        if node.func.attr in _FAILURE_METHODS:
+            calls.append((node, 0))
+        elif node.func.attr == "log" and node.args and _is_failure_level(node.args[0]):
+            calls.append((node, 1))
     return calls
 
 
-def _starts_with_entry_id(call: ast.Call) -> bool:
-    if len(call.args) < 2:
+def _starts_with_entry_id(call: ast.Call, at: int) -> bool:
+    if len(call.args) < at + 2:
         return False
-    fmt, label = call.args[0], call.args[1]
+    fmt, label = call.args[at], call.args[at + 1]
     return (
         isinstance(fmt, ast.Constant)
         and isinstance(fmt.value, str)
@@ -68,10 +104,34 @@ def test_every_auth_error_line_starts_with_the_entry_id() -> None:
     offenders = [
         f"{name}:{call.lineno}"
         for name, found in calls.items()
-        for call in found
-        if not _starts_with_entry_id(call)
+        for call, at in found
+        if not _starts_with_entry_id(call, at)
     ]
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    ("source", "found"),
+    [
+        ('_LOGGER.error("x")', 1),
+        ('_LOGGER.critical("x")', 1),
+        ('_LOGGER.warn("x")', 1),
+        ('logger.warning("x")', 1),
+        ('logging.getLogger(__name__).error("x")', 1),
+        ('_LOGGER.log(logging.ERROR, "x")', 1),
+        ('_LOGGER.log(40, "x")', 1),
+        ('_LOGGER.log(level, "x")', 1),
+        ('_LOGGER.log(logging.INFO, "x")', 0),
+        ('_LOGGER.info("x")', 0),
+        ('_LOGGER.debug("x")', 0),
+    ],
+)
+def test_the_failure_call_detector_covers_its_forms(
+    tmp_path: Path, source: str, found: int
+) -> None:
+    probe = tmp_path / "probe.py"
+    probe.write_text(source + "\n", encoding="utf-8")
+    assert len(_failure_calls(probe)) == found
 
 
 class _Cache:

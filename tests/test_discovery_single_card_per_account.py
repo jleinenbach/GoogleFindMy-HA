@@ -977,3 +977,77 @@ async def test_a_younger_copy_of_the_confirmed_bundle_is_not_a_newer_one(
         for record in caplog.records
         if "newer sign-in bundle replaced" in record.getMessage()
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_older_bundle_does_not_replace_a_confirmed_one_that_left_the_disk(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """Without the confirmed copy on disk, an older bundle still is not newer.
+
+    The card carries the newest bundle of the account when it is raised, so a
+    bundle written before that moment cannot be younger than the card.
+    """
+
+    import time  # noqa: PLC0415
+
+    first, second, manager, _failing = two_watched_files
+    _write_bundle(first, "O1O1", 1_000, token=_OLDER_TOKEN)
+    _write_bundle(second, "Y1Y1", int(time.time()) - 5, token=_YOUNGER_TOKEN)
+    await _scan(hass, manager)
+    (card,) = _cards(hass, _ACCOUNT_A)
+    assert _shared_key_of(hass, card["flow_id"]) == "Y1Y1"
+    second.unlink()
+
+    await hass.config_entries.flow.async_configure(card["flow_id"], {})
+    result = await hass.config_entries.flow.async_configure(card["flow_id"], {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_rewritten_in_place_after_the_card_is_imported(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """The confirmed file was overwritten after the card appeared: take the new one."""
+
+    import time  # noqa: PLC0415
+
+    first, _second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    _write_bundle(first, "Y1Y1", int(time.time()) + 60, token=_YOUNGER_TOKEN)
+
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_the_same_bundle_dropped_again_later_raises_a_card(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record only covers the moment of the answer, not a later re-drop."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    configured_accounts.add(_ACCOUNT_A)
+    card = await _submitted_card(hass, _ACCOUNT_A, "G1G1")
+    await hass.config_entries.flow.async_configure(
+        card["flow_id"], {"overwrite_credentials": False}
+    )
+    # raising=False: before the grace period existed, the test fails at the
+    # assertion below rather than at a missing name.
+    monkeypatch.setattr(
+        config_flow, "ANSWERED_DISCOVERY_BUNDLE_GRACE", 0.0, raising=False
+    )
+
+    again = await _discover(hass, _payload(_ACCOUNT_A, shared_key="G1G1"))
+
+    assert again["type"] == "form"
