@@ -590,6 +590,10 @@ async def _start_watcher(
             title=kwargs.get("title"),
             source=config_flow.SOURCE_DISCOVERY,
         )
+        # Set by key rather than through the helper's keyword, so the harness
+        # also runs against a tree whose helper predates the keyword.
+        if kwargs.get("bundle_mtime") is not None:
+            payload["discovery_bundle_mtime"] = kwargs["bundle_mtime"]
         await _discover(hass, payload)
         return discovery.CloudDiscoveryOutcome.ACCEPTED
 
@@ -1060,6 +1064,113 @@ async def test_a_bundle_rewritten_in_place_while_the_card_validates_is_imported(
     result = await hass.config_entries.flow.async_configure(card, {})
 
     assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+
+
+def _rewrite_while_the_watcher_renders_the_title(
+    monkeypatch: pytest.MonkeyPatch, path: Path, mtime: int
+) -> list[int]:
+    """Rewrite ``path`` in place after the watcher read it, before the flow starts.
+
+    The watcher awaits the card title between reading a bundle and dispatching
+    it; the login container can replace the file in exactly that gap.
+    """
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    render = discovery.SecretsJSONWatcher._async_render_title
+    rewrites: list[int] = []
+
+    async def _render(self: Any, email: str, *, is_update: bool) -> Any:
+        if not rewrites:
+            rewrites.append(mtime)
+            _write_bundle(path, "Y1Y1", mtime, token=_YOUNGER_TOKEN)
+        return await render(self, email, is_update=is_update)
+
+    monkeypatch.setattr(discovery.SecretsJSONWatcher, "_async_render_title", _render)
+    return rewrites
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_rewritten_between_the_watcher_read_and_the_card_is_imported(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card's boundary is the read bundle's mtime, not the step's start time."""
+
+    import time  # noqa: PLC0415
+
+    first, _second, manager, _failing = two_watched_files
+    rewrites = _rewrite_while_the_watcher_renders_the_title(
+        monkeypatch, first, int(time.time()) - 30
+    )
+    card = await _card_for_older_bundle(hass, first, manager)
+    assert _shared_key_of(hass, card) == "O1O1"
+    assert len(rewrites) == 1
+
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_with_the_same_mtime_as_the_card_bundle_is_imported(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coarse mtimes: the replacement of the card's file may carry the same stamp.
+
+    The card's own content is excluded by its digest, so a different bundle of
+    the account with the card's mtime has replaced it and is not older.
+    """
+
+    first, _second, manager, _failing = two_watched_files
+    _rewrite_while_the_watcher_renders_the_title(monkeypatch, first, 1_000)
+    card = await _card_for_older_bundle(hass, first, manager)
+    assert _shared_key_of(hass, card) == "O1O1"
+
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _YOUNGER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_after_a_swap_the_boundary_is_the_swapped_in_bundle(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    configured_accounts: set[str],
+    tmp_path: Path,
+) -> None:
+    """A bundle older than the one swapped in at confirmation is not newer later.
+
+    The account is configured, so the confirmation swaps in the younger bundle
+    and asks the overwrite question. When the swapped-in bundle has left the
+    disk by then, a bundle written between the card's and the swapped-in
+    bundle's mtime must not replace it.
+    """
+
+    configured_accounts.add(_ACCOUNT_A)
+    _add_configured_entry(hass, _ACCOUNT_A)
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    _write_bundle(second, "Y1Y1", 3_000, token=_YOUNGER_TOKEN)
+
+    result = await hass.config_entries.flow.async_configure(card, {})
+    assert result["step_id"] == "discovery_overwrite"
+
+    second.unlink()
+    _write_bundle(_third_watched_path(tmp_path), "X1X1", 2_000, token=_TOKEN)
+    result = await hass.config_entries.flow.async_configure(
+        card, {"overwrite_credentials": True}
+    )
+
+    assert result["reason"] == "credentials_updated"
     assert _imported_token(hass) == _YOUNGER_TOKEN
 
 

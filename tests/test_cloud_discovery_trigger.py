@@ -227,6 +227,78 @@ async def test_trigger_cloud_discovery_reports_a_transient_fallback_abort(
     hass.config_entries.flow.async_init.assert_awaited_once()
 
 
+async def test_trigger_cloud_discovery_forwards_the_bundle_mtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read bundle's mtime reaches the flow data as its freshness boundary."""
+
+    hass = _make_hass()
+
+    async def _helper(*args, **kwargs):
+        raise AttributeError("missing helper")
+
+    monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
+
+    await integration._trigger_cloud_discovery(
+        hass,
+        email="mtime@example.com",
+        token=None,
+        secrets_bundle=None,
+        bundle_mtime=1234.5,
+    )
+
+    data = hass.config_entries.flow.async_init.await_args.kwargs["data"]
+    assert data["discovery_bundle_mtime"] == 1234.5
+
+
+def test_the_discovery_queue_forwards_the_bundle_mtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued payload hands its bundle mtime on to the flow trigger."""
+
+    seen: list[dict[str, object]] = []
+
+    def _trigger(_hass: object, **kwargs: object) -> object:
+        seen.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _trigger)
+    monkeypatch.setattr(
+        discovery._CloudDiscoveryResults, "_schedule", lambda *_a, **_k: None
+    )
+    results = discovery._CloudDiscoveryResults(SimpleNamespace())
+
+    results.append({"email": "mtime@example.com", "discovery_bundle_mtime": 99.0})
+
+    assert seen[0]["bundle_mtime"] == 99.0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (1000, 1000.0),
+        (1234.5, 1234.5),
+        (True, None),
+        ("1000", None),
+        (float("nan"), None),
+        (float("inf"), None),
+        (None, None),
+    ],
+)
+def test_only_a_finite_bundle_mtime_is_kept(raw: object, expected: object) -> None:
+    """Only a finite number is a boundary; anything else falls back to the clock."""
+
+    normalized = config_flow._normalize_and_validate_discovery_payload(
+        {
+            "email": "mtime@example.com",
+            "token": "aas_et/" + "A" * 80,
+            "discovery_bundle_mtime": raw,
+        }
+    )
+
+    assert getattr(normalized, "bundle_mtime", None) == expected
+
+
 async def test_trigger_cloud_discovery_injects_fallback_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -55,6 +55,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -1057,10 +1058,12 @@ async def _async_freshest_watched_bundle(
     ``digest`` and whose modification time is later than the newest on-disk
     copy of the ``digest`` content, so a bundle written between two copies of
     the confirmed content does not count as newer. If that content is no longer
-    on disk, the bundle must be younger than ``not_before``, the moment the card's
-    discovery step began (before its credential check): the card then carried the
-    account's newest bundle, so anything written earlier is not newer. Without
-    ``not_before`` nothing counts as newer in that case. Returns ``None`` when
+    on disk, the bundle must be written at or after ``not_before``: the
+    modification time of the file the card's content was read from (or, for a
+    payload without one, the moment the card's discovery step began). The card
+    carried the account's newest bundle when it was read, so anything written
+    earlier is not newer. Without ``not_before`` nothing counts as newer in that
+    case. Returns ``None`` when
     there is no such bundle, no discovery manager, or no identity to compare
     against.
     """
@@ -1090,13 +1093,22 @@ async def _async_freshest_watched_bundle(
     confirmed_mtimes = [
         result.mtime for result in same_account if result.digest == digest
     ]
-    threshold = max(confirmed_mtimes) if confirmed_mtimes else not_before
-    if threshold is None:
+    if confirmed_mtimes:
+        threshold = max(confirmed_mtimes)
+        inclusive = False
+    elif not_before is not None:
+        # The confirmed content has left the disk, so something replaced it.
+        # A bundle stamped exactly at the boundary is that replacement under
+        # coarse mtimes, or one rewritten between the watcher's read and its
+        # stat() (which then carries the newer file's mtime): not older.
+        threshold = not_before
+        inclusive = True
+    else:
         return None
     for result in same_account:
         if result.digest == digest:
             continue
-        if result.mtime > threshold:
+        if result.mtime > threshold or (inclusive and result.mtime == threshold):
             return result
     return None
 
@@ -3645,6 +3657,10 @@ class CloudDiscoveryData:
     # carried no marker, which is treated as a credential import: asking one
     # question too many beats replacing working credentials unasked.
     source: str | None = None
+    # Modification time of the secrets file the watcher read the bundle from
+    # (``discovery_bundle_mtime``); the card's freshness boundary. ``None`` when
+    # the producer read no file or sent no usable value.
+    bundle_mtime: float | None = None
 
 
 def _normalize_and_validate_discovery_payload(
@@ -3744,6 +3760,14 @@ def _normalize_and_validate_discovery_payload(
         raise DiscoveryFlowError("invalid_discovery_info")
 
     source = payload_dict.get("discovery_source")
+    mtime_raw = payload_dict.get("discovery_bundle_mtime")
+    bundle_mtime = (
+        float(mtime_raw)
+        if isinstance(mtime_raw, int | float)
+        and not isinstance(mtime_raw, bool)
+        and math.isfinite(mtime_raw)
+        else None
+    )
     return CloudDiscoveryData(
         email=email_candidate,
         unique_id=unique_id,
@@ -3751,6 +3775,7 @@ def _normalize_and_validate_discovery_payload(
         secrets_bundle=secrets_bundle,
         title=str(title) if isinstance(title, str) else None,
         source=source if isinstance(source, str) and source else None,
+        bundle_mtime=bundle_mtime,
     )
 
 
@@ -4012,10 +4037,11 @@ class ConfigFlow(
         # the device selection creates the entry (see
         # _async_abort_sibling_discovery_flows).
         self._confirmed_discovery_payload: CloudDiscoveryData | None = None
-        # When this flow began the discovery step that showed its card, taken
-        # before the credential check (wall clock, comparable with file
-        # modification times; see _async_freshest_watched_bundle).
-        self._discovery_card_raised_at: float | None = None
+        # The freshness boundary of the content this flow's card carries: the
+        # modification time of the file the watcher read it from, or, without
+        # one, when the discovery step began. Moves to the swapped-in bundle's
+        # mtime on a swap (see _async_freshest_watched_bundle).
+        self._discovery_card_not_before: float | None = None
         # Whether this flow already staged the delete of the bundle it imported
         # as a new account (see _async_stage_discovery_import_cleanup).
         self._discovery_import_cleanup_staged = False
@@ -4766,7 +4792,7 @@ class ConfigFlow(
             hass_obj,
             stable_key=_stable_key_for_discovery_payload(payload),
             digest=_digest_for_discovery_payload(payload),
-            not_before=self._discovery_card_raised_at,
+            not_before=self._discovery_card_not_before,
         )
         if fresher is None:
             return payload, auth_data
@@ -4781,6 +4807,7 @@ class ConfigFlow(
             discovery_stable_key=fresher.stable_key,
             title=payload.title,
             source=payload.source,
+            bundle_mtime=fresher.mtime,
         )
         existing_entry: ConfigEntry | None = None
         if hass_obj is not None and hasattr(hass_obj, "config_entries"):
@@ -4807,6 +4834,9 @@ class ConfigFlow(
             _mask_email_for_logs(payload.email),
         )
         self._auth_data = new_auth
+        # The swapped-in content is the card's content now; an older bundle
+        # must not count as newer than it in a later comparison.
+        self._discovery_card_not_before = fresher.mtime
         return normalized, dict(new_auth)
 
     async def _async_supersede_discovery_flows(self) -> int:
@@ -4908,9 +4938,16 @@ class ConfigFlow(
             )
             return self.async_abort(reason="already_configured")
 
-        # Taken before the first await: a bundle written while the credentials
-        # below are being checked is younger than this card's content.
-        raised_at = time.time()
+        # The read file's mtime travels with the payload: a bundle written
+        # after the watcher read this one, even before this step began, is
+        # younger than the card's content. Without it, the clock is taken
+        # before the first await, so a bundle written while the credentials
+        # below are being checked still counts as younger.
+        not_before = (
+            normalized.bundle_mtime
+            if normalized.bundle_mtime is not None
+            else time.time()
+        )
         existing_entry = await self._async_prepare_account_context(
             email=normalized.email,
             preferred_unique_id=normalized.unique_id,
@@ -4942,7 +4979,7 @@ class ConfigFlow(
         self._pending_discovery_payload = normalized
         self._pending_discovery_auth = dict(auth_data)
         self._pending_discovery_entry_exists = updates is not None
-        self._discovery_card_raised_at = raised_at
+        self._discovery_card_not_before = not_before
         self._set_confirm_only()
         return self.async_show_form(
             step_id="discovery_confirm",

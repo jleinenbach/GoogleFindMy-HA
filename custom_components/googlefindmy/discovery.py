@@ -459,6 +459,7 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
         stable_key = payload.get("discovery_stable_key")
         source = payload.get("discovery_source")
         title = payload.get("title")
+        bundle_mtime = payload.get("discovery_bundle_mtime")
 
         coro = _trigger_cloud_discovery(
             self._hass,
@@ -470,6 +471,12 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             source=source if isinstance(source, str) else None,
             title=title if isinstance(title, str) else None,
             entry=self._entry,
+            bundle_mtime=(
+                float(bundle_mtime)
+                if isinstance(bundle_mtime, int | float)
+                and not isinstance(bundle_mtime, bool)
+                else None
+            ),
         )
         self._schedule(coro, on_failure=on_failure)
 
@@ -726,8 +733,15 @@ def _assemble_cloud_discovery_payload(
     discovery_stable_key: str,
     title: str | None,
     source: str | None,
+    bundle_mtime: float | None = None,
 ) -> dict[str, Any]:
-    """Prepare the payload forwarded to the config flow discovery handler."""
+    """Prepare the payload forwarded to the config flow discovery handler.
+
+    ``bundle_mtime`` is the modification time of the secrets file the bundle
+    was read from. The config flow takes it as the card's freshness boundary:
+    only a bundle of the account written at or after it can be newer than the
+    card's content (see ``config_flow._async_freshest_watched_bundle``).
+    """
 
     clean_email = normalize_email(email if isinstance(email, str) else None)
     payload: dict[str, Any] = {
@@ -751,6 +765,9 @@ def _assemble_cloud_discovery_payload(
 
     if source:
         payload["discovery_source"] = source
+
+    if bundle_mtime is not None:
+        payload["discovery_bundle_mtime"] = bundle_mtime
 
     return payload
 
@@ -782,6 +799,7 @@ async def _trigger_cloud_discovery(
     source: str | None = None,
     title: str | None = None,
     entry: ConfigEntry | None = None,
+    bundle_mtime: float | None = None,
 ) -> CloudDiscoveryOutcome:
     """Create or resume a config flow based on cloud-scan discovery data.
 
@@ -808,6 +826,7 @@ async def _trigger_cloud_discovery(
         discovery_stable_key=stable_key,
         title=title,
         source=source,
+        bundle_mtime=bundle_mtime,
     )
 
     # The in-flight guard dedups identical *payloads*, not accounts: keying it on
@@ -1454,6 +1473,9 @@ class SecretsJSONWatcher:
                 discovery_stable_key=result.stable_key,
                 title=title,
                 source=source,
+                # Taken with the read, so it precedes the title await above
+                # and the flow start: a rewrite in between is not older.
+                bundle_mtime=result.mtime,
             )
 
             runtime = _cloud_discovery_runtime(self._hass, existing_entry)
