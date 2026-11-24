@@ -15,13 +15,14 @@ as the number of cards rather than as an empty result.
 Two harness details are deliberate:
 
 * The suite installs stubbed Home Assistant modules, and some tests leave a
-  stubbed ``homeassistant.loader`` behind. Core's handler lookup
-  (``_async_get_flow_handler``) is the only part of ``async_init`` that touches
-  the loader and the handler registry, and which module instance it sees depends
-  on which tests ran earlier in the same worker. The fixture replaces exactly
-  that lookup, in the module the manager itself runs from, with one that returns
-  this integration's ``ConfigFlow``. Everything after it -- flow progress,
-  aborts, ``async_configure`` -- stays Home Assistant's own code.
+  stubbed ``homeassistant.loader`` behind. Two parts of the flow manager touch
+  the loader: the handler lookup (``_async_get_flow_handler``) and, once an
+  entry of the domain exists, ``_support_single_config_entry_only``. Which
+  loader they see depends on which tests ran earlier in the same worker. The
+  fixture replaces exactly those two, in the module the manager itself runs
+  from: the first returns this integration's ``ConfigFlow``, the second the
+  manifest's answer (no single-entry restriction). Everything else -- flow
+  progress, aborts, ``async_configure`` -- stays Home Assistant's own code.
 * ``_ingest_discovery_credentials`` is replaced: it validates tokens against
   Google, which is not what these tests are about. Payload normalisation and the
   single-key gate stay real.
@@ -87,6 +88,17 @@ async def configured_accounts(
         return config_flow.ConfigFlow
 
     monkeypatch.setitem(manager_globals, "_async_get_flow_handler", _flow_handler)
+
+    async def _single_entry_only(_hass: Any, domain: str) -> bool:
+        # The manifest declares no single_config_entry. Core reads it through
+        # the loader as soon as an entry of the domain exists, and the stubbed
+        # loader some tests leave behind lacks the attribute.
+        assert domain == config_flow.DOMAIN
+        return False
+
+    monkeypatch.setitem(
+        manager_globals, "_support_single_config_entry_only", _single_entry_only
+    )
 
     configured: set[str] = set()
 
