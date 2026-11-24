@@ -774,11 +774,19 @@ async def two_watched_files(
     _stub_entry_creation(hass, monkeypatch)
     first = tmp_path / "auth" / "secrets.json"
     second = tmp_path / "data" / "secrets.json"
-    manager = await _start_watcher(hass, monkeypatch, [first, second])
+    manager = await _start_watcher(
+        hass, monkeypatch, [first, second, _third_watched_path(tmp_path)]
+    )
     try:
         yield first, second, manager, failing
     finally:
         await manager.async_stop()
+
+
+def _third_watched_path(tmp_path: Path) -> Path:
+    """A third path the ``two_watched_files`` watcher observes; absent unless written."""
+
+    return tmp_path / "extra" / "secrets.json"
 
 
 def _imported_token(hass: HomeAssistant) -> Any:
@@ -965,6 +973,35 @@ async def test_a_younger_copy_of_the_confirmed_bundle_is_not_a_newer_one(
     first, second, manager, _failing = two_watched_files
     card = await _card_for_older_bundle(hass, first, manager)
     _write_bundle(second, "O1O1", 3_000, token=_OLDER_TOKEN)
+
+    caplog.set_level(logging.INFO, logger=config_flow.__name__)
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _OLDER_TOKEN
+    assert not [
+        record
+        for record in caplog.records
+        if "newer sign-in bundle replaced" in record.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_older_bundle_between_two_copies_of_the_confirmed_one_is_not_newer(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The newest copy of the confirmed content is the yardstick, not the oldest."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    _write_bundle(second, "Y1Y1", 2_000, token=_YOUNGER_TOKEN)
+    _write_bundle(_third_watched_path(tmp_path), "O1O1", 3_000, token=_OLDER_TOKEN)
 
     caplog.set_level(logging.INFO, logger=config_flow.__name__)
     await hass.config_entries.flow.async_configure(card, {})

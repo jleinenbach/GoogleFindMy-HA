@@ -1054,12 +1054,13 @@ async def _async_freshest_watched_bundle(
     Scans the watched paths with :func:`discovery.scan_secrets_bundles`, the
     ordering the watcher and the delete-after-import hook use as well, and
     returns the newest bundle of ``stable_key`` whose content differs from
-    ``digest`` and whose modification time is later than the oldest on-disk
-    copy of the ``digest`` content. If that content is no longer on disk, the
-    bundle must be younger than ``not_before``, the moment the card was raised:
-    the card then carried the account's newest bundle, so anything written
-    earlier is not newer. Without ``not_before`` nothing counts as newer in that
-    case. Returns ``None`` when there is no such bundle, no discovery manager,
+    ``digest`` and whose modification time is later than the newest on-disk
+    copy of the ``digest`` content, so a bundle written between two copies of
+    the confirmed content does not count as newer. If that content is no longer
+    on disk, the bundle must be younger than ``not_before``, the moment the card
+    was raised: the card then carried the account's newest bundle, so anything
+    written earlier is not newer. Without ``not_before`` nothing counts as newer
+    in that case. Returns ``None`` when there is no such bundle, no discovery manager,
     or no identity to compare against.
     """
 
@@ -1088,7 +1089,7 @@ async def _async_freshest_watched_bundle(
     confirmed_mtimes = [
         result.mtime for result in same_account if result.digest == digest
     ]
-    threshold = min(confirmed_mtimes) if confirmed_mtimes else not_before
+    threshold = max(confirmed_mtimes) if confirmed_mtimes else not_before
     if threshold is None:
         return None
     for result in same_account:
