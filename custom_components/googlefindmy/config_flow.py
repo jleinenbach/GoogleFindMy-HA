@@ -1049,7 +1049,7 @@ async def _async_freshest_watched_bundle(
     stable_key: str | None,
     digest: str | None,
     not_before: float | None = None,
-) -> Any | None:
+) -> _SecretsScanResult | None:
     """Return the account's newest watched bundle if it is newer than ``digest``.
 
     Scans the watched paths with :func:`discovery.scan_secrets_bundles`, the
@@ -1057,7 +1057,11 @@ async def _async_freshest_watched_bundle(
     returns the newest bundle of ``stable_key`` whose content differs from
     ``digest`` and whose modification time is later than the newest on-disk
     copy of the ``digest`` content, so a bundle written between two copies of
-    the confirmed content does not count as newer. If that content is no longer
+    the confirmed content does not count as newer. A bundle stamped exactly like
+    that copy is not newer either: the tie is undecidable (the scan order breaks
+    it on the digest, a coin flip with respect to age), and the confirmed
+    content is still on disk, so the card keeps what the user confirmed. If that
+    content is no longer
     on disk, the bundle must be written at or after ``not_before``: the
     modification time of the file the card's content was read from (or, for a
     payload without one, the moment the card's discovery step began). The card
@@ -1084,7 +1088,7 @@ async def _async_freshest_watched_bundle(
     from . import discovery as discovery_module
 
     paths = [Path(str(path)) for path in watch_paths]
-    scanned = await hass.async_add_executor_job(
+    scanned: list[tuple[Path, _SecretsScanResult]] = await hass.async_add_executor_job(
         discovery_module.scan_secrets_bundles, paths
     )
     same_account = [
@@ -1098,9 +1102,11 @@ async def _async_freshest_watched_bundle(
         inclusive = False
     elif not_before is not None:
         # The confirmed content has left the disk, so something replaced it.
-        # A bundle stamped exactly at the boundary is that replacement under
-        # coarse mtimes, or one rewritten between the watcher's read and its
-        # stat() (which then carries the newer file's mtime): not older.
+        # A bundle stamped exactly at the boundary is most likely that
+        # replacement: under coarse mtimes, or rewritten between the watcher's
+        # read and its stat() (which then carries the newer file's mtime). A
+        # different file stamped in the same tick may also be older; the tie
+        # cannot be decided, and taking it keeps the replacement.
         threshold = not_before
         inclusive = True
     else:
@@ -2003,14 +2009,15 @@ def _format_bundle_age(mtime: float) -> str:
 
 
 PENDING_CONTAINER_CLEANUP_KEY = "pending_container_cleanup"
+"""``hass.data[DOMAIN]`` key holding the staged, in-memory cleanup tickets."""
+
 # In-memory only: per account stable key, the content digest of the discovered
-# bundle a card was last answered with (see
-# ConfigFlow._async_remember_answered_bundle).
+# bundle a card was last answered with and the monotonic time of the answer
+# (see ConfigFlow._async_remember_answered_bundle).
 ANSWERED_DISCOVERY_BUNDLES_KEY = "answered_discovery_bundles"
 # How long, in seconds, a card for the bundle an account was just answered with
 # is dropped. It covers a scan racing the answer, not a later re-drop.
 ANSWERED_DISCOVERY_BUNDLE_GRACE = 30.0
-"""``hass.data[DOMAIN]`` key holding the staged, in-memory cleanup tickets."""
 
 PERSIST_PROOF_TIMEOUT = 60.0
 """Seconds the durability gate waits for the entry to appear in HA storage.
@@ -3663,6 +3670,18 @@ class CloudDiscoveryData:
     bundle_mtime: float | None = None
 
 
+def _finite_bundle_mtime(value: Any) -> float | None:
+    """Return ``value`` as a finite float, or ``None`` when it is no usable mtime."""
+
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _normalize_and_validate_discovery_payload(
     payload: Mapping[str, Any] | None,
 ) -> CloudDiscoveryData:
@@ -3760,14 +3779,7 @@ def _normalize_and_validate_discovery_payload(
         raise DiscoveryFlowError("invalid_discovery_info")
 
     source = payload_dict.get("discovery_source")
-    mtime_raw = payload_dict.get("discovery_bundle_mtime")
-    bundle_mtime = (
-        float(mtime_raw)
-        if isinstance(mtime_raw, int | float)
-        and not isinstance(mtime_raw, bool)
-        and math.isfinite(mtime_raw)
-        else None
-    )
+    bundle_mtime = _finite_bundle_mtime(payload_dict.get("discovery_bundle_mtime"))
     return CloudDiscoveryData(
         email=email_candidate,
         unique_id=unique_id,
@@ -5199,8 +5211,8 @@ class ConfigFlow(
     ) -> FlowResult:
         """Ask before replacing the credentials of an already configured account.
 
-        Reached from :meth:`async_step_discovery` once the discovery card has
-        been confirmed and the account turns out to have an entry already. The
+        Reached from :meth:`async_step_discovery_confirm` once the discovery card
+        has been confirmed and the account turns out to have an entry already. The
         answer decides between two aborts, both of which say what happened:
         ``credentials_updated`` or ``credentials_kept``. Neither is
         ``already_configured``, which used to end both outcomes and told the user
@@ -5209,6 +5221,12 @@ class ConfigFlow(
         Declining writes nothing at all: the entry keeps the credentials it has,
         and nothing is staged for cleanup, so the discovered bundle stays on
         disk.
+
+        Accepting first swaps in the account's newest bundle on disk (see
+        :meth:`_async_take_freshest_bundle`), so what is written can be a bundle
+        written after the question was asked rather than the one it was asked
+        about; if that newer bundle fails its check, the step ends with
+        ``cannot_connect`` and writes nothing.
 
         Accepting reports ``credentials_updated`` only where credentials were
         actually written, and that is read off the entry rather than inferred

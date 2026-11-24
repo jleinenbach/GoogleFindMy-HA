@@ -471,8 +471,10 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             source=source if isinstance(source, str) else None,
             title=title if isinstance(title, str) else None,
             entry=self._entry,
+            # Passed on as is; the config flow drops anything that is not a
+            # finite number (see config_flow._finite_bundle_mtime).
             bundle_mtime=(
-                float(bundle_mtime)
+                bundle_mtime
                 if isinstance(bundle_mtime, int | float)
                 and not isinstance(bundle_mtime, bool)
                 else None

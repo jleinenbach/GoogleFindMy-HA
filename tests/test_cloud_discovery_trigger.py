@@ -282,6 +282,7 @@ def test_the_discovery_queue_forwards_the_bundle_mtime(
         ("1000", None),
         (float("nan"), None),
         (float("inf"), None),
+        (10**400, None),
         (None, None),
     ],
 )

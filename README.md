@@ -987,7 +987,9 @@ the login container's `docker-login/data/secrets.json`. The advanced option
 way. A bundle found on any of them starts a discovery flow. Each account has at
 most one unanswered discovery card: a newer bundle of the same account replaces
 the content of the card you have not answered yet, and confirming a card imports
-the newest bundle of that account that is on disk at that moment. The copy is
+the newest bundle of that account that is on disk at that moment (on an exact
+tie of modification times with a copy of the confirmed content, that content is
+kept). The copy is
 deleted once Home Assistant is observed to hold the imported credentials
 (`config_flow.py` → `_async_delete_watched_secrets`, armed by
 `async_setup_entry`). Until then — and indefinitely if you never confirm the

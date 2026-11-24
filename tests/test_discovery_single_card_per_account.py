@@ -1092,6 +1092,28 @@ def _rewrite_while_the_watcher_renders_the_title(
 
 
 @pytest.mark.asyncio
+async def test_a_bundle_tied_with_a_confirmed_copy_on_disk_is_not_newer(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """An exact mtime tie with the confirmed content still on disk keeps it.
+
+    Neither bundle is provably newer, so the card keeps what the user confirmed
+    instead of following the scan order's digest tiebreak.
+    """
+
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    _write_bundle(second, "Y1Y1", 1_000, token=_YOUNGER_TOKEN)
+
+    await hass.config_entries.flow.async_configure(card, {})
+    result = await hass.config_entries.flow.async_configure(card, {})
+
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _OLDER_TOKEN
+
+
+@pytest.mark.asyncio
 async def test_a_bundle_rewritten_between_the_watcher_read_and_the_card_is_imported(
     hass: HomeAssistant,
     two_watched_files: tuple[Path, Path, Any, set[str]],
