@@ -101,6 +101,7 @@
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
       "credentials_updated": "Die gespeicherten Zugangsdaten für dieses Konto wurden durch die gefundenen ersetzt.",
       "credentials_kept": "Die gespeicherten Zugangsdaten wurden behalten. Es wurde nichts geändert.",
+      "bundle_older_than_imported": "Diese Anmeldedaten sind nicht neuer als die bereits übernommenen. Es wurde nichts geändert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
       "dependency_not_ready": "Google Find My Device-Abhängigkeiten sind nicht installiert. Installiere die Anforderungen und versuche es erneut.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",

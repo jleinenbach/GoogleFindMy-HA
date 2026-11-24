@@ -38,6 +38,7 @@ from .const import (
     CONF_GOOGLE_EMAIL,
     # secrets in entry.data (must never be exposed)
     CONF_OAUTH_TOKEN,
+    DATA_DISCOVERY_IMPORTED_DIGEST,
     DATA_EID_RESOLVER,
     DATA_SECRET_BUNDLE,
     # defaults for options (used to avoid hard-coded literals)
@@ -88,6 +89,10 @@ TO_REDACT: list[str] = [
     # async_setup_entry; if setup fails in between, it is still there when a user
     # downloads diagnostics for that very failure.
     DATA_SECRET_BUNDLE,
+    # Unsalted SHA-256 over the imported bundle: not reversible, but a stable
+    # marker of the credentials that confirms a candidate secrets.json. The
+    # mtime next to it is kept; it says when, not what.
+    DATA_DISCOVERY_IMPORTED_DIGEST,
     # The per-entry key behind the ids of phones without a canonical ID, the
     # table from their row ids to Android IDs, and the Wi-Fi name such a phone
     # reports. Today no block of this payload reads either; the entries

@@ -122,6 +122,8 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
+    DATA_DISCOVERY_IMPORTED_DIGEST,
+    DATA_DISCOVERY_IMPORTED_MTIME,
     DATA_SECRET_BUNDLE,
     DATA_SUBENTRY_KEY,
     DEFAULT_ACCURACY_GATE_ENABLED,
@@ -1007,6 +1009,7 @@ async def _async_delete_watched_secrets(
         if result.stable_key == imported_stable_key and result.digest == imported_digest
     ]
     oldest_imported_mtime = min(imported_mtimes) if imported_mtimes else None
+    newest_imported_mtime = max(imported_mtimes) if imported_mtimes else None
 
     for path in paths:
         path_str = str(path)
@@ -1034,6 +1037,25 @@ async def _async_delete_watched_secrets(
         ):
             await hass.async_add_executor_job(
                 _remove_if_digest_matches, path_str, result.digest
+            )
+            continue
+        if newest_imported_mtime is not None and result.mtime <= newest_imported_mtime:
+            # Between two copies of the import (or tied with the newest): not
+            # provably stale, so it stays, but the entry's recorded import
+            # state turns its card away (_discovery_bundle_not_newer_than_import).
+            _LOGGER.info(
+                "Keeping watched secrets bundle: it is not older than every copy "
+                "of the imported one, but not newer than the newest; it raises "
+                "no discovery card: %s",
+                path_str,
+            )
+            continue
+        if newest_imported_mtime is None:
+            _LOGGER.info(
+                "Keeping watched secrets bundle: the imported content is no "
+                "longer on disk; it raises a discovery card only if it is newer "
+                "than the import the entry recorded: %s",
+                path_str,
             )
             continue
         _LOGGER.info(
@@ -1117,6 +1139,90 @@ async def _async_freshest_watched_bundle(
         if result.mtime > threshold or (inclusive and result.mtime == threshold):
             return result
     return None
+
+
+async def _async_discovery_import_state(
+    hass: HomeAssistant | None, payload: CloudDiscoveryData | None
+) -> dict[str, Any]:
+    """Return the entry-data keys that record which bundle state was imported.
+
+    The digest is the imported content's (:func:`_digest_for_discovery_payload`).
+    The time is the mtime of the **newest** on-disk copy of that content, the
+    same ``max`` the confirmation uses (:func:`_async_freshest_watched_bundle`);
+    without a copy on disk it is the payload's ``bundle_mtime``. It is capped at
+    the wall clock of the import: the watcher accepts mtimes from the future,
+    and an uncapped one would hide every later card of the account for good.
+
+    Returns ``{}`` when there is no digest or no usable time; the entry then
+    records nothing and later cards are offered as before. Neither value is a
+    secret, but the digest identifies the credentials, which is why diagnostics
+    redact it.
+    """
+
+    digest = _digest_for_discovery_payload(payload)
+    if payload is None or digest is None:
+        return {}
+    stable_key = _stable_key_for_discovery_payload(payload)
+
+    copy_mtimes: list[float] = []
+    bucket = getattr(hass, "data", {}) if hass is not None else {}
+    bucket = bucket.get(DOMAIN) if isinstance(bucket, Mapping) else None
+    manager = bucket.get("discovery_manager") if isinstance(bucket, Mapping) else None
+    watch_paths = getattr(manager, "watch_paths", None)
+    if hass is not None and watch_paths:
+        from . import discovery as discovery_module
+
+        paths = [Path(str(path)) for path in watch_paths]
+        scanned = await hass.async_add_executor_job(
+            discovery_module.scan_secrets_bundles, paths
+        )
+        copy_mtimes = [
+            result.mtime
+            for _path, result in scanned
+            if result.stable_key == stable_key and result.digest == digest
+        ]
+
+    mtime = (
+        max(copy_mtimes) if copy_mtimes else _finite_bundle_mtime(payload.bundle_mtime)
+    )
+    if mtime is None:
+        return {}
+    return {
+        DATA_DISCOVERY_IMPORTED_DIGEST: digest,
+        DATA_DISCOVERY_IMPORTED_MTIME: min(mtime, time.time()),
+    }
+
+
+def _discovery_bundle_not_newer_than_import(
+    entry: ConfigEntry | None, payload: CloudDiscoveryData
+) -> bool:
+    """Whether ``payload`` carries a different bundle no newer than the import.
+
+    True only when the entry recorded an import state, the payload's bundle has
+    another digest, and its mtime is not later than the recorded one; a tie
+    counts as not newer, as it does for the confirmation. Anything that cannot
+    be decided (no recorded state, no digest, no mtime) is False, so the card is
+    offered as it was before the state existed.
+    """
+
+    data = getattr(entry, "data", None)
+    if not isinstance(data, Mapping):
+        return False
+    imported_digest = data.get(DATA_DISCOVERY_IMPORTED_DIGEST)
+    imported_mtime = _finite_bundle_mtime(data.get(DATA_DISCOVERY_IMPORTED_MTIME))
+    if not isinstance(imported_digest, str) or imported_mtime is None:
+        return False
+    digest = _digest_for_discovery_payload(payload)
+    if digest is None or digest == imported_digest:
+        return False
+    if payload.bundle_mtime is None:
+        _LOGGER.info(
+            "Discovery for %s carries no bundle time; it is offered although "
+            "the entry recorded an imported bundle state",
+            _mask_email_for_logs(payload.email),
+        )
+        return False
+    return payload.bundle_mtime <= imported_mtime
 
 
 def _stable_key_for_discovery_payload(
@@ -4965,6 +5071,25 @@ class ConfigFlow(
             preferred_unique_id=normalized.unique_id,
             abort_on_duplicate=False,
         )
+        # Checked before the siblings are superseded: an older bundle that is
+        # turned away must not close a card for a newer one either.
+        hass_obj = getattr(self, "hass", None)
+        imported_entry = existing_entry
+        if (
+            imported_entry is None
+            and hass_obj is not None
+            and hasattr(hass_obj, "config_entries")
+        ):
+            imported_entry = _find_entry_by_email(
+                cast(HomeAssistant, hass_obj), normalized.email
+            )
+        if _discovery_bundle_not_newer_than_import(imported_entry, normalized):
+            _LOGGER.info(
+                "Discovery for %s ignored: its bundle is not newer than the "
+                "one the entry imported",
+                _mask_email_for_logs(normalized.email),
+            )
+            return self.async_abort(reason="bundle_older_than_imported")
         await self._async_supersede_discovery_flows()
         try:
             auth_data, updates = await _ingest_discovery_credentials(
@@ -5284,7 +5409,12 @@ class ConfigFlow(
                 )
                 return await self._async_import_discovered_account(payload)
 
-            updates = rebased[1]
+            updates = {
+                **rebased[1],
+                **await _async_discovery_import_state(
+                    getattr(self, "hass", None), payload
+                ),
+            }
             existing_entry: ConfigEntry | None = None
             written = False
             try:
@@ -5530,6 +5660,10 @@ class ConfigFlow(
         )
 
         hass_obj = getattr(self, "hass", None)
+        updates = {
+            **updates,
+            **await _async_discovery_import_state(hass_obj, normalized),
+        }
         updates_to_apply = deepcopy(updates)
 
         abort_raised = False
@@ -6346,6 +6480,13 @@ class ConfigFlow(
             aas_token = self._auth_data.get(DATA_AAS_TOKEN)
             if isinstance(aas_token, str) and aas_token:
                 data_payload[DATA_AAS_TOKEN] = aas_token
+            # A confirmed discovery card records the bundle state it imported;
+            # any other creation path has no payload and records nothing.
+            data_payload.update(
+                await _async_discovery_import_state(
+                    getattr(self, "hass", None), self._confirmed_discovery_payload
+                )
+            )
 
             options_payload: dict[str, Any] = {}
             managed_option_keys: set[str] = set()

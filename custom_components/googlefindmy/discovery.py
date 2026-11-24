@@ -248,6 +248,9 @@ _TERMINAL_ABORT_REASONS: frozenset[str] = frozenset(
     {
         "already_configured",
         "already_in_progress",
+        # The entry already imported a newer bundle of the account; the same
+        # bundle will be turned away again, so retrying it only spins.
+        "bundle_older_than_imported",
         "single_instance_allowed",
         "not_implemented",
         "invalid_discovery_info",
@@ -1590,8 +1593,12 @@ class SecretsJSONWatcher:
         older snapshot of that account is armed. The guarantee is scoped to
         candidacy on purpose: if the newest snapshot is later deleted and only
         an older same-account snapshot on a read-only mount remains, that
-        snapshot becomes the sole candidate again -- there the delete-after-
-        import hook's stale-copy removal, not this collapse, is the guard. On
+        snapshot becomes the sole candidate again. The delete-after-import hook
+        cannot remove it there (and keeps any bundle it cannot prove stale even
+        where it can), so the guard is the bundle state the entry recorded at
+        its import: the discovery flow turns away a card whose bundle is not
+        newer than that state (``config_flow._discovery_bundle_not_newer_than_import``),
+        not this collapse and not the hook. On
         identical mtimes the per-account winner falls back to the digest
         tiebreak of :func:`scan_secrets_bundles`, which is arbitrary with
         respect to age; the collapse is therefore deterministic-winner, not

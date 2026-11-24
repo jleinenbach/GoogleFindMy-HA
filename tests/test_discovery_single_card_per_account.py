@@ -1479,3 +1479,510 @@ async def test_the_bundle_swap_runs_without_a_config_entries_manager(
 
     assert result is None
     assert seen == [None]
+
+
+# --- After an import: an older bundle of the account raises no card -----------
+# F2 (NA-11 variant b): the entry remembers which bundle state it imported, and
+# a later card whose bundle is not newer than that state is not offered. The
+# delete-after-import hook stays at ``min`` and deletes nothing extra.
+
+_IMPORTED_TOKEN = "aas_et/" + "I" * 80
+_BETWEEN_TOKEN = "aas_et/" + "B" * 80
+_NEWEST_TOKEN = "aas_et/" + "N" * 80
+
+
+async def _import_newest(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    manager: Any,
+) -> None:
+    """Scan, confirm the single card and create the entry from it.
+
+    Afterwards the account counts as configured, so the stubbed credential check
+    reports an update for any later card, as the real check would.
+    """
+
+    await _scan(hass, manager)
+    (card,) = _cards(hass, _ACCOUNT_A)
+    await hass.config_entries.flow.async_configure(card["flow_id"], {})
+    result = await hass.config_entries.flow.async_configure(card["flow_id"], {})
+    assert result["type"] == "create_entry"
+    assert _imported_token(hass) == _IMPORTED_TOKEN
+    configured_accounts.add(_ACCOUNT_A)
+
+
+async def _run_staged_cleanup(hass: HomeAssistant) -> None:
+    """Run the delete-after-import hook for the job the import staged.
+
+    The entry setup is stubbed in this module, so the durability gate that
+    normally runs the hook never fires; the test runs the hook itself with the
+    very identity the import staged.
+    """
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    tickets = hass.data[config_flow.DOMAIN][config_flow.PENDING_CONTAINER_CLEANUP_KEY]
+    (job,) = [job for ticket in tickets for job in ticket.jobs]
+    await config_flow._async_delete_watched_secrets(
+        hass,
+        imported_stable_key=job.imported_stable_key,
+        imported_digest=job.imported_digest,
+    )
+
+
+def _bundle_between_two_copies_of_the_import(
+    first: Path, second: Path, third: Path
+) -> None:
+    _write_bundle(first, "I1I1", 1_000, token=_IMPORTED_TOKEN)
+    _write_bundle(second, "B1B1", 2_000, token=_BETWEEN_TOKEN)
+    _write_bundle(third, "I1I1", 3_000, token=_IMPORTED_TOKEN)
+
+
+@pytest.mark.asyncio
+async def test_an_older_bundle_left_by_the_cleanup_raises_no_card(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bundle between two copies of the import survives the hook, but no card.
+
+    The hook keeps it because it is not older than *every* copy of the imported
+    content (its documented, deliberately cautious rule). After the copies are
+    gone it is the newest bundle of the account on disk, yet it is older than
+    what the entry imported, so offering it would invite replacing newer
+    credentials with older ones.
+    """
+
+    first, second, manager, _failing = two_watched_files
+    third = _third_watched_path(tmp_path)
+    _bundle_between_two_copies_of_the_import(first, second, third)
+    await _import_newest(hass, configured_accounts, manager)
+
+    caplog.set_level(logging.INFO, logger="custom_components.googlefindmy.config_flow")
+    await _run_staged_cleanup(hass)
+    assert not first.exists()
+    assert not third.exists()
+    assert second.exists(), "the hook must keep the bundle it cannot prove stale"
+    kept = [
+        record.getMessage()
+        for record in caplog.records
+        if str(second) in record.getMessage()
+    ]
+    assert len(kept) == 1
+    assert "it raises no discovery card" in kept[0]
+
+    await _scan(hass, manager)
+
+    assert _cards(hass, _ACCOUNT_A) == []
+    assert _imported_token(hass) == _IMPORTED_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_an_older_bundle_still_raises_no_card(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The imported state lives in the entry, not in memory.
+
+    A restart is reproduced by stopping the watcher, dropping everything the
+    integration keeps in ``hass.data`` and starting a fresh watcher over the
+    same paths. Only the config entry carries over, as it does across a real
+    Home Assistant restart.
+    """
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    first, second, manager, _failing = two_watched_files
+    third = _third_watched_path(tmp_path)
+    _bundle_between_two_copies_of_the_import(first, second, third)
+    await _import_newest(hass, configured_accounts, manager)
+    await _run_staged_cleanup(hass)
+
+    await manager.async_stop()
+    hass.data[config_flow.DOMAIN].clear()
+    restarted = await _start_watcher(hass, monkeypatch, [first, second, third])
+    try:
+        await _scan(hass, restarted)
+        assert _cards(hass, _ACCOUNT_A) == []
+    finally:
+        await restarted.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_an_older_bundle_left_on_a_read_only_mount_raises_no_card(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+) -> None:
+    """Where the hook cannot delete, an older bundle must not come back as a card.
+
+    On a read-only mount the hook removes nothing. The watcher hides the older
+    bundle only while the newer copy of the same account is on disk
+    (``SecretsJSONWatcher._read_bundles``); once that copy goes away the older
+    one is the newest left. The read-only mount is reproduced by not running the
+    hook at all, which is exactly what it amounts to.
+    """
+
+    _first, second, manager, _failing = two_watched_files
+    third = _third_watched_path(tmp_path)
+    _write_bundle(second, "B1B1", 2_000, token=_BETWEEN_TOKEN)
+    _write_bundle(third, "I1I1", 3_000, token=_IMPORTED_TOKEN)
+    await _import_newest(hass, configured_accounts, manager)
+
+    third.unlink()
+    await _scan(hass, manager)
+
+    assert _cards(hass, _ACCOUNT_A) == []
+
+
+# --- Controls: the recorded state turns away only what is not newer -----------
+
+
+async def _import_then_leave_only(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    manager: Any,
+    imported: Path,
+    mtime: int,
+) -> None:
+    """Import the single bundle at ``imported``, then remove it like the hook would."""
+
+    _write_bundle(imported, "I1I1", mtime, token=_IMPORTED_TOKEN)
+    await _import_newest(hass, configured_accounts, manager)
+    imported.unlink()
+    await _scan(hass, manager)
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_newer_than_the_import_still_raises_a_card(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+) -> None:
+    _first, second, manager, _failing = two_watched_files
+    await _import_then_leave_only(
+        hass, configured_accounts, manager, _third_watched_path(tmp_path), 3_000
+    )
+
+    _write_bundle(second, "N1N1", 4_000, token=_NEWEST_TOKEN)
+    await _scan(hass, manager)
+
+    assert len(_cards(hass, _ACCOUNT_A)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_different_bundle_tied_with_the_import_raises_no_card(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+) -> None:
+    """A tie is undecidable and counts as not newer, as for the confirmation."""
+
+    _first, second, manager, _failing = two_watched_files
+    await _import_then_leave_only(
+        hass, configured_accounts, manager, _third_watched_path(tmp_path), 3_000
+    )
+
+    _write_bundle(second, "B1B1", 3_000, token=_BETWEEN_TOKEN)
+    await _scan(hass, manager)
+
+    assert _cards(hass, _ACCOUNT_A) == []
+
+
+@pytest.mark.asyncio
+async def test_an_import_stamped_in_the_future_does_not_hide_later_cards(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+) -> None:
+    """The recorded time is capped at the clock of the import.
+
+    The watcher accepts a future mtime. Recorded as is, it would turn away every
+    later bundle of the account until that date; a bundle written a minute after
+    the import must raise its card.
+    """
+
+    import time  # noqa: PLC0415
+
+    _first, second, manager, _failing = two_watched_files
+    ten_years = 10 * 365 * 24 * 3600
+    await _import_then_leave_only(
+        hass,
+        configured_accounts,
+        manager,
+        _third_watched_path(tmp_path),
+        int(time.time()) + ten_years,
+    )
+
+    _write_bundle(second, "N1N1", int(time.time()) + 60, token=_NEWEST_TOKEN)
+    await _scan(hass, manager)
+
+    assert len(_cards(hass, _ACCOUNT_A)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_turned_away_bundle_is_not_dispatched_again_on_every_scan(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One turn-away per bundle, not one per scan."""
+
+    _first, second, manager, _failing = two_watched_files
+    third = _third_watched_path(tmp_path)
+    _write_bundle(second, "B1B1", 2_000, token=_BETWEEN_TOKEN)
+    _write_bundle(third, "I1I1", 3_000, token=_IMPORTED_TOKEN)
+    await _import_newest(hass, configured_accounts, manager)
+    third.unlink()
+
+    caplog.set_level(logging.INFO, logger="custom_components.googlefindmy.config_flow")
+    for _ in range(3):
+        await _scan(hass, manager)
+
+    turned_away = [
+        record
+        for record in caplog.records
+        if "is not newer than the one the entry imported" in record.getMessage()
+    ]
+    assert _cards(hass, _ACCOUNT_A) == []
+    assert len(turned_away) == 1
+
+
+def test_the_watcher_does_not_retry_a_turned_away_bundle() -> None:
+    """The harness above reports every dispatch as accepted; the real one classifies.
+
+    A reason the verdict table does not know counts as transient, and the
+    watcher would start the same bundle again on its next scan.
+    """
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    verdict = discovery._classify_discovery_flow_result(
+        {"type": "abort", "reason": "bundle_older_than_imported"}
+    )
+
+    assert verdict is discovery.CloudDiscoveryOutcome.ACCEPTED
+
+
+# --- Every import path records the state ---------------------------------------
+
+
+def _recorded_state(entry: Any) -> tuple[Any, Any]:
+    from custom_components.googlefindmy.const import (  # noqa: PLC0415
+        DATA_DISCOVERY_IMPORTED_DIGEST,
+        DATA_DISCOVERY_IMPORTED_MTIME,
+    )
+
+    return (
+        entry.data.get(DATA_DISCOVERY_IMPORTED_DIGEST),
+        entry.data.get(DATA_DISCOVERY_IMPORTED_MTIME),
+    )
+
+
+@pytest.mark.asyncio
+async def test_accepting_the_overwrite_records_the_written_bundle(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """The overwrite records the bundle it wrote, the newest copy's time."""
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    configured_accounts.add(_ACCOUNT_A)
+    entry = _add_configured_entry(hass, _ACCOUNT_A)
+    first, second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    await hass.config_entries.flow.async_configure(card, {})
+    _write_bundle(second, "Y1Y1", 2_000, token=_YOUNGER_TOKEN)
+
+    result = await hass.config_entries.flow.async_configure(
+        card, {"overwrite_credentials": True}
+    )
+
+    assert result["reason"] == "credentials_updated"
+    written = discovery.read_secrets_bundle(second)
+    assert written is not None
+    assert _recorded_state(entry) == (written.digest, 2_000.0)
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_update_records_the_bundle_time_of_its_payload(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a watcher the payload's own bundle time is recorded."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    _stub_entry_creation(hass, monkeypatch)
+    # The update path reloads the entry itself; the real reload would set the
+    # integration and its dependencies up, which is not what this test is about.
+    monkeypatch.setattr(
+        hass.config_entries, "async_reload", AsyncMock(return_value=True)
+    )
+    configured_accounts.add(_ACCOUNT_A)
+    entry = _add_configured_entry(hass, _ACCOUNT_A)
+    payload = {
+        **_payload(_ACCOUNT_A, shared_key="U1U1"),
+        "discovery_bundle_mtime": 2_500.0,
+    }
+
+    await hass.config_entries.flow.async_init(
+        config_flow.DOMAIN,
+        context={"source": config_flow.DISCOVERY_UPDATE_SOURCE},
+        data=payload,
+    )
+    await hass.async_block_till_done()
+
+    digest, mtime = _recorded_state(entry)
+    assert isinstance(digest, str)
+    assert mtime == 2_500.0
+
+
+# --- What the hook logs is what the next scan does; what stays offered --------
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_newer_than_every_copy_is_announced_and_offered(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The hook's "offered as a new discovery card" holds for a newer bundle."""
+
+    _first, second, manager, _failing = two_watched_files
+    third = _third_watched_path(tmp_path)
+    _write_bundle(third, "I1I1", 3_000, token=_IMPORTED_TOKEN)
+    await _import_newest(hass, configured_accounts, manager)
+    _write_bundle(second, "N1N1", 4_000, token=_NEWEST_TOKEN)
+
+    caplog.set_level(logging.INFO, logger="custom_components.googlefindmy.config_flow")
+    await _run_staged_cleanup(hass)
+    (kept,) = [r.getMessage() for r in caplog.records if str(second) in r.getMessage()]
+    assert "it is offered as a new discovery card" in kept
+
+    await _scan(hass, manager)
+    assert len(_cards(hass, _ACCOUNT_A)) == 1
+
+
+@pytest.mark.asyncio
+async def test_without_a_copy_of_the_import_the_hook_keeps_and_the_state_decides(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No copy of the import left: nothing is provably stale, the entry decides.
+
+    The copy was removed by someone else before the hook ran. The hook keeps the
+    older bundle, as it always did, and says the recorded state decides; that
+    state then turns its card away.
+    """
+
+    _first, second, manager, _failing = two_watched_files
+    third = _third_watched_path(tmp_path)
+    _write_bundle(second, "B1B1", 2_000, token=_BETWEEN_TOKEN)
+    _write_bundle(third, "I1I1", 3_000, token=_IMPORTED_TOKEN)
+    await _import_newest(hass, configured_accounts, manager)
+    third.unlink()
+
+    caplog.set_level(logging.INFO, logger="custom_components.googlefindmy.config_flow")
+    await _run_staged_cleanup(hass)
+    assert second.exists()
+    (kept,) = [r.getMessage() for r in caplog.records if str(second) in r.getMessage()]
+    assert "only if it is newer than the import the entry recorded" in kept
+
+    await _scan(hass, manager)
+    assert _cards(hass, _ACCOUNT_A) == []
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_the_imported_content_is_still_offered(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same content is not turned away, however old its file.
+
+    After a restart the watcher rediscovers the unchanged bundle; that card is
+    what redeems the cleanup ticket of an overwrite (see
+    ``async_step_discovery_overwrite``), so turning it away would leave the
+    file on disk for good. The copy left behind carries an older time than the
+    one recorded, which is exactly what the comparison must not look at.
+    """
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    first, second, manager, _failing = two_watched_files
+    third = _third_watched_path(tmp_path)
+    _write_bundle(second, "I1I1", 1_000, token=_IMPORTED_TOKEN)
+    _write_bundle(third, "I1I1", 3_000, token=_IMPORTED_TOKEN)
+    await _import_newest(hass, configured_accounts, manager)
+    third.unlink()
+
+    await manager.async_stop()
+    hass.data[config_flow.DOMAIN].clear()
+    restarted = await _start_watcher(hass, monkeypatch, [first, second, third])
+    try:
+        await _scan(hass, restarted)
+        assert len(_cards(hass, _ACCOUNT_A)) == 1
+    finally:
+        await restarted.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_a_card_without_a_bundle_time_is_offered_and_says_so(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Without a time there is nothing to compare; the card stays, with a log line."""
+
+    _first, _second, manager, _failing = two_watched_files
+    third = _third_watched_path(tmp_path)
+    _write_bundle(third, "I1I1", 3_000, token=_IMPORTED_TOKEN)
+    await _import_newest(hass, configured_accounts, manager)
+
+    caplog.set_level(logging.INFO, logger="custom_components.googlefindmy.config_flow")
+    await _discover(hass, _payload(_ACCOUNT_A, shared_key="T1T1"))
+
+    assert len(_cards(hass, _ACCOUNT_A)) == 1
+    assert any("carries no bundle time" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_no_state_is_recorded_without_imported_content() -> None:
+    """No payload, or a payload without a bundle: nothing identifies the import."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    without_bundle = config_flow.CloudDiscoveryData(
+        email=_ACCOUNT_A,
+        unique_id=config_flow.unique_account_id(_ACCOUNT_A),
+        candidates=(("candidate", _TOKEN),),
+        secrets_bundle=None,
+        bundle_mtime=3_000.0,
+    )
+
+    assert await config_flow._async_discovery_import_state(None, None) == {}
+    assert await config_flow._async_discovery_import_state(None, without_bundle) == {}

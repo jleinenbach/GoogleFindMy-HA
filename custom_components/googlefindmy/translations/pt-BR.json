@@ -101,6 +101,7 @@
       "already_configured": "O Google Encontrar Meu Dispositivo já está configurado.",
       "credentials_updated": "As credenciais salvas desta conta foram substituídas pelas que foram encontradas.",
       "credentials_kept": "As credenciais salvas foram mantidas. Nada foi alterado.",
+      "bundle_older_than_imported": "Estes dados de login não são mais recentes do que os já importados. Nada foi alterado.",
       "cannot_connect": "Falha ao conectar-se ao Encontre Meu Dispositivo do Google.",
       "dependency_not_ready": "As dependências do Encontre Meu Dispositivo do Google não estão instaladas. ",
       "invalid_discovery_info": "A carga de descoberta era inválida. ",

@@ -101,6 +101,7 @@
       "already_configured": "Google Find My Device è già configurato.",
       "credentials_updated": "Le credenziali salvate per questo account sono state sostituite con quelle trovate.",
       "credentials_kept": "Le credenziali salvate sono state mantenute. Non è stato modificato nulla.",
+      "bundle_older_than_imported": "Questi dati di accesso non sono più recenti di quelli già importati. Non è stato modificato nulla.",
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
       "dependency_not_ready": "Le dipendenze di Google Find My Device non sono installate. Installa i requisiti e riprova.",
       "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",

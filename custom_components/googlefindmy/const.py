@@ -606,6 +606,11 @@ CONF_OAUTH_TOKEN: str = "oauth_token"  # kept for backward compatibility
 DATA_AAS_TOKEN: str = "aas_token"  # AAS token (TokenCache key; not in entry.data)
 CONF_GOOGLE_EMAIL: str = "google_email"  # helper key when individual tokens are used
 DATA_SECRET_BUNDLE: str = "secrets_data"  # full GoogleFindMyTools secrets.json content
+# The bundle state a discovery import wrote: content digest and the mtime of
+# the newest on-disk copy, capped at the wall clock of the import. A later
+# discovery card whose bundle is not newer than that state is not offered.
+DATA_DISCOVERY_IMPORTED_DIGEST: str = "discovery_imported_digest"
+DATA_DISCOVERY_IMPORTED_MTIME: str = "discovery_imported_mtime"
 DATA_AUTH_METHOD: str = "auth_method"  # "secrets_json" | "individual_tokens"
 # Credential keys an account may or may not carry. Credentials that replace
 # existing ones express "this account has no bundle / no AAS token any more" by

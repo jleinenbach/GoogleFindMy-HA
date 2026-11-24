@@ -101,6 +101,7 @@
       "already_configured": "Google Find My Device כבר מוגדר.",
       "credentials_updated": "פרטי ההתחברות השמורים של חשבון זה הוחלפו בפרטים שנמצאו.",
       "credentials_kept": "פרטי ההתחברות השמורים נשמרו. דבר לא שונה.",
+      "bundle_older_than_imported": "נתוני ההתחברות האלה אינם חדשים יותר מאלה שכבר יובאו. דבר לא שונה.",
       "cannot_connect": "נכשל החיבור ל-Google Find My Device.",
       "dependency_not_ready": "תלויות של Google Find My Device לא מותקנות. יש להתקין את הדרישות ולנסות שוב.",
       "invalid_discovery_info": "מטען הגילוי לא היה תקין. יש לבדוק את האישורים ולנסות שוב.",
