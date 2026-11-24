@@ -1065,6 +1065,34 @@ async def _async_delete_watched_secrets(
         )
 
 
+async def _async_watched_bundles_of_account(
+    hass: HomeAssistant, stable_key: str | None
+) -> list[_SecretsScanResult] | None:
+    """Return the watched on-disk bundles of ``stable_key``, newest first.
+
+    Scans the discovery manager's watch paths with
+    :func:`discovery.scan_secrets_bundles` in the executor. Returns ``None``
+    when no discovery manager with watch paths is running, and an empty list
+    when it is running but no bundle of the account is on disk.
+    """
+    domain_data = getattr(hass, "data", None)
+    bucket = domain_data.get(DOMAIN) if isinstance(domain_data, Mapping) else None
+    manager = bucket.get("discovery_manager") if isinstance(bucket, Mapping) else None
+    watch_paths = getattr(manager, "watch_paths", None)
+    if not watch_paths:
+        return None
+
+    # Imported inside the function to avoid a circular import at module load
+    # (discovery imports config_flow).
+    from . import discovery as discovery_module
+
+    paths = [Path(str(path)) for path in watch_paths]
+    scanned: list[tuple[Path, _SecretsScanResult]] = await hass.async_add_executor_job(
+        discovery_module.scan_secrets_bundles, paths
+    )
+    return [result for _path, result in scanned if result.stable_key == stable_key]
+
+
 async def _async_freshest_watched_bundle(
     hass: HomeAssistant | None,
     *,
@@ -1096,26 +1124,9 @@ async def _async_freshest_watched_bundle(
 
     if hass is None or stable_key is None or digest is None:
         return None
-    domain_data = getattr(hass, "data", None)
-    if not isinstance(domain_data, Mapping):
+    same_account = await _async_watched_bundles_of_account(hass, stable_key)
+    if same_account is None:
         return None
-    bucket = domain_data.get(DOMAIN)
-    manager = bucket.get("discovery_manager") if isinstance(bucket, Mapping) else None
-    watch_paths = getattr(manager, "watch_paths", None)
-    if not watch_paths:
-        return None
-
-    # Imported inside the function to avoid a circular import at module load
-    # (discovery imports config_flow).
-    from . import discovery as discovery_module
-
-    paths = [Path(str(path)) for path in watch_paths]
-    scanned: list[tuple[Path, _SecretsScanResult]] = await hass.async_add_executor_job(
-        discovery_module.scan_secrets_bundles, paths
-    )
-    same_account = [
-        result for _path, result in scanned if result.stable_key == stable_key
-    ]
     confirmed_mtimes = [
         result.mtime for result in same_account if result.digest == digest
     ]
@@ -1164,23 +1175,14 @@ async def _async_discovery_import_state(
         return {}
     stable_key = _stable_key_for_discovery_payload(payload)
 
-    copy_mtimes: list[float] = []
-    bucket = getattr(hass, "data", {}) if hass is not None else {}
-    bucket = bucket.get(DOMAIN) if isinstance(bucket, Mapping) else None
-    manager = bucket.get("discovery_manager") if isinstance(bucket, Mapping) else None
-    watch_paths = getattr(manager, "watch_paths", None)
-    if hass is not None and watch_paths:
-        from . import discovery as discovery_module
-
-        paths = [Path(str(path)) for path in watch_paths]
-        scanned = await hass.async_add_executor_job(
-            discovery_module.scan_secrets_bundles, paths
-        )
-        copy_mtimes = [
-            result.mtime
-            for _path, result in scanned
-            if result.stable_key == stable_key and result.digest == digest
-        ]
+    same_account = (
+        await _async_watched_bundles_of_account(hass, stable_key)
+        if hass is not None
+        else None
+    )
+    copy_mtimes = [
+        result.mtime for result in same_account or () if result.digest == digest
+    ]
 
     mtime = (
         max(copy_mtimes) if copy_mtimes else _finite_bundle_mtime(payload.bundle_mtime)
