@@ -1986,3 +1986,75 @@ async def test_no_state_is_recorded_without_imported_content() -> None:
 
     assert await config_flow._async_discovery_import_state(None, None) == {}
     assert await config_flow._async_discovery_import_state(None, without_bundle) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_newer_bundle_of_another_account_is_not_newer_for_this_one(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """The watched scan is filtered by account before anything is compared.
+
+    Account B's bundle is the newest file on disk. For account A it is neither
+    a newer bundle to swap in at confirmation nor a copy whose time the import
+    state records.
+    """
+
+    from custom_components.googlefindmy import config_flow, discovery  # noqa: PLC0415
+
+    first, second, _manager, _failing = two_watched_files
+    _write_bundle(first, "A1A1", 1_000)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    second.write_text(
+        json.dumps(
+            {"google_email": _ACCOUNT_B, "aas_token": _TOKEN, "shared_key": "B9B9"}
+        ),
+        encoding="utf-8",
+    )
+    os.utime(second, (2_000, 2_000))
+    ((_path, own),) = discovery.scan_secrets_bundles([first])
+
+    fresher = await config_flow._async_freshest_watched_bundle(
+        hass, stable_key=own.stable_key, digest=own.digest
+    )
+    imported = config_flow.CloudDiscoveryData(
+        email=_ACCOUNT_A,
+        unique_id=config_flow.unique_account_id(_ACCOUNT_A),
+        candidates=(("candidate", _TOKEN),),
+        secrets_bundle=json.loads(first.read_text(encoding="utf-8")),
+        bundle_mtime=500.0,
+    )
+    state = await config_flow._async_discovery_import_state(hass, imported)
+
+    assert fresher is None
+    assert state[config_flow.DATA_DISCOVERY_IMPORTED_MTIME] == 1_000
+
+
+@pytest.mark.asyncio
+async def test_the_import_state_records_the_imported_content_not_a_newer_one(
+    hass: HomeAssistant,
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+) -> None:
+    """Only copies of the imported content set the recorded time.
+
+    A newer bundle of the same account with other content is still on disk. Had
+    its time been recorded, its own card would later count as a tie and be
+    turned away.
+    """
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    first, second, _manager, _failing = two_watched_files
+    _write_bundle(first, "A1A1", 1_000)
+    _write_bundle(second, "A2A2", 2_000, token=_YOUNGER_TOKEN)
+    imported = config_flow.CloudDiscoveryData(
+        email=_ACCOUNT_A,
+        unique_id=config_flow.unique_account_id(_ACCOUNT_A),
+        candidates=(("candidate", _TOKEN),),
+        secrets_bundle=json.loads(first.read_text(encoding="utf-8")),
+        bundle_mtime=500.0,
+    )
+
+    state = await config_flow._async_discovery_import_state(hass, imported)
+
+    assert state[config_flow.DATA_DISCOVERY_IMPORTED_MTIME] == 1_000
