@@ -608,7 +608,8 @@ CONF_GOOGLE_EMAIL: str = "google_email"  # helper key when individual tokens are
 DATA_SECRET_BUNDLE: str = "secrets_data"  # full GoogleFindMyTools secrets.json content
 # The bundle state a discovery import wrote: content digest and the mtime of
 # the newest on-disk copy, capped at the wall clock of the import. A later
-# discovery card whose bundle is not newer than that state is not offered.
+# discovery card with other content whose bundle is not newer than that
+# state is not offered.
 DATA_DISCOVERY_IMPORTED_DIGEST: str = "discovery_imported_digest"
 DATA_DISCOVERY_IMPORTED_MTIME: str = "discovery_imported_mtime"
 DATA_AUTH_METHOD: str = "auth_method"  # "secrets_json" | "individual_tokens"

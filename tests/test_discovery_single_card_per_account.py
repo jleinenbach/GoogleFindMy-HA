@@ -1571,7 +1571,7 @@ async def test_an_older_bundle_left_by_the_cleanup_raises_no_card(
         if str(second) in record.getMessage()
     ]
     assert len(kept) == 1
-    assert "it raises no discovery card" in kept[0]
+    assert "checked against the import the entry recorded" in kept[0]
 
     await _scan(hass, manager)
 
@@ -1684,7 +1684,7 @@ async def test_a_different_bundle_tied_with_the_import_raises_no_card(
     two_watched_files: tuple[Path, Path, Any, set[str]],
     tmp_path: Path,
 ) -> None:
-    """A tie is undecidable and counts as not newer, as for the confirmation."""
+    """A tie is undecidable and counts as not newer: keeping the import loses nothing."""
 
     _first, second, manager, _failing = two_watched_files
     await _import_then_leave_only(
@@ -1874,7 +1874,7 @@ async def test_a_bundle_newer_than_every_copy_is_announced_and_offered(
     caplog.set_level(logging.INFO, logger="custom_components.googlefindmy.config_flow")
     await _run_staged_cleanup(hass)
     (kept,) = [r.getMessage() for r in caplog.records if str(second) in r.getMessage()]
-    assert "it is offered as a new discovery card" in kept
+    assert "offered as a new discovery card" in kept
 
     await _scan(hass, manager)
     assert len(_cards(hass, _ACCOUNT_A)) == 1
@@ -1906,7 +1906,7 @@ async def test_without_a_copy_of_the_import_the_hook_keeps_and_the_state_decides
     await _run_staged_cleanup(hass)
     assert second.exists()
     (kept,) = [r.getMessage() for r in caplog.records if str(second) in r.getMessage()]
-    assert "only if it is newer than the import the entry recorded" in kept
+    assert "checked against the import the entry recorded" in kept
 
     await _scan(hass, manager)
     assert _cards(hass, _ACCOUNT_A) == []
@@ -2178,3 +2178,43 @@ async def test_without_a_copy_on_disk_the_payload_time_is_recorded() -> None:
     state = await config_flow._async_discovery_import_state(None, _later_card(1_234.0))
 
     assert state[config_flow.DATA_DISCOVERY_IMPORTED_MTIME] == 1_234.0
+
+
+def test_a_bundle_that_is_not_utf8_is_skipped_by_the_scan(tmp_path: Path) -> None:
+    """An undecodable file is unreadable like any other, not an exception.
+
+    The import paths scan the watched files while the entry is created; a
+    UTF-16 or binary file there must not abort the setup.
+    """
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    garbled = tmp_path / "secrets.json"
+    garbled.write_bytes(b"\xff\xfe{\x00}\x00")
+    _write_bundle(tmp_path / "other" / "secrets.json", "U1U1", 1_000)
+
+    assert discovery.read_secrets_bundle(garbled) is None
+    scanned = discovery.scan_secrets_bundles(
+        [garbled, tmp_path / "other" / "secrets.json"]
+    )
+    assert [result.mtime for _path, result in scanned] == [1_000]
+
+
+@pytest.mark.parametrize("recorded_digest", [None, 42, b"recorded"], ids=repr)
+def test_an_unusable_recorded_digest_turns_nothing_away(recorded_digest: Any) -> None:
+    """Without a usable digest the record cannot tell the same content from other."""
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    entry = SimpleNamespace(
+        data={
+            config_flow.DATA_DISCOVERY_IMPORTED_DIGEST: recorded_digest,
+            config_flow.DATA_DISCOVERY_IMPORTED_MTIME: 5_000.0,
+        }
+    )
+
+    assert not config_flow._discovery_bundle_not_newer_than_import(
+        entry, _later_card(1_000.0)
+    )

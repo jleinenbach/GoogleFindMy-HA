@@ -992,8 +992,9 @@ tie of modification times with a copy of the confirmed content, that content is
 kept). Home Assistant then remembers, in the entry, which bundle it imported for
 the account (also for a bundle taken over in the setup preview): a bundle with other content that is not newer than that one no
 longer raises a card, also after a restart, so an older copy left on disk (for
-example on a path Home Assistant cannot write to) cannot replace the imported
-credentials. An entry set up before this record existed has none until its next
+example on a path Home Assistant cannot write to) does not come back to replace
+the imported credentials. "Newer" goes by the file's modification time, so a
+bundle copied with its old time kept counts as old. An entry set up before this record existed has none until its next
 import from a watched bundle. The copy is
 deleted once Home Assistant is observed to hold the imported credentials
 (`config_flow.py` → `_async_delete_watched_secrets`, armed by

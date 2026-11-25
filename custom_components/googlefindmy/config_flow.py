@@ -1041,26 +1041,28 @@ async def _async_delete_watched_secrets(
             continue
         if newest_imported_mtime is not None and result.mtime <= newest_imported_mtime:
             # Between two copies of the import (or tied with the newest): not
-            # provably stale, so it stays, but the entry's recorded import
-            # state turns its card away (_discovery_bundle_not_newer_than_import).
+            # provably stale, so it stays. Its card is checked against the
+            # entry's recorded import state (_discovery_bundle_not_newer_than_import),
+            # which this hook does not read, so the line does not predict it.
             _LOGGER.info(
                 "Keeping watched secrets bundle: it is not older than every copy "
-                "of the imported one, but not newer than the newest; it raises "
-                "no discovery card: %s",
+                "of the imported one, but not newer than the newest; a discovery "
+                "card for it is checked against the import the entry recorded: %s",
                 path_str,
             )
             continue
         if newest_imported_mtime is None:
             _LOGGER.info(
                 "Keeping watched secrets bundle: the imported content is no "
-                "longer on disk; it raises a discovery card only if it is newer "
-                "than the import the entry recorded: %s",
+                "longer on disk; a discovery card for it is checked against the "
+                "import the entry recorded: %s",
                 path_str,
             )
             continue
         _LOGGER.info(
             "Keeping watched secrets bundle: it is not older than the imported "
-            "one for the same account; it is offered as a new discovery card: %s",
+            "one for the same account; it can be offered as a new discovery "
+            "card: %s",
             path_str,
         )
 
@@ -1218,8 +1220,11 @@ def _discovery_bundle_not_newer_than_import(
     """Whether ``payload`` carries a different bundle no newer than the import.
 
     True only when the entry recorded an import state, the payload's bundle has
-    another digest, and its mtime is not later than the recorded one; a tie
-    counts as not newer, as it does for the confirmation. Anything that cannot
+    another digest, and its mtime is not later than the recorded one. A tie
+    counts as not newer, as it does for the confirmation while a copy of the
+    confirmed content is on disk; the record cannot tell a rewrite stamped in the
+    same tick from an older file, and keeping the imported credentials is the
+    error that loses nothing. Anything that cannot
     be decided (no recorded state, no digest, no mtime, a recorded time later
     than the clock, which only a clock set back since the import produces) is
     False, so the card is offered as it was before the state existed.
@@ -1239,9 +1244,9 @@ def _discovery_bundle_not_newer_than_import(
         return False
     if payload.bundle_mtime is None:
         _LOGGER.info(
-            "Discovery for %s carries no bundle time; it is offered although "
-            "the entry recorded an imported bundle state",
-            _mask_email_for_logs(payload.email),
+            "Discovery for entry %s carries no bundle time; it is offered "
+            "although the entry recorded an imported bundle state",
+            getattr(entry, "entry_id", None) or "-",
         )
         return False
     return payload.bundle_mtime <= imported_mtime
@@ -5108,9 +5113,9 @@ class ConfigFlow(
             )
         if _discovery_bundle_not_newer_than_import(imported_entry, normalized):
             _LOGGER.info(
-                "Discovery for %s ignored: its bundle is not newer than the "
-                "one the entry imported",
-                _mask_email_for_logs(normalized.email),
+                "Discovery for entry %s ignored: its bundle is not newer than "
+                "the one the entry imported",
+                getattr(imported_entry, "entry_id", None) or "-",
             )
             return self.async_abort(reason="bundle_older_than_imported")
         await self._async_supersede_discovery_flows()

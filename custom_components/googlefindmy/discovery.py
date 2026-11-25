@@ -1049,7 +1049,7 @@ def read_secrets_bundle(path: Path) -> _SecretsScanResult | None:
         mtime = path.stat().st_mtime
     except FileNotFoundError:
         return None
-    except OSError as err:
+    except (OSError, UnicodeDecodeError) as err:
         _LOGGER.debug(
             "Unable to read secrets bundle",
             extra={"bundle_path": str(path)},
