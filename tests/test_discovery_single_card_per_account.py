@@ -2218,3 +2218,104 @@ def test_an_unusable_recorded_digest_turns_nothing_away(recorded_digest: Any) ->
     assert not config_flow._discovery_bundle_not_newer_than_import(
         entry, _later_card(1_000.0)
     )
+
+
+def _change_entry_during_scan(
+    hass: HomeAssistant,
+    entry: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    on_call: int,
+) -> None:
+    """Let another task drop a key from ``entry.data`` while the scan call yields.
+
+    Home Assistant writes updates flat over the current data, so a key added
+    meanwhile survives any order; only a stale snapshot brings a removed one back.
+    """
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    real = config_flow._async_watched_bundles_of_account
+    calls = {"n": 0}
+
+    async def _scan_and_change(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == on_call:
+            hass.config_entries.async_update_entry(
+                entry,
+                data={k: v for k, v in entry.data.items() if k != "obsolete_meanwhile"},
+            )
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(
+        config_flow, "_async_watched_bundles_of_account", _scan_and_change
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_overwrite_keeps_what_another_task_wrote_during_the_scan(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The import state is scanned before the entry data is snapshotted.
+
+    The first scan is the freshness check, the second the import state; a
+    snapshot taken between them would write the entry back as it was.
+    """
+
+    configured_accounts.add(_ACCOUNT_A)
+    entry = _add_configured_entry(hass, _ACCOUNT_A)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, "obsolete_meanwhile": True}
+    )
+    first, _second, manager, _failing = two_watched_files
+    card = await _card_for_older_bundle(hass, first, manager)
+    await hass.config_entries.flow.async_configure(card, {})
+    _change_entry_during_scan(hass, entry, monkeypatch, on_call=2)
+
+    result = await hass.config_entries.flow.async_configure(
+        card, {"overwrite_credentials": True}
+    )
+
+    assert result["reason"] == "credentials_updated"
+    assert "obsolete_meanwhile" not in entry.data
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_update_keeps_what_another_task_wrote_during_the_scan(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same order on the update path: scan first, then snapshot and write.
+
+    The account stays out of the stubbed ingest's set, so the step snapshots
+    ``entry.data`` itself, as it does whenever the ingest returns no updates.
+    """
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    _stub_entry_creation(hass, monkeypatch)
+    monkeypatch.setattr(
+        hass.config_entries, "async_reload", AsyncMock(return_value=True)
+    )
+    entry = _add_configured_entry(hass, _ACCOUNT_A)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, "obsolete_meanwhile": True}
+    )
+    _change_entry_during_scan(hass, entry, monkeypatch, on_call=1)
+
+    await hass.config_entries.flow.async_init(
+        config_flow.DOMAIN,
+        context={"source": config_flow.DISCOVERY_UPDATE_SOURCE},
+        data={
+            **_payload(_ACCOUNT_A, shared_key="U2U2"),
+            "discovery_bundle_mtime": 2_500.0,
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert "obsolete_meanwhile" not in entry.data
+    assert _recorded_state(entry)[1] == 2_500.0

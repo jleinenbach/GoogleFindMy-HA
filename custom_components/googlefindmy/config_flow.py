@@ -5424,6 +5424,12 @@ class ConfigFlow(
                 return self.async_abort(reason="cannot_connect")
             payload, auth_data = freshest
 
+            # Scanned before the entry data is snapshotted: the scan yields to
+            # the executor, and a snapshot taken earlier would be written back
+            # over whatever another task changed in the entry meanwhile.
+            import_state = await _async_discovery_import_state(
+                getattr(self, "hass", None), payload
+            )
             rebased = self._async_rebase_credential_updates(payload.email, auth_data)
             if rebased is None:
                 # No entry to overwrite any more: it was removed, or its account
@@ -5437,12 +5443,7 @@ class ConfigFlow(
                 )
                 return await self._async_import_discovered_account(payload)
 
-            updates = {
-                **rebased[1],
-                **await _async_discovery_import_state(
-                    getattr(self, "hass", None), payload
-                ),
-            }
+            updates = {**rebased[1], **import_state}
             existing_entry: ConfigEntry | None = None
             written = False
             try:
@@ -5661,6 +5662,9 @@ class ConfigFlow(
                     prev_source,
                 )
 
+        hass_obj = getattr(self, "hass", None)
+        # Scanned before the entry data is snapshotted (see the overwrite step).
+        import_state = await _async_discovery_import_state(hass_obj, normalized)
         try:
             auth_data, updates = await _ingest_discovery_credentials(
                 self, normalized, existing_entry=existing_entry
@@ -5687,11 +5691,7 @@ class ConfigFlow(
             _mask_email_for_logs(normalized.email),
         )
 
-        hass_obj = getattr(self, "hass", None)
-        updates = {
-            **updates,
-            **await _async_discovery_import_state(hass_obj, normalized),
-        }
+        updates = {**updates, **import_state}
         updates_to_apply = deepcopy(updates)
 
         abort_raised = False
