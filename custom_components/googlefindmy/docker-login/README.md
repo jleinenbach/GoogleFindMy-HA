@@ -403,7 +403,8 @@ Either way, re-running the login is the whole recovery procedure. After a
 cancelled sign-in 2 of 2 the re-run finds the stored tokens and opens only the
 second window.
 
-Cancelling a **re-authentication** costs nothing either. `--reauth` (passed
+Cancelling a **re-authentication** costs nothing either (a stop from outside
+is the exception, see the end of this section). `--reauth` (passed
 through `GFMY_ARGS`, see [Forcing a fresh login](#forcing-a-fresh-login)) clears
 the cached tokens before it starts, because an empty cache is what makes the CLI
 open the login at all. If sign-in 1 of 2 then ends without a token (you closed
@@ -441,6 +442,25 @@ so instead of pretending otherwise:
 * **Writing the restored file failed** (a full or read-only disk). The run says
   so and leaves the cleared state on disk rather than replacing the reason it
   ended with a disk error; `--reauth` again is the recovery here too.
+
+Stopping the container from outside is a different ending. `docker stop` sends
+SIGTERM, and the run then ends with exit status `143` (128 + 15, the status a
+shell reports for a process that SIGTERM ended) in whatever step it was. A
+stop while sign-in 2 of 2 reads the account vault or waits for the push
+registration first saves what the run had read by then and says so:
+
+```
+The login was stopped (SIGTERM) during sign-in 2 of 2; whatever it had read by then was saved.
+```
+
+A stop before the key was read can leave the incomplete file shown further
+up, and the same notice then names it. Running the login again is the recovery
+here too.
+
+A stop does not put cleared tokens back. Under `--reauth`, a stop during
+sign-in 1 of 2 leaves them cleared, because SIGTERM ends the program before
+the `--reauth` restore described above can run. Run the login again
+(without `--reauth`) to sign in afresh.
 
 ## Browser closed by accident
 
@@ -764,6 +784,12 @@ there is no separate image to rebuild for code changes.
   `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line. Start the login
   again; after a cancelled sign-in 2 of 2 it opens only the second window. The
   messages are quoted in full under [Cancelling a login](#cancelling-a-login).
+- **The run ended with exit status 143:** the container was stopped from
+  outside, usually by `docker stop`, which sends SIGTERM. It is neither a
+  cancellation (`130`) nor a failed step (`1`). A stop at the tracker menu,
+  after the login finished, leaves a complete `secrets.json`; a stop before
+  that needs another run. What a stop during sign-in 2 of 2 keeps is described
+  under [Cancelling a login](#cancelling-a-login).
 - **A `TimeoutException` traceback instead of an `[AuthFlow]` line:** that is
   the opposite case, and the exit status is *not* `130`. Chrome or ChromeDriver
   stopped answering while the login was still being waited for, so the run

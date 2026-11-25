@@ -135,3 +135,18 @@ def test_the_marker_is_set_right_after_the_login_starts() -> None:
     assert len(launch) == 1, "expected exactly one main.py launch line"
     assert lines[launch[0] + 1 : launch[0] + 3] == ["CHILD_PID=$!", "_login_ran=1"]
     assert sum(ln.strip() == "_login_ran=1" for ln in lines) == 1
+
+
+def test_a_stopped_run_names_the_partial_bundle_too(tmp_path: Path) -> None:
+    """Status 143 (``docker stop``) before the key was read: the same notice.
+
+    docker-login/README.md says so under "Cancelling a login". The notice keys
+    on any status other than 0; this pins 143 as one of them.
+    """
+    result = _notice(
+        tmp_path, status=143, content='{"aas_token": "aas_et/X", "username": "u"}'
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "reached-end"
+    assert "Home Assistant does not offer" in result.stderr
