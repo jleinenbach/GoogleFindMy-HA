@@ -909,3 +909,73 @@ async def test_a_block_writes_a_value_changed_in_place_before_it(
 
     assert len(writes) == 1
     assert "fcm" not in json.loads(path.read_text(encoding="utf-8"))["fcm_credentials"]
+
+
+# ---------------------------------------------------------------------------
+# docker-login/README.md quotes the SIGTERM line under "Cancelling a login".
+# Measured extent: that one block, its lead-in and the status the lead-in
+# names. Other quotes in the section have their own guards
+# (tests/test_auth_flow.py, tests/test_login_window_restart.py).
+# ---------------------------------------------------------------------------
+
+_SIGTERM_LEAD_IN = (
+    "A stop while sign-in 2 of 2 reads the account vault or waits for the push "
+    "registration first saves what the run had read by then and says so:"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_sigterm_stand_in")
+async def test_the_guide_quotes_the_sigterm_stop_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The guide shows the line a ``docker stop`` prints, and names status 143.
+
+    The line is taken from a real stop in the push wait, so a change of its
+    wording, or of ``_EXIT_TERMINATED``, fails here until the guide follows.
+    It goes once the guide no longer quotes the line.
+    """
+    from custom_components.googlefindmy import main as cli_main
+    from tests.test_auth_flow import _documented_quotes
+
+    cache, _path, _writes = _bootstrap_world(
+        monkeypatch, tmp_path, {"username": "user@example.com", "oauth_token": "o"}
+    )
+    _install_steps(monkeypatch)
+
+    async def _unregistered(_cache: Any) -> _Fcm:
+        asyncio.get_running_loop().call_later(0.05, _send_sigterm)
+        return _Fcm()
+
+    monkeypatch.setattr(cli_main, "_setup_fcm_receiver", _unregistered)
+    monkeypatch.setattr(cli_main, "_PUSH_REGISTRATION_WAIT_S", 1.0, raising=False)
+    monkeypatch.setattr(cli_main, "_PUSH_REGISTRATION_POLL_S", 0.01, raising=False)
+
+    outcome = await _bootstrap_outcome(cache)
+
+    assert isinstance(outcome, SystemExit), f"run ended with {outcome!r}"
+    assert outcome.code == cli_main._EXIT_TERMINATED
+    lines = [" ".join(line.split()) for line in capsys.readouterr().err.splitlines()]
+    printed = [line for line in lines if "SIGTERM" in line]
+    assert len(printed) == 1, lines
+
+    quoted = [
+        (prose, block)
+        for prose, block in _documented_quotes()
+        if prose.endswith(_SIGTERM_LEAD_IN)
+    ]
+    assert len(quoted) == 1, (
+        f"expected exactly one fenced block right after {_SIGTERM_LEAD_IN!r} "
+        f"in '## Cancelling a login', found {len(quoted)}"
+    )
+    prose, block = quoted[0]
+    assert block == printed[0], (
+        f"the guide does not quote the SIGTERM line verbatim. Block: {block!r}. "
+        f"Printed: {printed[0]!r}"
+    )
+    status = f"`{cli_main._EXIT_TERMINATED}`"
+    assert status in prose, (
+        f"the lead-in of the SIGTERM block must name the exit status {status}"
+    )

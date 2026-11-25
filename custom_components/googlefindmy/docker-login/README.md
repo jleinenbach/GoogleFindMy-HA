@@ -442,6 +442,20 @@ so instead of pretending otherwise:
   so and leaves the cleared state on disk rather than replacing the reason it
   ended with a disk error; `--reauth` again is the recovery here too.
 
+Stopping the container from outside is a different ending. `docker stop` sends
+SIGTERM, and the run then ends with exit status `143` (128 + 15, the status a
+shell reports for a process that SIGTERM ended) in whatever step it was. A
+stop while sign-in 2 of 2 reads the account vault or waits for the push
+registration first saves what the run had read by then and says so:
+
+```
+The login was stopped (SIGTERM) during sign-in 2 of 2; whatever it had read by then was saved.
+```
+
+A stop before the key was read can leave the incomplete file shown further
+up, and the same notice then names it. Running the login again is the recovery
+here too.
+
 ## Browser closed by accident
 
 Closing a sign-in window before it finished does not end the login at once. The
@@ -764,6 +778,11 @@ there is no separate image to rebuild for code changes.
   `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line. Start the login
   again; after a cancelled sign-in 2 of 2 it opens only the second window. The
   messages are quoted in full under [Cancelling a login](#cancelling-a-login).
+- **The run ended with exit status 143:** the container was stopped from
+  outside, usually by `docker stop`, which sends SIGTERM. It is neither a
+  cancellation (`130`) nor a failed step (`1`). Start the login again; what a
+  stop during sign-in 2 of 2 keeps is described under
+  [Cancelling a login](#cancelling-a-login).
 - **A `TimeoutException` traceback instead of an `[AuthFlow]` line:** that is
   the opposite case, and the exit status is *not* `130`. Chrome or ChromeDriver
   stopped answering while the login was still being waited for, so the run
