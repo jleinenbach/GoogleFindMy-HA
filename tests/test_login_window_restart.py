@@ -540,3 +540,232 @@ def test_a_non_driver_failure_in_step_two_is_neither_restarted_nor_closed(
     assert len(started) == 1
     assert started[0].quit_calls == 1
     assert "opening it again" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# README quotes (L-13, CA-N13)
+#
+# The docker-login guide quotes what the terminal prints when a sign-in window
+# is closed, reopened, finished, or cancelled on the Google page. Each quoted
+# block is rendered here through the same chain the tests above drive, and the
+# block must be a run of *whole* output lines of that scenario, directly after
+# its own lead-in. Whole lines, not a substring: a block that quotes half a
+# sentence, or two lines from different places, would otherwise pass.
+#
+# Measured extent: the blocks listed in ``_README_QUOTES``. Every fenced block
+# in "Browser closed by accident" must be one of them, so a new quote there
+# without a scenario fails; in "Cancelling a login" only the listed ones are
+# checked (the sign-in 1 of 2 and ``--reauth`` blocks have their own guards in
+# ``tests/test_auth_flow.py`` and ``tests/test_main_cli_exit_paths.py``).
+# ---------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+
+from tests.test_auth_flow import _documented_quotes  # noqa: E402
+from tests.test_docker_login_partial_bundle_notice import _notice  # noqa: E402
+
+_CLOSED_SECTION = "Browser closed by accident"
+_CANCEL_SECTION = "Cancelling a login"
+
+
+def _step_one_restart_then_finish(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> str:
+    _drivers(
+        monkeypatch,
+        [
+            _ClosedWindowDriver(cookie_after_wait=None),
+            FakeDriver(cookie_after_wait=_TOKEN_COOKIE),
+        ],
+    )
+    _run_cli_boundary()
+    return _out(capsys)
+
+
+async def _step_two_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    sequence: list[StepTwoDriver],
+    *,
+    world: VaultWorld | None = None,
+    base_world: bool = False,
+) -> str:
+    _step_two(monkeypatch, sequence, world=world)
+    await _run(_CountingCache(_base(world) if base_world else _base()))
+    return _out(capsys)
+
+
+async def _step_two_reopened_during_vault(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
+) -> str:
+    world = make_vault_world(versions=(1, 2), spot_version=2)
+    second = StepTwoDriver([_SET_KEYS], async_answer=vault_answer(world))
+    return await _step_two_output(
+        monkeypatch, capsys, [_closed_during_fetch(), second], world=world
+    )
+
+
+async def _step_two_finished(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
+) -> str:
+    return await _step_two_output(monkeypatch, capsys, [StepTwoDriver([_SET_KEYS])])
+
+
+async def _step_two_closed_three_times(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
+) -> str:
+    return await _step_two_output(
+        monkeypatch, capsys, [_closed_at(_SECURITY_URL) for _ in range(3)]
+    )
+
+
+async def _step_two_cancelled_on_page(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
+) -> str:
+    return await _step_two_output(monkeypatch, capsys, [StepTwoDriver([_CLOSE_VIEW])])
+
+
+async def _vault_only_closed_three_times(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
+) -> str:
+    world = make_vault_world(versions=(1, 2), spot_version=2)
+    return await _step_two_output(
+        monkeypatch,
+        capsys,
+        [_closed_at(_ACCOUNTS_URL), _closed_during_fetch(), _closed_during_fetch()],
+        world=world,
+        base_world=True,
+    )
+
+
+async def _step_one_reopened(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
+) -> str:
+    return _step_one_restart_then_finish(monkeypatch, capsys)
+
+
+async def _partial_bundle_notice(
+    _monkeypatch: pytest.MonkeyPatch, _capsys: pytest.CaptureFixture[str], tmp: Path
+) -> str:
+    # What a cancelled sign-in 2 of 2 leaves: tokens without the key. The guide
+    # shows the container path from docker-compose.yml; the test runs the
+    # function against a temporary file, so that one path is swapped.
+    result = _notice(
+        tmp, status=130, content='{"aas_token": "aas_et/X", "username": "u"}'
+    )
+    assert result.returncode == 0, result.stderr
+    here = str(tmp / "secrets.json")
+    assert result.stderr.count(here) == 1, result.stderr
+    return result.stderr.replace(here, "/data/secrets.json")
+
+
+# Scenario name -> what the terminal shows for it (stdout and stderr together).
+_SCENARIOS = {
+    "step-one-reopened": _step_one_reopened,
+    "step-two-reopened-during-vault": _step_two_reopened_during_vault,
+    "step-two-finished": _step_two_finished,
+    "step-two-closed-three-times": _step_two_closed_three_times,
+    "step-two-cancelled-on-page": _step_two_cancelled_on_page,
+    "vault-only-closed-three-times": _vault_only_closed_three_times,
+    "partial-bundle-notice": _partial_bundle_notice,
+}
+
+
+# (section, lead-in that ends right before the block, scenario that emits it)
+_README_QUOTES = [
+    (
+        _CLOSED_SECTION,
+        "Closing the sign-in window 1 of 2 the first time:",
+        "step-one-reopened",
+    ),
+    (
+        _CLOSED_SECTION,
+        "Closing the sign-in window 2 of 2 the first time, also while it reads the "
+        "account vault:",
+        "step-two-reopened-during-vault",
+    ),
+    (_CLOSED_SECTION, "When sign-in 1 of 2 is done:", "step-one-reopened"),
+    (_CLOSED_SECTION, "When sign-in 2 of 2 is done:", "step-two-finished"),
+    (
+        _CLOSED_SECTION,
+        "the run says why they are missing:",
+        "vault-only-closed-three-times",
+    ),
+    (
+        _CANCEL_SECTION,
+        "Closing the sign-in window 2 of 2 a third time, after it was opened again "
+        "twice:",
+        "step-two-closed-three-times",
+    ),
+    (
+        _CANCEL_SECTION,
+        "Pressing cancel on the Google unlock page during sign-in 2 of 2, which is "
+        "not opened again because the page ended the step on purpose:",
+        "step-two-cancelled-on-page",
+    ),
+    (
+        _CANCEL_SECTION,
+        "with the path inside the container in brackets:",
+        "partial-bundle-notice",
+    ),
+]
+
+
+def _is_whole_output_lines(block: str, output: str) -> bool:
+    """True when ``block`` equals consecutive non-empty output lines, collapsed."""
+    lines = [" ".join(line.split()) for line in output.splitlines()]
+    lines = [line for line in lines if line]
+    return any(
+        " ".join(lines[start:stop]) == block
+        for start in range(len(lines))
+        for stop in range(start + 1, len(lines) + 1)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("section", "lead_in", "scenario"),
+    _README_QUOTES,
+    ids=[f"{section}: {scenario}" for section, _, scenario in _README_QUOTES],
+)
+async def test_the_guide_quotes_what_the_terminal_shows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    section: str,
+    lead_in: str,
+    scenario: str,
+) -> None:
+    output = await _SCENARIOS[scenario](monkeypatch, capsys, tmp_path)
+    blocks = [
+        block for prose, block in _documented_quotes(section) if prose.endswith(lead_in)
+    ]
+
+    assert len(blocks) == 1, (
+        f"expected exactly one fenced block right after {lead_in!r} in "
+        f"'## {section}', found {len(blocks)}"
+    )
+    # Guard against the vacuous pass: an empty block matches no line, but a
+    # block holding one stray word could still be a whole line elsewhere.
+    assert len(blocks[0]) > 40, blocks[0]
+    assert _is_whole_output_lines(blocks[0], output), (
+        f"the block after {lead_in!r} is not what the terminal shows for "
+        f"{scenario}. Quote whole output lines, verbatim. Block: {blocks[0]!r}. "
+        f"Output: {output!r}"
+    )
+
+
+def test_every_quote_in_the_closed_window_section_is_guarded() -> None:
+    """A new quote in "Browser closed by accident" needs a scenario above."""
+    guarded = [
+        lead for section, lead, _ in _README_QUOTES if section == _CLOSED_SECTION
+    ]
+    quotes = _documented_quotes(_CLOSED_SECTION)
+
+    assert quotes, "the section quotes nothing; the guard would pass vacuously"
+    unguarded = [
+        prose[-80:]
+        for prose, _ in quotes
+        if not any(prose.endswith(lead) for lead in guarded)
+    ]
+    assert not unguarded, f"fenced blocks without a rendering scenario: {unguarded}"

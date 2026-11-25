@@ -808,7 +808,7 @@ def _rendered_restore_message(
 _RESTORE_OUTCOMES = {
     "restored": (
         "the cleared tokens are put back and the run says so:",
-        "If that login then ends without a token",
+        "If sign-in 1 of 2 then ends without a token",
         False,
     ),
     "declined": (
