@@ -891,7 +891,8 @@ def test_a_registration_without_its_push_token_has_none(stored: object) -> None:
     assert cli_main._push_token(stored) is None
 
 
-def test_a_block_writes_a_value_changed_in_place_before_it(
+@pytest.mark.asyncio
+async def test_a_block_writes_a_value_changed_in_place_before_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The block compares with the file, not with the memory on entry."""
@@ -901,13 +902,10 @@ def test_a_block_writes_a_value_changed_in_place_before_it(
         {"fcm_credentials": json.loads(json.dumps(_STORED_PUSH_DATA))},
     )
 
-    async def _change() -> None:
-        creds = await cache.get("fcm_credentials")
-        creds.pop("fcm")
-        with cache.deferred_writes():
-            await cache.set("fcm_credentials", creds)
-
-    asyncio.run(_change())
+    creds = await cache.get("fcm_credentials")
+    creds.pop("fcm")
+    with cache.deferred_writes():
+        await cache.set("fcm_credentials", creds)
 
     assert len(writes) == 1
     assert "fcm" not in json.loads(path.read_text(encoding="utf-8"))["fcm_credentials"]
