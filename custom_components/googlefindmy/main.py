@@ -30,11 +30,12 @@ directory name legitimately determines.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
@@ -304,6 +305,7 @@ def _register_file_cache(entry_id: str = "") -> object:
     Returns the cache instance so callers can pass it to the FCM setup.
     """
     import json  # noqa: PLC0415
+    from collections.abc import Iterator  # noqa: PLC0415
 
     from custom_components.googlefindmy.Auth.token_cache import (  # noqa: PLC0415
         _register_instance,
@@ -333,6 +335,10 @@ def _register_file_cache(entry_id: str = "") -> object:
             self._data: dict[str, object] = {}
             self._soft_invalidated: set[str] = set()
             self._load_failed = False
+            # Depth of nested ``deferred_writes`` blocks; while it is above
+            # zero ``_save`` only records that a write is owed.
+            self._defer_depth = 0
+            self._dirty = False
             if path.is_file():
                 try:
                     with open(path, encoding="utf-8") as fh:
@@ -350,10 +356,51 @@ def _register_file_cache(entry_id: str = "") -> object:
                     self._load_failed = True
 
         def _save(self) -> None:
+            if self._defer_depth:
+                self._dirty = True
+                return
+            self._write_now()
+
+        def _write_now(self) -> None:
             if self._load_failed and not self._data:
                 return  # Don't overwrite valid file with empty data
             self._load_failed = False
             _atomic_write_json(self._path, self._data)
+
+        def _snapshot(self) -> str | None:
+            try:
+                return json.dumps(self._data, sort_keys=True)
+            except (TypeError, ValueError):
+                return None  # not comparable: treat any write as a change
+
+        @contextlib.contextmanager
+        def deferred_writes(self) -> Iterator[None]:
+            """Collapse every write inside the block into one write at its end.
+
+            The login stores the vault keys, the owner-key versions and the
+            push credentials one after the other. Written one by one, the file
+            changed several times within a minute and Home Assistant's watcher
+            offered a card for each stage, the first ones without ``shared_key``.
+            Inside this block ``_save`` only notes that a write is owed; leaving
+            the block -- normally, by an exception or by ``SystemExit`` --
+            writes once, and only if the content differs from what it was on
+            entry, because the file's modification time is what the watcher
+            compares.
+            """
+            outermost = self._defer_depth == 0
+            before = self._snapshot() if outermost else None
+            if outermost:
+                self._dirty = False
+            self._defer_depth += 1
+            try:
+                yield
+            finally:
+                self._defer_depth -= 1
+                if outermost and self._dirty:
+                    self._dirty = False
+                    after = self._snapshot()
+                    if before is None or after is None or after != before:
+                        self._write_now()
 
         # --- async interface expected by nbe_list_devices / nova_request ---
 
@@ -1296,6 +1343,18 @@ def _resolve_effective_entry_id(cli_entry: str | None, env_entry: str | None) ->
     return ""
 
 
+def _deferred_writes(cache: object) -> contextlib.AbstractContextManager[None]:
+    """Return the cache's ``deferred_writes`` block, or a no-op for other caches.
+
+    Only the file-backed cache of the standalone CLI writes on every change;
+    a cache without the method is left as it is.
+    """
+    method = getattr(cache, "deferred_writes", None)
+    if callable(method):
+        return cast("contextlib.AbstractContextManager[None]", method())
+    return contextlib.nullcontext()
+
+
 async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
     """Run the standalone token bootstrap, then hand off to the interactive CLI.
 
@@ -1328,10 +1387,14 @@ async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
         # so the exchange must happen immediately.
         await _ensure_aas_token(file_cache)
         # Eagerly obtain both vault keys (shared + owner); a vault failure exits
-        # cleanly without deleting the durable AAS/oauth tokens.
-        await _ensure_vault_keys(file_cache)
-        await _clear_stale_adm_token(file_cache)
-        fcm = await _setup_fcm_receiver(file_cache)
+        # cleanly without deleting the durable AAS/oauth tokens. The AAS token
+        # above stays outside the block: it is written at once so a later
+        # failure cannot lose it. Everything below lands in one write, so Home
+        # Assistant never sees a bundle that has keys but no push credentials.
+        with _deferred_writes(file_cache):
+            await _ensure_vault_keys(file_cache)
+            await _clear_stale_adm_token(file_cache)
+            fcm = await _setup_fcm_receiver(file_cache)
         try:
             await _async_cli_main(entry_id=entry_id, session=session)
         finally:
