@@ -27,6 +27,8 @@ except ImportError as _err:  # pragma: no cover - needs a selenium-less environm
 from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
+    from collections.abc import Callable
+
     from selenium.webdriver.remote.webdriver import WebDriver
 
 # Opt-in for consoles that carry a user but report no tty (IDE run windows).
@@ -52,6 +54,47 @@ class LoginAborted(Exception):
     ``RuntimeError`` to decide whether a missing browser package is to blame,
     and an abort has nothing to do with the driver install.
     """
+
+
+class LoginWindowClosed(LoginAborted):
+    """The user closed the sign-in window before the step had its result.
+
+    Kept apart from the other aborts (an expired wait) because it is the one a
+    caller may answer by opening the window again: closing it is often an
+    accident, and the step it belongs to has produced nothing yet. A crash never
+    arrives as this type; ``_describe_lost_session`` sends it down the traceback
+    path first.
+    """
+
+
+def restart_on_closed_window[T](
+    run: Callable[[], T],
+    *,
+    step: int,
+    total: int,
+    max_restarts: int = 2,
+) -> T:
+    """Run *run*; when its window is closed, say so and run it again.
+
+    At most ``max_restarts`` times. The loss after that propagates unchanged, so
+    the caller reports it with today's cancellation message and status. Only
+    ``LoginWindowClosed`` restarts: a crash, an expired wait or a window the
+    program closed itself never reach this handler as that type.
+    """
+    restarts = 0
+    while True:
+        try:
+            return run()
+        except LoginWindowClosed:
+            if restarts >= max_restarts:
+                raise
+            restarts += 1
+            print(
+                f"[AuthFlow] The sign-in window {step} of {total} was closed before "
+                f"it finished; opening it again ({restarts} of {max_restarts}). "
+                "Press Ctrl+C here to cancel.",
+                flush=True,
+            )
 
 
 # Evidence that the browser *died* rather than being closed. Chromedriver
@@ -368,6 +411,14 @@ def request_oauth_account_token_flow(
             print("[AuthFlow] Retrieved Account Token successfully.")
             if email:
                 print(f"[AuthFlow] Detected account: {email}")
+            # The program closes this window itself in the ``finally`` below.
+            # Say so first: a window that vanishes without a word looks like a
+            # failure, and the user might close the next one in reaction.
+            print(
+                "[AuthFlow] Sign-in 1 of 2 finished; this window closes now. "
+                "Sign-in 2 of 2 opens shortly unless the key is already stored.",
+                flush=True,
+            )
 
         return oauth_token_value, email
 
@@ -387,7 +438,7 @@ def request_oauth_account_token_flow(
             f"[AuthFlow] Login cancelled: {reason} before Google issued an "
             "account token. Nothing was saved; start the login again to retry."
         )
-        raise LoginAborted(msg) from err
+        raise LoginWindowClosed(msg) from err
 
     finally:
         # Close the browser (safe_quit handles WinError 6 on Windows)

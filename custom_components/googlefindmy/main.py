@@ -510,10 +510,13 @@ def _run_oauth_flow_or_exit(
     # the time anything reaches this line, selenium is present.
     from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
         LoginAborted,
+        restart_on_closed_window,
     )
 
     try:
-        return flow()
+        # A sign-in window closed by accident is opened again, at most twice;
+        # the third loss arrives here as LoginAborted with today's message.
+        return restart_on_closed_window(flow, step=1, total=2)
     except LoginAborted as err:
         # A cancelled login is a finished run, not a crash: the user closed the
         # window or let the wait expire. Print the flow's own sentence and stop
@@ -526,16 +529,16 @@ def _run_oauth_flow_or_exit(
         # broke" for anything scripting this run, and login.sh already spends 1
         # and 2 on its own failures, so reusing those would make the two
         # indistinguishable.
-        print(f"\n{err}\n")
+        print(f"\n{err}\n", flush=True)
         raise SystemExit(_EXIT_LOGIN_ABORTED) from err
     except BrowserPackagesUnusable as err:
         # The typed case: the packages are there but unusable, and the type
         # carried that through the strategy chain unchanged.
-        print(f"\n{err}\n")
+        print(f"\n{err}\n", flush=True)
         raise SystemExit(1) from err
     except RuntimeError as err:
         if INSTALL_COMMAND in str(err):
-            print(f"\n{err}\n")
+            print(f"\n{err}\n", flush=True)
             raise SystemExit(1) from err
         # The hint does not always survive the trip. `chrome_driver.py` ends its
         # strategy chain in a generic "Failed to start ChromeDriver" message, so
@@ -548,11 +551,12 @@ def _run_oauth_flow_or_exit(
         # install command would answer a question that user did not ask, and
         # they would install the packages and fail again for the same reason.
         if browser_packages_missing():
-            print(f"\n{err}\n")
+            print(f"\n{err}\n", flush=True)
             print(
                 "The browser packages are also missing, so this run could not "
                 "have succeeded either way:\n"
-                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n"
+                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n",
+                flush=True,
             )
             raise SystemExit(1) from err
         raise

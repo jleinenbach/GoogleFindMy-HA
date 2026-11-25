@@ -24,6 +24,10 @@ services:
       # inside the read-only code mount. main.py honours this override and keeps
       # the atomic write on a single writable filesystem.
       GOOGLEFINDMY_SECRETS_PATH: "/data/secrets.json"
+      # Unbuffered output: the login's status and cancellation lines must reach
+      # the terminal when they are printed, not when a buffer fills or the
+      # process ends. Without it a line can appear late or not at all.
+      PYTHONUNBUFFERED: "1"
       # Mark this as the docker-login container so the interactive auth flow
       # prints container-correct instructions (open the noVNC URL) instead of
       # the desktop text ("install Chrome on your system"), and skips the desktop
