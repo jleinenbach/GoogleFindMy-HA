@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
 from custom_components.googlefindmy.browser_deps import missing_browser_dependency
@@ -27,6 +28,8 @@ except ImportError as _err:  # pragma: no cover - needs a selenium-less environm
 from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
+    from collections.abc import Callable
+
     from selenium.webdriver.remote.webdriver import WebDriver
 
 # Opt-in for consoles that carry a user but report no tty (IDE run windows).
@@ -35,6 +38,14 @@ _ENV_ASSUME_INTERACTIVE = "GOOGLEFINDMY_ASSUME_INTERACTIVE"
 # How long the flow waits for the login to produce the ``oauth_token`` cookie.
 # Named so the timeout message can quote it without the two drifting apart.
 _LOGIN_WAIT_SECONDS = 300
+
+# True while ``restart_on_closed_window`` runs a step again after its window was
+# closed. The desktop gate reads it: the user already confirmed this sign-in
+# once, and the line printed before the restart promises a new window, not a
+# question. A context variable rather than a parameter, because the restart
+# loop knows it is reopening and the gate is two calls further down, inside the
+# step it runs (review F1, PR #1482).
+_REOPENING: ContextVar[bool] = ContextVar("googlefindmy_login_reopening", default=False)
 
 
 class LoginAborted(Exception):
@@ -52,6 +63,50 @@ class LoginAborted(Exception):
     ``RuntimeError`` to decide whether a missing browser package is to blame,
     and an abort has nothing to do with the driver install.
     """
+
+
+class LoginWindowClosed(LoginAborted):
+    """The user closed the sign-in window before the step had its result.
+
+    Kept apart from the other aborts (an expired wait) because it is the one a
+    caller may answer by opening the window again: closing it is often an
+    accident, and the step it belongs to has produced nothing yet. A crash never
+    arrives as this type; ``_describe_lost_session`` sends it down the traceback
+    path first.
+    """
+
+
+def restart_on_closed_window[T](
+    run: Callable[[], T],
+    *,
+    step: int,
+    total: int,
+    max_restarts: int = 2,
+) -> T:
+    """Run *run*; when its window is closed, say so and run it again.
+
+    At most ``max_restarts`` times. The loss after that propagates unchanged, so
+    the caller reports it with today's cancellation message and status. Only
+    ``LoginWindowClosed`` restarts: a crash, an expired wait or a window the
+    program closed itself never reach this handler as that type.
+    """
+    restarts = 0
+    while True:
+        reopening = _REOPENING.set(restarts > 0)
+        try:
+            return run()
+        except LoginWindowClosed:
+            if restarts >= max_restarts:
+                raise
+            restarts += 1
+            print(
+                f"[AuthFlow] The sign-in window {step} of {total} was closed before "
+                f"it finished; opening it again ({restarts} of {max_restarts}). "
+                "Press Ctrl+C here to cancel.",
+                flush=True,
+            )
+        finally:
+            _REOPENING.reset(reopening)
 
 
 # Evidence that the browser *died* rather than being closed. Chromedriver
@@ -113,6 +168,11 @@ def _describe_lost_session(err: WebDriverException) -> str | None:
     if isinstance(err, (NoSuchWindowException, InvalidSessionIdException)):
         return "the browser window was closed"
     return None
+
+
+# Sign-in 2 of 2 (`KeyBackup/shared_key_flow.py`) asks the same question about
+# its own window; one classifier keeps a crash on the traceback path there too.
+describe_lost_session = _describe_lost_session
 
 
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -224,6 +284,12 @@ def _announce_and_gate(*, headless: bool) -> None:
             # the pre-start prompt used to arrive before the display was ready.
             # The terminal still has to stay attached, because main.py asks for
             # the account e-mail on stdin when auto-detection fails.
+        elif _REOPENING.get():
+            # The window is opened again after the user closed it. They saw
+            # these instructions and pressed Enter for this sign-in already;
+            # asking again would leave the promised window unopened until they
+            # notice the prompt.
+            return
         else:
             print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
 > Please make sure that Chrome is installed on your system.
@@ -368,6 +434,14 @@ def request_oauth_account_token_flow(
             print("[AuthFlow] Retrieved Account Token successfully.")
             if email:
                 print(f"[AuthFlow] Detected account: {email}")
+            # The program closes this window itself in the ``finally`` below.
+            # Say so first: a window that vanishes without a word looks like a
+            # failure, and the user might close the next one in reaction.
+            print(
+                "[AuthFlow] Sign-in 1 of 2 finished; this window closes now. "
+                "Sign-in 2 of 2 opens shortly unless the key is already stored.",
+                flush=True,
+            )
 
         return oauth_token_value, email
 
@@ -387,7 +461,7 @@ def request_oauth_account_token_flow(
             f"[AuthFlow] Login cancelled: {reason} before Google issued an "
             "account token. Nothing was saved; start the login again to retry."
         )
-        raise LoginAborted(msg) from err
+        raise LoginWindowClosed(msg) from err
 
     finally:
         # Close the browser (safe_quit handles WinError 6 on Windows)

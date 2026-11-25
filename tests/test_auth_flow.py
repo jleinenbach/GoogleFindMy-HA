@@ -1096,21 +1096,25 @@ _DOCKER_LOGIN_README = (
 # "is the message somewhere in the file" check stayed green.
 _CANCELLATION_PATHS = {
     "closed window": (
-        "Closing the Chrome window in the viewer:",
+        "Closing the sign-in window 1 of 2 a third time, after it was opened "
+        "again twice:",
         auth_flow.NoSuchWindowException("no such window: target window already closed"),
     ),
     "expired wait": (
-        "Walking away and letting the five-minute wait expire, with the window "
-        "still open:",
+        "Walking away from sign-in 1 of 2 and letting its five-minute wait "
+        "expire, with the window still open:",
         auth_flow.TimeoutException("timed out"),
     ),
 }
 
 
-def _documented_quotes() -> list[tuple[str, str]]:
-    """Return (lead-in prose, quoted block) pairs from the "Cancelling a login" section.
+def _documented_quotes(heading: str = "Cancelling a login") -> list[tuple[str, str]]:
+    """Return (lead-in prose, quoted block) pairs from one ``##`` section of the guide.
 
     Both halves are whitespace-collapsed so the guide may wrap however it likes.
+    ``heading`` defaults to "Cancelling a login"; the guard for "Browser closed
+    by accident" in ``tests/test_login_window_restart.py`` reads its own section
+    through the same function, so both apply one pairing rule.
 
     Pairing the prose with the fenced block that follows it is the whole point,
     and two earlier shapes of this guard were measurably weaker. Searching the
@@ -1124,11 +1128,10 @@ def _documented_quotes() -> list[tuple[str, str]]:
     stated.
     """
     text = _DOCKER_LOGIN_README.read_text(encoding="utf-8")
-    marker = "\n## Cancelling a login\n"
+    marker = f"\n## {heading}\n"
     assert marker in text, (
-        f"{_DOCKER_LOGIN_README} no longer has a '## Cancelling a login' "
-        "section. This guard and the #cancelling-a-login link in the "
-        "troubleshooting list both anchor on that heading."
+        f"{_DOCKER_LOGIN_README} no longer has a '## {heading}' section. The "
+        "README guards and the links to it in the guide anchor on that heading."
     )
     body = text[text.index(marker) + len(marker) :]
     end = body.find("\n## ")
@@ -1140,7 +1143,7 @@ def _documented_quotes() -> list[tuple[str, str]]:
     # this guard is supposed to enforce.
     parts = section.split("```")
     assert len(parts) % 2 == 1, (
-        "unbalanced ``` fences in the 'Cancelling a login' section: "
+        f"unbalanced ``` fences in the '{heading}' section: "
         f"{len(parts) - 1} delimiters found"
     )
     return [

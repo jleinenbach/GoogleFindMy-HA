@@ -30,15 +30,18 @@ directory name legitimately determines.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
+import signal
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NoReturn, cast
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 
     from custom_components.googlefindmy.KeyBackup.vault_web_api import (
         VaultCause,
@@ -333,12 +336,22 @@ def _register_file_cache(entry_id: str = "") -> object:
             self._data: dict[str, object] = {}
             self._soft_invalidated: set[str] = set()
             self._load_failed = False
+            # Depth of nested ``deferred_writes`` blocks; while it is above
+            # zero ``_save`` only records that a write is owed.
+            self._defer_depth = 0
+            self._dirty = False
+            # The content as last loaded from or written to the file; a set()
+            # that leaves the content equal to it does not write. Compared as
+            # text, not by object: ``get`` hands out the stored object, and a
+            # caller may change it in place before storing it again.
+            self._on_disk: str | None = None
             if path.is_file():
                 try:
                     with open(path, encoding="utf-8") as fh:
                         raw = json.load(fh)
                     if isinstance(raw, dict):
                         self._data = raw
+                        self._on_disk = self._snapshot()
                 except Exception:  # noqa: BLE001
                     import logging  # noqa: PLC0415
 
@@ -350,10 +363,54 @@ def _register_file_cache(entry_id: str = "") -> object:
                     self._load_failed = True
 
         def _save(self) -> None:
+            if self._defer_depth:
+                self._dirty = True
+                return
+            self._write_now()
+
+        def _write_now(self) -> None:
             if self._load_failed and not self._data:
                 return  # Don't overwrite valid file with empty data
             self._load_failed = False
             _atomic_write_json(self._path, self._data)
+            self._on_disk = self._snapshot()
+
+        def _snapshot(self) -> str | None:
+            try:
+                return json.dumps(self._data, sort_keys=True)
+            except (TypeError, ValueError):
+                return None  # not comparable: treat any write as a change
+
+        @contextlib.contextmanager
+        def deferred_writes(self) -> Iterator[None]:
+            """Collapse every write inside the block into one write at its end.
+
+            The login stores the vault keys, the owner-key versions and the
+            push credentials one after the other. Written one by one, the file
+            changed several times within a minute and Home Assistant's watcher
+            offered a card for each stage, the first ones without ``shared_key``.
+            Inside this block ``_save`` only notes that a write is owed; leaving
+            the block -- normally, by an exception or by ``SystemExit`` --
+            writes once, and only if the content differs from what it was on
+            entry, because the file's modification time is what the watcher
+            compares.
+            """
+            outermost = self._defer_depth == 0
+            # Compared with the file's content: an object changed in place
+            # before the block already differs from the file, not from memory.
+            before = (self._on_disk or self._snapshot()) if outermost else None
+            if outermost:
+                self._dirty = False
+            self._defer_depth += 1
+            try:
+                yield
+            finally:
+                self._defer_depth -= 1
+                if outermost and self._dirty:
+                    self._dirty = False
+                    after = self._snapshot()
+                    if before is None or after is None or after != before:
+                        self._write_now()
 
         # --- async interface expected by nbe_list_devices / nova_request ---
 
@@ -373,6 +430,13 @@ def _register_file_cache(entry_id: str = "") -> object:
             else:
                 self._data[name] = value
                 self._soft_invalidated.discard(name)
+                if not self._defer_depth and self._on_disk is not None:
+                    if self._snapshot() == self._on_disk:
+                        # The file already holds it; a rewrite would only move
+                        # the modification time, and Home Assistant offers a
+                        # card for every move (the receiver stores its
+                        # registration again at each start).
+                        return
             self._save()
 
         async def async_get_cached_value(self, name: str) -> object:
@@ -463,10 +527,13 @@ def _run_oauth_flow_or_exit(
     # the time anything reaches this line, selenium is present.
     from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
         LoginAborted,
+        restart_on_closed_window,
     )
 
     try:
-        return flow()
+        # A sign-in window closed by accident is opened again, at most twice;
+        # the third loss arrives here as LoginAborted with today's message.
+        return restart_on_closed_window(flow, step=1, total=2)
     except LoginAborted as err:
         # A cancelled login is a finished run, not a crash: the user closed the
         # window or let the wait expire. Print the flow's own sentence and stop
@@ -479,16 +546,16 @@ def _run_oauth_flow_or_exit(
         # broke" for anything scripting this run, and login.sh already spends 1
         # and 2 on its own failures, so reusing those would make the two
         # indistinguishable.
-        print(f"\n{err}\n")
+        print(f"\n{err}\n", flush=True)
         raise SystemExit(_EXIT_LOGIN_ABORTED) from err
     except BrowserPackagesUnusable as err:
         # The typed case: the packages are there but unusable, and the type
         # carried that through the strategy chain unchanged.
-        print(f"\n{err}\n")
+        print(f"\n{err}\n", flush=True)
         raise SystemExit(1) from err
     except RuntimeError as err:
         if INSTALL_COMMAND in str(err):
-            print(f"\n{err}\n")
+            print(f"\n{err}\n", flush=True)
             raise SystemExit(1) from err
         # The hint does not always survive the trip. `chrome_driver.py` ends its
         # strategy chain in a generic "Failed to start ChromeDriver" message, so
@@ -501,11 +568,12 @@ def _run_oauth_flow_or_exit(
         # install command would answer a question that user did not ask, and
         # they would install the packages and fail again for the same reason.
         if browser_packages_missing():
-            print(f"\n{err}\n")
+            print(f"\n{err}\n", flush=True)
             print(
                 "The browser packages are also missing, so this run could not "
                 "have succeeded either way:\n"
-                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n"
+                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n",
+                flush=True,
             )
             raise SystemExit(1) from err
         raise
@@ -687,6 +755,13 @@ class _VaultSink:
 
 def _print_vault_cause(cause: VaultCause, count: int, hint: str | None = None) -> None:
     """Report why no owner-key version field was written: cause class and count only."""
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (  # noqa: PLC0415
+        VaultCause,
+    )
+
+    if hint is None and cause is VaultCause.WINDOW_CLOSED:
+        # Not a failed request: the user closed the window, so name it.
+        hint = "The sign-in window 2 of 2 was closed before the account vault was read."
     lead = f"\n{hint}\n" if hint else ""
     print(
         f"{lead}\nNote: owner-key versions were not saved "
@@ -989,6 +1064,17 @@ async def _ensure_vault_keys(cache: object) -> None:
             MISSING_BROWSER_PACKAGES_HINT,
             browser_packages_missing,
         )
+        from custom_components.googlefindmy.KeyBackup.vault_web_api import (  # noqa: PLC0415
+            SharedKeyStepAborted,
+        )
+
+        # The user closed sign-in 2 of 2 or cancelled it on the Google page.
+        # Its message names the step and what is kept; the advice below would
+        # send them back to a browser problem they do not have. Status 130 like
+        # a cancelled sign-in 1 of 2.
+        if isinstance(err, SharedKeyStepAborted):
+            print(f"\n{err}\n", file=sys.stderr, flush=True)
+            sys.exit(130)
 
         # The browser packages are optional (they are not in manifest.json), so
         # "they are not installed" is a normal way for this to fail, and the
@@ -1296,6 +1382,154 @@ def _resolve_effective_entry_id(cli_entry: str | None, env_entry: str | None) ->
     return ""
 
 
+def _deferred_writes(cache: object) -> contextlib.AbstractContextManager[None]:
+    """Return the cache's ``deferred_writes`` block, or a no-op for other caches.
+
+    Only the file-backed cache of the standalone CLI writes on every change;
+    a cache without the method is left as it is.
+    """
+    method = getattr(cache, "deferred_writes", None)
+    if callable(method):
+        return cast("contextlib.AbstractContextManager[None]", method())
+    return contextlib.nullcontext()
+
+
+# How long the login waits for the push registration before it saves the keys
+# without it. The receiver registers in a background task, over the network; a
+# reachable endpoint answers within seconds.
+_PUSH_REGISTRATION_WAIT_S: Final = 60.0
+_PUSH_REGISTRATION_POLL_S: Final = 0.2
+# Once the registration carries its token, the receiver stores the token's
+# routing entry in a task of this process, without network; it is best-effort,
+# so its absence costs this grace and nothing else.
+_ROUTING_ENTRY_GRACE_S: Final = 2.0
+
+
+def _push_token(credentials: object) -> str | None:
+    """Return the push token of a stored registration, or ``None``.
+
+    Like the receiver, a registration stored as JSON text is read as well.
+    """
+    if isinstance(credentials, str):
+        import json  # noqa: PLC0415
+
+        try:
+            credentials = json.loads(credentials)
+        except ValueError:
+            return None
+    if not isinstance(credentials, dict):
+        return None
+    fcm = credentials.get("fcm")
+    registration = fcm.get("registration") if isinstance(fcm, dict) else None
+    token = registration.get("token") if isinstance(registration, dict) else None
+    return token if isinstance(token, str) and token else None
+
+
+async def _await_push_credentials(cache: object) -> None:
+    """Wait until the push receiver has stored its registration in ``cache``.
+
+    ``_setup_fcm_receiver`` returns before the registration exists: the
+    receiver's supervisor runs as a task and stores ``fcm_credentials`` once
+    Google has answered. Leaving the write block earlier published the keys
+    without push data, and the push data followed in a second write (Codex,
+    PR #1482). When the wait runs out it says so in the terminal and returns;
+    the keys are saved then and the push data follow on their own. A cache
+    without ``get`` is not waited for.
+
+    The registration counts as finished once it carries its push token; push
+    data from an earlier run or a registration in progress without the token
+    do not end the wait. The block then also waits, for at most
+    ``_ROUTING_ENTRY_GRACE_S``, until the receiver has stored the token's
+    routing entry, which it does in a task of its own; with push data from an
+    earlier run that entry otherwise followed in a write after the block
+    (review of PR #1482). The receiver storing the same registration again
+    leaves the file alone, because the cache skips unchanged values.
+    """
+    get = getattr(cache, "get", None)
+    if not callable(get):
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _PUSH_REGISTRATION_WAIT_S
+    while (token := _push_token(await get("fcm_credentials"))) is None:
+        if loop.time() >= deadline:
+            print(
+                "The push registration did not finish within "
+                f"{_PUSH_REGISTRATION_WAIT_S:.0f} s; saving the keys now. The "
+                "push data are saved when the registration completes.",
+                flush=True,
+            )
+            return
+        await asyncio.sleep(_PUSH_REGISTRATION_POLL_S)
+    grace = loop.time() + _ROUTING_ENTRY_GRACE_S
+    while token not in (await get("fcm_routing_tokens") or ()):
+        if loop.time() >= grace:
+            return
+        await asyncio.sleep(_PUSH_REGISTRATION_POLL_S)
+
+
+# ``docker stop`` sends SIGTERM; a run that ends on it reports 128 + 15, as the
+# shell does for a process the signal killed.
+_EXIT_TERMINATED: Final = 143
+
+
+def _end_process_now(code: int) -> NoReturn:
+    """End the process with ``code`` without waiting for executor threads.
+
+    The browser flow of sign-in 2 runs in an executor thread that cancelling
+    the task cannot stop. Ending through ``SystemExit`` let ``asyncio.run``
+    wait for that thread, up to the sign-in deadline, and ``docker stop``
+    killed the container before ``entrypoint.sh`` handed the file over (Codex,
+    PR #1482). The file is written by then, so nothing else is left to save.
+    ``os._exit`` drops buffered output, so stdout is flushed first (stderr is
+    line-buffered, and the stop message is flushed where it is printed). A
+    closed stdout must not keep the process from ending.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        sys.stdout.flush()
+    os._exit(code)
+
+
+class _StopRequest:
+    """Whether the SIGTERM handler of ``_cancel_on_sigterm`` has fired."""
+
+    def __init__(self) -> None:
+        self.fired = False
+
+
+@contextlib.contextmanager
+def _cancel_on_sigterm() -> Iterator[_StopRequest]:
+    """While the block runs, let SIGTERM cancel the current task instead of killing.
+
+    Killed by the signal, the process never reached the end of the write block,
+    and the vault keys of sign-in 2 of 2 were lost (``docker stop`` during the
+    vault read or the push wait). Cancelled, the task unwinds through the
+    block's ``finally``, which writes what it holds. The handler is the event
+    loop's, so it runs as a callback between steps, never inside a write, and
+    it is removed when the block ends: outside it SIGTERM keeps its default. A
+    loop without signal handlers (Windows) leaves the run as it was.
+    """
+    request = _StopRequest()
+    loop = asyncio.get_running_loop()
+    # Entered from the bootstrap coroutine, so a current task always exists.
+    task = cast("asyncio.Task[Any]", asyncio.current_task())
+
+    def _on_sigterm() -> None:
+        request.fired = True
+        task.cancel()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+    # NotImplementedError (no signal support, Windows) is a RuntimeError, as is
+    # the refusal outside the main thread.
+    except RuntimeError:
+        yield request
+        return
+    try:
+        yield request
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+
+
 async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
     """Run the standalone token bootstrap, then hand off to the interactive CLI.
 
@@ -1328,10 +1562,32 @@ async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
         # so the exchange must happen immediately.
         await _ensure_aas_token(file_cache)
         # Eagerly obtain both vault keys (shared + owner); a vault failure exits
-        # cleanly without deleting the durable AAS/oauth tokens.
-        await _ensure_vault_keys(file_cache)
-        await _clear_stale_adm_token(file_cache)
-        fcm = await _setup_fcm_receiver(file_cache)
+        # cleanly without deleting the durable AAS/oauth tokens. The AAS token
+        # above stays outside the block: it is written at once so a later
+        # failure cannot lose it. Everything below lands in one write, so Home
+        # Assistant never sees a bundle that has keys but no push credentials.
+        # The push data are created by a task of the receiver, so the block
+        # waits for them before it ends.
+        # A SIGTERM (docker stop) inside the block cancels it; the block then
+        # writes what it holds and the run ends with status 143.
+        with _cancel_on_sigterm() as stop:
+            try:
+                with _deferred_writes(file_cache):
+                    await _ensure_vault_keys(file_cache)
+                    await _clear_stale_adm_token(file_cache)
+                    fcm = await _setup_fcm_receiver(file_cache)
+                    await _await_push_credentials(file_cache)
+            except asyncio.CancelledError:
+                if not stop.fired:
+                    raise
+                # stderr, like the status-130 message of a cancelled step.
+                print(
+                    "\nThe login was stopped (SIGTERM) during sign-in 2 of 2; "
+                    "whatever it had read by then was saved.\n",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                _end_process_now(_EXIT_TERMINATED)
         try:
             await _async_cli_main(entry_id=entry_id, session=session)
         finally:

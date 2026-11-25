@@ -294,9 +294,39 @@ CHILD_PID=""
 # 0 (main.py does exactly that on SIGINT), leaving no trace in the wait status.
 # Read by exit_if_terminating below, which every wait is followed by.
 _terminating=""
+# Set once main.py has been started. A run that ends before that (the X display
+# never came up, a signal while waiting for it) did not touch secrets.json, so a
+# file found then is left over from an earlier run and must not be reported as
+# the one this run left behind.
+_login_ran=""
+
+# Partial-bundle notice: a run that ends early (closed window, Ctrl+C, a failed
+# key step) can leave a secrets.json that has tokens but no shared_key. Home
+# Assistant does not offer such a file, so without this the user finds a file on
+# disk, sees no card, and cannot tell why. cleanup calls it with the script's exit
+# status, because cleanup is the one place every exit passes through: a closed
+# login window ends main.py with 130, and exit_if_terminating leaves at once for
+# any status above 128, so a notice placed after the wait would never be printed
+# in the most common case. It reads the path itself: cleanup reassigns the global
+# _secrets_path with a different default.
+function notice_partial_bundle {
+  local status="${1:-0}"
+  local path="${GOOGLEFINDMY_SECRETS_PATH:-/data/secrets.json}"
+  [ -n "${_login_ran}" ] || return 0
+  [ "${status}" -ne 0 ] || return 0
+  [ -f "${path}" ] || return 0
+  if grep -q '"shared_key"' "${path}" 2>/dev/null; then
+    return 0
+  fi
+  echo "[entrypoint] The sign-in stopped before it finished. It left an incomplete credential file:" >&2
+  echo "[entrypoint]   data/secrets.json next to the launcher (${path} inside the container)." >&2
+  echo "[entrypoint] Home Assistant does not offer this file. Run the login again to complete it, or delete the file." >&2
+}
 function cleanup {
+  local status=$?
   [ "${_cleaned}" = 1 ] && return
   _cleaned=1
+  notice_partial_bundle "${status}"
 
   # Ownership handoff: main.py writes secrets.json 0600 owned by the container
   # user. Hand the produced credentials back to the *host* user (UID/GID passed
@@ -563,6 +593,7 @@ cd /app/gfmy
 # shellcheck disable=SC2086 -- GFMY_ARGS is an intentional word-split flag list.
 ( trap - INT QUIT; exec python3 main.py ${GFMY_ARGS:-} ) <&0 &
 CHILD_PID=$!
+_login_ran=1
 
 # Capture the child's status without tripping `set -e`, then propagate it via the
 # final `exit` so the EXIT trap runs cleanup() (ownership handoff to the host user,

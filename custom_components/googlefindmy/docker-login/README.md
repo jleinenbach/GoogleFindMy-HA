@@ -338,39 +338,77 @@ Two fallbacks, in the order worth trying:
 
 ## Cancelling a login
 
-A login can end without a token in two ways that the flow itself names, and the
-line it prints says which one it was. (`Ctrl+C` is a third way out. It saves
-nothing either and ends with the same status, but it is the one cancellation
-that still prints a Python `KeyboardInterrupt` traceback instead of an
-`[AuthFlow]` line.)
+The login has two sign-ins, and each opens its own Chrome window. Sign-in 1 of
+2 gets the account token; sign-in 2 of 2 gets the key from the Google unlock page
+and is skipped when `secrets.json` already holds that key. A login can end early
+in four ways that the flow itself names, and the line it prints says which one it
+was. (`Ctrl+C` is a fifth way out. It ends with the same status, but it is the
+one cancellation that still prints a Python `KeyboardInterrupt` traceback instead
+of an `[AuthFlow]` line.)
 
-Closing the Chrome window in the viewer:
+A window you close is opened again first, at most twice per sign-in (see
+[Browser closed by accident](#browser-closed-by-accident)). The two "closed"
+lines below therefore appear only on the third close.
+
+Closing the sign-in window 1 of 2 a third time, after it was opened again twice:
 
 ```
 [AuthFlow] Login cancelled: the browser window was closed before Google issued
 an account token. Nothing was saved; start the login again to retry.
 ```
 
-Walking away and letting the five-minute wait expire, with the window still
-open:
+Walking away from sign-in 1 of 2 and letting its five-minute wait expire, with
+the window still open:
 
 ```
 [AuthFlow] No login completed within 5 minutes, so no account token was
 received. Nothing was saved; start the login again when you are ready.
 ```
 
+Closing the sign-in window 2 of 2 a third time, after it was opened again twice:
+
+```
+[AuthFlow] The sign-in window 2 of 2 was closed before Google sent the key. The
+result of sign-in 1 of 2 is kept; run the login again to finish sign-in 2 of 2.
+```
+
+Pressing cancel on the Google unlock page during sign-in 2 of 2, which is not
+opened again because the page ended the step on purpose:
+
+```
+[AuthFlow] Sign-in 2 of 2 was cancelled on the Google page before it sent the
+key. The result of sign-in 1 of 2 is kept; run the login again to finish
+sign-in 2 of 2.
+```
+
 These are cancellations, not failures. The exit status is `130` ("cancelled by
 the user") on every one of them, which is deliberately distinct from the `1`/`2`
 the launcher uses for its own failures, so a script around this can tell "you
-stopped" from "it broke". No new credentials are stored on any of these paths,
-so re-running the login is the whole recovery procedure.
+stopped" from "it broke". Running out of time in sign-in 2 of 2 is not one of
+them: it ends with status `1` as a failed key step, and the window is not opened
+again.
+
+A cancelled sign-in 1 of 2 stores nothing. A cancelled sign-in 2 of 2 keeps what
+sign-in 1 of 2 stored, so `secrets.json` then holds the tokens without the key.
+Home Assistant does not offer such a file, and the container names it on its way
+out, with the path inside the container in brackets:
+
+```
+[entrypoint] The sign-in stopped before it finished. It left an incomplete credential file:
+[entrypoint]   data/secrets.json next to the launcher (/data/secrets.json inside the container).
+[entrypoint] Home Assistant does not offer this file. Run the login again to complete it, or delete the file.
+```
+
+Either way, re-running the login is the whole recovery procedure. After a
+cancelled sign-in 2 of 2 the re-run finds the stored tokens and opens only the
+second window.
 
 Cancelling a **re-authentication** costs nothing either. `--reauth` (passed
 through `GFMY_ARGS`, see [Forcing a fresh login](#forcing-a-fresh-login)) clears
 the cached tokens before it starts, because an empty cache is what makes the CLI
-open the login at all. If that login then ends without a token (you closed the
-window, the wait expired, you pressed `Ctrl+C`), the cleared tokens are put back
-and the run says so:
+open the login at all. If sign-in 1 of 2 then ends without a token (you closed
+its window a third time, the wait expired, you pressed `Ctrl+C`), the cleared
+tokens are put back and the run says so:
 
 ```
 Login did not complete; restored 3 cached token(s).
@@ -378,8 +416,11 @@ Login did not complete; restored 3 cached token(s).
 
 (The number is whatever was cached; a used cache holds more than three keys.)
 
-A cancelled `--reauth` therefore leaves you signed in exactly as you were. Three
-cases cannot be undone, and each says so instead of pretending otherwise:
+A `--reauth` cancelled in sign-in 1 of 2 therefore leaves you signed in exactly
+as you were. A `--reauth` cancelled in sign-in 2 of 2 puts nothing back: sign-in
+1 of 2 has already stored the new sign-in, and running the login again (without
+`--reauth`) finishes the second step. Three cases cannot be undone, and each says
+so instead of pretending otherwise:
 
 * **The login already stored a new token** and was then cut short in the moment
   between saving it and returning — a `Ctrl+C` or a broken pipe in that
@@ -400,6 +441,60 @@ cases cannot be undone, and each says so instead of pretending otherwise:
 * **Writing the restored file failed** (a full or read-only disk). The run says
   so and leaves the cleared state on disk rather than replacing the reason it
   ended with a disk error; `--reauth` again is the recovery here too.
+
+## Browser closed by accident
+
+Closing a sign-in window before it finished does not end the login at once. The
+terminal names the window and opens it again, at most twice per sign-in.
+
+Closing the sign-in window 1 of 2 the first time:
+
+```
+[AuthFlow] The sign-in window 1 of 2 was closed before it finished; opening it
+again (1 of 2). Press Ctrl+C here to cancel.
+```
+
+Closing the sign-in window 2 of 2 the first time, also while it reads the
+account vault:
+
+```
+[AuthFlow] The sign-in window 2 of 2 was closed before it finished; opening it
+again (1 of 2). Press Ctrl+C here to cancel.
+```
+
+The second close says `(2 of 2)`. The third one ends the login with the line
+quoted under [Cancelling a login](#cancelling-a-login) and exit status `130`.
+Only a window you closed is opened again. A crashed browser, a wait that ran out
+and a cancel on the Google unlock page end the run as before.
+
+The program closes each window itself once its sign-in is done, and says so
+first, so a window that vanishes is not taken for a failure. Leave it to the
+program at that point. When sign-in 1 of 2 is done:
+
+```
+[AuthFlow] Sign-in 1 of 2 finished; this window closes now. Sign-in 2 of 2
+opens shortly unless the key is already stored.
+```
+
+When sign-in 2 of 2 is done:
+
+```
+[AuthFlow] Sign-in 2 of 2 finished; this window closes now.
+```
+
+When `secrets.json` already holds the key, sign-in 2 of 2 only reads the account
+vault for the owner-key versions (see
+[Owner-key versions from the account vault](#owner-key-versions-from-the-account-vault)).
+Its window is opened again the same way. Closing it a third time does not fail
+the login, because the bundle is complete without the versions; the run says why
+they are missing:
+
+```
+The sign-in window 2 of 2 was closed before the account vault was read.
+
+Note: owner-key versions were not saved (cause=window_closed, entries=0).
+This is non-fatal: the generated secrets.json is ready to use.
+```
 
 ## After the login (the menu, `q`, and the wrap-up)
 
@@ -663,11 +758,12 @@ there is no separate image to rebuild for code changes.
   set it). `GFMY_LOCALE=en bash login.sh` keeps the sign-in page in English. See
   [Language and keyboard](#language-and-keyboard).
 - **The run ended with exit status 130:** that is not an error, it is a
-  cancellation. If you closed the Chrome window or let the wait run out, the
-  line above it names which of the two it was; a `Ctrl+C` gets the same status
-  but ends in a `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line.
-  Nothing was written on any of them; start the login again. The two messages
-  are quoted in full under [Cancelling a login](#cancelling-a-login).
+  cancellation. The `[AuthFlow]` line above it names which sign-in ended and
+  why: a window closed a third time, a wait that ran out, or a cancel on the
+  Google unlock page. A `Ctrl+C` gets the same status but ends in a
+  `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line. Start the login
+  again; after a cancelled sign-in 2 of 2 it opens only the second window. The
+  messages are quoted in full under [Cancelling a login](#cancelling-a-login).
 - **A `TimeoutException` traceback instead of an `[AuthFlow]` line:** that is
   the opposite case, and the exit status is *not* `130`. Chrome or ChromeDriver
   stopped answering while the login was still being waited for, so the run

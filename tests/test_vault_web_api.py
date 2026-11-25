@@ -533,6 +533,7 @@ def test_cause_names_are_the_closed_set() -> None:
         "http_status",
         "self_test_failed",
         "alert_deadline",
+        "window_closed",
     ]
 
 
