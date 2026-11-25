@@ -2058,3 +2058,123 @@ async def test_the_import_state_records_the_imported_content_not_a_newer_one(
     state = await config_flow._async_discovery_import_state(hass, imported)
 
     assert state[config_flow.DATA_DISCOVERY_IMPORTED_MTIME] == 1_000
+
+
+@pytest.mark.asyncio
+async def test_a_turned_away_card_leaves_the_open_younger_card_alone(
+    hass: HomeAssistant,
+    configured_accounts: set[str],
+    two_watched_files: tuple[Path, Path, Any, set[str]],
+    tmp_path: Path,
+) -> None:
+    """The import-state check runs before the account's open card is superseded.
+
+    Closed by a card that is then turned away, the younger card the user has not
+    answered yet would only come back after a restart, because the watcher
+    already settled its signature.
+    """
+
+    _first, second, manager, _failing = two_watched_files
+    await _import_then_leave_only(
+        hass, configured_accounts, manager, _third_watched_path(tmp_path), 3_000
+    )
+    _write_bundle(second, "N1N1", 4_000, token=_NEWEST_TOKEN)
+    await _scan(hass, manager)
+    (younger,) = _cards(hass, _ACCOUNT_A)
+
+    older = await _discover(
+        hass,
+        {**_payload(_ACCOUNT_A, shared_key="B1B1"), "discovery_bundle_mtime": 2_000.0},
+    )
+
+    assert older["type"] == "abort"
+    assert older["reason"] == "bundle_older_than_imported"
+    assert [card["flow_id"] for card in _cards(hass, _ACCOUNT_A)] == [
+        younger["flow_id"]
+    ]
+
+
+def _recorded_entry(mtime: Any) -> Any:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    return SimpleNamespace(
+        data={
+            config_flow.DATA_DISCOVERY_IMPORTED_DIGEST: "recorded-digest",
+            config_flow.DATA_DISCOVERY_IMPORTED_MTIME: mtime,
+        }
+    )
+
+
+def _later_card(bundle_mtime: float | None, *, with_bundle: bool = True) -> Any:
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    return config_flow.CloudDiscoveryData(
+        email=_ACCOUNT_A,
+        unique_id=config_flow.unique_account_id(_ACCOUNT_A),
+        candidates=(("candidate", _TOKEN),),
+        secrets_bundle=(
+            {"google_email": _ACCOUNT_A, "aas_token": _TOKEN, "shared_key": "L1L1"}
+            if with_bundle
+            else None
+        ),
+        bundle_mtime=bundle_mtime,
+    )
+
+
+def test_a_recorded_time_after_the_clock_turns_nothing_away() -> None:
+    """Only a clock set back since the import puts the record in the future.
+
+    Compared as is, every card written until the clock catches up would be
+    turned away for good, because the reason is terminal for the watcher. The
+    same card is turned away against a record from the past.
+    """
+
+    import time  # noqa: PLC0415
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    now = time.time()
+    card = _later_card(now - 60)
+
+    assert not config_flow._discovery_bundle_not_newer_than_import(
+        _recorded_entry(now + 3_600), card
+    )
+    assert config_flow._discovery_bundle_not_newer_than_import(
+        _recorded_entry(now - 30), card
+    )
+
+
+@pytest.mark.parametrize(
+    "recorded", ["3000", True, float("nan"), float("inf"), None], ids=repr
+)
+def test_an_unusable_recorded_time_turns_nothing_away(recorded: Any) -> None:
+    """A recorded time that is not a finite number cannot be compared."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    assert not config_flow._discovery_bundle_not_newer_than_import(
+        _recorded_entry(recorded), _later_card(1_000.0)
+    )
+
+
+def test_a_card_without_a_bundle_is_not_compared_with_the_record() -> None:
+    """Without imported content there is no digest to tell old from new."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    assert not config_flow._discovery_bundle_not_newer_than_import(
+        _recorded_entry(5_000.0), _later_card(1_000.0, with_bundle=False)
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_a_copy_on_disk_the_payload_time_is_recorded() -> None:
+    """No watched copy of the content: the card's own bundle time is the record."""
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+
+    state = await config_flow._async_discovery_import_state(None, _later_card(1_234.0))
+
+    assert state[config_flow.DATA_DISCOVERY_IMPORTED_MTIME] == 1_234.0

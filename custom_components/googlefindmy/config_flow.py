@@ -1155,25 +1155,44 @@ async def _async_freshest_watched_bundle(
 async def _async_discovery_import_state(
     hass: HomeAssistant | None, payload: CloudDiscoveryData | None
 ) -> dict[str, Any]:
-    """Return the entry-data keys that record which bundle state was imported.
+    """Return the entry-data keys that record which discovery bundle was imported.
 
-    The digest is the imported content's (:func:`_digest_for_discovery_payload`).
-    The time is the mtime of the **newest** on-disk copy of that content, the
-    same ``max`` the confirmation uses (:func:`_async_freshest_watched_bundle`);
-    without a copy on disk it is the payload's ``bundle_mtime``. It is capped at
-    the wall clock of the import: the watcher accepts mtimes from the future,
-    and an uncapped one would hide every later card of the account for good.
-
-    Returns ``{}`` when there is no digest or no usable time; the entry then
-    records nothing and later cards are offered as before. Neither value is a
-    secret, but the digest identifies the credentials, which is why diagnostics
-    redact it.
+    The digest is the imported content's (:func:`_digest_for_discovery_payload`);
+    without a copy on disk the time falls back to the payload's ``bundle_mtime``.
+    See :func:`_async_import_state`.
     """
 
     digest = _digest_for_discovery_payload(payload)
     if payload is None or digest is None:
         return {}
-    stable_key = _stable_key_for_discovery_payload(payload)
+    return await _async_import_state(
+        hass,
+        stable_key=_stable_key_for_discovery_payload(payload),
+        digest=digest,
+        fallback_mtime=payload.bundle_mtime,
+    )
+
+
+async def _async_import_state(
+    hass: HomeAssistant | None,
+    *,
+    stable_key: str | None,
+    digest: str,
+    fallback_mtime: float | None,
+) -> dict[str, Any]:
+    """Return the entry-data keys that record which bundle state was imported.
+
+    The time is the mtime of the **newest** on-disk copy of the imported content,
+    the same ``max`` the confirmation uses (:func:`_async_freshest_watched_bundle`);
+    without a copy on disk it is ``fallback_mtime``. It is capped at the wall
+    clock of the import: the watcher accepts mtimes from the future, and an
+    uncapped one would hide every later card of the account until the clock
+    reaches it.
+
+    Returns ``{}`` when there is no usable time; the entry then records nothing
+    and later cards are offered as before. Neither value is a secret, but the
+    digest identifies the credentials, which is why diagnostics redact it.
+    """
 
     same_account = (
         await _async_watched_bundles_of_account(hass, stable_key)
@@ -1184,9 +1203,7 @@ async def _async_discovery_import_state(
         result.mtime for result in same_account or () if result.digest == digest
     ]
 
-    mtime = (
-        max(copy_mtimes) if copy_mtimes else _finite_bundle_mtime(payload.bundle_mtime)
-    )
+    mtime = max(copy_mtimes) if copy_mtimes else _finite_bundle_mtime(fallback_mtime)
     if mtime is None:
         return {}
     return {
@@ -1203,8 +1220,9 @@ def _discovery_bundle_not_newer_than_import(
     True only when the entry recorded an import state, the payload's bundle has
     another digest, and its mtime is not later than the recorded one; a tie
     counts as not newer, as it does for the confirmation. Anything that cannot
-    be decided (no recorded state, no digest, no mtime) is False, so the card is
-    offered as it was before the state existed.
+    be decided (no recorded state, no digest, no mtime, a recorded time later
+    than the clock, which only a clock set back since the import produces) is
+    False, so the card is offered as it was before the state existed.
     """
 
     data = getattr(entry, "data", None)
@@ -1213,6 +1231,8 @@ def _discovery_bundle_not_newer_than_import(
     imported_digest = data.get(DATA_DISCOVERY_IMPORTED_DIGEST)
     imported_mtime = _finite_bundle_mtime(data.get(DATA_DISCOVERY_IMPORTED_MTIME))
     if not isinstance(imported_digest, str) or imported_mtime is None:
+        return False
+    if imported_mtime > time.time():
         return False
     digest = _digest_for_discovery_payload(payload)
     if digest is None or digest == imported_digest:
@@ -4186,6 +4206,7 @@ class ConfigFlow(
         # Delete-after-import job of an accepted preflight bundle. Staged (not
         # executed) once device_selection actually creates the entry.
         self._local_bundle_pending_cleanup: PendingContainerCleanup | None = None
+        self._local_bundle_import: _SecretsScanResult | None = None
         # Identity of this flow's cleanup ticket (see _StagedCleanupTicket).
         # Resolved lazily because Home Assistant assigns ``flow_id`` only when
         # the flow manager starts the flow, i.e. after ``__init__``.
@@ -6207,6 +6228,7 @@ class ConfigFlow(
             imported_stable_key=scan.stable_key,
             imported_digest=scan.digest,
         )
+        self._local_bundle_import = scan
         return await self.async_step_device_selection()
 
     @_typed_callback
@@ -6482,13 +6504,27 @@ class ConfigFlow(
             aas_token = self._auth_data.get(DATA_AAS_TOKEN)
             if isinstance(aas_token, str) and aas_token:
                 data_payload[DATA_AAS_TOKEN] = aas_token
-            # A confirmed discovery card records the bundle state it imported;
-            # any other creation path has no payload and records nothing.
-            data_payload.update(
-                await _async_discovery_import_state(
-                    getattr(self, "hass", None), self._confirmed_discovery_payload
+            # An import from a watched bundle (a confirmed discovery card or the
+            # preview of a found bundle) records the bundle state it imported;
+            # a pasted bundle or manual tokens come from no watched file and
+            # record nothing.
+            flow_hass = getattr(self, "hass", None)
+            local_import = self._local_bundle_import
+            if self._confirmed_discovery_payload is not None:
+                data_payload.update(
+                    await _async_discovery_import_state(
+                        flow_hass, self._confirmed_discovery_payload
+                    )
                 )
-            )
+            elif local_import is not None:
+                data_payload.update(
+                    await _async_import_state(
+                        flow_hass,
+                        stable_key=local_import.stable_key,
+                        digest=local_import.digest,
+                        fallback_mtime=local_import.mtime,
+                    )
+                )
 
             options_payload: dict[str, Any] = {}
             managed_option_keys: set[str] = set()

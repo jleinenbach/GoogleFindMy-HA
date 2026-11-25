@@ -990,10 +990,11 @@ the content of the card you have not answered yet, and confirming a card imports
 the newest bundle of that account that is on disk at that moment (on an exact
 tie of modification times with a copy of the confirmed content, that content is
 kept). Home Assistant then remembers, in the entry, which bundle it imported for
-the account: a bundle with other content that is not newer than that one no
+the account (also for a bundle taken over in the setup preview): a bundle with other content that is not newer than that one no
 longer raises a card, also after a restart, so an older copy left on disk (for
 example on a path Home Assistant cannot write to) cannot replace the imported
-credentials. The copy is
+credentials. An entry set up before this record existed has none until its next
+import from a watched bundle. The copy is
 deleted once Home Assistant is observed to hold the imported credentials
 (`config_flow.py` → `_async_delete_watched_secrets`, armed by
 `async_setup_entry`). Until then — and indefinitely if you never confirm the
