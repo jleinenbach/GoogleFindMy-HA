@@ -22,6 +22,13 @@ from typing import Any
 
 import pytest
 
+# A registration as the receiver stores it: both receivers read the push token
+# from ``fcm.registration.token`` only.
+_STORED_PUSH_DATA: dict[str, Any] = {
+    "gcm": {"android_id": "1", "security_token": "2"},
+    "fcm": {"registration": {"token": "push-token"}},
+}
+
 
 def _reset_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wipe the module-global TokenCache registry so tests don't leak."""
@@ -107,9 +114,9 @@ def _install_steps(
         cache.sync_pop("adm_token_user@example.com")
 
     async def _fcm(cache: Any) -> _Fcm:
-        await cache.set(
-            "fcm_credentials", fcm_credentials or {"gcm": {"token": "push-token"}}
-        )
+        # Like the receiver: the registration, then its routing entry.
+        await cache.set("fcm_credentials", fcm_credentials or _STORED_PUSH_DATA)
+        await cache.set("fcm_routing_tokens", ["push-token"])
         return _Fcm()
 
     monkeypatch.setattr(cli_main, "_ensure_aas_token", _aas)
@@ -144,7 +151,8 @@ async def test_one_login_run_writes_keys_and_push_data_once(
         "for each write"
     )
     published = with_key[0]
-    assert published["fcm_credentials"] == {"gcm": {"token": "push-token"}}
+    assert published["fcm_credentials"] == _STORED_PUSH_DATA
+    assert published["fcm_routing_tokens"] == ["push-token"]
     assert published["owner_key_versions"] == [1]
     assert "adm_token_user@example.com" not in published
     # The AAS token is written before the block, on its own.
@@ -171,7 +179,8 @@ async def test_an_unchanged_bundle_is_not_rewritten(
         "shared_key": "aa" * 32,
         "owner_key": "bb" * 32,
         "owner_key_versions": [1],
-        "fcm_credentials": {"gcm": {"token": "push-token"}},
+        "fcm_credentials": _STORED_PUSH_DATA,
+        "fcm_routing_tokens": ["push-token"],
     }
     cache, path, writes = _bootstrap_world(monkeypatch, tmp_path, complete)
     _install_steps(monkeypatch)
@@ -695,3 +704,118 @@ def test_a_closed_stdout_does_not_keep_a_stopped_login_alive(
     cli_main._end_process_now(143)
 
     assert ended == [143]
+
+
+# --- push data from an earlier run (review of PR #1482, P2 #1 and #2) ---
+
+
+@pytest.mark.asyncio
+async def test_stored_push_data_leave_no_write_after_the_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With push data from an earlier run the keys still land in one write.
+
+    The wait used to end at once because ``fcm_credentials`` were already
+    there; the receiver then added ``fcm_routing_tokens`` and stored the same
+    registration twice more after the block, three more versions of the file
+    and three more cards (``--reauth`` always takes this path).
+    """
+    from custom_components.googlefindmy import main as cli_main
+    from custom_components.googlefindmy.NovaApi.ListDevices import (
+        nbe_list_devices as nbe,
+    )
+
+    cache, _path, writes = _bootstrap_world(
+        monkeypatch,
+        tmp_path,
+        {
+            "username": "user@example.com",
+            "oauth_token": "oauth2_4/X",
+            "fcm_credentials": _STORED_PUSH_DATA,
+        },
+    )
+    _real_receiver_with_fake_push_client(monkeypatch)
+
+    async def _menu(**_kwargs: object) -> None:
+        # The real menu runs for a while; the receiver's tasks run meanwhile.
+        await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(nbe, "_async_cli_main", _menu)
+
+    await asyncio.wait_for(cli_main._run_cli_bootstrap(cache, ""), timeout=10)
+
+    first = next(i for i, w in enumerate(writes) if "shared_key" in w)
+    assert writes[first].get("fcm_routing_tokens") == ["push-token"]
+    assert len(writes) == first + 1, [sorted(w) for w in writes[first:]]
+
+
+class _DictCache:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+    async def get(self, name: str) -> object:
+        return self.data.get(name)
+
+
+@pytest.mark.asyncio
+async def test_push_data_without_a_token_do_not_end_the_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration without its token (mid re-registration) is not finished.
+
+    The routing grace is cut short, so a wait that took the incomplete
+    registration for a finished one would end well before the token arrives.
+    """
+    from custom_components.googlefindmy import main as cli_main
+
+    monkeypatch.setattr(cli_main, "_ROUTING_ENTRY_GRACE_S", 0.05, raising=False)
+    cache = _DictCache({"fcm_credentials": {"gcm": {"android_id": "1"}}})
+
+    async def _register() -> None:
+        await asyncio.sleep(0.3)
+        cache.data["fcm_credentials"] = _STORED_PUSH_DATA
+        cache.data["fcm_routing_tokens"] = ["push-token"]
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    task = asyncio.create_task(_register())
+    await asyncio.wait_for(cli_main._await_push_credentials(cache), timeout=10)
+    waited = loop.time() - started
+    await task
+
+    assert waited >= 0.3, f"the wait ended after {waited:.2f} s, before the token"
+
+
+@pytest.mark.asyncio
+async def test_a_routing_entry_that_never_comes_ends_the_wait_quietly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The routing entry is best-effort; its absence costs a short grace only."""
+    from custom_components.googlefindmy import main as cli_main
+
+    monkeypatch.setattr(cli_main, "_ROUTING_ENTRY_GRACE_S", 0.2, raising=False)
+    cache = _DictCache({"fcm_credentials": _STORED_PUSH_DATA})
+
+    await asyncio.wait_for(cli_main._await_push_credentials(cache), timeout=5)
+
+    assert "did not finish" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_value_outside_the_block_is_not_rewritten(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Storing what the file already holds leaves its modification time alone."""
+    cache, _path, writes = _bootstrap_world(
+        monkeypatch, tmp_path, {"username": "user@example.com"}
+    )
+
+    await cache.set("fcm_credentials", dict(_STORED_PUSH_DATA))
+    await cache.set("fcm_credentials", dict(_STORED_PUSH_DATA))
+    await cache.set("username", "user@example.com")
+    await cache.set("fcm_routing_tokens", ["push-token"])
+
+    assert [sorted(w) for w in writes] == [
+        ["fcm_credentials", "username"],
+        ["fcm_credentials", "fcm_routing_tokens", "username"],
+    ]

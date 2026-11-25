@@ -419,8 +419,15 @@ def _register_file_cache(entry_id: str = "") -> object:
                     return  # intentionally skip _save()
                 self._data.pop(name, None)
             else:
+                unchanged = name in self._data and self._data[name] == value
                 self._data[name] = value
                 self._soft_invalidated.discard(name)
+                if unchanged:
+                    # The file already holds it; a rewrite would only move the
+                    # modification time, and Home Assistant offers a card for
+                    # every move (the receiver stores its registration again
+                    # at each start).
+                    return
             self._save()
 
         async def async_get_cached_value(self, name: str) -> object:
@@ -1383,6 +1390,20 @@ def _deferred_writes(cache: object) -> contextlib.AbstractContextManager[None]:
 # reachable endpoint answers within seconds.
 _PUSH_REGISTRATION_WAIT_S: Final = 60.0
 _PUSH_REGISTRATION_POLL_S: Final = 0.2
+# Once the registration carries its token, the receiver stores the token's
+# routing entry in a task of this process, without network; it is best-effort,
+# so its absence costs this grace and nothing else.
+_ROUTING_ENTRY_GRACE_S: Final = 2.0
+
+
+def _push_token(credentials: object) -> str | None:
+    """Return the push token of a stored registration, or ``None``."""
+    if not isinstance(credentials, dict):
+        return None
+    fcm = credentials.get("fcm")
+    registration = fcm.get("registration") if isinstance(fcm, dict) else None
+    token = registration.get("token") if isinstance(registration, dict) else None
+    return token if isinstance(token, str) and token else None
 
 
 async def _await_push_credentials(cache: object) -> None:
@@ -1396,17 +1417,21 @@ async def _await_push_credentials(cache: object) -> None:
     the keys are saved then and the push data follow on their own. A cache
     without ``get`` is not waited for.
 
-    Push data already stored by an earlier run end the wait at once. The
-    receiver's start-up writes (routing token, the same registration again)
-    then still follow after the block, as they did before it existed; this
-    wait closes the first-sign-in case only.
+    The registration counts as finished once it carries its push token; push
+    data from an earlier run or a registration in progress without the token
+    do not end the wait. The block then also waits, for at most
+    ``_ROUTING_ENTRY_GRACE_S``, until the receiver has stored the token's
+    routing entry, which it does in a task of its own; with push data from an
+    earlier run that entry otherwise followed in a write after the block
+    (review of PR #1482). The receiver storing the same registration again
+    leaves the file alone, because the cache skips unchanged values.
     """
     get = getattr(cache, "get", None)
     if not callable(get):
         return
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _PUSH_REGISTRATION_WAIT_S
-    while not await get("fcm_credentials"):
+    while (token := _push_token(await get("fcm_credentials"))) is None:
         if loop.time() >= deadline:
             print(
                 "The push registration did not finish within "
@@ -1414,6 +1439,11 @@ async def _await_push_credentials(cache: object) -> None:
                 "push data are saved when the registration completes.",
                 flush=True,
             )
+            return
+        await asyncio.sleep(_PUSH_REGISTRATION_POLL_S)
+    grace = loop.time() + _ROUTING_ENTRY_GRACE_S
+    while token not in (await get("fcm_routing_tokens") or ()):
+        if loop.time() >= grace:
             return
         await asyncio.sleep(_PUSH_REGISTRATION_POLL_S)
 
