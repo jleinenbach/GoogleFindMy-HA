@@ -819,3 +819,95 @@ async def test_an_unchanged_value_outside_the_block_is_not_rewritten(
         ["fcm_credentials", "username"],
         ["fcm_credentials", "fcm_routing_tokens", "username"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_value_changed_in_place_is_still_written(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``get`` hands out the stored object; changing it and storing it writes.
+
+    The receiver invalidates its registration that way (pop ``fcm`` and the
+    GCM token, then ``set`` the same dict). Compared with the object in memory
+    the value looked unchanged, and the stale token stayed on disk.
+    """
+    cache, path, writes = _bootstrap_world(
+        monkeypatch,
+        tmp_path,
+        {"fcm_credentials": json.loads(json.dumps(_STORED_PUSH_DATA))},
+    )
+
+    creds = await cache.get("fcm_credentials")
+    creds.pop("fcm")
+    await cache.set("fcm_credentials", creds)
+
+    assert len(writes) == 1
+    assert "fcm" not in json.loads(path.read_text(encoding="utf-8"))["fcm_credentials"]
+
+
+@pytest.mark.asyncio
+async def test_push_data_stored_as_json_text_end_the_wait() -> None:
+    """The receiver accepts its registration as JSON text; so does the wait."""
+    from custom_components.googlefindmy import main as cli_main
+
+    cache = _DictCache(
+        {
+            "fcm_credentials": json.dumps(_STORED_PUSH_DATA),
+            "fcm_routing_tokens": ["push-token"],
+        }
+    )
+    try:
+        await asyncio.wait_for(cli_main._await_push_credentials(cache), timeout=2)
+    except TimeoutError:
+        finished = False
+    else:
+        finished = True
+
+    assert finished, "a registration stored as JSON text was not recognised"
+
+
+@pytest.mark.asyncio
+async def test_storing_what_was_loaded_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Right after loading, the loaded content counts as the file's content."""
+    cache, _path, writes = _bootstrap_world(
+        monkeypatch, tmp_path, {"fcm_routing_tokens": ["push-token"]}
+    )
+
+    await cache.set("fcm_routing_tokens", ["push-token"])
+
+    assert writes == []
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [None, "not json", "[]", {"gcm": {"token": "t"}}, {"fcm": {"registration": {}}}],
+)
+def test_a_registration_without_its_push_token_has_none(stored: object) -> None:
+    """Text that is not JSON and registrations without the token count as none."""
+    from custom_components.googlefindmy import main as cli_main
+
+    assert cli_main._push_token(stored) is None
+
+
+def test_a_block_writes_a_value_changed_in_place_before_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The block compares with the file, not with the memory on entry."""
+    cache, path, writes = _bootstrap_world(
+        monkeypatch,
+        tmp_path,
+        {"fcm_credentials": json.loads(json.dumps(_STORED_PUSH_DATA))},
+    )
+
+    async def _change() -> None:
+        creds = await cache.get("fcm_credentials")
+        creds.pop("fcm")
+        with cache.deferred_writes():
+            await cache.set("fcm_credentials", creds)
+
+    asyncio.run(_change())
+
+    assert len(writes) == 1
+    assert "fcm" not in json.loads(path.read_text(encoding="utf-8"))["fcm_credentials"]

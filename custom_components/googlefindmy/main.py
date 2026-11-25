@@ -340,12 +340,18 @@ def _register_file_cache(entry_id: str = "") -> object:
             # zero ``_save`` only records that a write is owed.
             self._defer_depth = 0
             self._dirty = False
+            # The content as last loaded from or written to the file; a set()
+            # that leaves the content equal to it does not write. Compared as
+            # text, not by object: ``get`` hands out the stored object, and a
+            # caller may change it in place before storing it again.
+            self._on_disk: str | None = None
             if path.is_file():
                 try:
                     with open(path, encoding="utf-8") as fh:
                         raw = json.load(fh)
                     if isinstance(raw, dict):
                         self._data = raw
+                        self._on_disk = self._snapshot()
                 except Exception:  # noqa: BLE001
                     import logging  # noqa: PLC0415
 
@@ -367,6 +373,7 @@ def _register_file_cache(entry_id: str = "") -> object:
                 return  # Don't overwrite valid file with empty data
             self._load_failed = False
             _atomic_write_json(self._path, self._data)
+            self._on_disk = self._snapshot()
 
         def _snapshot(self) -> str | None:
             try:
@@ -389,7 +396,9 @@ def _register_file_cache(entry_id: str = "") -> object:
             compares.
             """
             outermost = self._defer_depth == 0
-            before = self._snapshot() if outermost else None
+            # Compared with the file's content: an object changed in place
+            # before the block already differs from the file, not from memory.
+            before = (self._on_disk or self._snapshot()) if outermost else None
             if outermost:
                 self._dirty = False
             self._defer_depth += 1
@@ -419,15 +428,15 @@ def _register_file_cache(entry_id: str = "") -> object:
                     return  # intentionally skip _save()
                 self._data.pop(name, None)
             else:
-                unchanged = name in self._data and self._data[name] == value
                 self._data[name] = value
                 self._soft_invalidated.discard(name)
-                if unchanged:
-                    # The file already holds it; a rewrite would only move the
-                    # modification time, and Home Assistant offers a card for
-                    # every move (the receiver stores its registration again
-                    # at each start).
-                    return
+                if not self._defer_depth and self._on_disk is not None:
+                    if self._snapshot() == self._on_disk:
+                        # The file already holds it; a rewrite would only move
+                        # the modification time, and Home Assistant offers a
+                        # card for every move (the receiver stores its
+                        # registration again at each start).
+                        return
             self._save()
 
         async def async_get_cached_value(self, name: str) -> object:
@@ -1397,7 +1406,17 @@ _ROUTING_ENTRY_GRACE_S: Final = 2.0
 
 
 def _push_token(credentials: object) -> str | None:
-    """Return the push token of a stored registration, or ``None``."""
+    """Return the push token of a stored registration, or ``None``.
+
+    Like the receiver, a registration stored as JSON text is read as well.
+    """
+    if isinstance(credentials, str):
+        import json  # noqa: PLC0415
+
+        try:
+            credentials = json.loads(credentials)
+        except ValueError:
+            return None
     if not isinstance(credentials, dict):
         return None
     fcm = credentials.get("fcm")
