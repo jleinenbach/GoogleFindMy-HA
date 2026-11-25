@@ -769,3 +769,71 @@ def test_every_quote_in_the_closed_window_section_is_guarded() -> None:
         if not any(prose.endswith(lead) for lead in guarded)
     ]
     assert not unguarded, f"fenced blocks without a rendering scenario: {unguarded}"
+
+
+def _desktop(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The desktop path: the stdin gate is active; return the prompts it shows."""
+    monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
+    monkeypatch.setattr(auth_flow, "_stdin_is_attended", lambda: True)
+    prompts: list[str] = []
+
+    def _input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", _input)
+    return prompts
+
+
+def test_a_reopened_desktop_window_opens_without_asking_for_enter(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The restart says "opening it again" and does so (review F1, PR #1482).
+
+    On the desktop the whole sign-in function used to run again, gate included:
+    the instructions were printed a second time and nothing opened until Enter
+    was pressed, although the line above it promised a new window and offered
+    only Ctrl+C. Driven the way ``_ensure_authenticated`` calls it.
+    """
+    started = _drivers(
+        monkeypatch,
+        [
+            _ClosedWindowDriver(cookie_after_wait=None),
+            FakeDriver(cookie_after_wait=_TOKEN_COOKIE),
+        ],
+    )
+    prompts = _desktop(monkeypatch)
+
+    token, _email = cli_main._run_oauth_flow_or_exit(
+        auth_flow.request_oauth_account_token_flow
+    )
+
+    out = capsys.readouterr().out
+    assert token == "oauth2_4/TOKEN"
+    assert len(started) == 2
+    assert prompts == ["[AuthFlow] Press Enter to continue..."], (
+        f"asked {len(prompts)} times; the reopened window must not wait for Enter"
+    )
+    assert out.count("This script will now open Google Chrome") == 1
+    assert "opening it again (1 of 2)" in out
+
+
+def test_a_new_sign_in_after_a_restart_asks_again(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Skipping the gate holds for the reopened window only, not for later runs."""
+    _drivers(
+        monkeypatch,
+        [
+            _ClosedWindowDriver(cookie_after_wait=None),
+            FakeDriver(cookie_after_wait=_TOKEN_COOKIE),
+            FakeDriver(cookie_after_wait=_TOKEN_COOKIE),
+        ],
+    )
+    prompts = _desktop(monkeypatch)
+
+    cli_main._run_oauth_flow_or_exit(auth_flow.request_oauth_account_token_flow)
+    auth_flow.request_oauth_account_token_flow()
+
+    assert len(prompts) == 2
+    assert capsys.readouterr().out.count("This script will now open Google Chrome") == 2

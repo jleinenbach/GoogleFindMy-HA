@@ -30,6 +30,7 @@ directory name legitimately determines.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import sys
@@ -1377,6 +1378,46 @@ def _deferred_writes(cache: object) -> contextlib.AbstractContextManager[None]:
     return contextlib.nullcontext()
 
 
+# How long the login waits for the push registration before it saves the keys
+# without it. The receiver registers in a background task, over the network; a
+# reachable endpoint answers within seconds.
+_PUSH_REGISTRATION_WAIT_S: Final = 60.0
+_PUSH_REGISTRATION_POLL_S: Final = 0.2
+
+
+async def _await_push_credentials(cache: object) -> None:
+    """Wait until the push receiver has stored its registration in ``cache``.
+
+    ``_setup_fcm_receiver`` returns before the registration exists: the
+    receiver's supervisor runs as a task and stores ``fcm_credentials`` once
+    Google has answered. Leaving the write block earlier published the keys
+    without push data, and the push data followed in a second write (Codex,
+    PR #1482). When the wait runs out it says so in the terminal and returns;
+    the keys are saved then and the push data follow on their own. A cache
+    without ``get`` is not waited for.
+
+    Push data already stored by an earlier run end the wait at once. The
+    receiver's start-up writes (routing token, the same registration again)
+    then still follow after the block, as they did before it existed; this
+    wait closes the first-sign-in case only.
+    """
+    get = getattr(cache, "get", None)
+    if not callable(get):
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _PUSH_REGISTRATION_WAIT_S
+    while not await get("fcm_credentials"):
+        if loop.time() >= deadline:
+            print(
+                "The push registration did not finish within "
+                f"{_PUSH_REGISTRATION_WAIT_S:.0f} s; saving the keys now. The "
+                "push data are saved when the registration completes.",
+                flush=True,
+            )
+            return
+        await asyncio.sleep(_PUSH_REGISTRATION_POLL_S)
+
+
 async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
     """Run the standalone token bootstrap, then hand off to the interactive CLI.
 
@@ -1413,10 +1454,13 @@ async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
         # above stays outside the block: it is written at once so a later
         # failure cannot lose it. Everything below lands in one write, so Home
         # Assistant never sees a bundle that has keys but no push credentials.
+        # The push data are created by a task of the receiver, so the block
+        # waits for them before it ends.
         with _deferred_writes(file_cache):
             await _ensure_vault_keys(file_cache)
             await _clear_stale_adm_token(file_cache)
             fcm = await _setup_fcm_receiver(file_cache)
+            await _await_push_credentials(file_cache)
         try:
             await _async_cli_main(entry_id=entry_id, session=session)
         finally:

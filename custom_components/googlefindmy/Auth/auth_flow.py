@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
 from custom_components.googlefindmy.browser_deps import missing_browser_dependency
@@ -37,6 +38,14 @@ _ENV_ASSUME_INTERACTIVE = "GOOGLEFINDMY_ASSUME_INTERACTIVE"
 # How long the flow waits for the login to produce the ``oauth_token`` cookie.
 # Named so the timeout message can quote it without the two drifting apart.
 _LOGIN_WAIT_SECONDS = 300
+
+# True while ``restart_on_closed_window`` runs a step again after its window was
+# closed. The desktop gate reads it: the user already confirmed this sign-in
+# once, and the line printed before the restart promises a new window, not a
+# question. A context variable rather than a parameter, because the restart
+# loop knows it is reopening and the gate is two calls further down, inside the
+# step it runs (review F1, PR #1482).
+_REOPENING: ContextVar[bool] = ContextVar("googlefindmy_login_reopening", default=False)
 
 
 class LoginAborted(Exception):
@@ -83,6 +92,7 @@ def restart_on_closed_window[T](
     """
     restarts = 0
     while True:
+        reopening = _REOPENING.set(restarts > 0)
         try:
             return run()
         except LoginWindowClosed:
@@ -95,6 +105,8 @@ def restart_on_closed_window[T](
                 "Press Ctrl+C here to cancel.",
                 flush=True,
             )
+        finally:
+            _REOPENING.reset(reopening)
 
 
 # Evidence that the browser *died* rather than being closed. Chromedriver
@@ -272,6 +284,12 @@ def _announce_and_gate(*, headless: bool) -> None:
             # the pre-start prompt used to arrive before the display was ready.
             # The terminal still has to stay attached, because main.py asks for
             # the account e-mail on stdin when auto-detection fails.
+        elif _REOPENING.get():
+            # The window is opened again after the user closed it. They saw
+            # these instructions and pressed Enter for this sign-in already;
+            # asking again would leave the promised window unopened until they
+            # notice the prompt.
+            return
         else:
             print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
 > Please make sure that Chrome is installed on your system.

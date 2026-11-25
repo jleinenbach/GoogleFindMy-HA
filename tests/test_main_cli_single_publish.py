@@ -15,6 +15,7 @@ and its file are real, and ``_atomic_write_json`` is counted, not replaced.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -269,3 +270,138 @@ def test_a_cache_without_the_block_is_left_as_it_is() -> None:
 
     with cli_main._deferred_writes(object()):
         pass
+
+
+class _RegisteringPushClient:
+    """Stands in for ``firebase_messaging``'s push client at its documented seam.
+
+    The real client registers over the network and reports the new
+    registration through ``credentials_updated_callback`` from inside
+    ``checkin_or_register``. The sleep stands for that round trip: the push
+    data exist only after the receiver's supervisor has run for a while, which
+    is what the step double above hid by writing them itself.
+    """
+
+    def __init__(
+        self,
+        _on_notification: object,
+        _config: object,
+        credentials: object,
+        credentials_updated_callback: Any,
+        **_kwargs: object,
+    ) -> None:
+        self.credentials = credentials
+        self._updated = credentials_updated_callback
+        self.run_state: object = None
+        self.do_listen = False
+
+    async def checkin_or_register(self) -> str:
+        import asyncio
+
+        await asyncio.sleep(0.05)
+        self.credentials = {
+            "gcm": {"android_id": "1", "security_token": "2"},
+            "fcm": {"registration": {"token": "push-token"}},
+        }
+        self._updated(self.credentials)
+        return "push-token"
+
+    async def start(self) -> None:
+        from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
+            FcmPushClientRunState,
+        )
+
+        self.run_state = FcmPushClientRunState.STARTED
+
+    async def stop(self) -> None:
+        self.run_state = None
+
+
+def _real_receiver_with_fake_push_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use the real ``_setup_fcm_receiver``; only the push client is a double."""
+    from custom_components.googlefindmy import api
+    from custom_components.googlefindmy import main as cli_main
+    from custom_components.googlefindmy.Auth import fcm_receiver_ha
+    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
+        location_request,
+    )
+
+    real_setup = cli_main._setup_fcm_receiver
+    _install_steps(monkeypatch)
+    monkeypatch.setattr(cli_main, "_setup_fcm_receiver", real_setup)
+    monkeypatch.setattr(fcm_receiver_ha, "FcmPushClient", _RegisteringPushClient)
+    monkeypatch.setattr(fcm_receiver_ha, "HAVE_FCM_PUSH_CLIENT", True)
+    # The setup registers the receiver as a process-wide provider.
+    monkeypatch.setitem(location_request._fcm_receiver_state, "getter", None)
+    monkeypatch.setattr(api, "_FCM_ReceiverGetter", None, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_the_real_receiver_s_push_data_land_in_the_keys_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fresh login publishes keys and push data together (Codex, PR #1482).
+
+    The receiver's ``async_initialize`` creates no client; the supervisor that
+    registers is only scheduled by ``register_coordinator``. Leaving the block
+    right after ``_setup_fcm_receiver`` therefore wrote the keys without push
+    data, and the push data followed in a second write: two cards again.
+    """
+    from custom_components.googlefindmy import main as cli_main
+
+    cache, path, writes = _bootstrap_world(
+        monkeypatch,
+        tmp_path,
+        {"username": "user@example.com", "oauth_token": "oauth2_4/X"},
+    )
+    _real_receiver_with_fake_push_client(monkeypatch)
+
+    await cli_main._run_cli_bootstrap(cache, "")
+
+    with_key = [w for w in writes if "shared_key" in w]
+    assert with_key, "the keys never reached the file"
+    assert "fcm_credentials" in with_key[0], (
+        "the first write with the keys had no push data; Home Assistant offers "
+        "a card for it and another one for the push data"
+    )
+    assert with_key[0]["fcm_credentials"]["fcm"]["registration"]["token"] == (
+        "push-token"
+    )
+    final = json.loads(path.read_text(encoding="utf-8"))
+    assert final["fcm_credentials"] == with_key[0]["fcm_credentials"]
+
+
+@pytest.mark.asyncio
+async def test_a_registration_that_never_finishes_still_saves_the_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The wait for the push data is bounded; the keys are not held back for ever."""
+    from custom_components.googlefindmy import main as cli_main
+
+    cache, path, writes = _bootstrap_world(
+        monkeypatch,
+        tmp_path,
+        {"username": "user@example.com", "oauth_token": "oauth2_4/X"},
+    )
+    _install_steps(monkeypatch)
+
+    async def _unregistered(_cache: Any) -> _Fcm:
+        return _Fcm()  # the push endpoint never answers
+
+    monkeypatch.setattr(cli_main, "_setup_fcm_receiver", _unregistered)
+    monkeypatch.setattr(cli_main, "_PUSH_REGISTRATION_WAIT_S", 0.3, raising=False)
+    monkeypatch.setattr(cli_main, "_PUSH_REGISTRATION_POLL_S", 0.01, raising=False)
+
+    # Bounded here too: a wait without its limit must fail this test, not hang it.
+    await asyncio.wait_for(cli_main._run_cli_bootstrap(cache, ""), timeout=10)
+
+    with_key = [w for w in writes if "shared_key" in w]
+    assert len(with_key) == 1
+    assert "fcm_credentials" not in with_key[0]
+    assert json.loads(path.read_text(encoding="utf-8"))["shared_key"] == "aa" * 32
+    out = capsys.readouterr().out
+    assert (
+        "The push registration did not finish within 0 s; saving the keys now." in out
+    )
