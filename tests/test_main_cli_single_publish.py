@@ -421,9 +421,14 @@ async def test_a_registration_that_never_finishes_still_saves_the_keys(
 
 
 @pytest.fixture
-def _sigterm_stand_in() -> Any:
+def _sigterm_stand_in(monkeypatch: pytest.MonkeyPatch) -> Any:
+    import os
     import signal
 
+    def _exit_in_test(code: int) -> None:
+        raise SystemExit(code)  # os._exit would end pytest itself
+
+    monkeypatch.setattr(os, "_exit", _exit_in_test)
     received: list[int] = []
     previous = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGTERM, lambda signum, _frame: received.append(signum))
@@ -609,3 +614,113 @@ async def test_a_loop_without_signal_handlers_runs_the_login_unchanged(
     await cli_main._run_cli_bootstrap(cache, "")
 
     assert len([w for w in writes if "shared_key" in w]) == 1
+
+
+_STOP_IN_BROWSER_WORKER = r"""
+import asyncio, json, os, signal, sys, time
+import aiohttp
+from custom_components.googlefindmy import main as cli_main
+from custom_components.googlefindmy.NovaApi.ListDevices import nbe_list_devices as nbe
+
+class _Session:
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *exc):
+        return False
+
+aiohttp.ClientSession = lambda *a, **k: _Session()
+aiohttp.TCPConnector = lambda **k: object()
+
+async def _menu(**_kwargs):
+    return None
+
+async def _aas(cache):
+    await cache.set("aas_token", "aas_et/TOKEN")
+
+async def _vault(cache):
+    await cache.set("shared_key", "aa" * 32)
+    print("vault read started")  # buffered: stdout is a pipe here
+    loop = asyncio.get_running_loop()
+    def _stop():
+        print(f"SIGTERM_AT={time.monotonic()}", file=sys.stderr, flush=True)
+        os.kill(os.getpid(), signal.SIGTERM)
+    loop.call_later(0.2, _stop)
+    # The browser flow of sign-in 2 runs in the default executor.
+    await loop.run_in_executor(None, time.sleep, 30)
+
+nbe._async_cli_main = _menu
+cli_main._ensure_aas_token = _aas
+cli_main._ensure_vault_keys = _vault
+cache = cli_main._register_file_cache("")
+asyncio.run(cli_main._run_cli_bootstrap(cache, ""))
+"""
+
+
+def test_a_stop_does_not_wait_for_the_browser_worker(tmp_path: Path) -> None:
+    """The run ends at once with 143, although the browser thread is still busy.
+
+    The browser flow of sign-in 2 runs in an executor thread that a cancelled
+    task cannot stop. Ending through ``SystemExit`` made ``asyncio.run`` wait
+    for that thread (up to the 300 s sign-in deadline); ``docker stop`` then
+    killed the container before ``entrypoint.sh`` handed the file over. Only a
+    real process shows the wait, so this test starts one. The time is taken
+    from the signal on (the clock is system-wide on Linux), not from the start,
+    which includes importing Home Assistant.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+
+    path = tmp_path / "secrets.json"
+    path.write_text(json.dumps({"username": "user@example.com"}), encoding="utf-8")
+    env = {**os.environ, "GOOGLEFINDMY_SECRETS_PATH": str(path)}
+    root = Path(__file__).resolve().parents[1]
+
+    done: subprocess.CompletedProcess[str] | None
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", _STOP_IN_BROWSER_WORKER],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        done = None
+    ended = time.monotonic()
+
+    assert done is not None, "the stopped login waited for the browser thread"
+    assert done.returncode == 143, done.stderr[-2000:]
+    sent = [ln for ln in done.stderr.splitlines() if ln.startswith("SIGTERM_AT=")]
+    assert len(sent) == 1
+    elapsed = ended - float(sent[0].split("=", 1)[1])
+    # The worker sleeps 30 s; waiting for it would take that long.
+    assert elapsed < 10, f"the stopped login ended {elapsed:.1f} s after SIGTERM"
+    assert json.loads(path.read_text(encoding="utf-8"))["shared_key"] == "aa" * 32
+    assert "The login was stopped (SIGTERM) during sign-in 2 of 2" in done.stderr
+    assert "vault read started" in done.stdout  # earlier output is not lost
+
+
+def test_a_closed_stdout_does_not_keep_a_stopped_login_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing flush (the terminal is gone) still ends the process."""
+    import os
+    import sys
+
+    from custom_components.googlefindmy import main as cli_main
+
+    class _ClosedPipe:
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+    ended: list[int] = []
+    monkeypatch.setattr(sys, "stdout", _ClosedPipe())
+    monkeypatch.setattr(os, "_exit", ended.append)
+
+    cli_main._end_process_now(143)
+
+    assert ended == [143]

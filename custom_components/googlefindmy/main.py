@@ -37,7 +37,7 @@ import signal
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, NoReturn, cast
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
@@ -1423,6 +1423,23 @@ async def _await_push_credentials(cache: object) -> None:
 _EXIT_TERMINATED: Final = 143
 
 
+def _end_process_now(code: int) -> NoReturn:
+    """End the process with ``code`` without waiting for executor threads.
+
+    The browser flow of sign-in 2 runs in an executor thread that cancelling
+    the task cannot stop. Ending through ``SystemExit`` let ``asyncio.run``
+    wait for that thread, up to the sign-in deadline, and ``docker stop``
+    killed the container before ``entrypoint.sh`` handed the file over (Codex,
+    PR #1482). The file is written by then, so nothing else is left to save.
+    ``os._exit`` drops buffered output, so stdout is flushed first (stderr is
+    line-buffered, and the stop message is flushed where it is printed). A
+    closed stdout must not keep the process from ending.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        sys.stdout.flush()
+    os._exit(code)
+
+
 class _StopRequest:
     """Whether the SIGTERM handler of ``_cancel_on_sigterm`` has fired."""
 
@@ -1521,7 +1538,7 @@ async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
                     file=sys.stderr,
                     flush=True,
                 )
-                raise SystemExit(_EXIT_TERMINATED) from None
+                _end_process_now(_EXIT_TERMINATED)
         try:
             await _async_cli_main(entry_id=entry_id, session=session)
         finally:
