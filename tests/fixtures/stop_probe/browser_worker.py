@@ -1,5 +1,5 @@
 # tests/fixtures/stop_probe/browser_worker.py
-"""Run the login bootstrap and send SIGTERM while sign-in 2 waits on a thread.
+"""Start the login CLI and send SIGTERM while sign-in 2 waits on a thread.
 
 The vault step stores a ``shared_key``, prints one buffered stdout line and
 then blocks in the default executor for 30 s, standing in for the browser flow.
@@ -64,15 +64,24 @@ async def _vault(cache: Any) -> None:
     await loop.run_in_executor(None, time.sleep, 30)
 
 
+def _signed_in() -> None:
+    """Stand in for sign-in 1; the stored username is enough here."""
+
+
 def main() -> None:
-    """Patch the stand-ins in and run the bootstrap until the signal ends it."""
+    """Patch the stand-ins in and start the CLI until the signal ends it.
+
+    The run goes through the real entry point, so the event loop is the one
+    the CLI itself starts; this script does not start one of its own.
+    """
+    os.environ.pop("GOOGLEFINDMY_ENTRY_ID", None)
     setattr(aiohttp, "ClientSession", _session)  # noqa: B010
     setattr(aiohttp, "TCPConnector", _connector)  # noqa: B010
     setattr(nbe, "_async_cli_main", _menu)  # noqa: B010
+    setattr(cli_main, "_ensure_authenticated", _signed_in)  # noqa: B010
     setattr(cli_main, "_ensure_aas_token", _aas)  # noqa: B010
     setattr(cli_main, "_ensure_vault_keys", _vault)  # noqa: B010
-    cache = cli_main._register_file_cache("")
-    asyncio.run(cli_main._run_cli_bootstrap(cache, ""))
+    cli_main._main([])
 
 
 if __name__ == "__main__":
