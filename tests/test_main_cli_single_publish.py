@@ -616,44 +616,9 @@ async def test_a_loop_without_signal_handlers_runs_the_login_unchanged(
     assert len([w for w in writes if "shared_key" in w]) == 1
 
 
-_STOP_IN_BROWSER_WORKER = r"""
-import asyncio, json, os, signal, sys, time
-import aiohttp
-from custom_components.googlefindmy import main as cli_main
-from custom_components.googlefindmy.NovaApi.ListDevices import nbe_list_devices as nbe
-
-class _Session:
-    async def __aenter__(self):
-        return self
-    async def __aexit__(self, *exc):
-        return False
-
-aiohttp.ClientSession = lambda *a, **k: _Session()
-aiohttp.TCPConnector = lambda **k: object()
-
-async def _menu(**_kwargs):
-    return None
-
-async def _aas(cache):
-    await cache.set("aas_token", "aas_et/TOKEN")
-
-async def _vault(cache):
-    await cache.set("shared_key", "aa" * 32)
-    print("vault read started")  # buffered: stdout is a pipe here
-    loop = asyncio.get_running_loop()
-    def _stop():
-        print(f"SIGTERM_AT={time.monotonic()}", file=sys.stderr, flush=True)
-        os.kill(os.getpid(), signal.SIGTERM)
-    loop.call_later(0.2, _stop)
-    # The browser flow of sign-in 2 runs in the default executor.
-    await loop.run_in_executor(None, time.sleep, 30)
-
-nbe._async_cli_main = _menu
-cli_main._ensure_aas_token = _aas
-cli_main._ensure_vault_keys = _vault
-cache = cli_main._register_file_cache("")
-asyncio.run(cli_main._run_cli_bootstrap(cache, ""))
-"""
+_STOP_IN_BROWSER_WORKER = (
+    Path(__file__).resolve().parent / "fixtures" / "stop_probe" / "browser_worker.py"
+)
 
 
 def test_a_stop_does_not_wait_for_the_browser_worker(tmp_path: Path) -> None:
@@ -674,13 +639,19 @@ def test_a_stop_does_not_wait_for_the_browser_worker(tmp_path: Path) -> None:
 
     path = tmp_path / "secrets.json"
     path.write_text(json.dumps({"username": "user@example.com"}), encoding="utf-8")
-    env = {**os.environ, "GOOGLEFINDMY_SECRETS_PATH": str(path)}
     root = Path(__file__).resolve().parents[1]
+    env = {
+        **os.environ,
+        "GOOGLEFINDMY_SECRETS_PATH": str(path),
+        "PYTHONPATH": os.pathsep.join(
+            p for p in (str(root), os.environ.get("PYTHONPATH", "")) if p
+        ),
+    }
 
     done: subprocess.CompletedProcess[str] | None
     try:
         done = subprocess.run(
-            [sys.executable, "-c", _STOP_IN_BROWSER_WORKER],
+            [sys.executable, str(_STOP_IN_BROWSER_WORKER)],
             cwd=root,
             env=env,
             capture_output=True,
