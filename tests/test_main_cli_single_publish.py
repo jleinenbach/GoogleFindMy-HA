@@ -405,3 +405,207 @@ async def test_a_registration_that_never_finishes_still_saves_the_keys(
     assert (
         "The push registration did not finish within 0 s; saving the keys now." in out
     )
+
+
+# --- docker stop (SIGTERM) inside the write block ---------------------------
+#
+# ``docker stop`` sends SIGTERM; ``entrypoint.sh`` forwards it to the login.
+# Without a handler the process died at once and the block never wrote: the
+# vault keys gathered in sign-in 2 of 2 were lost. While the block runs, the
+# event loop's handler now cancels the bootstrap, the block writes what it
+# holds, and the run ends with status 143 (128 + SIGTERM).
+#
+# The tests send a real SIGTERM to this process. A counting stand-in handler is
+# installed first, so a build without the loop handler (the red probe) records
+# the signal instead of killing pytest.
+
+
+@pytest.fixture
+def _sigterm_stand_in() -> Any:
+    import signal
+
+    received: list[int] = []
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda signum, _frame: received.append(signum))
+    try:
+        yield received
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _send_sigterm() -> None:
+    import os
+    import signal
+
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+async def _bootstrap_outcome(cache: Any) -> BaseException | None:
+    """Run the bootstrap; return what it raised (``None`` for a normal end)."""
+    from custom_components.googlefindmy import main as cli_main
+
+    try:
+        await asyncio.wait_for(cli_main._run_cli_bootstrap(cache, ""), timeout=10)
+    except BaseException as err:  # noqa: BLE001 - the outcome is the result
+        return err
+    return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_sigterm_stand_in")
+async def test_a_stop_during_the_vault_read_saves_the_key_read_so_far(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """SIGTERM after the shared key: it is on disk, and the run ends with 143."""
+    from custom_components.googlefindmy import main as cli_main
+
+    cache, path, writes = _bootstrap_world(
+        monkeypatch, tmp_path, {"username": "user@example.com", "oauth_token": "o"}
+    )
+    _install_steps(monkeypatch)
+
+    async def _vault_stopped(cache_: Any) -> None:
+        await cache_.set("shared_key", "aa" * 32)
+        _send_sigterm()
+        await asyncio.sleep(2)  # the owner-key versions are still being read
+        await cache_.set("owner_key_versions", [1])
+
+    monkeypatch.setattr(cli_main, "_ensure_vault_keys", _vault_stopped)
+
+    outcome = await _bootstrap_outcome(cache)
+
+    assert isinstance(outcome, SystemExit), f"run ended with {outcome!r}"
+    assert outcome.code == 143
+    final = json.loads(path.read_text(encoding="utf-8"))
+    assert final["shared_key"] == "aa" * 32
+    assert "owner_key_versions" not in final
+    assert "fcm_credentials" not in final
+    assert len([w for w in writes if "shared_key" in w]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_sigterm_stand_in")
+async def test_a_stop_while_waiting_for_push_data_saves_the_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """SIGTERM in the push wait: keys and versions are saved, without push data.
+
+    This is the likely moment: the browser already showed success. Home
+    Assistant's own receiver registers when the bundle has no push data.
+    """
+    from custom_components.googlefindmy import main as cli_main
+
+    cache, path, writes = _bootstrap_world(
+        monkeypatch, tmp_path, {"username": "user@example.com", "oauth_token": "o"}
+    )
+    _install_steps(monkeypatch)
+
+    async def _unregistered(_cache: Any) -> _Fcm:
+        asyncio.get_running_loop().call_later(0.05, _send_sigterm)
+        return _Fcm()
+
+    monkeypatch.setattr(cli_main, "_setup_fcm_receiver", _unregistered)
+    monkeypatch.setattr(cli_main, "_PUSH_REGISTRATION_WAIT_S", 1.0, raising=False)
+    monkeypatch.setattr(cli_main, "_PUSH_REGISTRATION_POLL_S", 0.01, raising=False)
+
+    outcome = await _bootstrap_outcome(cache)
+
+    assert isinstance(outcome, SystemExit), f"run ended with {outcome!r}"
+    assert outcome.code == 143
+    final = json.loads(path.read_text(encoding="utf-8"))
+    assert final["shared_key"] == "aa" * 32
+    assert final["owner_key_versions"] == [1]
+    assert "fcm_credentials" not in final
+    assert len([w for w in writes if "shared_key" in w]) == 1
+    captured = capsys.readouterr()
+    assert (
+        "The login was stopped (SIGTERM) during sign-in 2 of 2; whatever it had "
+        "read by then was saved." in captured.err
+    )
+    assert "The push registration did not finish" not in captured.out
+
+
+@pytest.mark.asyncio
+async def test_the_stop_handler_ends_with_the_write_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """After the block SIGTERM is no longer the login's: the menu keeps the default."""
+    import signal
+
+    from custom_components.googlefindmy import main as cli_main
+    from custom_components.googlefindmy.NovaApi.ListDevices import (
+        nbe_list_devices as nbe,
+    )
+
+    cache, _path, _writes = _bootstrap_world(
+        monkeypatch, tmp_path, {"username": "user@example.com", "oauth_token": "o"}
+    )
+    _install_steps(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    async def _vault_sees(cache_: Any) -> None:
+        seen["in_block"] = signal.getsignal(signal.SIGTERM)
+        await cache_.set("shared_key", "aa" * 32)
+
+    async def _menu_sees(**_kwargs: object) -> None:
+        seen["after_block"] = signal.getsignal(signal.SIGTERM)
+
+    monkeypatch.setattr(cli_main, "_ensure_vault_keys", _vault_sees)
+    monkeypatch.setattr(nbe, "_async_cli_main", _menu_sees)
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        await cli_main._run_cli_bootstrap(cache, "")
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert seen["in_block"] not in (signal.SIG_DFL, signal.SIG_IGN, None)
+    assert seen["after_block"] == signal.SIG_DFL
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_sigterm_stand_in")
+async def test_a_cancellation_that_is_not_a_stop_stays_a_cancellation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the SIGTERM handler turns a cancellation into status 143."""
+    from custom_components.googlefindmy import main as cli_main
+
+    cache, path, _writes = _bootstrap_world(
+        monkeypatch, tmp_path, {"username": "user@example.com", "oauth_token": "o"}
+    )
+    _install_steps(monkeypatch)
+
+    async def _vault_cancelled(cache_: Any) -> None:
+        await cache_.set("shared_key", "aa" * 32)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(cli_main, "_ensure_vault_keys", _vault_cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await cli_main._run_cli_bootstrap(cache, "")
+    assert json.loads(path.read_text(encoding="utf-8"))["shared_key"] == "aa" * 32
+
+
+@pytest.mark.asyncio
+async def test_a_loop_without_signal_handlers_runs_the_login_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Windows' loop has no ``add_signal_handler``; the login runs as before."""
+    from custom_components.googlefindmy import main as cli_main
+
+    cache, _path, writes = _bootstrap_world(
+        monkeypatch, tmp_path, {"username": "user@example.com", "oauth_token": "o"}
+    )
+    _install_steps(monkeypatch)
+    loop = asyncio.get_running_loop()
+
+    def _unsupported(*_args: object) -> None:
+        raise NotImplementedError
+
+    monkeypatch.setattr(loop, "add_signal_handler", _unsupported)
+
+    await cli_main._run_cli_bootstrap(cache, "")
+
+    assert len([w for w in writes if "shared_key" in w]) == 1

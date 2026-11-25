@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 import sys
 import types
 from pathlib import Path
@@ -40,7 +41,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 
     from custom_components.googlefindmy.KeyBackup.vault_web_api import (
         VaultCause,
@@ -306,7 +307,6 @@ def _register_file_cache(entry_id: str = "") -> object:
     Returns the cache instance so callers can pass it to the FCM setup.
     """
     import json  # noqa: PLC0415
-    from collections.abc import Iterator  # noqa: PLC0415
 
     from custom_components.googlefindmy.Auth.token_cache import (  # noqa: PLC0415
         _register_instance,
@@ -1418,6 +1418,52 @@ async def _await_push_credentials(cache: object) -> None:
         await asyncio.sleep(_PUSH_REGISTRATION_POLL_S)
 
 
+# ``docker stop`` sends SIGTERM; a run that ends on it reports 128 + 15, as the
+# shell does for a process the signal killed.
+_EXIT_TERMINATED: Final = 143
+
+
+class _StopRequest:
+    """Whether the SIGTERM handler of ``_cancel_on_sigterm`` has fired."""
+
+    def __init__(self) -> None:
+        self.fired = False
+
+
+@contextlib.contextmanager
+def _cancel_on_sigterm() -> Iterator[_StopRequest]:
+    """While the block runs, let SIGTERM cancel the current task instead of killing.
+
+    Killed by the signal, the process never reached the end of the write block,
+    and the vault keys of sign-in 2 of 2 were lost (``docker stop`` during the
+    vault read or the push wait). Cancelled, the task unwinds through the
+    block's ``finally``, which writes what it holds. The handler is the event
+    loop's, so it runs as a callback between steps, never inside a write, and
+    it is removed when the block ends: outside it SIGTERM keeps its default. A
+    loop without signal handlers (Windows) leaves the run as it was.
+    """
+    request = _StopRequest()
+    loop = asyncio.get_running_loop()
+    # Entered from the bootstrap coroutine, so a current task always exists.
+    task = cast("asyncio.Task[Any]", asyncio.current_task())
+
+    def _on_sigterm() -> None:
+        request.fired = True
+        task.cancel()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+    # NotImplementedError (no signal support, Windows) is a RuntimeError, as is
+    # the refusal outside the main thread.
+    except RuntimeError:
+        yield request
+        return
+    try:
+        yield request
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+
+
 async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
     """Run the standalone token bootstrap, then hand off to the interactive CLI.
 
@@ -1456,11 +1502,26 @@ async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
         # Assistant never sees a bundle that has keys but no push credentials.
         # The push data are created by a task of the receiver, so the block
         # waits for them before it ends.
-        with _deferred_writes(file_cache):
-            await _ensure_vault_keys(file_cache)
-            await _clear_stale_adm_token(file_cache)
-            fcm = await _setup_fcm_receiver(file_cache)
-            await _await_push_credentials(file_cache)
+        # A SIGTERM (docker stop) inside the block cancels it; the block then
+        # writes what it holds and the run ends with status 143.
+        with _cancel_on_sigterm() as stop:
+            try:
+                with _deferred_writes(file_cache):
+                    await _ensure_vault_keys(file_cache)
+                    await _clear_stale_adm_token(file_cache)
+                    fcm = await _setup_fcm_receiver(file_cache)
+                    await _await_push_credentials(file_cache)
+            except asyncio.CancelledError:
+                if not stop.fired:
+                    raise
+                # stderr, like the status-130 message of a cancelled step.
+                print(
+                    "\nThe login was stopped (SIGTERM) during sign-in 2 of 2; "
+                    "whatever it had read by then was saved.\n",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise SystemExit(_EXIT_TERMINATED) from None
         try:
             await _async_cli_main(entry_id=entry_id, session=session)
         finally:
