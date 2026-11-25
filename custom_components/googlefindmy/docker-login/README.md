@@ -456,6 +456,11 @@ A stop before the key was read can leave the incomplete file shown further
 up, and the same notice then names it. Running the login again is the recovery
 here too.
 
+A stop does not put tokens back. Under `--reauth`, a stop during sign-in 1 of 2
+leaves the cleared tokens cleared, because SIGTERM ends the program before the
+restore described above can run. Run the login again (without `--reauth`) to
+sign in afresh.
+
 ## Browser closed by accident
 
 Closing a sign-in window before it finished does not end the login at once. The
@@ -780,9 +785,10 @@ there is no separate image to rebuild for code changes.
   messages are quoted in full under [Cancelling a login](#cancelling-a-login).
 - **The run ended with exit status 143:** the container was stopped from
   outside, usually by `docker stop`, which sends SIGTERM. It is neither a
-  cancellation (`130`) nor a failed step (`1`). Start the login again; what a
-  stop during sign-in 2 of 2 keeps is described under
-  [Cancelling a login](#cancelling-a-login).
+  cancellation (`130`) nor a failed step (`1`). A stop at the tracker menu,
+  after the login finished, leaves a complete `secrets.json`; a stop before
+  that needs another run. What a stop during sign-in 2 of 2 keeps is described
+  under [Cancelling a login](#cancelling-a-login).
 - **A `TimeoutException` traceback instead of an `[AuthFlow]` line:** that is
   the opposite case, and the exit status is *not* `130`. Chrome or ChromeDriver
   stopped answering while the login was still being waited for, so the run
