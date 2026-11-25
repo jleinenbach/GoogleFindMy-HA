@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, cast
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.KeyBackup.vault_web_api import (
     SharedKeyFlowDeadlineError,
+    SharedKeyStepAborted,
 )
 from custom_components.googlefindmy.typing_utils import (
     run_in_executor as _run_in_executor,
@@ -284,6 +285,10 @@ async def _retrieve_shared_key_hex(*, vault_sink: VaultSink | None = None) -> st
 
         # Installed but unusable: the type says so where the text cannot.
         if isinstance(err, BrowserPackagesUnusable):
+            raise
+        # The user closed the window or cancelled on the page: the message
+        # already says so, and "install Chrome" would send them the wrong way.
+        if isinstance(err, SharedKeyStepAborted):
             raise
 
         # "Install these two packages" and "your Chrome installation is

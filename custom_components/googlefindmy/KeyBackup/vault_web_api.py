@@ -139,7 +139,9 @@ class VaultCause(StrEnum):
     """Closed set of reasons why a vault fetch produced no usable entries.
 
     The parser in this module emits the first four; the browser driver and the
-    login tool emit the remaining three.
+    login tool emit the remaining four. ``window_closed`` says the user closed
+    the browser window before the fetch finished, which is neither a Google
+    answer nor a driver defect.
     """
 
     NO_FRAME = "no_frame"
@@ -149,6 +151,7 @@ class VaultCause(StrEnum):
     HTTP_STATUS = "http_status"
     SELF_TEST_FAILED = "self_test_failed"
     ALERT_DEADLINE = "alert_deadline"
+    WINDOW_CLOSED = "window_closed"
 
 
 class SharedKeyFlowDeadlineError(RuntimeError):
@@ -158,6 +161,26 @@ class SharedKeyFlowDeadlineError(RuntimeError):
     say that the sign-in was not finished in time instead of blaming the
     browser installation. Defined here because this module needs no browser
     package, so the Home Assistant side can import it as well.
+    """
+
+
+class SharedKeyStepAborted(RuntimeError):
+    """Sign-in 2 of 2 ended without the shared key because of the user.
+
+    Raised for a window closed more often than it is reopened and for a cancel
+    on the Google unlock page. Its message is the line the login tool prints:
+    it names the step and says that the result of sign-in 1 of 2 is kept. It
+    never mentions the browser installation, because nothing is wrong with it.
+    Defined here, like `SharedKeyFlowDeadlineError`, so code without the browser
+    packages can tell it apart.
+    """
+
+
+class SharedKeyCancelledOnPage(SharedKeyStepAborted):
+    """The Google unlock page called ``closeView``: the user cancelled there.
+
+    Never followed by a new window: the page ended the step on purpose, and the
+    program does not reopen what was closed for a reason.
     """
 
 

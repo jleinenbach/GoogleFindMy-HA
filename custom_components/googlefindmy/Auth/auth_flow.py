@@ -158,6 +158,11 @@ def _describe_lost_session(err: WebDriverException) -> str | None:
     return None
 
 
+# Sign-in 2 of 2 (`KeyBackup/shared_key_flow.py`) asks the same question about
+# its own window; one classifier keeps a crash on the traceback path there too.
+describe_lost_session = _describe_lost_session
+
+
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the standalone auth flow helper."""
 

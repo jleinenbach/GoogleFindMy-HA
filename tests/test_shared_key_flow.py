@@ -14,6 +14,7 @@ from custom_components.googlefindmy.KeyBackup import shared_key_flow
 from custom_components.googlefindmy.KeyBackup.vault_web_api import (
     FETCH_SCRIPT,
     FIND_MY_DEVICE_URL,
+    SharedKeyCancelledOnPage,
     SharedKeyFlowDeadlineError,
     VaultCause,
     VaultFetchResult,
@@ -103,13 +104,14 @@ def test_returns_shared_key_hex_on_set_vault_keys(
     assert driver.quit_calls == 1
 
 
-def test_close_view_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_close_view_raises_cancelled_on_page(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = json.dumps({"method": "closeView"})
     driver = _FakeDriver([payload])
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
 
 
 def test_malformed_json_is_discarded_then_loop_continues(
@@ -120,7 +122,8 @@ def test_malformed_json_is_discarded_then_loop_continues(
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
     assert "malformed alert payload" in " ".join(caplog.messages).lower()
 
 
@@ -133,7 +136,8 @@ def test_set_vault_keys_with_invalid_payload_continues(
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
     assert "invalid vaultkeys" in " ".join(caplog.messages).lower()
 
 
@@ -149,7 +153,8 @@ def test_unhandled_method_is_logged_then_loop_continues(
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
     assert "unhandled alert payload" in " ".join(caplog.messages).lower()
 
 
@@ -185,7 +190,8 @@ def test_timeout_exception_continues_loop(monkeypatch: pytest.MonkeyPatch) -> No
     )
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
     assert state["raised"] is True
 
 
@@ -374,7 +380,8 @@ def test_malformed_payload_is_logged_by_shape_not_content(
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
 
     logged = " ".join(caplog.messages)
     assert "malformed alert payload" in logged.lower()
@@ -393,7 +400,8 @@ def test_invalid_vault_keys_payload_is_redacted(
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
 
     logged = " ".join(str(record.getMessage()) for record in caplog.records)
     assert "invalid vaultkeys" in logged.lower()
@@ -416,7 +424,8 @@ def test_unhandled_payload_is_redacted(
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
 
     logged = " ".join(str(record.getMessage()) for record in caplog.records)
     assert "unhandled alert payload" in logged.lower()
@@ -442,7 +451,8 @@ def test_an_unexpected_key_is_not_logged_either(
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
 
     logged = " ".join(str(record.getMessage()) for record in caplog.records)
     assert _SECRET not in logged
@@ -481,7 +491,8 @@ def test_cli_path_binds_the_redaction_helper_not_the_diagnostics_copy(
     _patch_flow(monkeypatch, driver)
     monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
     assert calls, "the unhandled branch must route through the redaction helper"
     assert "TRACED" in " ".join(str(r.getMessage()) for r in caplog.records)
 
@@ -826,6 +837,7 @@ def test_alert_deadline_is_not_reached_by_a_quick_answer(
     monkeypatch.setattr(shared_key_flow, "_monotonic", FakeClock())
     _quitting(monkeypatch)
 
-    assert shared_key_flow.request_shared_key_flow() is None
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
     assert "alert_deadline" not in " ".join(caplog.messages)
     assert driver.quit_calls == 1

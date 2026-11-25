@@ -738,6 +738,13 @@ class _VaultSink:
 
 def _print_vault_cause(cause: VaultCause, count: int, hint: str | None = None) -> None:
     """Report why no owner-key version field was written: cause class and count only."""
+    from custom_components.googlefindmy.KeyBackup.vault_web_api import (  # noqa: PLC0415
+        VaultCause,
+    )
+
+    if hint is None and cause is VaultCause.WINDOW_CLOSED:
+        # Not a failed request: the user closed the window, so name it.
+        hint = "The sign-in window 2 of 2 was closed before the account vault was read."
     lead = f"\n{hint}\n" if hint else ""
     print(
         f"{lead}\nNote: owner-key versions were not saved "
@@ -1040,6 +1047,17 @@ async def _ensure_vault_keys(cache: object) -> None:
             MISSING_BROWSER_PACKAGES_HINT,
             browser_packages_missing,
         )
+        from custom_components.googlefindmy.KeyBackup.vault_web_api import (  # noqa: PLC0415
+            SharedKeyStepAborted,
+        )
+
+        # The user closed sign-in 2 of 2 or cancelled it on the Google page.
+        # Its message names the step and what is kept; the advice below would
+        # send them back to a browser problem they do not have. Status 130 like
+        # a cancelled sign-in 1 of 2.
+        if isinstance(err, SharedKeyStepAborted):
+            print(f"\n{err}\n", file=sys.stderr, flush=True)
+            sys.exit(130)
 
         # The browser packages are optional (they are not in manifest.json), so
         # "they are not installed" is a normal way for this to fail, and the
