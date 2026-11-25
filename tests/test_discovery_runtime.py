@@ -1249,6 +1249,11 @@ _DISCOVERY_ABORT_VERDICTS: dict[str, tuple[discovery.CloudDiscoveryOutcome, str]
         discovery.CloudDiscoveryOutcome.ACCEPTED,
         "the payload itself was rejected; the next scan submits identical bytes",
     ),
+    "bundle_older_than_imported": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "the entry recorded a newer imported bundle of the account; the same "
+        "bundle is turned away again at every scan, so a retry only spins",
+    ),
     "keys_missing": (
         discovery.CloudDiscoveryOutcome.ACCEPTED,
         "bundle without a usable shared_key: a non-renewable dead end, rejected "

@@ -101,6 +101,7 @@
       "already_configured": "Google Find My Device ya está configurado.",
       "credentials_updated": "Las credenciales guardadas de esta cuenta se reemplazaron por las encontradas.",
       "credentials_kept": "Se conservaron las credenciales guardadas. No se cambió nada.",
+      "bundle_older_than_imported": "Estos datos de inicio de sesión no son más recientes que los ya importados. No se cambió nada.",
       "cannot_connect": "No se pudo conectar con Google Find My Device.",
       "dependency_not_ready": "Las dependencias de Google Find My Device no están instaladas. Instala los requisitos e inténtalo de nuevo.",
       "invalid_discovery_info": "La carga de descubrimiento no es válida. Verifica las credenciales y vuelve a intentarlo.",

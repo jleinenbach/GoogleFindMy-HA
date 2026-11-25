@@ -2131,6 +2131,54 @@ async def test_creating_the_entry_hands_the_preflight_delete_to_the_gate(
 
 
 @pytest.mark.asyncio
+async def test_an_entry_from_the_preview_records_the_imported_bundle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The preview imports a watched bundle, so the entry records it like a card.
+
+    Without the record an older bundle of the account, left where the delete
+    hook cannot remove it, would come back as a discovery card and replace the
+    credentials the preview imported.
+    """
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json", email="recorded@example.com"
+    )
+    os.utime(bundle, (2_000, 2_000))
+    _pin_watch_paths(monkeypatch, [bundle])
+
+    async def _pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1] if candidates else None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _pick)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([])  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    await flow.async_step_user(None)
+    await flow.async_step_found_local_bundle({"use_found_bundle": True})
+    created = await flow.async_step_device_selection({})
+    if inspect.isawaitable(created):
+        created = await created
+
+    scanned = discovery.read_secrets_bundle(bundle)
+    assert scanned is not None
+    assert created["type"] == "create_entry"
+    assert created["data"][config_flow.DATA_DISCOVERY_IMPORTED_DIGEST] == scanned.digest
+    assert created["data"][config_flow.DATA_DISCOVERY_IMPORTED_MTIME] == 2_000
+
+
+@pytest.mark.asyncio
 async def test_manual_tokens_dead_token_reports_cannot_connect(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

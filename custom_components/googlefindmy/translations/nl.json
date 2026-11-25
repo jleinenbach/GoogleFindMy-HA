@@ -101,6 +101,7 @@
       "already_configured": "Google Find My Device is al geconfigureerd.",
       "credentials_updated": "De opgeslagen inloggegevens voor dit account zijn vervangen door de gevonden gegevens.",
       "credentials_kept": "De opgeslagen inloggegevens zijn behouden. Er is niets gewijzigd.",
+      "bundle_older_than_imported": "Deze aanmeldgegevens zijn niet nieuwer dan de al geïmporteerde. Er is niets gewijzigd.",
       "cannot_connect": "Kan geen verbinding maken met Google Find My Device.",
       "dependency_not_ready": "Google Find My Device-afhankelijkheden zijn niet geïnstalleerd. Installeer de vereisten en probeer het opnieuw.",
       "invalid_discovery_info": "De discovery-payload was ongeldig. Controleer de inloggegevens en probeer het opnieuw.",

@@ -53,6 +53,29 @@ def test_the_bundle_is_redacted_as_a_json_string() -> None:
     assert _SECRET not in str(redacted)
 
 
+def test_the_imported_bundle_digest_is_redacted_but_its_time_is_not() -> None:
+    """The digest identifies the credentials; the time only says when.
+
+    The time stays visible because it is what explains a discovery card that
+    was turned away as not newer than the import.
+    """
+
+    from custom_components.googlefindmy.const import (  # noqa: PLC0415
+        DATA_DISCOVERY_IMPORTED_DIGEST,
+        DATA_DISCOVERY_IMPORTED_MTIME,
+    )
+
+    payload = {
+        DATA_DISCOVERY_IMPORTED_DIGEST: "f" * 64,
+        DATA_DISCOVERY_IMPORTED_MTIME: 3_000.0,
+    }
+
+    redacted = _redact(payload)
+
+    assert redacted[DATA_DISCOVERY_IMPORTED_DIGEST] == REDACTED
+    assert redacted[DATA_DISCOVERY_IMPORTED_MTIME] == 3_000.0
+
+
 def test_the_two_keys_that_decrypt_locations_are_redacted() -> None:
     payload = {"shared_key": _SECRET, "owner_key": _SECRET, "scanned_data": _SECRET}
 

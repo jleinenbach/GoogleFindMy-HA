@@ -209,6 +209,44 @@ async def test_reusing_a_stored_aas_value_reports_no_generation(
 
 
 @pytest.mark.asyncio
+async def test_a_filtered_aas_value_is_not_reported_as_reused(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reuse log follows the shortcut, also once the filter grows.
+
+    ``_stored_aas_form_value`` mirrors the shortcut in ``_generate_aas_token``.
+    When the negative filter rejects an ``aas_et/`` value, the shortcut is not
+    taken and an exchange runs, so the routine must not claim it reused the
+    stored value.
+    """
+
+    stored = "aas_et/" + "S" * 80
+
+    def _reject_all(_token: str) -> str:
+        return "rejected by a stricter filter"
+
+    def _exchange(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"Token": "aas_et/EXCHANGED", "Email": _USER}
+
+    monkeypatch.setattr(
+        aas_token_retrieval, "_disqualifies_oauth_for_exchange", _reject_all
+    )
+    monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", _exchange)
+    cache = _Cache(entry_id="e4", **{CONF_OAUTH_TOKEN: stored})
+    await cache.set(aas_token_retrieval.username_string, _USER)
+    await cache.set(f"adm_token_{_USER}", "adm-fallback-oauth")
+
+    with caplog.at_level(logging.DEBUG, logger=aas_token_retrieval.__name__):
+        token = await aas_token_retrieval.async_get_aas_token(cache=cache)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert await aas_token_retrieval._stored_aas_form_value(cache) is None  # type: ignore[arg-type]
+    assert token == "aas_et/EXCHANGED"
+    assert not [m for m in messages if "reusing the stored value" in m]
+    assert [m for m in messages if "generating new token" in m]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_exchange_names_the_entry(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
