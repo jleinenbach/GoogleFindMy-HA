@@ -403,7 +403,8 @@ Either way, re-running the login is the whole recovery procedure. After a
 cancelled sign-in 2 of 2 the re-run finds the stored tokens and opens only the
 second window.
 
-Cancelling a **re-authentication** costs nothing either. `--reauth` (passed
+Cancelling a **re-authentication** costs nothing either (a stop from outside
+is the exception, see the end of this section). `--reauth` (passed
 through `GFMY_ARGS`, see [Forcing a fresh login](#forcing-a-fresh-login)) clears
 the cached tokens before it starts, because an empty cache is what makes the CLI
 open the login at all. If sign-in 1 of 2 then ends without a token (you closed
@@ -456,10 +457,10 @@ A stop before the key was read can leave the incomplete file shown further
 up, and the same notice then names it. Running the login again is the recovery
 here too.
 
-A stop does not put tokens back. Under `--reauth`, a stop during sign-in 1 of 2
-leaves the cleared tokens cleared, because SIGTERM ends the program before the
-restore described above can run. Run the login again (without `--reauth`) to
-sign in afresh.
+A stop does not put cleared tokens back. Under `--reauth`, a stop during
+sign-in 1 of 2 leaves them cleared, because SIGTERM ends the program before
+the `--reauth` restore described above can run. Run the login again
+(without `--reauth`) to sign in afresh.
 
 ## Browser closed by accident
 
