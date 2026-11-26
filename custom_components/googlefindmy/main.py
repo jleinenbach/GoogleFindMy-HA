@@ -1231,6 +1231,80 @@ def _credential_is_present(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _warn_before_replacing_unconsumed_bundle() -> None:
+    """Warn before ``--reauth`` replaces a bundle Home Assistant may not have imported.
+
+    There is one ``secrets.json``. A bundle in it that Home Assistant has not
+    imported yet is gone once ``--reauth`` clears the file and the sign-in
+    writes new keys, possibly for another account: a second run for a second
+    account is the usual way to get there, from ``login.sh``, ``login.cmd`` or a
+    plain ``docker compose run`` alike. The file cannot tell whether the import
+    happened (Home Assistant cannot delete it from a read-only mount), so the
+    warning says "if". It runs before anything is written and before the stop
+    handler of sign-in 1 of 2 is set, so a stop here costs nothing. When
+    ``auth_flow._stdin_is_attended`` sees someone (a terminal, or an IDE console
+    with ``GOOGLEFINDMY_ASSUME_INTERACTIVE=1``) it waits for Enter; Ctrl+C or the end of input ends the
+    run with ``_EXIT_LOGIN_ABORTED`` and leaves the file as it was.
+    """
+    import json  # noqa: PLC0415
+
+    bundle_path = _resolve_secrets_path()
+    try:
+        with open(bundle_path, encoding="utf-8") as fh:
+            stored = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if not isinstance(stored, dict):
+        return
+    # The same keys _clear_stale_tokens_for_reauth removes: ``shared_key`` and
+    # its older per-user form ``shared_key_<username>``.
+    if not any(
+        key.startswith("shared_key") and _credential_is_present(value)
+        for key, value in stored.items()
+    ):
+        return
+
+    from custom_components.googlefindmy.Auth.aas_token_retrieval import (  # noqa: PLC0415
+        _mask_email_for_logs,
+    )
+    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+        _stdin_is_attended,
+    )
+    from custom_components.googlefindmy.chrome_driver import (  # noqa: PLC0415
+        _is_container_login,
+    )
+
+    username = stored.get("username")
+    account = _mask_email_for_logs(username if isinstance(username, str) else None)
+    # The launcher's own wording for the same file (entrypoint.sh).
+    location = (
+        "data/secrets.json next to the launcher"
+        if _is_container_login()
+        else str(bundle_path)
+    )
+    print(
+        f"\nThe credential file ({location}) still holds a bundle for {account}.\n"
+        "If Home Assistant has not imported it yet, this run replaces it: "
+        "import it first, or copy the file.",
+        file=sys.stderr,
+        flush=True,
+    )
+    # The same test as the sign-in prompts: a terminal, or an IDE console that
+    # sets GOOGLEFINDMY_ASSUME_INTERACTIVE=1; a closed stdin counts as nobody.
+    if not _stdin_is_attended():
+        return
+    try:
+        input("Press Enter to continue, or Ctrl+C to stop. ")
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl+C reaches the whole process group in the container, and the
+        # entrypoint forwards another one; a second KeyboardInterrupt must not
+        # cut the message short.
+        with contextlib.suppress(ValueError):
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+        print("\nStopped. Nothing was changed.", file=sys.stderr, flush=True)
+        sys.exit(_EXIT_LOGIN_ABORTED)
+
+
 def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
     """Clear cached tokens from secrets.json to force re-authentication.
 
@@ -1550,17 +1624,60 @@ def _raise_on_sigterm() -> Iterator[None]:
     stack instead, through the ``finally`` that quits Chrome, into the restore
     in ``_main``. The previous handler comes back when the block ends, so a
     stop during the restore itself meets the default again (the write is
-    atomic either way).
+    atomic either way). Outside the main thread ``signal.signal`` refuses with
+    ``ValueError``; the block then runs without the handler, as
+    ``_cancel_on_sigterm`` does, instead of refusing the sign-in.
     """
 
     def _on_sigterm(signum: int, frame: types.FrameType | None) -> None:
         raise _LoginTerminated
 
-    previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    except ValueError:  # outside the main thread
+        yield
+        return
     try:
         yield
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+@contextlib.contextmanager
+def _hold_stop_signals() -> Iterator[None]:
+    """Hold SIGTERM and SIGINT back while the block runs, then deliver them.
+
+    ``--reauth`` clears the cached tokens, and only then does ``_main`` hold
+    the callable that puts them back. A stop between the two left the account
+    signed out with nothing to restore it (review of PR #1485). Inside the
+    block each of the two signals only marks itself as pending. When the block
+    ends, the previous handlers come back and every pending signal is raised
+    again, so it meets them -- ``_LoginTerminated`` or ``KeyboardInterrupt`` --
+    with the restore in place. Python runs signal handlers in the main thread
+    whichever thread the signal reached, so the mark holds for a process-wide
+    signal too. An exception from the block wins over a pending signal; the
+    run ends on it either way. Outside the main thread nothing can be held, and
+    the block runs as it is.
+    """
+    pending: list[int] = []
+
+    def _mark(signum: int, frame: types.FrameType | None) -> None:
+        if signum not in pending:
+            pending.append(signum)
+
+    previous: dict[int, Any] = {}
+    try:
+        try:
+            for stop_signal in (signal.SIGTERM, signal.SIGINT):
+                previous[stop_signal] = signal.signal(stop_signal, _mark)
+        except ValueError:  # not the main thread: there is nothing to hold
+            pass
+        yield
+    finally:
+        for restored, handler in previous.items():
+            signal.signal(restored, handler)
+    for held in pending:
+        signal.raise_signal(held)
 
 
 async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
@@ -1848,16 +1965,20 @@ def _main(argv: Sequence[str] | None = None) -> None:
     # then a cache-signal check that was always empty for a fresh shell start),
     # both of which could dead-end a repo-layout start in an opaque
     # MissingTokenCacheError instead of bootstrapping.
-    restore_cleared_tokens = _clear_stale_tokens_for_reauth() if args.reauth else None
+    if args.reauth:
+        _warn_before_replacing_unconsumed_bundle()
+    restore_cleared_tokens: Callable[[], None] | None = None
     try:
-        # Only a --reauth run has tokens to put back; without it SIGTERM keeps
-        # its default and the signal ends the process (a shell or docker then
-        # reports 143).
-        with (
-            _raise_on_sigterm()
-            if restore_cleared_tokens is not None
-            else contextlib.nullcontext()
-        ):
+        # Only a --reauth run can have tokens to put back; without it SIGTERM
+        # keeps its default and the signal ends the process (a shell or docker
+        # then reports 143). The handler is in place before the tokens are
+        # cleared, and the clearing runs with the stop signals held until the
+        # restore callable is assigned: a stop in between used to find the
+        # tokens gone and nothing to put them back.
+        with _raise_on_sigterm() if args.reauth else contextlib.nullcontext():
+            if args.reauth:
+                with _hold_stop_signals():
+                    restore_cleared_tokens = _clear_stale_tokens_for_reauth()
             _ensure_authenticated()
     except BaseException as err:
         # A cancelled login, a Ctrl+C, the sys.exit from a driver failure, or a

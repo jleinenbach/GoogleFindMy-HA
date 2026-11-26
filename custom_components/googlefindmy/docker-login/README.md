@@ -348,7 +348,9 @@ and is skipped when `secrets.json` already holds that key. A login can end early
 in four ways that the flow itself names, and the line it prints says which one it
 was. (`Ctrl+C` is a fifth way out. It ends with the same status, but it is the
 one cancellation that still prints a Python `KeyboardInterrupt` traceback instead
-of an `[AuthFlow]` line.)
+of an `[AuthFlow]` line. A `--reauth` run can also stop with that status before
+either window opens, at the question after its overwrite warning; see
+[Forcing a fresh login](#forcing-a-fresh-login).)
 
 A window you close is opened again first, at most twice per sign-in (see
 [Browser closed by accident](#browser-closed-by-accident)). The two "closed"
@@ -678,6 +680,29 @@ echo '{}' > data/secrets.json
 GFMY_ARGS="--reauth" bash login.sh
 ```
 
+There is only one `data/secrets.json`. If it still holds a bundle (for example
+from a first run for another account that Home Assistant has not imported yet),
+a `--reauth` run warns before it changes anything; the account is masked:
+
+```
+The credential file (data/secrets.json next to the launcher) still holds a bundle for u***@example.com.
+If Home Assistant has not imported it yet, this run replaces it: import it first, or copy the file.
+```
+
+At a terminal it then asks you to press Enter to go on. `Ctrl+C` (or the end of
+input) stops the run with exit status `130` and this line, and the file stays as
+it was:
+
+```
+Stopped. Nothing was changed.
+```
+
+Without a terminal (input not attached) the warning is printed and the run goes
+on, unless `GOOGLEFINDMY_ASSUME_INTERACTIVE=1` says someone is there (an IDE
+console that passes input through a pipe); then it asks as well. A file only knows that it holds a bundle, not whether Home Assistant has
+imported it already, so the warning also appears when the import has happened
+but the file could not be removed (a read-only mount).
+
 `GFMY_ARGS` is forwarded to `main.py`. Useful values: `--reauth` (force login),
 `--debug` (verbose bootstrap/FCM logging), `--entry <id>` (select one config
 entry when the cache holds several).
@@ -790,7 +815,10 @@ there is no separate image to rebuild for code changes.
   cancellation. The `[AuthFlow]` line above it names which sign-in ended and
   why: a window closed a third time, a wait that ran out, or a cancel on the
   Google unlock page. A `Ctrl+C` gets the same status but ends in a
-  `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line. Start the login
+  `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line. A `--reauth`
+  run that ends with `Stopped. Nothing was changed.` was stopped at the question
+  after its overwrite warning, before any window opened, and left `secrets.json`
+  as it was (see [Forcing a fresh login](#forcing-a-fresh-login)). Start the login
   again; after a cancelled sign-in 2 of 2 it opens only the second window. The
   messages are quoted in full under [Cancelling a login](#cancelling-a-login).
 - **The run ended with exit status 143:** the container was stopped from
