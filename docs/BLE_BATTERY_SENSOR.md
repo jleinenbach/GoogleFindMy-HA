@@ -182,6 +182,17 @@ appears only once INFO is enabled for the integration, for example with
 results" in the README shows two ways to set it). The log view under **Settings → System → Logs** lists warnings and errors only; the
 probe appears in the full log.
 
+For a tracker with a static EID (the fixed counter-0 EID of DIY
+microcontroller trackers, window `mcu_static`) the probe, the first
+`FMDN_FLAGS_CONFLICT` line and `FMDN_UWT_TRANSITION` keep their level but
+write `withheld` instead of the flags byte, the XOR mask, the decoded byte
+and the battery level. The mask of a rotating tracker changes with its EID;
+the counter-0 mask never does, and log lines get pasted into public issues.
+The frame type is clear text and the reserved flag bits are zero, so a
+capture of the advertisement already gives every mask bit except the two
+battery bits, and those fields would supply the rest. The battery sensor
+itself is unaffected.
+
 ---
 
 ## 6. Lessons Learned

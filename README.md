@@ -810,6 +810,9 @@ from Google.
      not available, for example because its key could not be decrypted once.
    - `source`: whether the hashed-flags bit (`flags_bit`) or the frame type
      (`frame_type`) showed the mode.
+   - `decoded`: the decoded hashed-flags byte. Trackers with a static EID (DIY
+     microcontroller trackers registered with GoogleFindMyTools) show
+     `withheld`: their flags mask never changes, and the byte would reveal it.
    - `poll_age_s`: seconds between the last location request this integration
      sent for the device and the advertisement that showed the change. The
      clock starts immediately before the request is sent, after the push

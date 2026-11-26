@@ -652,7 +652,10 @@ _EXPECTED_ARGS = (
     "event.source",
     "event.flags",
     "event.frame",
-    "f'0x{decoded:02x}' if decoded is not None else 'none'",
+    # A static EID writes the fixed label instead of the byte (its mask
+    # never changes, eid_resolver._withhold_if_static).
+    "'withheld' if reading.static_eid else f'0x{reading.decoded:02x}' "
+    "if reading.decoded is not None else 'none'",
     "event.payload_len",
     "event.poll_age_s if event.poll_age_s is not None else 'none'",
     "event.prev_seen_age_s if event.prev_seen_age_s is not None else 'none'",
@@ -670,7 +673,8 @@ def test_transition_line_carries_no_identifying_or_flagged_values() -> None:
     are exactly the expressions listed in ``_EXPECTED_ARGS``, with no keyword
     argument: the class (b)
     identifiers of the match, fields of the recorded event (fixed labels,
-    numbers, the UTC time), the decoded flags byte and the suppressed count;
+    numbers, the UTC time), the decoded flags byte (a fixed label for a
+    static EID) and the suppressed count;
     no name, entity id, address or coordinate. Any added, removed or changed
     argument fails the test and has to be classified again.
 

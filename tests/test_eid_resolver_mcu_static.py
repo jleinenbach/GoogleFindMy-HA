@@ -11,7 +11,11 @@ resolve and the FMDN battery level decodes.
 from __future__ import annotations
 
 import hashlib
+import logging
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from custom_components.googlefindmy import eid_resolver as resolver_module
 from custom_components.googlefindmy.coordinator import DeviceIdentity
@@ -277,3 +281,128 @@ def test_static_eid_flags_decode_with_counter_0_mask_long_after_pairing() -> Non
     assert state.decoded_flags == decoded
     assert state.battery_level == 1
     assert state.uwt_mode is False
+
+
+# Log lines that print the decoded hashed flags of a device.
+_FLAG_LOG_MARKERS = ("FMDN_FLAGS_PROBE", "FMDN_FLAGS_CONFLICT", "FMDN_UWT_TRANSITION")
+
+
+def _new_resolver_with_hass() -> GoogleFindMyEIDResolver:
+    """Resolver whose protection-mode channel runs (it reads ``hass.data``)."""
+    resolver = _new_resolver()
+    resolver.hass = SimpleNamespace(data={})
+    return resolver
+
+
+def _feed_flag_logs(
+    resolver: GoogleFindMyEIDResolver, eid: bytes, mask: int, *, at: int
+) -> None:
+    """Frame and bit agree (probe, mode change), then they disagree (conflict)."""
+    flags = DECODED_FLAGS ^ mask
+    assert _resolve(resolver, bytes([0x41]) + eid + bytes([flags]), at=at)
+    assert _resolve(resolver, bytes([0x40]) + eid + bytes([flags]), at=at + 1)
+
+
+def _flag_lines(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == level and record.getMessage().startswith(_FLAG_LOG_MARKERS)
+    ]
+
+
+def _forget_logged_devices(resolver: GoogleFindMyEIDResolver) -> None:
+    """Let the once-per-device INFO lines fire again, as after a restart."""
+    resolver._flags_logged_devices.clear()
+    resolver._frame_conflict_logged_devices.clear()
+    resolver._frame_conflict_log_at.clear()
+    resolver._uwt_track.clear()
+
+
+def test_static_eid_keeps_flags_mask_out_of_info_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The counter-0 mask never changes, and INFO lines end up in issues.
+
+    The frame type is clear text and the reserved bits are zero, so a capture
+    of the advertisement already gives every mask bit except the two battery
+    bits. No line may carry the mask, the decoded byte or the battery level.
+    The lines themselves stay at INFO with ``withheld`` in those fields, so a
+    reporter still sees the probe (docs/BLE_BATTERY_SENSOR.md, section 6.2).
+    Checked again in the lock window (``timestamp_basis`` ``lock_tracking``),
+    which also produces counter 0.
+    """
+    caplog.set_level(logging.DEBUG, logger=resolver_module.__name__)
+    mask = _flags_mask()
+    assert mask not in (0x40, 0x41)  # Otherwise frame=0x.. would match.
+    resolver = _new_resolver_with_hass()
+    identity = _identity(fast_pair_model_id=mcu_fast_pair_model_id)
+
+    for at in (NOW, NOW + 60):
+        _build(resolver, identity, now=at)
+        if at != NOW:
+            metadata = resolver._lookup_metadata[_static_eid()]
+            assert metadata["timestamp_basis"] == "lock_tracking"
+            _forget_logged_devices(resolver)
+        caplog.clear()
+
+        _feed_flag_logs(resolver, _static_eid(), mask, at=at)
+
+        info = _flag_lines(caplog, logging.INFO)
+        for marker, withheld in (
+            (
+                "FMDN_FLAGS_PROBE",
+                "flags_byte=withheld xor_mask=withheld decoded=withheld "
+                "battery=withheld battery_pct=withheld",
+            ),
+            ("FMDN_FLAGS_CONFLICT", "decoded=withheld"),
+            ("FMDN_UWT_TRANSITION", "decoded=withheld"),
+        ):
+            assert any(line.startswith(marker) and withheld in line for line in info), (
+                marker,
+                info,
+            )
+        for line in info + _flag_lines(caplog, logging.DEBUG):
+            for field in ("flags_byte=0x", "xor_mask=0x", "decoded=0x", "LOW"):
+                assert field not in line, line
+            assert f"0x{mask:02x}" not in line, line
+
+
+def test_rotating_tracker_flags_log_lines_unchanged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Protects the diagnostics of Google trackers: their mask rotates.
+
+    Expectation measured on the resolver before the follow-up.
+    """
+    caplog.set_level(logging.DEBUG, logger=resolver_module.__name__)
+    resolver = _new_resolver_with_hass()
+    _build(resolver, _identity(fast_pair_model_id=None), now=NOW)
+    eid, metadata = min(
+        (
+            (eid, meta)
+            for eid, meta in resolver._lookup_metadata.items()
+            if len(eid) == 20
+            and isinstance(meta.get("rotation_timestamp"), int)
+            and meta.get("flags_xor_mask") is not None
+        ),
+        key=lambda item: abs(item[1]["rotation_timestamp"] - NOW),
+    )
+    assert MCU_STATIC_TIME_BASIS not in (metadata.get("timestamp_bases") or ())
+    mask = metadata["flags_xor_mask"]
+
+    _feed_flag_logs(resolver, eid, mask, at=NOW)
+
+    info = _flag_lines(caplog, logging.INFO)
+    decoded = f"decoded=0x{DECODED_FLAGS:02x}"
+    assert any(
+        line.startswith("FMDN_FLAGS_PROBE")
+        and f"xor_mask=0x{mask:02x} {decoded} battery=LOW(2)" in line
+        for line in info
+    ), info
+    assert any(
+        line.startswith("FMDN_FLAGS_CONFLICT") and decoded in line for line in info
+    ), info
+    assert any(
+        line.startswith("FMDN_UWT_TRANSITION") and decoded in line for line in info
+    ), info

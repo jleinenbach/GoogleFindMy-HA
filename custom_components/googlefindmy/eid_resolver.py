@@ -1080,6 +1080,31 @@ class UwtSource(StrEnum):
 FlagsOrigin = Literal["framed", "guessed", "absent"]
 
 
+def _is_static_eid(metadata: Mapping[str, Any]) -> bool:
+    """Return whether a match came from the fixed counter-0 window.
+
+    ``timestamp_bases`` is checked, not ``timestamp_basis``: for up to one
+    rotation period after the first hit the lock window also yields counter 0
+    and wins the registration.
+    """
+    return MCU_STATIC_TIME_BASIS in (metadata.get("timestamp_bases") or ())
+
+
+def _withhold_if_static(text: str, metadata: Mapping[str, Any]) -> str:
+    """Return ``text``, or ``"withheld"`` for a match of a static EID.
+
+    For log fields that print a device's hashed flags. The mask of a rotating
+    tracker changes with its EID; the mask of the counter-0 EID never changes,
+    and INFO lines get pasted into public issues. The frame type is clear text
+    and the reserved flag bits are zero, so a capture of the advertisement
+    already gives every mask bit except the two battery bits; the mask, the
+    decoded byte or the battery level in such a line would supply the rest for
+    good. The line keeps its level: a one-time probe stays visible at INFO
+    (docs/BLE_BATTERY_SENSOR.md, section 6.2).
+    """
+    return "withheld" if _is_static_eid(metadata) else text
+
+
 def _drop_stock_mcu_flags(
     flags_byte: int | None, flags_origin: FlagsOrigin, metadata: Mapping[str, Any]
 ) -> tuple[int | None, FlagsOrigin]:
@@ -1088,14 +1113,10 @@ def _drop_stock_mcu_flags(
     Stock GoogleFindMyTools firmware advertises the counter-0 EID with a fixed
     0x00 hashed-flags byte. Decoding that byte returns the mask itself: a
     battery level and a UWT bit made of key material alone. Only matches of
-    the counter-0 window qualify, so rotating trackers keep decoding 0x00 as
-    before. ``timestamp_bases`` is checked, not ``timestamp_basis``: for up
-    to one rotation period after the first hit the lock window also yields
-    counter 0 and wins the registration.
+    the counter-0 window qualify (``_is_static_eid``), so rotating trackers
+    keep decoding 0x00 as before.
     """
-    if flags_byte == 0x00 and MCU_STATIC_TIME_BASIS in (
-        metadata.get("timestamp_bases") or ()
-    ):
+    if flags_byte == 0x00 and _is_static_eid(metadata):
         return None, "absent"
     return flags_byte, flags_origin
 
@@ -1109,12 +1130,14 @@ class _FlagsReading(NamedTuple):
     position the matched geometry defines, ``"guessed"`` by
     ``_guess_flags_byte``, ``"absent"`` when no byte was found. ``decoded``
     is the whole XOR-decoded flags byte, ``None`` when nothing was decoded;
-    the measurement channel logs it next to the mode.
+    the measurement channel logs it next to the mode, except for a static EID
+    (``static_eid``), whose mask it would give away (``_withhold_if_static``).
     """
 
     uwt_bit: bool | None
     origin: FlagsOrigin
     decoded: int | None = None
+    static_eid: bool = False
 
 
 def _effective_uwt_mode(
@@ -4089,7 +4112,11 @@ class GoogleFindMyEIDResolver:
                         old_seen_mono=None,
                     )
                     self._log_uwt_event(
-                        match, track, event, decoded=reading.decoded, clock=clock
+                        match,
+                        track,
+                        event,
+                        reading=reading,
+                        clock=clock,
                     )
                 continue
             # The state moves only after the event was built and stored: if
@@ -4110,7 +4137,11 @@ class GoogleFindMyEIDResolver:
             )
             track.state = mode
             self._log_uwt_event(
-                match, track, event, decoded=reading.decoded, clock=clock
+                match,
+                track,
+                event,
+                reading=reading,
+                clock=clock,
             )
 
     @staticmethod
@@ -4131,13 +4162,17 @@ class GoogleFindMyEIDResolver:
         track: _UwtTrack,
         event: UwtTransitionEvent,
         *,
-        decoded: int | None,
+        reading: _FlagsReading,
         clock: ObservationClock,
     ) -> None:
         """Write ``FMDN_UWT_TRANSITION`` at INFO within the budget, else DEBUG.
 
         Every event is written; the budget only decides the level. The event
-        history keeps all of them either way.
+        history keeps all of them either way. For a static EID
+        (``reading.static_eid``, ``_withhold_if_static``) it writes
+        ``decoded=withheld`` instead of the byte. Lowering the line to DEBUG
+        instead would break the budget: only an INFO line resets
+        ``suppressed``, so such a device would log a resync on every sighting.
         """
         if self._uwt_budget_free(track, clock.monotonic):
             level = logging.INFO
@@ -4159,7 +4194,13 @@ class GoogleFindMyEIDResolver:
             event.source,
             event.flags,
             event.frame,
-            f"0x{decoded:02x}" if decoded is not None else "none",
+            (
+                "withheld"
+                if reading.static_eid
+                else f"0x{reading.decoded:02x}"
+                if reading.decoded is not None
+                else "none"
+            ),
             event.payload_len,
             event.poll_age_s if event.poll_age_s is not None else "none",
             event.prev_seen_age_s if event.prev_seen_age_s is not None else "none",
@@ -4435,7 +4476,7 @@ class GoogleFindMyEIDResolver:
                     matches=matches,
                     observed_frame=observed_frame,
                     uwt_mode=uwt_mode,
-                    decoded=decoded,
+                    decoded=_withhold_if_static(f"0x{decoded:02x}", metadata),
                     payload_len=length,
                 )
 
@@ -4477,21 +4518,23 @@ class GoogleFindMyEIDResolver:
                     continue
                 self._ble_battery_state[storage_key] = state
 
-                # First decode per device → INFO probe log (once per device)
+                # First decode per device → INFO probe log (once per device);
+                # flag fields withheld for a static EID (_withhold_if_static).
                 if storage_key not in self._flags_logged_devices:
                     _LOGGER.info(
                         "FMDN_FLAGS_PROBE device=%s canonical=%s "
-                        "flags_byte=0x%02x xor_mask=0x%02x decoded=0x%02x "
-                        "battery=%s(%d) battery_pct=%s uwt_mode=%s "
+                        "flags_byte=%s xor_mask=%s decoded=%s "
+                        "battery=%s battery_pct=%s uwt_mode=%s "
                         "observed_frame=%s payload_len=%d",
                         match.device_id,
                         match.canonical_id,
-                        flags_byte,
-                        xor_mask,
-                        decoded,
-                        battery_label,
-                        battery_raw,
-                        battery_pct,
+                        _withhold_if_static(f"0x{flags_byte:02x}", metadata),
+                        _withhold_if_static(f"0x{xor_mask:02x}", metadata),
+                        _withhold_if_static(f"0x{decoded:02x}", metadata),
+                        _withhold_if_static(
+                            f"{battery_label}({battery_raw})", metadata
+                        ),
+                        _withhold_if_static(str(battery_pct), metadata),
                         uwt_mode,
                         f"0x{observed_frame:02x}"
                         if observed_frame is not None
@@ -4537,7 +4580,9 @@ class GoogleFindMyEIDResolver:
                         raw_hex,
                     )
                     self._flags_logged_devices.add(storage_key)
-        return _FlagsReading(uwt_bit, flags_origin, decoded_flags)
+        return _FlagsReading(
+            uwt_bit, flags_origin, decoded_flags, _is_static_eid(metadata)
+        )
 
     # ------------------------------------------------------------------
     # Public BLE battery API
@@ -4875,7 +4920,7 @@ class GoogleFindMyEIDResolver:
         matches: list[EIDMatch],
         observed_frame: int,
         uwt_mode: bool,
-        decoded: int,
+        decoded: str,
         payload_len: int,
     ) -> None:
         """Record a disagreement between the frame type and the UWT flag bit.
@@ -4897,6 +4942,8 @@ class GoogleFindMyEIDResolver:
         ``device_id`` in the field this log would have filled with the
         canonical one. A measurement channel that cannot be joined with the
         probe log it is meant to explain is worthless as a diagnostic.
+        ``decoded`` arrives formatted, ``withheld`` for a static EID like the
+        probe line (``_withhold_if_static``).
         """
 
         frame_says_uwt = observed_frame == MODERN_FRAME_TYPE
@@ -4911,7 +4958,7 @@ class GoogleFindMyEIDResolver:
                 self._frame_conflict_log_at[(storage_key, observed_frame)] = now
                 _LOGGER.info(
                     "FMDN_FLAGS_CONFLICT device=%s canonical=%s frame=0x%02x "
-                    "uwt_bit=%s decoded=0x%02x payload_len=%d; frame type and "
+                    "uwt_bit=%s decoded=%s payload_len=%d; frame type and "
                     "flags bit disagree, sensor value passed through unchanged",
                     match.device_id,
                     match.canonical_id,
@@ -4933,7 +4980,7 @@ class GoogleFindMyEIDResolver:
             self._frame_conflict_log_at[key] = now
             _LOGGER.debug(
                 "FMDN_FLAGS_CONFLICT device=%s canonical=%s frame=0x%02x "
-                "uwt_bit=%s decoded=0x%02x payload_len=%d; frame type and "
+                "uwt_bit=%s decoded=%s payload_len=%d; frame type and "
                 "flags bit disagree, sensor value passed through unchanged",
                 match.device_id,
                 match.canonical_id,
