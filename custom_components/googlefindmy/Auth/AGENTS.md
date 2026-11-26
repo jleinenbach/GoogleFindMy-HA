@@ -15,18 +15,36 @@ When the upstream stubs change, update this file and adjust the affected call si
 ## Classifying selenium failures in the login flow
 
 `auth_flow._describe_lost_session` decides whether a `WebDriverException` means
-"the user closed the window" (a finished run, `LoginAborted`, CLI status 130) or
-"the driver broke" (a defect, own type and traceback). Two rules hold it
+"the user closed the window" (no defect: `LoginWindowClosed`, a subclass of
+`LoginAborted`) or "the driver broke" (a defect, own type and traceback). Two rules hold it
 together. The first lives in `_describe_lost_session`, the second in
 `request_oauth_account_token_flow`; keep both when editing either. Everything
 stated below about selenium was measured against selenium 4.40.
 
+The verdict also decides whether the window comes back. `restart_on_closed_window`
+answers a `LoginWindowClosed` by opening the same sign-in window again, at most
+`max_restarts` (2) times per sign-in, each time with an `[AuthFlow] … opening it
+again (n of 2)` line; only the close after that propagates, and the CLI ends the
+run with the cancellation message and status 130. Every other loss is not that
+type and ends the run at once: a crash, an expired wait, and a window the
+program closes itself after a finished sign-in. A crash taken for a closed
+window would therefore be reopened twice before the user learns of the defect,
+which is why `_describe_lost_session` reads the crash markers first and returns
+`None` for them, so the caller re-raises the driver error instead of raising
+`LoginWindowClosed`. Sign-in 2 of 2 (`KeyBackup/shared_key_flow.py`) uses the
+same classifier through `describe_lost_session`. Tests:
+`tests/test_login_window_restart.py`, among them
+`test_a_closed_first_window_is_reopened_twice_then_aborts`,
+`test_a_crash_is_not_restarted`, `test_an_expired_wait_is_not_restarted` and
+`test_the_program_closing_the_window_never_restarts`.
+
 * **Chromedriver is not known to use the `timeout` error code to *report* a
-  gone window,** and the rule is written so that being wrong about that is the
-  cheap direction: a genuine cancellation would then be reported as a driver
-  fault with a traceback, rather than a driver fault being reported as a
-  cancellation the user never made. so a window phrase inside a `TimeoutException` message is not
-  evidence of one and the type is checked before any phrase matching. Note the
+  gone window,** so a window phrase inside a `TimeoutException` message is not
+  evidence of one and the type is checked before any phrase matching. The rule
+  is written so that being wrong about that is the cheap direction: a genuine
+  cancellation would then be reported as a driver fault with a traceback,
+  rather than a driver fault being reported as a cancellation the user never
+  made. Note the
   direction: a window that goes away mid-command often *causes* a timeout
   ("Timed out receiving message from renderer"), which is exactly why the text
   cannot be trusted there. Only two W3C codes map to `TimeoutException`
