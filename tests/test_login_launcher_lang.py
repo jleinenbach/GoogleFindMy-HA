@@ -22,6 +22,7 @@ tags count as German is compared with the real ``login.sh``.
 
 from __future__ import annotations
 
+import fnmatch
 import re
 import shutil
 import subprocess
@@ -36,6 +37,7 @@ from tests.test_docker_login_hardening import (
 )
 
 _BASH = shutil.which("bash")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(_BASH is None, reason="bash runs the launcher")
 
 
@@ -305,6 +307,37 @@ def test_login_cmd_stays_ascii_and_keeps_the_code_page() -> None:
     executable = "\n".join(line for _, line in _cmd_code_lines()).lower()
     assert "chcp" not in executable, "login.cmd must not switch the code page"
     assert "geloescht" in _cmd_text(), "the German texts are missing altogether"
+
+
+def test_login_cmd_is_checked_out_with_crlf_line_ends() -> None:
+    """cmd.exe can miss a label in an LF batch file, so checkouts must get CRLF.
+
+    The label search reads 512-byte blocks and only trusts CRLF line ends; with
+    LF, ``goto``/``call`` can fail on a label that exists, depending on where it
+    falls. The release ZIP is zipped from the checkout, so an ``eol=crlf``
+    attribute reaches HACS users too. The last matching line wins in git, so the
+    last one that matches ``login.cmd`` is the one checked here.
+    """
+
+    attributes = REPO_ROOT / ".gitattributes"
+    assert attributes.is_file(), ".gitattributes is missing"
+    verdict: list[str] | None = None
+    for raw in attributes.read_text("utf-8").splitlines():
+        fields = raw.split()
+        if not fields or fields[0].startswith("#"):
+            continue
+        pattern, attrs = fields[0], fields[1:]
+        target = (
+            "custom_components/googlefindmy/docker-login/login.cmd"
+            if "/" in pattern
+            else "login.cmd"
+        )
+        if fnmatch.fnmatchcase(target, pattern.lstrip("/")):
+            verdict = attrs
+    assert verdict is not None, "no .gitattributes line covers login.cmd"
+    assert "eol=crlf" in verdict and "-text" not in verdict, (
+        f"login.cmd must be checked out with CRLF, got {verdict}"
+    )
 
 
 def test_login_cmd_reads_lang_before_any_output() -> None:

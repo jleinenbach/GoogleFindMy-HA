@@ -1,0 +1,6 @@
+# cmd.exe looks for a batch label in 512-byte blocks and only trusts CRLF
+# line ends; in an LF file `goto`/`call` can miss a label that is there.
+# The index keeps LF; checkouts, and so the HACS ZIP built from the release
+# checkout, get CRLF. Pinned by tests/test_login_launcher_lang.py.
+*.cmd text eol=crlf
+*.bat text eol=crlf
