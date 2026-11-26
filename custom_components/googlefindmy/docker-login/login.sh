@@ -46,7 +46,8 @@
 # prints the finished bundle in this terminal at the end, for manual copy/paste
 # into Home Assistant, and removes the file afterwards. No extra port is opened.
 #
-# Optional language:
+# Optional language: `bash login.sh --lang de` (short name for GFMY_LOCALE)
+# puts the sign-in page AND this script's own [login] lines into German; and
 #   GFMY_LOCALE=C bash login.sh
 # hands the language of the sign-in page back to Chrome (English here) instead
 # of taking it from your shell locale. Spelled with a capital C, the POSIX
@@ -62,10 +63,15 @@ cd "$(dirname "$0")"
 # the parser further down already prints messages (a bad --ip, an unknown
 # option) and those must speak the chosen language too. A value given here wins
 # over an inherited GFMY_LOCALE, as a flag wins over the environment everywhere
-# else in this launcher. The scan stops at `--`, like the parser.
+# else in this launcher. The scan stops at `--`, like the parser. A value that
+# starts with `-` is another option, not a tag, so `--lang --help` is refused
+# as a missing value. An EMPTY value (`--lang ''`, `--lang=`) is accepted and
+# means "no preference", like `GFMY_LOCALE=`; login.cmd refuses it instead,
+# because cmd.exe cannot hold an empty variable (see the README).
 _lang_expect=0
 for _arg in "$@"; do
   if [ "$_lang_expect" -eq 1 ]; then
+    case "$_arg" in -*) break ;; esac
     GFMY_LOCALE="$_arg"
     _lang_expect=0
     continue
@@ -130,7 +136,8 @@ esac
 
 # msg EN DE: print one line in the launcher language. Both texts sit side by
 # side at every call, so a translation cannot drift away from its original;
-# test_login_launcher_lang.py checks that every [login] line goes through here.
+# test_login_launcher_lang.py checks that every [login] line goes through here,
+# apart from a few language-neutral ones it lists by name.
 msg() {
   if [ "$_launcher_de" -eq 1 ]; then
     printf '%s\n' "$2"
@@ -661,7 +668,7 @@ prompt_for_track() {
       msg "[login]      The file is deleted right after printing, so this" \
           "[login]      Die Datei wird direkt nach der Ausgabe gelöscht, deshalb"
       msg "[login]      REPLACES A: no watched-file import afterwards." \
-          "[login]      ERSETZT das A: danach kein Import über die überwachte Datei."
+          "[login]      ERSETZT B den Weg A: danach kein Import über die überwachte Datei."
       msg "[login]      Last resort: the credentials then sit in your scrollback," \
           "[login]      Letzter Ausweg: Die Anmeldedaten stehen dann im Terminalverlauf,"
       msg "[login]      in 'docker logs' and in the clipboard you paste them from." \
@@ -795,7 +802,7 @@ else
   msg "[login] (the per-run noVNC password is printed by the container below, as" \
       "[login] (das noVNC-Passwort dieses Laufs gibt der Container weiter unten aus,"
   msg "[login] '(password: ...)' in the noVNC-available line and the [AuthFlow] banner)." \
-      "[login] als '(password: ...)' in der noVNC-Zeile und im [AuthFlow]-Banner)"
+      "[login] als '(password: ...)' in der noVNC-Zeile und im [AuthFlow]-Banner)."
 fi
 msg "[login] and log into Google in the browser view." \
     "[login] und dich in der Browseransicht bei Google anmelden."

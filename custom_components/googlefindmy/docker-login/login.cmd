@@ -74,6 +74,7 @@ rem cmd.exe splits arguments at "=", so `--lang=de` normally arrives as the two
 rem words `--lang` `de`; the inline branch covers the quoted "--lang=de" form.
 rem An empty value is refused instead of being read as "ask Windows": saying
 rem nothing already does that, and `--lang C` is the spelling that opts out.
+rem So is a value starting with "-": that is the next option, not a tag.
 call :prescan_lang %*
 if errorlevel 1 goto :lang_missing
 
@@ -103,7 +104,8 @@ rem the terminal and Chrome cannot disagree. Messages from the container itself
 rem stay English. The German texts are written in ASCII transliteration (ae, oe,
 rem ue, ss) on purpose: this file stays ASCII and never switches the console
 rem code page, so the lines read the same on every Windows console. Every [login]
-rem line below is an adjacent pair, English first, each guarded by LAUNCHER_DE;
+rem line below is an adjacent pair, English first, each guarded by LAUNCHER_DE,
+rem apart from the ssh command line and the two-language --lang error;
 rem test_login_launcher_lang.py pins that, so a new line cannot stay English-only.
 set "LAUNCHER_DE="
 set "_LOC="
@@ -244,7 +246,7 @@ if defined LAUNCHER_DE echo [login]      dieses Repo unter config\custom_compone
 if not defined LAUNCHER_DE echo [login]   B) Print the bundle in this terminal INSTEAD of keeping it
 if defined LAUNCHER_DE echo [login]   B) Buendel in diesem Terminal ausgeben, STATT es aufzubewahren
 if not defined LAUNCHER_DE echo [login]      The file is deleted right after printing, so this REPLACES A:
-if defined LAUNCHER_DE echo [login]      Die Datei wird direkt nach der Ausgabe geloescht, deshalb ERSETZT das A:
+if defined LAUNCHER_DE echo [login]      Die Datei wird direkt nach der Ausgabe geloescht, deshalb ERSETZT B den Weg A:
 if not defined LAUNCHER_DE echo [login]      no watched-file import afterwards.
 if defined LAUNCHER_DE echo [login]      danach kein Import ueber die ueberwachte Datei.
 if not defined LAUNCHER_DE echo [login]      Last resort: the credentials then sit in your scrollback, in
@@ -479,12 +481,15 @@ shift
 goto :prescan_lang
 :prescan_lang_value
 if "%~2"=="" exit /b 1
-set "GFMY_LOCALE=%~2"
+set "_PV=%~2"
+if "%_PV:~0,1%"=="-" exit /b 1
+set "GFMY_LOCALE=%_PV%"
 shift
 shift
 goto :prescan_lang
 :prescan_lang_inline
 if "%_PA:~7%"=="" exit /b 1
+if "%_PA:~7,1%"=="-" exit /b 1
 set "GFMY_LOCALE=%_PA:~7%"
 shift
 goto :prescan_lang

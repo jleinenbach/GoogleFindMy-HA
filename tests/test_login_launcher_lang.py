@@ -116,9 +116,14 @@ def test_lang_after_double_dash_is_not_an_option(tmp_path: Path) -> None:
     assert "needs an IP address" in proc.stderr, proc.stderr
 
 
-def test_lang_without_a_value_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "args",
+    [("--lang",), ("--lang", "--help"), ("--track", "a", "--lang", "-x")],
+)
+def test_lang_without_a_value_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
+    """A missing value, or one that is the next option, is no language tag."""
     work, env = _launcher_sandbox(tmp_path)
-    proc = _run(work, env, "--lang")
+    proc = _run(work, env, *args)
     assert proc.returncode == 2
     assert "--lang needs a language tag" in proc.stderr
     assert "DOCKER_ARGS" not in proc.stdout, "nothing may start without a language"
@@ -188,7 +193,10 @@ def test_every_launcher_line_goes_through_msg() -> None:
         for line in text.splitlines()
         if "[login]" in line
         and not line.lstrip().startswith("#")
-        and re.search(r"\b(echo|printf) ['\"]\[login\]", line)
+        # any echo/printf form (`printf '%s\n' "[login] ..."`, `echo -e`), not
+        # just the quoted first argument; pick lines are pairs by construction
+        and re.search(r"\b(echo|printf)\b", line)
+        and "pick " not in line
     }
     assert plain == _LANGUAGE_NEUTRAL, (
         "these [login] lines bypass msg/pick and stay English for a German "
@@ -197,6 +205,7 @@ def test_every_launcher_line_goes_through_msg() -> None:
 
     pairs = re.findall(r'msg "([^"]*)" \\\n\s*"([^"]*)"', text)
     assert len(pairs) >= 40, "the msg pairs were not found; did the call form change?"
+    pairs += re.findall(r"pick '([^']*)' '([^']*)'", text)
     same = [en for en, de in pairs if en == de]
     assert not same, f"untranslated msg pairs: {same}"
     one_arg = re.findall(r'^\s*msg "[^"]*"\s*(?:>&2)?\s*$', text, re.M)
@@ -313,6 +322,8 @@ def test_login_cmd_reads_lang_before_any_output() -> None:
     refusal = first("if errorlevel 1 goto :lang_missing")
     culture = first("if not defined GFMY_LOCALE (")
     decided = first('set "LAUNCHER_DE="')
+    detected = [i for i, line in lines if line.endswith('set "LAUNCHER_DE=1"')]
+    assert len(detected) >= 2, "the German detection lines are missing"
     parser = first(":parse_args")
     first_output = min(
         index
@@ -325,7 +336,10 @@ def test_login_cmd_reads_lang_before_any_output() -> None:
     assert order.index(refusal) == order.index(prescan) + 1, (
         "a --lang without a value must be refused right after the scan"
     )
-    assert prescan < culture < decided < parser < first_output, (
+    assert prescan < culture < decided < min(detected), (
+        "the reset must come before the detection it resets"
+    )
+    assert max(detected) < parser < first_output, (
         "--lang, then the Windows culture, then the launcher language, and all "
         "of that before the parser, which already prints messages"
     )
@@ -359,6 +373,8 @@ def _cmd_counts_as_german(value: str) -> bool:
     )
     assert exact and prefixes, "login.cmd lost its German detection"
     assert "if not defined _LOC goto :launcher_lang_done" in text
+    # The detection must read the real GFMY_LOCALE, not a fixed value.
+    assert 'if defined GFMY_LOCALE set "_LOC=%GFMY_LOCALE%"' in text
     low = value.lower()
     return low in {e.lower() for e in exact} or any(
         low[: int(n)] == p.lower() for n, p in prefixes
@@ -395,8 +411,13 @@ def test_login_cmd_parser_takes_lang_and_refuses_it_empty() -> None:
         'if /i "%~1"=="--lang" goto :parse_lang',
         'if /i "%ARG:~0,7%"=="--lang=" goto :parse_lang_inline',
         'if /i "%~1"=="--lang" goto :prescan_lang_value',
-        'set "GFMY_LOCALE=%~2"',
+        'set "_PV=%~2"',
+        'set "GFMY_LOCALE=%_PV%"',
         'set "GFMY_LOCALE=%_PA:~7%"',
+        # refused: empty inline value, and a value that is the next option
+        'if "%_PA:~7%"=="" exit /b 1',
+        'if "%_PA:~7,1%"=="-" exit /b 1',
+        'if "%_PV:~0,1%"=="-" exit /b 1',
     ):
         assert needle in text, f"login.cmd must contain {needle!r}"
     labels = set(re.findall(r"^:([A-Za-z_]+)", text, re.M))

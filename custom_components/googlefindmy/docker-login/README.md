@@ -276,7 +276,11 @@ language by this container.
 `--lang <tag>` is the short name for `GFMY_LOCALE` on both launchers: `bash
 login.sh --lang de` is the same as `GFMY_LOCALE=de bash login.sh`, `login.cmd
 --lang de` the same as `set GFMY_LOCALE=de` before `login.cmd`, and it wins
-over a `GFMY_LOCALE` you inherited. Because the launcher's own lines and Chrome read
+over a `GFMY_LOCALE` you inherited. A value that starts with `-` is taken as
+the next option and refused. An empty one differs between the two:
+`login.sh --lang=` means "no preference", like `GFMY_LOCALE=`, while
+`login.cmd` refuses it, because `cmd.exe` cannot hold an empty variable; use
+`--lang C` there. Because the launcher's own lines and Chrome read
 the same value, the terminal and the sign-in page always speak the same
 language. A bare `docker compose run` has no launcher and no flag; there,
 `GFMY_LOCALE=de` is the way.
@@ -825,7 +829,8 @@ there is no separate image to rebuild for code changes.
   for the setting behind it.
 - **Everything appears in the wrong language:** the viewer follows your own
   browser, Chrome follows `GFMY_LOCALE` (taken from your shell locale unless you
-  set it). `GFMY_LOCALE=en bash login.sh` keeps the sign-in page in English. See
+  set it), and so do the launcher's own `[login]` lines.
+  `bash login.sh --lang en` (or `login.cmd --lang en`) keeps both in English. See
   [Language and keyboard](#language-and-keyboard).
 - **The run ended with exit status 130:** that is not an error, it is a
   cancellation. The `[AuthFlow]` line above it names which sign-in ended and
