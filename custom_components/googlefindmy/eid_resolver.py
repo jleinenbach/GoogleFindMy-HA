@@ -292,8 +292,9 @@ VALID_ANCHOR_BASES: set[str] = {"unix", "pair_date", "secrets_creation_date"}
 
 # MCU_STATIC_TIME_BASIS: Window label for the fixed counter-0 EID of DIY
 # microcontroller trackers (``is_mcu_tracker``). The GoogleFindMyTools ESP32 and
-# Zephyr firmwares compute their EID once at counter 0 and advertise it
-# unchanged, so no time-anchored window ever reaches it. Like
+# Zephyr firmwares advertise a constant EID entered into the firmware; the
+# registration tool prints it as the advertisement key for counter 0, the
+# firmware does not compute it. No time-anchored window ever reaches it. Like
 # ``lock_tracking`` it is not an anchor basis and never enters
 # ``_known_offsets``.
 MCU_STATIC_TIME_BASIS = "mcu_static"
@@ -1114,7 +1115,9 @@ def _drop_stock_mcu_flags(
     0x00 hashed-flags byte. Decoding that byte returns the mask itself: a
     battery level and a UWT bit made of key material alone. Only matches of
     the counter-0 window qualify (``_is_static_eid``), so rotating trackers
-    keep decoding 0x00 as before.
+    keep decoding 0x00 as before. The rule and its tests are listed in
+    custom_components/googlefindmy/AGENTS.md, section "Hashed-flags byte of
+    static counter-0 EIDs"; change both together.
     """
     if flags_byte == 0x00 and _is_static_eid(metadata):
         return None, "absent"
@@ -2142,7 +2145,9 @@ class GoogleFindMyEIDResolver:
         """Return the counter-0 window for DIY microcontroller trackers.
 
         Trackers registered with GoogleFindMyTools (``is_mcu_tracker``) run
-        firmware that derives one EID at counter 0 and advertises it forever.
+        firmware that advertises a constant EID forever: the registration
+        tool prints the counter-0 EID as the advertisement key, and the
+        firmware carries it as a constant without computing it.
         The time-anchored and lock windows move with the wall clock and never
         contain counter 0, so without this window such a tracker never
         resolves over BLE. The window is independent of the lock: a lock

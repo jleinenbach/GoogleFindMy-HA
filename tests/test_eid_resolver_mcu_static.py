@@ -2,10 +2,13 @@
 """Static counter-0 EID of DIY microcontroller trackers.
 
 Trackers registered with GoogleFindMyTools (Fast Pair model ``003200``, see
-``is_mcu_tracker``) run ESP32/Zephyr firmware that computes one EID at
-counter 0 and advertises it unchanged. The resolver must precompute that EID
-(and its hashed-flags mask) for these trackers only, so their advertisements
-resolve and the FMDN battery level decodes.
+``is_mcu_tracker``) run ESP32/Zephyr firmware that advertises a constant
+EID: the registration tool prints the counter-0 EID as the advertisement
+key, and the firmware carries it without computing it. The resolver must
+precompute that EID (and its hashed-flags mask) for these trackers only, so
+their advertisements resolve and, for firmware that sends real hashed flags,
+the FMDN battery level decodes. The stock firmware's fixed 0x00 flags byte
+stays unknown.
 """
 
 from __future__ import annotations
