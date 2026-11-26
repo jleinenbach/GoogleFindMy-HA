@@ -1550,17 +1550,60 @@ def _raise_on_sigterm() -> Iterator[None]:
     stack instead, through the ``finally`` that quits Chrome, into the restore
     in ``_main``. The previous handler comes back when the block ends, so a
     stop during the restore itself meets the default again (the write is
-    atomic either way).
+    atomic either way). Outside the main thread ``signal.signal`` refuses with
+    ``ValueError``; the block then runs without the handler, as
+    ``_cancel_on_sigterm`` does, instead of refusing the sign-in.
     """
 
     def _on_sigterm(signum: int, frame: types.FrameType | None) -> None:
         raise _LoginTerminated
 
-    previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    except ValueError:  # outside the main thread
+        yield
+        return
     try:
         yield
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+@contextlib.contextmanager
+def _hold_stop_signals() -> Iterator[None]:
+    """Hold SIGTERM and SIGINT back while the block runs, then deliver them.
+
+    ``--reauth`` clears the cached tokens, and only then does ``_main`` hold
+    the callable that puts them back. A stop between the two left the account
+    signed out with nothing to restore it (review of PR #1485). Inside the
+    block each of the two signals only marks itself as pending. When the block
+    ends, the previous handlers come back and every pending signal is raised
+    again, so it meets them -- ``_LoginTerminated`` or ``KeyboardInterrupt`` --
+    with the restore in place. Python runs signal handlers in the main thread
+    whichever thread the signal reached, so the mark holds for a process-wide
+    signal too. An exception from the block wins over a pending signal; the
+    run ends on it either way. Outside the main thread nothing can be held, and
+    the block runs as it is.
+    """
+    pending: list[int] = []
+
+    def _mark(signum: int, frame: types.FrameType | None) -> None:
+        if signum not in pending:
+            pending.append(signum)
+
+    previous: dict[int, Any] = {}
+    try:
+        try:
+            for stop_signal in (signal.SIGTERM, signal.SIGINT):
+                previous[stop_signal] = signal.signal(stop_signal, _mark)
+        except ValueError:  # not the main thread: there is nothing to hold
+            pass
+        yield
+    finally:
+        for restored, handler in previous.items():
+            signal.signal(restored, handler)
+    for held in pending:
+        signal.raise_signal(held)
 
 
 async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
@@ -1848,16 +1891,18 @@ def _main(argv: Sequence[str] | None = None) -> None:
     # then a cache-signal check that was always empty for a fresh shell start),
     # both of which could dead-end a repo-layout start in an opaque
     # MissingTokenCacheError instead of bootstrapping.
-    restore_cleared_tokens = _clear_stale_tokens_for_reauth() if args.reauth else None
+    restore_cleared_tokens: Callable[[], None] | None = None
     try:
-        # Only a --reauth run has tokens to put back; without it SIGTERM keeps
-        # its default and the signal ends the process (a shell or docker then
-        # reports 143).
-        with (
-            _raise_on_sigterm()
-            if restore_cleared_tokens is not None
-            else contextlib.nullcontext()
-        ):
+        # Only a --reauth run can have tokens to put back; without it SIGTERM
+        # keeps its default and the signal ends the process (a shell or docker
+        # then reports 143). The handler is in place before the tokens are
+        # cleared, and the clearing runs with the stop signals held until the
+        # restore callable is assigned: a stop in between used to find the
+        # tokens gone and nothing to put them back.
+        with _raise_on_sigterm() if args.reauth else contextlib.nullcontext():
+            if args.reauth:
+                with _hold_stop_signals():
+                    restore_cleared_tokens = _clear_stale_tokens_for_reauth()
             _ensure_authenticated()
     except BaseException as err:
         # A cancelled login, a Ctrl+C, the sys.exit from a driver failure, or a
