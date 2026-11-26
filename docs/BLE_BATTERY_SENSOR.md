@@ -159,6 +159,47 @@ nothing: until the first sighting it shows `unknown` for a present device and
 without resolver data, otherwise the INFO record `UWT-Mode binary sensor
 created`.
 
+### What keeps the sighting fresh
+
+The 7-day limit counts from the sighting time the resolver stored last, and
+the resolver stores a new one each time it processes an advertisement. The
+value therefore stays only as long as the feeder keeps handing advertisements
+to the resolver, unchanged ones included. This matters for a tracker with a
+static EID (the counter-0 window `mcu_static`): its advertisement never
+changes, so a feeder that forwards only changed advertisements would let the
+value expire after 7 days while the tag is still sending.
+
+- **Bermuda polls, so its feed keeps the value fresh.** On every refresh
+  (about once per second) Bermuda reads each scanner's
+  `discovered_devices_and_advertisement_data` and calls `resolve_eid_all()`
+  for every advertisement whose scanner stamp is newer than the start of the
+  refresh minus 3 s (`jleinenbach/bermuda`, `coordinator.py`
+  `_async_gather_advert_data`, and `fmdn/integration.py`). For remote scanners
+  (proxies) habluetooth 7.1.2 renews that stamp on every advertisement, also an
+  unchanged one: both the short path for unchanged raw data
+  (`base_scanner.py:549`, new time at `:565`) and the general path
+  (`base_scanner.py:720`, stored at `:723`) set a new `info.time`. For a local
+  adapter Bermuda has no stamp and feeds the advertisement on every refresh.
+- **A feeder that lives on callbacks alone does not.** Home Assistant's
+  advertisement callbacks fire only on changed data: the manager returns
+  before dispatching when manufacturer data, service data, service UUIDs and
+  name are unchanged (habluetooth 7.1.2 `manager.py:1315` to `:1349`). The
+  finder scanner (`fmdn_finder/ble_scanner.py`, `async_register_callback`,
+  off by default) is such a feeder; switched on as the only feeder, it would
+  let the value of a static-EID tracker expire.
+- **With Bermuda, the sighting time is the processing time.** Bermuda calls
+  the resolver without `observed_at` and without `ble_address`, so
+  `observed_at_wall` is the moment of the call (`_observation_clock()` in
+  `eid_resolver.py`), not the time the tag sent. On a local adapter the time
+  keeps advancing for a while after the tag has gone, until BlueZ drops the
+  device from its cache.
+
+These statements are derived from code, not checked on a live system.
+`tests/test_ble_battery_freshness_static_eid.py` pins our side: an unchanged
+advertisement fed through `resolve_eid_all()` moves the sighting time forward,
+the sensor keeps its value when fed hourly for 8 days, and the value expires
+7 days after the last delivery.
+
 ---
 
 ## 5. Logging strategy
@@ -291,8 +332,10 @@ extract the flags byte.
 Tests live in `tests/test_ble_battery_sensor.py`,
 `tests/test_ble_battery_sensor_setup.py` (creation at setup from the entity
 registry and on the first sighting), `tests/test_ble_battery_sensor_max_age.py`
-(the 7-day limit) and `tests/test_uwt_mode_binary_sensor_setup.py` (the same
-creation paths for the unwanted tracking mode binary sensor). They cover:
+(the 7-day limit), `tests/test_ble_battery_freshness_static_eid.py` (fresh
+sightings from an unchanged static-EID advertisement) and
+`tests/test_uwt_mode_binary_sensor_setup.py` (the same creation paths for the
+unwanted tracking mode binary sensor). They cover:
 
 - Battery state storage and retrieval via canonical_id
 - All battery levels (UNSUPPORTED, NORMAL, LOW, CRITICALLY_LOW)
@@ -324,4 +367,5 @@ that the storage key matches the lookup key in test scenarios.
 | `tests/test_ble_battery_sensor.py` | (module) | Decoding, storage and sensor behaviour |
 | `tests/test_ble_battery_sensor_setup.py` | (module) | Creation at setup and on the first sighting |
 | `tests/test_ble_battery_sensor_max_age.py` | (module) | 7-day limit of the shown value |
+| `tests/test_ble_battery_freshness_static_eid.py` | (module) | Fresh sightings and the 7-day limit for an unchanged static-EID advertisement |
 | `tests/test_uwt_mode_binary_sensor_setup.py` | (module) | Creation paths of the unwanted tracking mode sensor |

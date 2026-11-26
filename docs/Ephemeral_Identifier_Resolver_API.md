@@ -171,7 +171,7 @@ if resolver:
 | `battery_pct` | `int \| None` | Mapped percentage: 100, 25, 5, or None (unsupported) |
 | `uwt_mode` | `bool` | `True` if Unwanted Tracking protection is active |
 | `decoded_flags` | `int` | Fully decoded flags byte (after XOR) |
-| `observed_at_wall` | `float` | Wall-clock time of the BLE observation, i.e. of the advertisement (`observed_at` passed to `resolve_eid`), not of its processing; on a history replay this is the original sighting |
+| `observed_at_wall` | `float` | Wall-clock time of the BLE observation: of the advertisement when the caller passes `observed_at` to `resolve_eid` (on a history replay this is the original sighting), otherwise of the call; Bermuda passes no `observed_at`, so there it is the processing time |
 | `observed_at_monotonic` | `float` | The same observation on the `time.monotonic()` clock; the ordering key by which the writer keeps the newest sighting (default `-inf` for states built elsewhere) |
 
 ### Identity model — which ID to use
