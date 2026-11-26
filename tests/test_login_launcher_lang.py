@@ -324,8 +324,9 @@ def test_login_cmd_is_checked_out_with_crlf_line_ends(tmp_path: Path) -> None:
 
     git, not a parser of our own, decides what the attributes mean: it merges
     them per attribute across lines and directories, and ``-text`` or
-    ``binary`` beat ``eol``. The test copies every ``.gitattributes`` of the
-    tree into an empty repository with an isolated config (tests/AGENTS.md,
+    ``binary`` beat ``eol``. The test copies the ``.gitattributes`` of the
+    root and of every directory above ``login.cmd`` (the only ones git reads
+    for that path) into an empty repository with an isolated config (tests/AGENTS.md,
     real git) and asks ``git check-attr``, so it also works on an exported
     tree without ``.git``.
     """
@@ -334,15 +335,17 @@ def test_login_cmd_is_checked_out_with_crlf_line_ends(tmp_path: Path) -> None:
     assert git, "git is needed to evaluate .gitattributes"
     repo = tmp_path / "attrs"
     repo.mkdir()
+    path = "custom_components/googlefindmy/docker-login/login.cmd"
     copied = 0
-    for current, dirs, files in os.walk(REPO_ROOT):
-        dirs[:] = [d for d in dirs if d not in {".git", ".venv", "node_modules"}]
-        if ".gitattributes" in files:
-            source = Path(current) / ".gitattributes"
+    for directory in (REPO_ROOT / path).parents:
+        source = directory / ".gitattributes"
+        if source.is_file():
             target = repo / source.relative_to(REPO_ROOT)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
             copied += 1
+        if directory == REPO_ROOT:
+            break
     assert copied, ".gitattributes is missing"
     global_config = tmp_path / "gitconfig"
     global_config.write_text("", "utf-8")
@@ -353,7 +356,6 @@ def test_login_cmd_is_checked_out_with_crlf_line_ends(tmp_path: Path) -> None:
         "GIT_CONFIG_GLOBAL": str(global_config),
     }
     subprocess.run([git, "init", "-q", str(repo)], check=True, env=env, timeout=30)
-    path = "custom_components/googlefindmy/docker-login/login.cmd"
     result = subprocess.run(
         [git, "-C", str(repo), "check-attr", "text", "eol", "--", path],
         check=True,
@@ -365,7 +367,9 @@ def test_login_cmd_is_checked_out_with_crlf_line_ends(tmp_path: Path) -> None:
     attrs = dict(
         line.rsplit(": ", 2)[1:] for line in result.stdout.splitlines() if line
     )
-    assert attrs.get("text") in {"set", "auto"}, (
+    # `eol` without `text` still makes it a text file; only `-text`/`binary`
+    # (text: unset) turn the conversion off.
+    assert attrs.get("text") != "unset", (
         f"login.cmd must be a text file for git, got {result.stdout!r}"
     )
     assert attrs.get("eol") == "crlf", (

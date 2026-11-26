@@ -65,9 +65,10 @@ cd "$(dirname "$0")"
 # over an inherited GFMY_LOCALE, as a flag wins over the environment everywhere
 # else in this launcher. The scan stops at `--`, like the parser. A value that
 # starts with `-` is another option, not a tag, so `--lang --help` and
-# `--lang=-x` are refused as a missing value. An EMPTY value (`--lang ''`, `--lang=`) is accepted and
-# means "no preference", like `GFMY_LOCALE=`; login.cmd refuses it instead,
-# because cmd.exe cannot hold an empty variable (see the README).
+# `--lang=-x` are refused as a missing value. An EMPTY value (`--lang ''`,
+# `--lang=`) is accepted and means "no preference", like `GFMY_LOCALE=`;
+# login.cmd refuses it instead, because cmd.exe cannot hold an empty variable
+# (see the README).
 _lang_expect=0
 for _arg in "$@"; do
   if [ "$_lang_expect" -eq 1 ]; then
