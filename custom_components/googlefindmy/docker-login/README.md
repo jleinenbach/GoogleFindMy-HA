@@ -270,13 +270,13 @@ language by this container.
 | --- | --- | --- |
 | The noVNC viewer (toolbar, panels) | Your **own browser's** language, which noVNC reads from it directly | Change your browser's language |
 | Chrome inside the viewer, and the Google sign-in page it loads | `GFMY_LOCALE`, which the launchers fill in from your own locale; empty on a bare `docker compose run`, which reads no locale of its own | `bash login.sh --lang fr` or `GFMY_LOCALE=fr bash login.sh` |
-| The `[login]` lines and the help of `login.sh` | The same `GFMY_LOCALE`: German for a `de` tag (`de`, `de-DE`, `de_DE.UTF-8`), English for everything else | `bash login.sh --lang de` |
-| The `[login]` lines of `login.cmd` | English for now | — |
+| The `[login]` lines and the help of `login.sh` and `login.cmd` | The same `GFMY_LOCALE`: German for a `de` tag (`de`, `de-DE`, `de_DE.UTF-8`), English for everything else. `login.cmd` writes its German without umlauts (`ae`, `oe`, `ue`, `ss`), so it reads correctly on any Windows console | `bash login.sh --lang de`, `login.cmd --lang de` |
 | The `[entrypoint]` / `[AuthFlow]` lines in your terminal | English, like the rest of the project | — |
 
-`--lang <tag>` is the short name for `GFMY_LOCALE` on `login.sh`: `bash login.sh
---lang de` is the same as `GFMY_LOCALE=de bash login.sh`, and it wins over a
-`GFMY_LOCALE` you inherited. Because the launcher's own lines and Chrome read
+`--lang <tag>` is the short name for `GFMY_LOCALE` on both launchers: `bash
+login.sh --lang de` is the same as `GFMY_LOCALE=de bash login.sh`, `login.cmd
+--lang de` the same as `set GFMY_LOCALE=de` before `login.cmd`, and it wins
+over a `GFMY_LOCALE` you inherited. Because the launcher's own lines and Chrome read
 the same value, the terminal and the sign-in page always speak the same
 language. A bare `docker compose run` has no launcher and no flag; there,
 `GFMY_LOCALE=de` is the way.
