@@ -159,6 +159,7 @@ pick() {
 
 usage() {
   if [ "$_launcher_de" -eq 1 ]; then
+    # codespell:ignore-begin
     cat <<'EOF'
 Aufruf: bash login.sh [--ip <ADRESSE>] [--track a|b] [--lang <KÜRZEL>] [--help]
 
@@ -198,6 +199,7 @@ Umgebung (siehe den Kommentarblock oben in dieser Datei):
                         deine Locale, sonst die von Chrome, auch bei C/POSIX;
                         GFMY_LOCALE=C überlässt die Wahl Chrome)
 EOF
+    # codespell:ignore-end
     return 0
   fi
   cat <<'EOF'
@@ -412,7 +414,7 @@ is_loopback_addr() {
 set_ip_option() {
   if [ -z "$1" ]; then
     msg "[login] --ip needs an address, e.g. --ip 192.168.1.21" \
-        "[login] --ip braucht eine Adresse, z. B. --ip 192.168.1.21" >&2
+        "[login] --ip braucht eine Adresse, z. B. --ip 192.168.1.21" >&2  # codespell:ignore
     exit 2
   fi
   if ! is_ip_literal "$1"; then
@@ -446,7 +448,7 @@ set_track_option() {
       ;;
     *)
       msg "[login] --track needs a or b, got '$1'." \
-          "[login] --track braucht a oder b, erhalten: '$1'." >&2
+          "[login] --track braucht a oder b, erhalten: '$1'." >&2  # codespell:ignore
       msg "[login]   a = file handoff only (./data/secrets.json, the default)" \
           "[login]   a = nur Dateiübergabe (./data/secrets.json, die Vorgabe)" >&2
       msg "[login]   b = print the bundle in this terminal instead (the" \
@@ -465,7 +467,7 @@ while [ "$#" -gt 0 ]; do
     --ip)
       if [ "$#" -lt 2 ]; then
         msg "[login] --ip needs an address, e.g. --ip 192.168.1.21" \
-            "[login] --ip braucht eine Adresse, z. B. --ip 192.168.1.21" >&2
+            "[login] --ip braucht eine Adresse, z. B. --ip 192.168.1.21" >&2  # codespell:ignore
         exit 2
       fi
       set_ip_option "$2"
@@ -588,7 +590,7 @@ EOF
     {
       echo ""
       msg "[login] Where will you open the noVNC viewer? Pick the address your" \
-          "[login] Wo öffnest du den noVNC-Viewer? Wähle die Adresse, unter der"
+          "[login] Wo öffnest du den noVNC-Viewer? Wähle die Adresse, unter der"  # codespell:ignore
       msg "[login] browser can reach on this Docker host:" \
           "[login] dein Browser diesen Docker-Host erreicht:"
       idx=1
@@ -599,7 +601,7 @@ EOF
       msg "[login]   L) 127.0.0.1  (loopback only; reach it via an SSH tunnel)" \
           "[login]   L) 127.0.0.1  (nur Loopback; erreichbar über einen SSH-Tunnel)"
       msg "[login]   or type any other IP address of this host" \
-          "[login]   oder eine andere IP-Adresse dieses Hosts eintippen"
+          "[login]   oder eine andere IP-Adresse dieses Hosts eintippen"  # codespell:ignore
       # shellcheck disable=SC2059  # the format is one of two fixed literals
       printf "$(pick '[login] Choice [Enter = %s]: ' '[login] Auswahl [Enter = %s]: ')" "$default"
     } >&2
@@ -623,7 +625,7 @@ EOF
 
     if [ -z "$selected" ]; then
       msg "[login] No address available; type one, e.g. 192.168.1.21." \
-          "[login] Keine Adresse verfügbar; bitte eine eintippen, z. B. 192.168.1.21." >&2
+          "[login] Keine Adresse verfügbar; bitte eine eintippen, z. B. 192.168.1.21." >&2  # codespell:ignore
       continue
     fi
     if is_ip_literal "$selected"; then
@@ -632,7 +634,7 @@ EOF
       return 0
     fi
     msg "[login] '${selected}' is not an IP address of this host. Try again." \
-        "[login] '${selected}' ist keine IP-Adresse dieses Hosts. Bitte noch einmal." >&2
+        "[login] '${selected}' ist keine IP-Adresse dieses Hosts. Bitte noch einmal." >&2  # codespell:ignore
   done
 }
 
@@ -662,9 +664,9 @@ prompt_for_track() {
       msg "[login]   A) File only: ./data/secrets.json  (the file stays)" \
           "[login]   A) Nur Datei: ./data/secrets.json  (die Datei bleibt)"
       msg "[login]      Needs: Home Assistant can see that folder, e.g. this repo" \
-          "[login]      Voraussetzung: Home Assistant sieht diesen Ordner, z. B. liegt"
+          "[login]      Voraussetzung: Home Assistant sieht diesen Ordner, z. B. liegt"  # codespell:ignore
       msg "[login]      lives under config/custom_components on the HA machine." \
-          "[login]      dieses Repo unter config/custom_components auf dem HA-Rechner."
+          "[login]      dieses Repo unter config/custom_components auf dem HA-Rechner."  # codespell:ignore
       msg "[login]   B) Print the bundle in this terminal INSTEAD of keeping it" \
           "[login]   B) Bündel in diesem Terminal ausgeben, STATT es aufzubewahren"
       msg "[login]      The file is deleted right after printing, so this" \
@@ -674,7 +676,7 @@ prompt_for_track() {
       msg "[login]      Last resort: the credentials then sit in your scrollback," \
           "[login]      Letzter Ausweg: Die Anmeldedaten stehen dann im Terminalverlauf,"
       msg "[login]      in 'docker logs' and in the clipboard you paste them from." \
-          "[login]      in 'docker logs' und in der Zwischenablage, aus der du sie einfügst."
+          "[login]      in 'docker logs' und in der Zwischenablage, aus der du sie einfügst."  # codespell:ignore
       pick '[login] Choice [Enter = A]: ' '[login] Auswahl [Enter = A]: '
     } >&2
     read -r choice || choice=""
@@ -689,7 +691,7 @@ prompt_for_track() {
         ;;
       *)
         msg "[login] Please answer A or B (bare Enter picks A)." \
-            "[login] Bitte mit A oder B antworten (Enter allein wählt A)." >&2
+            "[login] Bitte mit A oder B antworten (Enter allein wählt A)." >&2  # codespell:ignore
         ;;
     esac
   done
@@ -804,7 +806,7 @@ else
   msg "[login] (the per-run noVNC password is printed by the container below, as" \
       "[login] (das noVNC-Passwort dieses Laufs gibt der Container weiter unten aus,"
   msg "[login] '(password: ...)' in the noVNC-available line and the [AuthFlow] banner)." \
-      "[login] als '(password: ...)' in der noVNC-Zeile und im [AuthFlow]-Banner)."
+      "[login] als '(password: ...)' in der noVNC-Zeile und im [AuthFlow]-Banner)."  # codespell:ignore
 fi
 msg "[login] and log into Google in the browser view." \
     "[login] und dich in der Browseransicht bei Google anmelden."
@@ -815,12 +817,12 @@ msg "[login] and log into Google in the browser view." \
 # that is in fact listening on every interface.
 if is_loopback_addr "$novnc_bind"; then
   msg "[login] noVNC is bound to ${novnc_bind}, so only this Docker host reaches it." \
-      "[login] noVNC ist an ${novnc_bind} gebunden, nur dieser Docker-Host erreicht es."
+      "[login] noVNC ist an ${novnc_bind} gebunden, nur dieser Docker-Host erreicht es."  # codespell:ignore
   msg "[login] From another machine either tunnel it:" \
       "[login] Von einem anderen Rechner aus entweder tunneln:"
   echo "[login]   ssh -L 7900:127.0.0.1:7900 <docker-host>"
   msg "[login] or re-run bound to a LAN address of this host: bash login.sh --ip <ADDRESS>" \
-      "[login] oder neu starten, an eine LAN-Adresse dieses Hosts gebunden: bash login.sh --ip <ADRESSE>"
+      "[login] oder neu starten, an eine LAN-Adresse dieses Hosts gebunden: bash login.sh --ip <ADRESSE>"  # codespell:ignore
   if [ -n "$lan_ips" ]; then
     msg "[login] Addresses detected on this host (pick the one your browser reaches):" \
         "[login] Auf diesem Host gefundene Adressen (nimm die, die dein Browser erreicht):"
@@ -830,7 +832,7 @@ if is_loopback_addr "$novnc_bind"; then
   fi
 else
   msg "[login] WARNING: noVNC is bound to ${novnc_bind} and is therefore reachable" \
-      "[login] WARNUNG: noVNC ist an ${novnc_bind} gebunden und damit auch"
+      "[login] WARNUNG: noVNC ist an ${novnc_bind} gebunden und damit auch"  # codespell:ignore
   msg "[login] beyond this host. For this LAN bind the container replaces the base" \
       "[login] außerhalb dieses Hosts erreichbar. Für diese LAN-Bindung ersetzt der"
   msg "[login] image's public password with a per-run password (printed in the" \
@@ -846,15 +848,15 @@ else
         "[login] in einem vertrauenswürdigen LAN und nur während der Anmeldung nutzen."
   else
     msg "[login] but TLS is OFF (--no-tls), so the transport is plain http. Use it" \
-        "[login] aber TLS ist AUS (--no-tls), die Übertragung läuft über reines http. Nur"
+        "[login] aber TLS ist AUS (--no-tls), die Übertragung läuft über reines http. Nur"  # codespell:ignore
     msg "[login] on a trusted LAN only, and only while logging in." \
         "[login] in einem vertrauenswürdigen LAN und nur während der Anmeldung nutzen."
   fi
   if is_wildcard_addr "$novnc_bind"; then
     msg "[login] That bind is a wildcard, so the URL above names just one of the" \
-        "[login] Diese Bindung ist ein Platzhalter, die Adresse oben nennt also nur eine"
+        "[login] Diese Bindung ist ein Platzhalter, die Adresse oben nennt also nur eine"  # codespell:ignore
     msg "[login] interfaces it listens on. Prefer bash login.sh --ip <ADDRESS>." \
-        "[login] der Schnittstellen, auf denen es lauscht. Besser: bash login.sh --ip <ADRESSE>."
+        "[login] der Schnittstellen, auf denen es lauscht. Besser: bash login.sh --ip <ADRESSE>."  # codespell:ignore
   fi
 fi
 

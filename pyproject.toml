@@ -536,6 +536,9 @@ max-statements = 100
 skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.pyi,translations,*.proto,*_pb2.py,package-lock.json,./custom_components/googlefindmy/vendor/leaflet,./tests/fixtures"
 ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-empt,pre-empted,pre-empting,pre-emptive,pre-emptively,pre-empts,titel,unparseable,addressings,re-use,re-uses,re-used,re-using,re-usable"
 check-filenames = true
+# Opt-in block for text no line comment can mark (a heredoc, a run of `echo`):
+# only the lines between the two markers are skipped, the rest of the tree is not.
+ignore-multiline-regex = "# codespell:ignore-begin\\b.*?# codespell:ignore-end\\b"
 
 [tool.bandit]
 # Exclude auto-generated protobuf files and test files

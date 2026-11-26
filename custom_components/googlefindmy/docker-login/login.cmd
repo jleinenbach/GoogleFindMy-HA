@@ -101,8 +101,8 @@ rem Language of this launcher's own terminal lines (L-11), mirroring login.sh:
 rem German for a de* tag (de, de-DE, de_DE.UTF-8, ...), English for everything
 rem else, C included. It follows the same GFMY_LOCALE as the sign-in page, so
 rem the terminal and Chrome cannot disagree. Messages from the container itself
-rem stay English. The German texts are written in ASCII transliteration (ae, oe,
-rem ue, ss) on purpose: this file stays ASCII and never switches the console
+rem stay English. The German texts are written in ASCII transliteration (ae for
+rem a-umlaut, ss for sharp s) on purpose: this file stays ASCII and never switches the console
 rem code page, so the lines read the same on every Windows console. Every [login]
 rem line below is an adjacent pair, English first, each guarded by LAUNCHER_DE,
 rem apart from the ssh command line and the two-language --lang error;
@@ -240,8 +240,10 @@ if defined LAUNCHER_DE echo [login] Wie sollen die fertigen Anmeldedaten zu Home
 if not defined LAUNCHER_DE echo [login]   A) File only: .\data\secrets.json  (the file stays)
 if defined LAUNCHER_DE echo [login]   A) Nur Datei: .\data\secrets.json  (die Datei bleibt)
 if not defined LAUNCHER_DE echo [login]      Needs: Home Assistant can see that folder, e.g. this repo lives
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login]      Voraussetzung: Home Assistant sieht diesen Ordner, z. B. liegt
 if not defined LAUNCHER_DE echo [login]      under config\custom_components on the HA machine.
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login]      dieses Repo unter config\custom_components auf dem HA-Rechner.
 if not defined LAUNCHER_DE echo [login]   B) Print the bundle in this terminal INSTEAD of keeping it
 if defined LAUNCHER_DE echo [login]   B) Buendel in diesem Terminal ausgeben, STATT es aufzubewahren
@@ -252,6 +254,7 @@ if defined LAUNCHER_DE echo [login]      danach kein Import ueber die ueberwacht
 if not defined LAUNCHER_DE echo [login]      Last resort: the credentials then sit in your scrollback, in
 if defined LAUNCHER_DE echo [login]      Letzter Ausweg: Die Anmeldedaten stehen dann im Terminalverlauf,
 if not defined LAUNCHER_DE echo [login]      "docker logs" and in the clipboard you paste them from.
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login]      in "docker logs" und in der Zwischenablage, aus der du sie einfuegst.
 set "TRACK_CHOICE="
 if not defined LAUNCHER_DE set /p "TRACK_CHOICE=[login] Choice [Enter = A]: "
@@ -297,6 +300,7 @@ if defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] Sobald er laeuft,
 if not defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] The per-run noVNC password is printed by the container below,
 if defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] Das noVNC-Passwort dieses Laufs gibt der Container weiter unten aus,
 if not defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] shown as "(password: ...)" in the noVNC-available line and the [AuthFlow] banner.
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] als "(password: ...)" in der noVNC-Zeile und im [AuthFlow]-Banner.
 if not defined LAUNCHER_DE echo [login] and log into Google in the browser view.
 if defined LAUNCHER_DE echo [login] und dich in der Browseransicht bei Google anmelden.
@@ -304,6 +308,7 @@ if defined LAUNCHER_DE echo [login] und dich in der Browseransicht bei Google an
 rem Tell the truth about who can actually reach that address.
 if defined IS_LOOPBACK goto :loopback_hint
 if not defined LAUNCHER_DE echo [login] WARNING: noVNC is bound to %NOVNC_BIND% and is therefore reachable
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login] WARNUNG: noVNC ist an %NOVNC_BIND% gebunden und damit auch
 if not defined LAUNCHER_DE echo [login] beyond this host. For this LAN bind the container replaces the base
 if defined LAUNCHER_DE echo [login] ausserhalb dieses Hosts erreichbar. Fuer diese LAN-Bindung ersetzt der
@@ -316,15 +321,18 @@ if defined LAUNCHER_DE echo [login] Viewer mit einem selbstsignierten Zertifikat
 if not defined LAUNCHER_DE echo [login] warning. Use it on a trusted LAN only, and only while logging in.
 if defined LAUNCHER_DE echo [login] oeffnen und die einmalige Browserwarnung bestaetigen. Nur in einem vertrauenswuerdigen LAN und nur waehrend der Anmeldung nutzen.
 if not defined LAUNCHER_DE if "%NOVNC_BIND%"=="0.0.0.0" echo [login] That bind is a wildcard, so the URL above names just one interface it listens on. Prefer login.cmd --ip ^<ADDRESS^>.
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE if "%NOVNC_BIND%"=="0.0.0.0" echo [login] Diese Bindung ist ein Platzhalter, die Adresse oben nennt also nur eine der Schnittstellen, auf denen es lauscht. Besser: login.cmd --ip ^<ADRESSE^>.
 goto :hint_done
 :loopback_hint
 if not defined LAUNCHER_DE echo [login] noVNC is bound to %NOVNC_BIND%, so only this Docker host reaches it.
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login] noVNC ist an %NOVNC_BIND% gebunden, nur dieser Docker-Host erreicht es.
 if not defined LAUNCHER_DE echo [login] From another machine either tunnel it:
 if defined LAUNCHER_DE echo [login] Von einem anderen Rechner aus entweder tunneln:
 echo [login]   ssh -L 7900:127.0.0.1:7900 ^<docker-host^>
 if not defined LAUNCHER_DE echo [login] or re-run bound to a LAN address: login.cmd --ip ^<ADDRESS^>
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login] oder neu starten, an eine LAN-Adresse gebunden: login.cmd --ip ^<ADRESSE^>
 :hint_done
 
@@ -368,6 +376,7 @@ exit /b 2
 
 :ip_missing
 if not defined LAUNCHER_DE echo [login] --ip needs an address, e.g. login.cmd --ip 192.168.1.21 1>&2
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login] --ip braucht eine Adresse, z. B. login.cmd --ip 192.168.1.21 1>&2
 popd
 endlocal
@@ -391,6 +400,7 @@ exit /b 2
 
 :track_missing
 if not defined LAUNCHER_DE echo [login] --track needs a value: a or b. Example: login.cmd --track a 1>&2
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login] --track braucht einen Wert: a oder b. Beispiel: login.cmd --track a 1>&2
 popd
 endlocal
@@ -398,6 +408,7 @@ exit /b 2
 
 :track_invalid
 if not defined LAUNCHER_DE echo [login] --track needs a or b. 1>&2
+rem # codespell:ignore-next-line
 if defined LAUNCHER_DE echo [login] --track braucht a oder b. 1>&2
 if not defined LAUNCHER_DE echo [login]   a = file handoff only (.\data\secrets.json, the default) 1>&2
 if defined LAUNCHER_DE echo [login]   a = nur Dateiuebergabe (.\data\secrets.json, die Vorgabe) 1>&2
@@ -441,6 +452,7 @@ goto :eof
 
 :print_usage_de
 rem German help, ASCII transliteration like every German line in this file.
+rem # codespell:ignore-begin
 echo Aufruf: login.cmd [--ip ^<ADRESSE^>] [--track a^|b] [--lang ^<KUERZEL^>] [--help]
 echo.
 echo   --ip ^<ADRESSE^>  Den noVNC-Viewer (Port 7900) an ^<ADRESSE^> binden und diese
@@ -467,6 +479,7 @@ echo   GFMY_LOCALE           Sprache der Anmeldeseite und dieser Zeilen (Vorgabe
 echo                         deine Windows-Kultur, sonst die von Chrome, falls
 echo                         PowerShell nicht antwortet)
 echo                         set GFMY_LOCALE=C ueberlaesst die Wahl Chrome
+rem # codespell:ignore-end
 goto :eof
 
 :prescan_lang

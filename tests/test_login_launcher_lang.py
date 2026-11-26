@@ -14,7 +14,7 @@ full: every ``[login]`` line goes through ``msg``/``pick``, so a new message
 cannot quietly stay English-only.
 
 ``login.cmd`` does the same on Windows, with its German written in ASCII
-transliteration (ae, oe, ue, ss) so no console code page has to change. It
+transliteration (ae for a-umlaut, ss) so no console code page has to change. It
 cannot run here, so the last block pins it by text: adjacent EN/DE line pairs,
 ASCII only, ``--lang`` read before any output, and a two-language help. Which
 tags count as German is compared with the real ``login.sh``.
@@ -300,7 +300,7 @@ def test_every_login_cmd_line_is_an_adjacent_language_pair() -> None:
 
 
 def test_login_cmd_stays_ascii_and_keeps_the_code_page() -> None:
-    """German on Windows is written ae/oe/ue/ss, so no code page has to change.
+    """German on Windows is written in two-letter ASCII, so no code page changes.
 
     An umlaut in this file would need the console code page switched, which
     nobody can verify without a Windows console, and a wrong guess would garble
