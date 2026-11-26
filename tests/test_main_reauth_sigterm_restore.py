@@ -12,7 +12,6 @@ exception for exactly that block.
 from __future__ import annotations
 
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -26,6 +25,11 @@ from custom_components.googlefindmy import main as cli_main
 from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (
     _ENV_CLI_PROCESS,
 )
+
+# tests/AGENTS.md: a test that spawns the CLI runs it through ``cli_sandbox``
+# and asserts ``_assert_no_process_kill``. The fixture lives in test_main.py;
+# importing it here makes pytest offer it to this module as well.
+from tests.test_main import _assert_no_process_kill, _CliSandbox, cli_sandbox  # noqa: F401
 
 _PROBE = (
     Path(__file__).resolve().parent
@@ -53,6 +57,7 @@ def _write_cache(tmp_path: Path) -> Path:
 
 def test_a_stop_during_sign_in_one_puts_the_cleared_tokens_back(
     tmp_path: Path,
+    cli_sandbox: _CliSandbox,  # noqa: F811 - the fixture imported above
 ) -> None:
     """A real process, stopped from outside, ends with 143 and keeps the account.
 
@@ -61,18 +66,13 @@ def test_a_stop_during_sign_in_one_puts_the_cleared_tokens_back(
     stop`` does, once the stand-in for the Chrome window reports that it waits.
     """
     path = _write_cache(tmp_path)
+    # The sandbox points GOOGLEFINDMY_SECRETS_PATH at this very file.
+    assert cli_sandbox.env["GOOGLEFINDMY_SECRETS_PATH"] == str(path)
     root = Path(__file__).resolve().parents[1]
-    env = {
-        **os.environ,
-        "GOOGLEFINDMY_SECRETS_PATH": str(path),
-        "PYTHONPATH": os.pathsep.join(
-            p for p in (str(root), os.environ.get("PYTHONPATH", "")) if p
-        ),
-    }
     child = subprocess.Popen(
         [sys.executable, str(_PROBE)],
         cwd=root,
-        env=env,
+        env=cli_sandbox.env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -102,6 +102,7 @@ def test_a_stop_during_sign_in_one_puts_the_cleared_tokens_back(
     assert "BROWSER_CLOSED" in err  # the stop unwound through the browser's finally
     assert _STOP_LINE in err
     assert "Login did not complete; restored 3 cached token(s)." in out
+    _assert_no_process_kill(cli_sandbox)
 
 
 def test_the_previous_handler_comes_back_even_when_the_block_raises() -> None:
