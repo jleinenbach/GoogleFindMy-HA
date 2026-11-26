@@ -1530,6 +1530,39 @@ def _cancel_on_sigterm() -> Iterator[_StopRequest]:
         loop.remove_signal_handler(signal.SIGTERM)
 
 
+class _LoginTerminated(BaseException):
+    """SIGTERM arrived during sign-in 1 of 2 of a ``--reauth`` run.
+
+    A ``BaseException`` so that no ``except Exception`` on the way swallows
+    it; ``_main`` catches it beside the other endings of sign-in 1 of 2.
+    """
+
+
+@contextlib.contextmanager
+def _raise_on_sigterm() -> Iterator[None]:
+    """While the block runs, turn SIGTERM into ``_LoginTerminated``.
+
+    ``--reauth`` clears the cached tokens before sign-in 1 of 2 and puts them
+    back when the sign-in ends without a new token. Sign-in 1 of 2 runs before
+    any event loop, so ``_cancel_on_sigterm`` cannot cover it, and SIGTERM's
+    default ended the process before the restore could run: ``docker stop``
+    left the account signed out. A Python handler that raises unwinds the
+    stack instead, through the ``finally`` that quits Chrome, into the restore
+    in ``_main``. The previous handler comes back when the block ends, so a
+    stop during the restore itself meets the default again (the write is
+    atomic either way).
+    """
+
+    def _on_sigterm(signum: int, frame: types.FrameType | None) -> None:
+        raise _LoginTerminated
+
+    previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
     """Run the standalone token bootstrap, then hand off to the interactive CLI.
 
@@ -1817,15 +1850,35 @@ def _main(argv: Sequence[str] | None = None) -> None:
     # MissingTokenCacheError instead of bootstrapping.
     restore_cleared_tokens = _clear_stale_tokens_for_reauth() if args.reauth else None
     try:
-        _ensure_authenticated()
-    except BaseException:
-        # A cancelled login, a Ctrl+C, or the sys.exit from a driver failure all
-        # end the run without a new token -- and --reauth has already taken the
-        # old ones away. Put them back, so stopping the login costs the user
-        # nothing. BaseException is deliberate: SystemExit and KeyboardInterrupt
-        # are exactly the two paths that reach here most often.
+        # Only a --reauth run has tokens to put back; without it SIGTERM keeps
+        # its default and the signal ends the process (a shell or docker then
+        # reports 143).
+        with (
+            _raise_on_sigterm()
+            if restore_cleared_tokens is not None
+            else contextlib.nullcontext()
+        ):
+            _ensure_authenticated()
+    except BaseException as err:
+        # A cancelled login, a Ctrl+C, the sys.exit from a driver failure, or a
+        # stop from outside (docker stop) all end the run without a new token
+        # -- and --reauth has already taken the old ones away. Put them back,
+        # so stopping the login costs the user nothing. BaseException is
+        # deliberate: SystemExit and KeyboardInterrupt are exactly the two
+        # paths that reach here most often.
         if restore_cleared_tokens is not None:
             restore_cleared_tokens()
+        if isinstance(err, _LoginTerminated):
+            # The restore has said what it did on stdout; flush that first so
+            # the two lines arrive in order.
+            with contextlib.suppress(OSError, ValueError):
+                sys.stdout.flush()
+            print(
+                "The login was stopped (SIGTERM) during sign-in 1 of 2.",
+                file=sys.stderr,
+                flush=True,
+            )
+            _end_process_now(_EXIT_TERMINATED)
         raise
     # Resolve the effective entry id once (CLI > env > "") and use the SAME
     # value for both registration and hand-off, so the registry key and the

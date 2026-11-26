@@ -407,13 +407,12 @@ Either way, re-running the login is the whole recovery procedure. After a
 cancelled sign-in 2 of 2 the re-run finds the stored tokens and opens only the
 second window.
 
-Cancelling a **re-authentication** costs nothing either (a stop from outside
-is the exception, see the end of this section). `--reauth` (passed
+Cancelling a **re-authentication** costs nothing either. `--reauth` (passed
 through `GFMY_ARGS`, see [Forcing a fresh login](#forcing-a-fresh-login)) clears
 the cached tokens before it starts, because an empty cache is what makes the CLI
 open the login at all. If sign-in 1 of 2 then ends without a token (you closed
-its window a third time, the wait expired, you pressed `Ctrl+C`), the cleared
-tokens are put back and the run says so:
+its window a third time, the wait expired, you pressed `Ctrl+C`, the container
+was stopped), the cleared tokens are put back and the run says so:
 
 ```
 Login did not complete; restored 3 cached token(s).
@@ -428,8 +427,8 @@ as you were. A `--reauth` cancelled in sign-in 2 of 2 puts nothing back: sign-in
 so instead of pretending otherwise:
 
 * **The login already stored a new token** and was then cut short in the moment
-  between saving it and returning — a `Ctrl+C` or a broken pipe in that
-  narrow window. The cleared tokens are then *not* put back, because they belong to the
+  between saving it and returning — a `Ctrl+C`, a broken pipe or a stop from
+  outside in that narrow window. The cleared tokens are then *not* put back, because they belong to the
   sign-in the new one replaces and a mix of the two would send the next run back
   to the old account:
 
@@ -461,10 +460,16 @@ A stop before the key was read can leave the incomplete file shown further
 up, and the same notice then names it. Running the login again is the recovery
 here too.
 
-A stop does not put cleared tokens back. Under `--reauth`, a stop during
-sign-in 1 of 2 leaves them cleared, because SIGTERM ends the program before
-the `--reauth` restore described above can run. Run the login again
-(without `--reauth`) to sign in afresh.
+Under `--reauth`, a stop during sign-in 1 of 2 first puts the cleared tokens
+back, exactly as a cancelled sign-in 1 of 2 does (the restore line, or one of
+the three exceptions, shown above), and then ends with exit status `143` and
+this line:
+
+```
+The login was stopped (SIGTERM) during sign-in 1 of 2.
+```
+
+In the usual case you are then signed in exactly as before the run.
 
 ## Browser closed by accident
 
