@@ -13,6 +13,7 @@ and 2).
 
 from __future__ import annotations
 
+import io
 import json
 import signal
 import subprocess
@@ -98,6 +99,8 @@ def _prepare_main(
     monkeypatch.setenv("GOOGLEFINDMY_SECRETS_PATH", str(path))
     monkeypatch.setenv(_ENV_CLI_PROCESS, "1")  # _main sets it; restored afterwards
     monkeypatch.setattr(cli_main, "_configure_cli_logging", lambda **kw: None)
+    # No terminal: the overwrite warning must not wait for Enter (pytest -s).
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     return path
 
 

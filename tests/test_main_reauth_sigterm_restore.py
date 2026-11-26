@@ -11,6 +11,7 @@ exception for exactly that block.
 
 from __future__ import annotations
 
+import io
 import json
 import signal
 import subprocess
@@ -73,6 +74,9 @@ def test_a_stop_during_sign_in_one_puts_the_cleared_tokens_back(
         [sys.executable, str(_PROBE)],
         cwd=root,
         env=cli_sandbox.env,
+        # The file holds a bundle, so --reauth warns and, at a terminal, asks
+        # for Enter; the child must not inherit pytest's terminal.
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -143,6 +147,8 @@ def _stop_in_process(
     monkeypatch.setenv("GOOGLEFINDMY_SECRETS_PATH", str(path))
     monkeypatch.setenv(_ENV_CLI_PROCESS, "1")  # _main sets it; restored afterwards
     monkeypatch.setattr(cli_main, "_configure_cli_logging", lambda **kw: None)
+    # No terminal: the overwrite warning must not wait for Enter (pytest -s).
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
 
     def _sign_in_one() -> None:
         handler = signal.getsignal(signal.SIGTERM)

@@ -1189,6 +1189,10 @@ class TestCliMainCallOrder:
         monkeypatch.setattr(cli_main, "_build_cli_parser", lambda: fake_parser)
         monkeypatch.setattr(cli_main, "_configure_cli_logging", manager.configure)
         monkeypatch.setattr(cli_main, "_clear_stale_tokens_for_reauth", manager.clear)
+        # The warning reads the real secrets.json otherwise (tests/AGENTS.md).
+        monkeypatch.setattr(
+            cli_main, "_warn_before_replacing_unconsumed_bundle", manager.warn
+        )
         monkeypatch.setattr(cli_main, "_ensure_authenticated", manager.auth)
         monkeypatch.setattr(
             cli_main, "_resolve_effective_entry_id", lambda *a: "entry-x"
@@ -1222,6 +1226,8 @@ class TestCliMainCallOrder:
         manager = self._run_main(monkeypatch, reauth=True)
         call_names = [call[0] for call in manager.mock_calls]
         assert call_names.index("clear") < call_names.index("auth")
+        # The overwrite warning comes before anything is cleared.
+        assert call_names.index("warn") < call_names.index("clear")
 
     def test_keyboard_interrupt_prints_exiting(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

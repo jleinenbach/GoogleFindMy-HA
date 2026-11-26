@@ -678,6 +678,28 @@ echo '{}' > data/secrets.json
 GFMY_ARGS="--reauth" bash login.sh
 ```
 
+There is only one `data/secrets.json`. If it still holds a bundle (for example
+from a first run for another account that Home Assistant has not imported yet),
+a `--reauth` run warns before it changes anything; the account is masked:
+
+```
+The credential file (data/secrets.json next to the launcher) still holds a bundle for u***@example.com.
+If Home Assistant has not imported it yet, this run replaces it: import it first, or copy the file.
+```
+
+At a terminal it then asks you to press Enter to go on. `Ctrl+C` (or the end of
+input) stops the run with exit status `130` and this line, and the file stays as
+it was:
+
+```
+Stopped. Nothing was changed.
+```
+
+Without a terminal (input not attached) the warning is printed and the run goes
+on. A file only knows that it holds a bundle, not whether Home Assistant has
+imported it already, so the warning also appears when the import has happened
+but the file could not be removed (a read-only mount).
+
 `GFMY_ARGS` is forwarded to `main.py`. Useful values: `--reauth` (force login),
 `--debug` (verbose bootstrap/FCM logging), `--entry <id>` (select one config
 entry when the cache holds several).

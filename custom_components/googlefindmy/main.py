@@ -1231,6 +1231,74 @@ def _credential_is_present(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _warn_before_replacing_unconsumed_bundle() -> None:
+    """Warn before ``--reauth`` replaces a bundle Home Assistant may not have imported.
+
+    There is one ``secrets.json``. A bundle in it that Home Assistant has not
+    imported yet is gone once ``--reauth`` clears the file and the sign-in
+    writes new keys, possibly for another account: a second run for a second
+    account is the usual way to get there, from ``login.sh``, ``login.cmd`` or a
+    plain ``docker compose run`` alike. The file cannot tell whether the import
+    happened (Home Assistant cannot delete it from a read-only mount), so the
+    warning says "if". It runs before anything is written and before the stop
+    handler of sign-in 1 of 2 is set, so a stop here costs nothing. At an
+    attended terminal it waits for Enter; Ctrl+C or the end of input ends the
+    run with ``_EXIT_LOGIN_ABORTED`` and leaves the file as it was.
+    """
+    import json  # noqa: PLC0415
+
+    bundle_path = _resolve_secrets_path()
+    try:
+        with open(bundle_path, encoding="utf-8") as fh:
+            stored = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if not isinstance(stored, dict):
+        return
+    # The same keys _clear_stale_tokens_for_reauth removes: ``shared_key`` and
+    # its older per-user form ``shared_key_<username>``.
+    if not any(
+        key.startswith("shared_key") and _credential_is_present(value)
+        for key, value in stored.items()
+    ):
+        return
+
+    from custom_components.googlefindmy.Auth.aas_token_retrieval import (  # noqa: PLC0415
+        _mask_email_for_logs,
+    )
+    from custom_components.googlefindmy.chrome_driver import (  # noqa: PLC0415
+        _is_container_login,
+    )
+
+    username = stored.get("username")
+    account = _mask_email_for_logs(username if isinstance(username, str) else None)
+    # The launcher's own wording for the same file (entrypoint.sh).
+    location = (
+        "data/secrets.json next to the launcher"
+        if _is_container_login()
+        else str(bundle_path)
+    )
+    print(
+        f"\nThe credential file ({location}) still holds a bundle for {account}.\n"
+        "If Home Assistant has not imported it yet, this run replaces it: "
+        "import it first, or copy the file.",
+        file=sys.stderr,
+        flush=True,
+    )
+    if sys.stdin is None or not sys.stdin.isatty():
+        return
+    try:
+        input("Press Enter to continue, or Ctrl+C to stop. ")
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl+C reaches the whole process group in the container, and the
+        # entrypoint forwards another one; a second KeyboardInterrupt must not
+        # cut the message short.
+        with contextlib.suppress(ValueError):
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+        print("\nStopped. Nothing was changed.", file=sys.stderr, flush=True)
+        sys.exit(_EXIT_LOGIN_ABORTED)
+
+
 def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
     """Clear cached tokens from secrets.json to force re-authentication.
 
@@ -1891,6 +1959,8 @@ def _main(argv: Sequence[str] | None = None) -> None:
     # then a cache-signal check that was always empty for a fresh shell start),
     # both of which could dead-end a repo-layout start in an opaque
     # MissingTokenCacheError instead of bootstrapping.
+    if args.reauth:
+        _warn_before_replacing_unconsumed_bundle()
     restore_cleared_tokens: Callable[[], None] | None = None
     try:
         # Only a --reauth run can have tokens to put back; without it SIGTERM
