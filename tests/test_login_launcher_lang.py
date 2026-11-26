@@ -22,7 +22,7 @@ tags count as German is compared with the real ``login.sh``.
 
 from __future__ import annotations
 
-import fnmatch
+import os
 import re
 import shutil
 import subprocess
@@ -120,7 +120,12 @@ def test_lang_after_double_dash_is_not_an_option(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "args",
-    [("--lang",), ("--lang", "--help"), ("--track", "a", "--lang", "-x")],
+    [
+        ("--lang",),
+        ("--lang", "--help"),
+        ("--track", "a", "--lang", "-x"),
+        ("--lang=-x",),
+    ],
 )
 def test_lang_without_a_value_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
     """A missing value, or one that is the next option, is no language tag."""
@@ -198,7 +203,7 @@ def test_every_launcher_line_goes_through_msg() -> None:
         # any echo/printf form (`printf '%s\n' "[login] ..."`, `echo -e`), not
         # just the quoted first argument; pick lines are pairs by construction
         and re.search(r"\b(echo|printf)\b", line)
-        and "pick " not in line
+        and not re.search(r"\bpick '", line)
     }
     assert plain == _LANGUAGE_NEUTRAL, (
         "these [login] lines bypass msg/pick and stay English for a German "
@@ -309,34 +314,62 @@ def test_login_cmd_stays_ascii_and_keeps_the_code_page() -> None:
     assert "geloescht" in _cmd_text(), "the German texts are missing altogether"
 
 
-def test_login_cmd_is_checked_out_with_crlf_line_ends() -> None:
+def test_login_cmd_is_checked_out_with_crlf_line_ends(tmp_path: Path) -> None:
     """cmd.exe can miss a label in an LF batch file, so checkouts must get CRLF.
 
     The label search reads 512-byte blocks and only trusts CRLF line ends; with
     LF, ``goto``/``call`` can fail on a label that exists, depending on where it
     falls. The release ZIP is zipped from the checkout, so an ``eol=crlf``
-    attribute reaches HACS users too. The last matching line wins in git, so the
-    last one that matches ``login.cmd`` is the one checked here.
+    attribute reaches HACS users too.
+
+    git, not a parser of our own, decides what the attributes mean: it merges
+    them per attribute across lines and directories, and ``-text`` or
+    ``binary`` beat ``eol``. The test copies every ``.gitattributes`` of the
+    tree into an empty repository with an isolated config (tests/AGENTS.md,
+    real git) and asks ``git check-attr``, so it also works on an exported
+    tree without ``.git``.
     """
 
-    attributes = REPO_ROOT / ".gitattributes"
-    assert attributes.is_file(), ".gitattributes is missing"
-    verdict: list[str] | None = None
-    for raw in attributes.read_text("utf-8").splitlines():
-        fields = raw.split()
-        if not fields or fields[0].startswith("#"):
-            continue
-        pattern, attrs = fields[0], fields[1:]
-        target = (
-            "custom_components/googlefindmy/docker-login/login.cmd"
-            if "/" in pattern
-            else "login.cmd"
-        )
-        if fnmatch.fnmatchcase(target, pattern.lstrip("/")):
-            verdict = attrs
-    assert verdict is not None, "no .gitattributes line covers login.cmd"
-    assert "eol=crlf" in verdict and "-text" not in verdict, (
-        f"login.cmd must be checked out with CRLF, got {verdict}"
+    git = shutil.which("git")
+    assert git, "git is needed to evaluate .gitattributes"
+    repo = tmp_path / "attrs"
+    repo.mkdir()
+    copied = 0
+    for current, dirs, files in os.walk(REPO_ROOT):
+        dirs[:] = [d for d in dirs if d not in {".git", ".venv", "node_modules"}]
+        if ".gitattributes" in files:
+            source = Path(current) / ".gitattributes"
+            target = repo / source.relative_to(REPO_ROOT)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            copied += 1
+    assert copied, ".gitattributes is missing"
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text("", "utf-8")
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": str(global_config),
+    }
+    subprocess.run([git, "init", "-q", str(repo)], check=True, env=env, timeout=30)
+    path = "custom_components/googlefindmy/docker-login/login.cmd"
+    result = subprocess.run(
+        [git, "-C", str(repo), "check-attr", "text", "eol", "--", path],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    attrs = dict(
+        line.rsplit(": ", 2)[1:] for line in result.stdout.splitlines() if line
+    )
+    assert attrs.get("text") in {"set", "auto"}, (
+        f"login.cmd must be a text file for git, got {result.stdout!r}"
+    )
+    assert attrs.get("eol") == "crlf", (
+        f"login.cmd must be checked out with CRLF, got {result.stdout!r}"
     )
 
 

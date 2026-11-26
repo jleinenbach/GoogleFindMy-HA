@@ -156,8 +156,8 @@ duplicate containers, stale code after an update) for you.
   The release ZIP and a git checkout give `login.cmd` Windows (CRLF) line
   ends. If you fetch the single file some other way (the *Raw* button on
   GitHub, for example), it arrives with LF ends, and `cmd.exe` can then fail
-  with "The system cannot find the batch label specified"; take it from the
-  ZIP instead.
+  with `The system cannot find the batch label specified - <label>`; take it
+  from the ZIP instead.
 
 Then follow [First run (Google login)](#first-run-google-login-required) from
 step 3.
