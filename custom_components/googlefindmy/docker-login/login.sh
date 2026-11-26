@@ -57,9 +57,142 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# --lang <tag> / --lang=<tag> (L-11): the short name for GFMY_LOCALE. It is read
+# in a pre-scan, BEFORE the language block below and before any output, because
+# the parser further down already prints messages (a bad --ip, an unknown
+# option) and those must speak the chosen language too. A value given here wins
+# over an inherited GFMY_LOCALE, as a flag wins over the environment everywhere
+# else in this launcher. The scan stops at `--`, like the parser.
+_lang_expect=0
+for _arg in "$@"; do
+  if [ "$_lang_expect" -eq 1 ]; then
+    GFMY_LOCALE="$_arg"
+    _lang_expect=0
+    continue
+  fi
+  case "$_arg" in
+    --) break ;;
+    --lang) _lang_expect=1 ;;
+    --lang=*) GFMY_LOCALE="${_arg#--lang=}" ;;
+  esac
+done
+if [ "$_lang_expect" -eq 1 ]; then
+  echo "[login] --lang needs a language tag, e.g. --lang de" >&2
+  echo "[login] --lang braucht ein Sprachkürzel, z. B. --lang de" >&2
+  exit 2
+fi
+
+# Language of the login browser (see docker-compose.yml -> GOOGLEFINDMY_LOGIN_LOCALE).
+# Read from the shell locale so the Google sign-in speaks the language of whoever
+# is running this, instead of always English. Deliberately NOT a hard setting:
+#   * an existing GFMY_LOCALE always wins, so `GFMY_LOCALE=en ./login.sh` opts out;
+#   * so does `GFMY_LOCALE= ./login.sh`, an empty but PRESENT value, which is how
+#     the guide tells the reader to hand the choice back to Chrome. That is why
+#     the test below expands with `+set` and not `:-`: `:-` cannot tell "said
+#     nothing" from "said no preference", so on a host with a real LANG the
+#     deliberate opt-out silently became the host locale. Same `+set` form as
+#     the three captures further down (two for the noVNC menu, AP-1, one for the
+#     handoff switch, AP-5), for the same reason;
+#   * an unset or "C"/"POSIX" locale carries no preference, so it stays empty and
+#     Chrome keeps its own default -- English, which is the right fallback.
+# Windows cannot express the empty-but-present state at all (`set VAR=` deletes
+# the name), so the opt-out that works on BOTH launchers is `GFMY_LOCALE=C`: the
+# container reads the POSIX "no localisation" locale as no preference and drops
+# it in silence. The rule therefore exists TWICE on purpose, once per side, and
+# the two are not interchangeable: the case arm below only ever sees the HOST
+# locale this launcher read, while the container sees whatever the user set --
+# which is the only copy login.cmd and a plain `docker compose` call reach at
+# all. Keep them in step; test_both_halves_agree_on_what_counts_as_no_preference
+# pins the pair over twelve values, and on the container side it is the SILENCE
+# that carries the assertion -- these values are no language tags either way, so
+# the `None` it also checks would pass on a container that warns about them.
+# The container validates the value and ignores it if it is not a language tag,
+# so a surprising locale can never break a login. Only the language part is
+# forwarded (LC_ALL > LC_MESSAGES > LANG, the standard precedence).
+if [ -z "${GFMY_LOCALE+set}" ]; then
+  _host_locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+  case "$_host_locale" in
+    ""|C|POSIX|C.*|POSIX.*|C@*|POSIX@*) GFMY_LOCALE="" ;;
+    *) GFMY_LOCALE="$_host_locale" ;;
+  esac
+fi
+export GFMY_LOCALE
+
+# Language of this launcher's own terminal lines (L-11): German for a de* tag
+# (de, de-DE, de_DE.UTF-8, ...), English for everything else, including the
+# empty "no preference" and C/POSIX. It follows the same GFMY_LOCALE as the
+# sign-in page, so terminal and Chrome cannot disagree. Messages from the
+# container itself stay English (the repo's rule for program output).
+_launcher_de=0
+case "$GFMY_LOCALE" in
+  [Dd][Ee] | [Dd][Ee][-_.@]*) _launcher_de=1 ;;
+esac
+
+# msg EN DE: print one line in the launcher language. Both texts sit side by
+# side at every call, so a translation cannot drift away from its original;
+# test_login_launcher_lang.py checks that every [login] line goes through here.
+msg() {
+  if [ "$_launcher_de" -eq 1 ]; then
+    printf '%s\n' "$2"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# pick EN DE: the same choice without a newline, for prompts and printf formats.
+pick() {
+  if [ "$_launcher_de" -eq 1 ]; then
+    printf '%s' "$2"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 usage() {
+  if [ "$_launcher_de" -eq 1 ]; then
+    cat <<'EOF'
+Aufruf: bash login.sh [--ip <ADRESSE>] [--track a|b] [--lang <KÜRZEL>] [--help]
+
+  --ip <ADRESSE>  Den noVNC-Viewer (Port 7900) an <ADRESSE> binden und diese
+                  Adresse als zu öffnende URL ausgeben. Eine konkrete LAN-Adresse
+                  dieses Docker-Hosts nehmen, z. B.: bash login.sh --ip 192.168.1.21
+  --no-tls        Bei einer LAN-Bindung KEINEN selbstsignierten TLS-Viewer
+                  einschalten, sondern einfaches http (z. B. bei eigenem Tunnel).
+                  Bei Loopback ohne Wirkung, das ist ohnehin einfaches http.
+  --track a|b     Festlegen, wie die fertigen Anmeldedaten zu Home Assistant
+                  kommen, ohne Rückfrage: a = nur Datei (Vorgabe), b = Bündel
+                  STATT der Datei in diesem Terminal ausgeben -- der Container
+                  löscht die Datei direkt danach. Gleichwertig zu GFMY_CLEARTEXT.
+  --lang <KÜRZEL> Sprache der Anmeldeseite und dieser Starterzeilen, z. B.
+                  --lang de oder --lang en. Kurzname für GFMY_LOCALE;
+                  --lang C überlässt die Wahl Chrome (dann Englisch).
+                  Der noVNC-Viewer folgt dagegen der Sprache deines BROWSERS.
+  --help          Diese Hilfe zeigen und beenden.
+
+Ohne --ip und ohne GFMY_NOVNC_BIND/GFMY_NOVNC_URL_HOST, und nur an einem
+bedienten Terminal, fragt der Starter, unter welcher Adresse der noVNC-Viewer
+geöffnet werden soll (nummeriertes Menü der gefundenen LAN-Adressen, ein
+Loopback-Eintrag oder freie Eingabe einer IP). Ein Lauf ohne Terminal behält die
+bisherige Loopback-Vorgabe unverändert.
+
+Dasselbe gilt für den Übergabeweg: Nur an einem bedienten Terminal und nur, wenn
+weder --track noch GFMY_CLEARTEXT angegeben ist, fragt der Starter nach dem Weg.
+Enter allein wählt Weg A (die Datei in ./data), also genau das bisherige
+Verhalten. Die beiden Wege schließen sich aus: Weg B gibt das Bündel aus, und
+der Container löscht die Datei danach.
+
+Umgebung (siehe den Kommentarblock oben in dieser Datei):
+  GFMY_NOVNC_BIND       Host-Bindung für noVNC 7900       (Vorgabe 127.0.0.1)
+  GFMY_NOVNC_URL_HOST   ausgegebene Adresse für den Browser (Vorgabe: die Bindung)
+  GFMY_CLEARTEXT=1      das Bündel am Ende in diesem Terminal ausgeben
+  GFMY_LOCALE           Sprache der Anmeldeseite und dieser Zeilen (Vorgabe:
+                        deine Locale, sonst die von Chrome, auch bei C/POSIX;
+                        GFMY_LOCALE=C überlässt die Wahl Chrome)
+EOF
+    return 0
+  fi
   cat <<'EOF'
-Usage: bash login.sh [--ip <ADDRESS>] [--track a|b] [--help]
+Usage: bash login.sh [--ip <ADDRESS>] [--track a|b] [--lang <TAG>] [--help]
 
   --ip <ADDRESS>  Bind the noVNC viewer (port 7900) to <ADDRESS> and print that
                   address as the URL to open. Use a concrete LAN address of this
@@ -71,6 +204,10 @@ Usage: bash login.sh [--ip <ADDRESS>] [--track a|b] [--help]
                   being asked: a = file only (default), b = print the bundle in
                   this terminal INSTEAD -- the container deletes the file right
                   after printing it. Equivalent to GFMY_CLEARTEXT.
+  --lang <TAG>    Language of the sign-in page and of these launcher lines,
+                  e.g. --lang de or --lang en. Short name for GFMY_LOCALE;
+                  --lang C hands the choice back to Chrome (English here).
+                  The noVNC viewer follows your BROWSER's language instead.
   --help          Show this help and exit.
 
 Without --ip and without GFMY_NOVNC_BIND/GFMY_NOVNC_URL_HOST, and only on an
@@ -88,7 +225,7 @@ Environment (see the comment block at the top of this file):
   GFMY_NOVNC_BIND       host bind for noVNC 7900         (default 127.0.0.1)
   GFMY_NOVNC_URL_HOST   address printed for your browser (default: the bind)
   GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
-  GFMY_LOCALE           language for the sign-in page     (default: your locale,
+  GFMY_LOCALE           language of the sign-in page and of these lines (default: your locale,
                         or Chrome's own if you have none, or it is C/POSIX;
                         GFMY_LOCALE=C hands the choice back to Chrome)
 EOF
@@ -265,13 +402,17 @@ is_loopback_addr() {
 
 set_ip_option() {
   if [ -z "$1" ]; then
-    echo "[login] --ip needs an address, e.g. --ip 192.168.1.21" >&2
+    msg "[login] --ip needs an address, e.g. --ip 192.168.1.21" \
+        "[login] --ip braucht eine Adresse, z. B. --ip 192.168.1.21" >&2
     exit 2
   fi
   if ! is_ip_literal "$1"; then
-    echo "[login] --ip needs an IP address of this Docker host, got '$1'." >&2
-    echo "[login] Host names are not accepted here: the value becomes a docker" >&2
-    echo "[login] port bind. Example: --ip 192.168.1.21" >&2
+    msg "[login] --ip needs an IP address of this Docker host, got '$1'." \
+        "[login] --ip braucht eine IP-Adresse dieses Docker-Hosts, erhalten: '$1'." >&2
+    msg "[login] Host names are not accepted here: the value becomes a docker" \
+        "[login] Hostnamen gehen hier nicht: Der Wert wird zu einer Docker-" >&2
+    msg "[login] port bind. Example: --ip 192.168.1.21" \
+        "[login] Portbindung. Beispiel: --ip 192.168.1.21" >&2
     exit 2
   fi
   novnc_bind="$1"
@@ -295,10 +436,14 @@ set_track_option() {
       GFMY_CLEARTEXT=1
       ;;
     *)
-      echo "[login] --track needs a or b, got '$1'." >&2
-      echo "[login]   a = file handoff only (./data/secrets.json, the default)" >&2
-      echo "[login]   b = print the bundle in this terminal instead (the" >&2
-      echo "[login]       container deletes the file after printing it)" >&2
+      msg "[login] --track needs a or b, got '$1'." \
+          "[login] --track braucht a oder b, erhalten: '$1'." >&2
+      msg "[login]   a = file handoff only (./data/secrets.json, the default)" \
+          "[login]   a = nur Dateiübergabe (./data/secrets.json, die Vorgabe)" >&2
+      msg "[login]   b = print the bundle in this terminal instead (the" \
+          "[login]   b = Bündel STATT der Datei in diesem Terminal ausgeben (der" >&2
+      msg "[login]       container deletes the file after printing it)" \
+          "[login]       Container löscht die Datei nach der Ausgabe)" >&2
       exit 2
       ;;
   esac
@@ -310,7 +455,8 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --ip)
       if [ "$#" -lt 2 ]; then
-        echo "[login] --ip needs an address, e.g. --ip 192.168.1.21" >&2
+        msg "[login] --ip needs an address, e.g. --ip 192.168.1.21" \
+            "[login] --ip braucht eine Adresse, z. B. --ip 192.168.1.21" >&2
         exit 2
       fi
       set_ip_option "$2"
@@ -322,7 +468,8 @@ while [ "$#" -gt 0 ]; do
       ;;
     --track)
       if [ "$#" -lt 2 ]; then
-        echo "[login] --track needs a value, e.g. --track a" >&2
+        msg "[login] --track needs a value, e.g. --track a" \
+            "[login] --track braucht einen Wert, z. B. --track a" >&2
         exit 2
       fi
       set_track_option "$2"
@@ -330,6 +477,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --track=*)
       set_track_option "${1#--track=}"
+      shift
+      ;;
+    --lang)
+      # Already applied by the pre-scan near the top (it must run before the
+      # first message); here the pair is only consumed. A missing value was
+      # refused there as well, so this arm always has a "$2".
+      shift 2
+      ;;
+    --lang=*)
       shift
       ;;
     --no-tls)
@@ -348,7 +504,8 @@ while [ "$#" -gt 0 ]; do
       break
       ;;
     *)
-      echo "[login] Unknown option: '$1'" >&2
+      msg "[login] Unknown option: '$1'" \
+          "[login] Unbekannte Option: '$1'" >&2
       usage >&2
       exit 2
       ;;
@@ -421,16 +578,21 @@ EOF
     # behavioural launcher test parses; the read still uses the terminal stdin.
     {
       echo ""
-      echo "[login] Where will you open the noVNC viewer? Pick the address your"
-      echo "[login] browser can reach on this Docker host:"
+      msg "[login] Where will you open the noVNC viewer? Pick the address your" \
+          "[login] Wo öffnest du den noVNC-Viewer? Wähle die Adresse, unter der"
+      msg "[login] browser can reach on this Docker host:" \
+          "[login] dein Browser diesen Docker-Host erreicht:"
       idx=1
       for cand in ${options[@]+"${options[@]}"}; do
         echo "[login]   ${idx}) ${cand}"
         idx=$((idx + 1))
       done
-      echo "[login]   L) 127.0.0.1  (loopback only; reach it via an SSH tunnel)"
-      echo "[login]   or type any other IP address of this host"
-      printf '[login] Choice [Enter = %s]: ' "$default"
+      msg "[login]   L) 127.0.0.1  (loopback only; reach it via an SSH tunnel)" \
+          "[login]   L) 127.0.0.1  (nur Loopback; erreichbar über einen SSH-Tunnel)"
+      msg "[login]   or type any other IP address of this host" \
+          "[login]   oder eine andere IP-Adresse dieses Hosts eintippen"
+      # shellcheck disable=SC2059  # the format is one of two fixed literals
+      printf "$(pick '[login] Choice [Enter = %s]: ' '[login] Auswahl [Enter = %s]: ')" "$default"
     } >&2
     read -r choice || choice=""
 
@@ -442,7 +604,8 @@ EOF
       if [ "$choice" -ge 1 ] && [ "$choice" -le "${#options[@]}" ]; then
         selected="${options[$((choice - 1))]}"
       else
-        echo "[login] No menu entry ${choice}. Try again." >&2
+        msg "[login] No menu entry ${choice}. Try again." \
+            "[login] Kein Menüeintrag ${choice}. Bitte noch einmal." >&2
         continue
       fi
     else
@@ -450,7 +613,8 @@ EOF
     fi
 
     if [ -z "$selected" ]; then
-      echo "[login] No address available; type one, e.g. 192.168.1.21." >&2
+      msg "[login] No address available; type one, e.g. 192.168.1.21." \
+          "[login] Keine Adresse verfügbar; bitte eine eintippen, z. B. 192.168.1.21." >&2
       continue
     fi
     if is_ip_literal "$selected"; then
@@ -458,7 +622,8 @@ EOF
       novnc_url_host="$selected"
       return 0
     fi
-    echo "[login] '${selected}' is not an IP address of this host. Try again." >&2
+    msg "[login] '${selected}' is not an IP address of this host. Try again." \
+        "[login] '${selected}' ist keine IP-Adresse dieses Hosts. Bitte noch einmal." >&2
   done
 }
 
@@ -483,16 +648,25 @@ prompt_for_track() {
   while true; do
     {
       echo ""
-      echo "[login] How should the finished credentials reach Home Assistant?"
-      echo "[login]   A) File only: ./data/secrets.json  (the file stays)"
-      echo "[login]      Needs: Home Assistant can see that folder, e.g. this repo"
-      echo "[login]      lives under config/custom_components on the HA machine."
-      echo "[login]   B) Print the bundle in this terminal INSTEAD of keeping it"
-      echo "[login]      The file is deleted right after printing, so this"
-      echo "[login]      REPLACES A: no watched-file import afterwards."
-      echo "[login]      Last resort: the credentials then sit in your scrollback,"
-      echo "[login]      in 'docker logs' and in the clipboard you paste them from."
-      printf '[login] Choice [Enter = A]: '
+      msg "[login] How should the finished credentials reach Home Assistant?" \
+          "[login] Wie sollen die fertigen Anmeldedaten zu Home Assistant kommen?"
+      msg "[login]   A) File only: ./data/secrets.json  (the file stays)" \
+          "[login]   A) Nur Datei: ./data/secrets.json  (die Datei bleibt)"
+      msg "[login]      Needs: Home Assistant can see that folder, e.g. this repo" \
+          "[login]      Voraussetzung: Home Assistant sieht diesen Ordner, z. B. liegt"
+      msg "[login]      lives under config/custom_components on the HA machine." \
+          "[login]      dieses Repo unter config/custom_components auf dem HA-Rechner."
+      msg "[login]   B) Print the bundle in this terminal INSTEAD of keeping it" \
+          "[login]   B) Bündel in diesem Terminal ausgeben, STATT es aufzubewahren"
+      msg "[login]      The file is deleted right after printing, so this" \
+          "[login]      Die Datei wird direkt nach der Ausgabe gelöscht, deshalb"
+      msg "[login]      REPLACES A: no watched-file import afterwards." \
+          "[login]      ERSETZT das A: danach kein Import über die überwachte Datei."
+      msg "[login]      Last resort: the credentials then sit in your scrollback," \
+          "[login]      Letzter Ausweg: Die Anmeldedaten stehen dann im Terminalverlauf,"
+      msg "[login]      in 'docker logs' and in the clipboard you paste them from." \
+          "[login]      in 'docker logs' und in der Zwischenablage, aus der du sie einfügst."
+      pick '[login] Choice [Enter = A]: ' '[login] Auswahl [Enter = A]: '
     } >&2
     read -r choice || choice=""
     case "$choice" in
@@ -505,7 +679,8 @@ prompt_for_track() {
         return 0
         ;;
       *)
-        echo "[login] Please answer A or B (bare Enter picks A)." >&2
+        msg "[login] Please answer A or B (bare Enter picks A)." \
+            "[login] Bitte mit A oder B antworten (Enter allein wählt A)." >&2
         ;;
     esac
   done
@@ -564,41 +739,6 @@ fi
 
 mkdir -p data
 
-# Language of the login browser (see docker-compose.yml -> GOOGLEFINDMY_LOGIN_LOCALE).
-# Read from the shell locale so the Google sign-in speaks the language of whoever
-# is running this, instead of always English. Deliberately NOT a hard setting:
-#   * an existing GFMY_LOCALE always wins, so `GFMY_LOCALE=en ./login.sh` opts out;
-#   * so does `GFMY_LOCALE= ./login.sh`, an empty but PRESENT value, which is how
-#     the guide tells the reader to hand the choice back to Chrome. That is why
-#     the test below expands with `+set` and not `:-`: `:-` cannot tell "said
-#     nothing" from "said no preference", so on a host with a real LANG the
-#     deliberate opt-out silently became the host locale. Same `+set` form as
-#     the three captures above (two for the noVNC menu, AP-1, one for the
-#     handoff switch, AP-5), for the same reason;
-#   * an unset or "C"/"POSIX" locale carries no preference, so it stays empty and
-#     Chrome keeps its own default -- English, which is the right fallback.
-# Windows cannot express the empty-but-present state at all (`set VAR=` deletes
-# the name), so the opt-out that works on BOTH launchers is `GFMY_LOCALE=C`: the
-# container reads the POSIX "no localisation" locale as no preference and drops
-# it in silence. The rule therefore exists TWICE on purpose, once per side, and
-# the two are not interchangeable: the case arm below only ever sees the HOST
-# locale this launcher read, while the container sees whatever the user set --
-# which is the only copy login.cmd and a plain `docker compose` call reach at
-# all. Keep them in step; test_both_halves_agree_on_what_counts_as_no_preference
-# pins the pair over twelve values, and on the container side it is the SILENCE
-# that carries the assertion -- these values are no language tags either way, so
-# the `None` it also checks would pass on a container that warns about them.
-# The container validates the value and ignores it if it is not a language tag,
-# so a surprising locale can never break a login. Only the language part is
-# forwarded (LC_ALL > LC_MESSAGES > LANG, the standard precedence).
-if [ -z "${GFMY_LOCALE+set}" ]; then
-  _host_locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
-  case "$_host_locale" in
-    ""|C|POSIX|C.*|POSIX.*|C@*|POSIX@*) GFMY_LOCALE="" ;;
-    *) GFMY_LOCALE="$_host_locale" ;;
-  esac
-fi
-export GFMY_LOCALE
 
 # Keyboard handling for the noVNC viewer (see docker-compose.yml). Both are
 # passed through rather than decided here, so `GFMY_KEYBOARD_LAYOUT=de ./login.sh`
@@ -638,53 +778,74 @@ if ! is_loopback_addr "$novnc_bind"; then
   fi
 fi
 
-echo "[login] Starting the GoogleFindMy-HA login container..."
+msg "[login] Starting the GoogleFindMy-HA login container..." \
+    "[login] Starte den Anmelde-Container von GoogleFindMy-HA ..."
 if is_loopback_addr "$novnc_bind"; then
   # Loopback keeps the base image's known fixed password, so it is safe -- and
   # helpful -- to print it here.
-  echo "[login] When it is up, open ${novnc_scheme}://${novnc_url_host}:7900 (password: secret)"
+  msg "[login] When it is up, open ${novnc_scheme}://${novnc_url_host}:7900 (password: secret)" \
+      "[login] Sobald er läuft, ${novnc_scheme}://${novnc_url_host}:7900 öffnen (Passwort: secret)"
 else
   # LAN bind: the per-run password is minted INSIDE the container, so the host does
   # not know it and cannot print it. It appears in the container output further
   # down, both in the '[entrypoint] noVNC available at ...' line and in the
   # '[AuthFlow]' sign-in banner, each as '(password: ...)'.
-  echo "[login] When it is up, open ${novnc_scheme}://${novnc_url_host}:7900"
-  echo "[login] (the per-run noVNC password is printed by the container below, as"
-  echo "[login] '(password: ...)' in the noVNC-available line and the [AuthFlow] banner)."
+  msg "[login] When it is up, open ${novnc_scheme}://${novnc_url_host}:7900" \
+      "[login] Sobald er läuft, ${novnc_scheme}://${novnc_url_host}:7900 öffnen"
+  msg "[login] (the per-run noVNC password is printed by the container below, as" \
+      "[login] (das noVNC-Passwort dieses Laufs gibt der Container weiter unten aus,"
+  msg "[login] '(password: ...)' in the noVNC-available line and the [AuthFlow] banner)." \
+      "[login] als '(password: ...)' in der noVNC-Zeile und im [AuthFlow]-Banner)"
 fi
-echo "[login] and log into Google in the browser view."
+msg "[login] and log into Google in the browser view." \
+    "[login] und dich in der Browseransicht bei Google anmelden."
 
 # Tell the truth about who can actually reach that address. This MUST key on the
 # BIND, not on the printed address: with a wildcard bind the printed address is a
 # concrete one, and branching on it would claim "only this host" for a viewer
 # that is in fact listening on every interface.
 if is_loopback_addr "$novnc_bind"; then
-  echo "[login] noVNC is bound to ${novnc_bind}, so only this Docker host reaches it."
-  echo "[login] From another machine either tunnel it:"
+  msg "[login] noVNC is bound to ${novnc_bind}, so only this Docker host reaches it." \
+      "[login] noVNC ist an ${novnc_bind} gebunden, nur dieser Docker-Host erreicht es."
+  msg "[login] From another machine either tunnel it:" \
+      "[login] Von einem anderen Rechner aus entweder tunneln:"
   echo "[login]   ssh -L 7900:127.0.0.1:7900 <docker-host>"
-  echo "[login] or re-run bound to a LAN address of this host: bash login.sh --ip <ADDRESS>"
+  msg "[login] or re-run bound to a LAN address of this host: bash login.sh --ip <ADDRESS>" \
+      "[login] oder neu starten, an eine LAN-Adresse dieses Hosts gebunden: bash login.sh --ip <ADRESSE>"
   if [ -n "$lan_ips" ]; then
-    echo "[login] Addresses detected on this host (pick the one your browser reaches):"
+    msg "[login] Addresses detected on this host (pick the one your browser reaches):" \
+        "[login] Auf diesem Host gefundene Adressen (nimm die, die dein Browser erreicht):"
     printf '%s\n' "$lan_ips" | while IFS= read -r _ip; do
       [ -n "$_ip" ] && echo "[login]   bash login.sh --ip ${_ip}"
     done
   fi
 else
-  echo "[login] WARNING: noVNC is bound to ${novnc_bind} and is therefore reachable"
-  echo "[login] beyond this host. For this LAN bind the container replaces the base"
-  echo "[login] image's public password with a per-run password (printed in the"
-  echo "[login] container output below, not here: the host never sees it),"
+  msg "[login] WARNING: noVNC is bound to ${novnc_bind} and is therefore reachable" \
+      "[login] WARNUNG: noVNC ist an ${novnc_bind} gebunden und damit auch"
+  msg "[login] beyond this host. For this LAN bind the container replaces the base" \
+      "[login] außerhalb dieses Hosts erreichbar. Für diese LAN-Bindung ersetzt der"
+  msg "[login] image's public password with a per-run password (printed in the" \
+      "[login] Container das öffentliche Passwort des Basisabbilds durch eines je Lauf"
+  msg "[login] container output below, not here: the host never sees it)," \
+      "[login] (steht weiter unten in der Containerausgabe, nicht hier: der Host sieht es nie)"
   if [ "$tls_enabled" -eq 1 ]; then
-    echo "[login] and encrypts the viewer with a self-signed certificate: open the"
-    echo "[login] https URL above and accept the one-time browser warning. Use it on"
-    echo "[login] a trusted LAN only, and only while logging in."
+    msg "[login] and encrypts the viewer with a self-signed certificate: open the" \
+        "[login] und verschlüsselt den Viewer mit einem selbstsignierten Zertifikat: die"
+    msg "[login] https URL above and accept the one-time browser warning. Use it on" \
+        "[login] https-Adresse oben öffnen und die einmalige Browserwarnung bestätigen. Nur"
+    msg "[login] a trusted LAN only, and only while logging in." \
+        "[login] in einem vertrauenswürdigen LAN und nur während der Anmeldung nutzen."
   else
-    echo "[login] but TLS is OFF (--no-tls), so the transport is plain http. Use it"
-    echo "[login] on a trusted LAN only, and only while logging in."
+    msg "[login] but TLS is OFF (--no-tls), so the transport is plain http. Use it" \
+        "[login] aber TLS ist AUS (--no-tls), die Übertragung läuft über reines http. Nur"
+    msg "[login] on a trusted LAN only, and only while logging in." \
+        "[login] in einem vertrauenswürdigen LAN und nur während der Anmeldung nutzen."
   fi
   if is_wildcard_addr "$novnc_bind"; then
-    echo "[login] That bind is a wildcard, so the URL above names just one of the"
-    echo "[login] interfaces it listens on. Prefer bash login.sh --ip <ADDRESS>."
+    msg "[login] That bind is a wildcard, so the URL above names just one of the" \
+        "[login] Diese Bindung ist ein Platzhalter, die Adresse oben nennt also nur eine"
+    msg "[login] interfaces it listens on. Prefer bash login.sh --ip <ADDRESS>." \
+        "[login] der Schnittstellen, auf denen es lauscht. Besser: bash login.sh --ip <ADRESSE>."
   fi
 fi
 

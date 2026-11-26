@@ -262,15 +262,31 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
 
 ## Language and keyboard
 
-Three different pieces of software show up on your screen during a login, and
-each takes its language from a different place. None of them is pinned to a
+Several pieces of software show up on your screen during a login, and each
+takes its language from a different place. None of them is pinned to a
 language by this container.
 
 | What you see | Where its language comes from | How to change it |
 | --- | --- | --- |
 | The noVNC viewer (toolbar, panels) | Your **own browser's** language, which noVNC reads from it directly | Change your browser's language |
-| Chrome inside the viewer, and the Google sign-in page it loads | `GFMY_LOCALE`, which the launchers fill in from your own locale; empty on a bare `docker compose run`, which reads no locale of its own | `GFMY_LOCALE=fr bash login.sh` |
+| Chrome inside the viewer, and the Google sign-in page it loads | `GFMY_LOCALE`, which the launchers fill in from your own locale; empty on a bare `docker compose run`, which reads no locale of its own | `bash login.sh --lang fr` or `GFMY_LOCALE=fr bash login.sh` |
+| The `[login]` lines and the help of `login.sh` | The same `GFMY_LOCALE`: German for a `de` tag (`de`, `de-DE`, `de_DE.UTF-8`), English for everything else | `bash login.sh --lang de` |
+| The `[login]` lines of `login.cmd` | English for now | — |
 | The `[entrypoint]` / `[AuthFlow]` lines in your terminal | English, like the rest of the project | — |
+
+`--lang <tag>` is the short name for `GFMY_LOCALE` on `login.sh`: `bash login.sh
+--lang de` is the same as `GFMY_LOCALE=de bash login.sh`, and it wins over a
+`GFMY_LOCALE` you inherited. Because the launcher's own lines and Chrome read
+the same value, the terminal and the sign-in page always speak the same
+language. A bare `docker compose run` has no launcher and no flag; there,
+`GFMY_LOCALE=de` is the way.
+
+The noVNC viewer is the exception, deliberately: it follows your **browser**,
+not `GFMY_LOCALE`. noVNC's own German translation is also incomplete, so with a
+German browser you will still meet English text inside the viewer; the
+*Clipboard* panel, for example, shows a German heading above an English hint.
+That mix comes from noVNC, not from this container, and the clipboard box works
+the same in either language.
 
 The launchers fill `GFMY_LOCALE` in from your own environment: `login.sh` reads
 your shell locale (`LC_ALL` / `LC_MESSAGES` / `LANG`) and `login.cmd` asks
