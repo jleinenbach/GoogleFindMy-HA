@@ -427,8 +427,8 @@ as you were. A `--reauth` cancelled in sign-in 2 of 2 puts nothing back: sign-in
 so instead of pretending otherwise:
 
 * **The login already stored a new token** and was then cut short in the moment
-  between saving it and returning — a `Ctrl+C` or a broken pipe in that
-  narrow window. The cleared tokens are then *not* put back, because they belong to the
+  between saving it and returning — a `Ctrl+C`, a broken pipe or a stop from
+  outside in that narrow window. The cleared tokens are then *not* put back, because they belong to the
   sign-in the new one replaces and a mix of the two would send the next run back
   to the old account:
 

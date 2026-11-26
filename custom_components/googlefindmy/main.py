@@ -1851,7 +1851,8 @@ def _main(argv: Sequence[str] | None = None) -> None:
     restore_cleared_tokens = _clear_stale_tokens_for_reauth() if args.reauth else None
     try:
         # Only a --reauth run has tokens to put back; without it SIGTERM keeps
-        # its default, which already ends the run with 143.
+        # its default and the signal ends the process (a shell or docker then
+        # reports 143).
         with (
             _raise_on_sigterm()
             if restore_cleared_tokens is not None
