@@ -275,7 +275,7 @@ language by this container.
 | --- | --- | --- |
 | The noVNC viewer (toolbar, panels) | Your **own browser's** language, which noVNC reads from it directly | Change your browser's language |
 | Chrome inside the viewer, and the Google sign-in page it loads | `GFMY_LOCALE`, which the launchers fill in from your own locale; empty on a bare `docker compose run`, which reads no locale of its own | `bash login.sh --lang fr` or `GFMY_LOCALE=fr bash login.sh` |
-| The `[login]` lines and the help of `login.sh` and `login.cmd` | The same `GFMY_LOCALE`: German for a `de` tag (`de`, `de-DE`, `de_DE.UTF-8`), English for everything else. `login.cmd` writes its German without umlauts (`ae` for a-umlaut, `ss` for sharp s), so it reads correctly on any Windows console | `bash login.sh --lang de`, `login.cmd --lang de` |
+| The `[login]` lines and the help of `login.sh` and `login.cmd` | The same `GFMY_LOCALE`: German for a `de` tag (`de`, `de-DE`, `de_DE.UTF-8`), English for everything else. `login.cmd` writes its German without umlauts (`ae`, `oe` and so on for the umlauts, `ss` for sharp s), so it reads correctly on any Windows console | `bash login.sh --lang de`, `login.cmd --lang de` |
 | The `[entrypoint]` / `[AuthFlow]` lines in your terminal | English, like the rest of the project | — |
 
 `--lang <tag>` is the short name for `GFMY_LOCALE` on both launchers: `bash

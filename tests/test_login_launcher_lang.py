@@ -14,7 +14,7 @@ full: every ``[login]`` line goes through ``msg``/``pick``, so a new message
 cannot quietly stay English-only.
 
 ``login.cmd`` does the same on Windows, with its German written in ASCII
-transliteration (ae for a-umlaut, ss) so no console code page has to change. It
+transliteration (ae, oe and so on, ss) so no console code page has to change. It
 cannot run here, so the last block pins it by text: adjacent EN/DE line pairs,
 ASCII only, ``--lang`` read before any output, and a two-language help. Which
 tags count as German is compared with the real ``login.sh``.

@@ -101,8 +101,8 @@ rem Language of this launcher's own terminal lines (L-11), mirroring login.sh:
 rem German for a de* tag (de, de-DE, de_DE.UTF-8, ...), English for everything
 rem else, C included. It follows the same GFMY_LOCALE as the sign-in page, so
 rem the terminal and Chrome cannot disagree. Messages from the container itself
-rem stay English. The German texts are written in ASCII transliteration (ae for
-rem a-umlaut, ss for sharp s) on purpose: this file stays ASCII and never switches the console
+rem stay English. The German texts are written in ASCII transliteration (ae, oe
+rem and so on for the umlauts, ss for sharp s) on purpose: this file stays ASCII and never switches the console
 rem code page, so the lines read the same on every Windows console. Every [login]
 rem line below is an adjacent pair, English first, each guarded by LAUNCHER_DE,
 rem apart from the ssh command line and the two-language --lang error;
