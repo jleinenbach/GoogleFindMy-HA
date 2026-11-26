@@ -112,6 +112,30 @@ The XOR mask is computed for **all** EID windows (previous, current,
 next) so the resolver can decode the flags regardless of which rotation
 window the tracker is currently broadcasting.
 
+### Static counter-0 EIDs (DIY firmware)
+
+DIY microcontroller trackers (`is_mcu_tracker`, Fast Pair model `003200`)
+also get the fixed counter-0 window `mcu_static`; its mask is computed from
+timestamp 0, like its EID. Three rules apply to matches of that window
+(`custom_components/googlefindmy/AGENTS.md`, section "Hashed-flags byte of
+static counter-0 EIDs"):
+
+- **A raw flags byte `0x00` counts as no flags byte** (`absent`): no battery
+  level, no UWT bit. Stock GoogleFindMyTools firmware sends that byte fixed
+  and never XORs it, so decoding it would return the mask itself. Matches
+  outside the counter-0 window still decode `0x00`.
+- **The frame byte stays the device's statement.** Stock firmware sends frame
+  type `0x41` fixed, so it reports UWT mode as on all the time; this counts as
+  what the device asserts, as for every other tracker.
+- **The evidence is weaker than for a rotating tracker.** The counter-0 EID
+  never changes, so one captured advertisement can be replayed without time
+  limit near any Home Assistant adapter or proxy and fakes presence and room.
+  The flags byte is an XOR without integrity protection: without the mask an
+  attacker can still set the UWT bit at will, but can move the battery level
+  only blindly (a chosen level is hit one time in four) unless the current
+  level is known. Log lines withhold the mask and the level for that reason
+  (section 5).
+
 ---
 
 ## 4. Sensor creation and restore

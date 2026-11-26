@@ -10,7 +10,8 @@ This note summarizes the refactored `_refresh_cache` pipeline inside `custom_com
    - Updates stored canonical IDs when they diverge from the normalized identifier and schedules a persisted lock save.
 3. **Time window computation** — `_compute_time_windows` derives rotation-aligned timestamps per strategy:
    - `lock_tracking` windows (±2 rotations from the persisted lock) when a valid rotation timestamp exists.
-   - Absolute (`unix`) and relative (`pair_date`, `secrets_creation_date`) windows when no lock timestamp is available.
+   - Relative (`pair_date`, `secrets_creation_date`) windows on every build, plus absolute (`unix`) windows when no lock windows exist; next to lock windows the relative ones are narrower (`LOCK_FALLBACK_RELATIVE_WINDOW_SIZE`) and serve as fallback discovery.
+   - One fixed counter-0 window (`mcu_static`, `_compute_mcu_static_windows`) for DIY microcontroller trackers (`is_mcu_tracker`), with or without a lock. It is not an anchor basis. Whether the battery sighting of such a tracker stays fresh depends on the feeder (`docs/BLE_BATTERY_SENSOR.md`, section 4, "What keeps the sighting fresh").
    - Drift allowances are derived from device “age” with configurable window sizes via `RotationParams`.
    - Stale time-basis hints that no longer match supported bases are dropped to avoid empty strategy sets.
 4. **Variant selection** — `_compute_variants` yields variant specifications for each window. Persisted locks constrain the variant; otherwise, all supported variants are considered.

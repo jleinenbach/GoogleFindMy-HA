@@ -49,7 +49,7 @@ The **EID Resolver API** exposes this knowledge to other integrations so that, g
 * The owning **config entry** (`config_entry_id`).
 * The device’s **canonical integration ID** (`canonical_id`).
 
-The resolver precomputes EIDs for sliding windows around the current rotation (past, present, and future) to absorb rotation jitter and clock drift, then stores them in an in-memory lookup table. Resolution is a constant-time map lookup and never performs cryptographic work on the hot path.
+The resolver precomputes EIDs for sliding windows around the current rotation (past, present, and future) to absorb rotation jitter and clock drift, then stores them in an in-memory lookup table. DIY microcontroller trackers (`is_mcu_tracker`) additionally get one fixed window at counter 0 (`mcu_static`), because their firmware advertises a constant EID. Resolution is a constant-time map lookup and never performs cryptographic work on the hot path.
 
 ---
 
@@ -363,6 +363,7 @@ Callers of `resolve_eid` do **not** need to distinguish between wrapped and raw 
 To tolerate real-world behavior (rotation jitter, clock drift, DST shifts, and timebase differences between devices that track Unix time vs. “seconds since provisioning”), the resolver:
 
 * Precomputes **previous, current, and future** rotation windows around each anchor (Unix, `pair_date`, `secrets_creation_date`).
+* Adds one fixed counter-0 window (`mcu_static`) for DIY microcontroller trackers, whose firmware advertises a constant EID; it is not an anchor and does not move with the clock.
 * Expands the window count based on device age (drift), timezone offsets, and configurable safety nets.
 * Caches both forward and reversed advertisements for each variant.
 
