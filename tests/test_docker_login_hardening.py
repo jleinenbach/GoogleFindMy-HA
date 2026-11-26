@@ -274,7 +274,11 @@ def _launcher_sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 
 
 def _run_launcher_on_tty(
-    work: Path, env: dict[str, str], answers: str, timeout: float = 60.0
+    work: Path,
+    env: dict[str, str],
+    answers: str,
+    timeout: float = 60.0,
+    args: tuple[str, ...] = (),
 ) -> tuple[int, str]:
     """Run ``login.sh`` with a real terminal on stdin and feed it ``answers``.
 
@@ -283,6 +287,7 @@ def _run_launcher_on_tty(
     and would make an "the menu did the right thing" assertion vacuously true.
     All answers are written up front (the shell buffers them) and stdout/stderr
     share the pty, so the returned text is what the operator would have seen.
+    ``args`` are passed to ``login.sh`` unchanged (``--lang de`` and the like).
     """
 
     bash = shutil.which("bash")
@@ -291,7 +296,7 @@ def _run_launcher_on_tty(
     master, slave = pty.openpty()
     try:
         proc = subprocess.Popen(  # noqa: S603 - fixed argv, test-local stub PATH
-            [bash, str(work / "login.sh")],
+            [bash, str(work / "login.sh"), *args],
             stdin=slave,
             stdout=slave,
             stderr=slave,

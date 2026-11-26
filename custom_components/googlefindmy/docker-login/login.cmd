@@ -39,7 +39,8 @@ rem   login.cmd
 rem Either of those skips the question. No extra port is published in either
 rem case, so both tracks start without one.
 rem
-rem Optional language:
+rem Optional language: `login.cmd --lang de` (short name for GFMY_LOCALE) puts
+rem the sign-in page AND this script's own [login] lines into German; and
 rem   set GFMY_LOCALE=C
 rem hands the language of the sign-in page back to Chrome (English here)
 rem instead of taking it from your Windows culture. Capital C, the POSIX
@@ -62,6 +63,61 @@ rem docker-compose.yml plus GFMY_NOVNC_URL_HOST, which only this script uses.
 rem Without the trim the wrong mode starts silently, with exit code 0.
 for %%V in (GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST GFMY_NOVNC_HARDEN GFMY_NOVNC_TLS GFMY_LOCALE GFMY_KEYBOARD_FIX GFMY_KEYBOARD_LAYOUT) do call :trim_trailing_blanks %%V
 
+rem --lang <tag> / --lang=<tag> (L-11): the short name for GFMY_LOCALE, mirroring
+rem login.sh. Read in a pre-scan, BEFORE the culture lookup below and before any
+rem output, because the parser further down already prints messages (an unknown
+rem option, a bad --ip) and those must speak the chosen language too. A value
+rem given here wins over an inherited GFMY_LOCALE, as a flag wins over the
+rem environment everywhere else in this launcher. The scan runs as a subroutine
+rem so its `shift` leaves this script's own arguments untouched for the parser.
+rem cmd.exe splits arguments at "=", so `--lang=de` normally arrives as the two
+rem words `--lang` `de`; the inline branch covers the quoted "--lang=de" form.
+rem An empty value is refused instead of being read as "ask Windows": saying
+rem nothing already does that, and `--lang C` is the spelling that opts out.
+rem So is a value starting with "-": that is the next option, not a tag.
+call :prescan_lang %*
+if errorlevel 1 goto :lang_missing
+
+rem Language of the login browser (docker-compose.yml -> GOOGLEFINDMY_LOGIN_LOCALE).
+rem Windows has no LANG, so ask the OS for the culture name, which is already a
+rem language tag ("de-DE"). An existing GFMY_LOCALE always wins, so
+rem `set GFMY_LOCALE=en` before running this stays in English, and a failed or
+rem missing PowerShell simply leaves it empty -- Chrome then keeps its own
+rem default. The container validates the value and ignores anything that is not
+rem a language tag, so this can never break a login.
+rem
+rem What cmd.exe canNOT express is bash's empty-but-present value: `set VAR=`
+rem DELETES the name (same reason the AP-5 comment below uses `if defined` as
+rem the counterpart of `${VAR+set}`), so `set GFMY_LOCALE=` here does not mean
+rem "no preference", it means "ask Windows". The spelling that DOES opt out on
+rem this launcher is `set GFMY_LOCALE=C`: it is defined, so it wins here, and
+rem the container reads the POSIX no-localisation locale as no preference and
+rem drops it without a warning. Documented under "Language and keyboard".
+if not defined GFMY_LOCALE (
+  for /f "usebackq delims=" %%c in (`powershell -NoProfile -Command "(Get-Culture).Name" 2^>nul`) do set "GFMY_LOCALE=%%c"
+)
+
+rem Language of this launcher's own terminal lines (L-11), mirroring login.sh:
+rem German for a de* tag (de, de-DE, de_DE.UTF-8, ...), English for everything
+rem else, C included. It follows the same GFMY_LOCALE as the sign-in page, so
+rem the terminal and Chrome cannot disagree. Messages from the container itself
+rem stay English. The German texts are written in ASCII transliteration (ae, oe
+rem and so on for the umlauts, ss for sharp s) on purpose: this file stays ASCII and never switches the console
+rem code page, so the lines read the same on every Windows console. Every [login]
+rem line below is an adjacent pair, English first, each guarded by LAUNCHER_DE,
+rem apart from the ssh command line and the two-language --lang error;
+rem test_login_launcher_lang.py pins that, so a new line cannot stay English-only.
+set "LAUNCHER_DE="
+set "_LOC="
+if defined GFMY_LOCALE set "_LOC=%GFMY_LOCALE%"
+if not defined _LOC goto :launcher_lang_done
+if /i "%_LOC%"=="de" set "LAUNCHER_DE=1"
+if /i "%_LOC:~0,3%"=="de-" set "LAUNCHER_DE=1"
+if /i "%_LOC:~0,3%"=="de_" set "LAUNCHER_DE=1"
+if /i "%_LOC:~0,3%"=="de." set "LAUNCHER_DE=1"
+if /i "%_LOC:~0,3%"=="de@" set "LAUNCHER_DE=1"
+:launcher_lang_done
+
 rem Remember what the caller pinned BEFORE anything defaults it, so the track
 rem menu below can tell "said nothing" from "said off" (AP-5). cmd.exe has no
 rem empty-but-defined state for these: `set VAR=` removes the name, so `if
@@ -82,10 +138,13 @@ if /i "%~1"=="--help" goto :usage
 if /i "%~1"=="-h" goto :usage
 if /i "%~1"=="--ip" goto :parse_ip
 if /i "%~1"=="--track" goto :parse_track
+if /i "%~1"=="--lang" goto :parse_lang
 set "ARG=%~1"
 if /i "%ARG:~0,5%"=="--ip=" goto :parse_ip_inline
 if /i "%ARG:~0,8%"=="--track=" goto :parse_track_inline
-echo [login] Unknown option: "%~1" 1>&2
+if /i "%ARG:~0,7%"=="--lang=" goto :parse_lang_inline
+if not defined LAUNCHER_DE echo [login] Unknown option: "%~1" 1>&2
+if defined LAUNCHER_DE echo [login] Unbekannte Option: "%~1" 1>&2
 goto :usage_error
 :parse_ip
 if "%~2"=="" goto :ip_missing
@@ -111,6 +170,14 @@ goto :parse_args
 set "CANDIDATE=%ARG:~8%"
 if "%CANDIDATE%"=="" goto :track_missing
 call :set_track "%CANDIDATE%" || goto :track_invalid
+shift
+goto :parse_args
+:parse_lang
+rem Already read by :prescan_lang, which also refused a missing value: skip it.
+shift
+shift
+goto :parse_args
+:parse_lang_inline
 shift
 goto :parse_args
 :args_done
@@ -168,17 +235,30 @@ rem forever against a redirected stdin that can never satisfy it.
 if defined TRACK_FROM_CLI goto :track_done
 if defined CLEARTEXT_ENV_SET goto :track_done
 echo.
-echo [login] How should the finished credentials reach Home Assistant?
-echo [login]   A) File only: .\data\secrets.json  (the file stays)
-echo [login]      Needs: Home Assistant can see that folder, e.g. this repo lives
-echo [login]      under config\custom_components on the HA machine.
-echo [login]   B) Print the bundle in this terminal INSTEAD of keeping it
-echo [login]      The file is deleted right after printing, so this REPLACES A:
-echo [login]      no watched-file import afterwards.
-echo [login]      Last resort: the credentials then sit in your scrollback, in
-echo [login]      "docker logs" and in the clipboard you paste them from.
+if not defined LAUNCHER_DE echo [login] How should the finished credentials reach Home Assistant?
+if defined LAUNCHER_DE echo [login] Wie sollen die fertigen Anmeldedaten zu Home Assistant kommen?
+if not defined LAUNCHER_DE echo [login]   A) File only: .\data\secrets.json  (the file stays)
+if defined LAUNCHER_DE echo [login]   A) Nur Datei: .\data\secrets.json  (die Datei bleibt)
+if not defined LAUNCHER_DE echo [login]      Needs: Home Assistant can see that folder, e.g. this repo lives
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login]      Voraussetzung: Home Assistant sieht diesen Ordner, z. B. liegt
+if not defined LAUNCHER_DE echo [login]      under config\custom_components on the HA machine.
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login]      dieses Repo unter config\custom_components auf dem HA-Rechner.
+if not defined LAUNCHER_DE echo [login]   B) Print the bundle in this terminal INSTEAD of keeping it
+if defined LAUNCHER_DE echo [login]   B) Buendel in diesem Terminal ausgeben, STATT es aufzubewahren
+if not defined LAUNCHER_DE echo [login]      The file is deleted right after printing, so this REPLACES A:
+if defined LAUNCHER_DE echo [login]      Die Datei wird direkt nach der Ausgabe geloescht, deshalb ERSETZT B den Weg A:
+if not defined LAUNCHER_DE echo [login]      no watched-file import afterwards.
+if defined LAUNCHER_DE echo [login]      danach kein Import ueber die ueberwachte Datei.
+if not defined LAUNCHER_DE echo [login]      Last resort: the credentials then sit in your scrollback, in
+if defined LAUNCHER_DE echo [login]      Letzter Ausweg: Die Anmeldedaten stehen dann im Terminalverlauf,
+if not defined LAUNCHER_DE echo [login]      "docker logs" and in the clipboard you paste them from.
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login]      in "docker logs" und in der Zwischenablage, aus der du sie einfuegst.
 set "TRACK_CHOICE="
-set /p "TRACK_CHOICE=[login] Choice [Enter = A]: "
+if not defined LAUNCHER_DE set /p "TRACK_CHOICE=[login] Choice [Enter = A]: "
+if defined LAUNCHER_DE set /p "TRACK_CHOICE=[login] Auswahl [Enter = A]: "
 if /i "%TRACK_CHOICE%"=="b" set "GFMY_CLEARTEXT=1"
 :track_done
 
@@ -201,57 +281,59 @@ if not defined IS_LOOPBACK set "GFMY_NOVNC_HARDEN=1"
 if not defined IS_LOOPBACK set "GFMY_NOVNC_TLS=1"
 if not defined IS_LOOPBACK set "NOVNC_SCHEME=https"
 
-rem Language of the login browser (docker-compose.yml -> GOOGLEFINDMY_LOGIN_LOCALE).
-rem Windows has no LANG, so ask the OS for the culture name, which is already a
-rem language tag ("de-DE"). An existing GFMY_LOCALE always wins, so
-rem `set GFMY_LOCALE=en` before running this stays in English, and a failed or
-rem missing PowerShell simply leaves it empty -- Chrome then keeps its own
-rem default. The container validates the value and ignores anything that is not
-rem a language tag, so this can never break a login.
-rem
-rem What cmd.exe canNOT express is bash's empty-but-present value: `set VAR=`
-rem DELETES the name (same reason the AP-5 comment above uses `if defined` as
-rem the counterpart of `${VAR+set}`), so `set GFMY_LOCALE=` here does not mean
-rem "no preference", it means "ask Windows". The spelling that DOES opt out on
-rem this launcher is `set GFMY_LOCALE=C`: it is defined, so it wins here, and
-rem the container reads the POSIX no-localisation locale as no preference and
-rem drops it without a warning. Documented under "Language and keyboard".
-if not defined GFMY_LOCALE (
-  for /f "usebackq delims=" %%c in (`powershell -NoProfile -Command "(Get-Culture).Name" 2^>nul`) do set "GFMY_LOCALE=%%c"
-)
-
 rem Keyboard handling for the noVNC viewer (docker-compose.yml). Passed through,
 rem not decided here, so `set GFMY_KEYBOARD_LAYOUT=de` works without editing files.
 if not defined GFMY_KEYBOARD_FIX set "GFMY_KEYBOARD_FIX=1"
 
 if not exist data mkdir data
 
-echo [login] Starting the GoogleFindMy-HA login container...
+if not defined LAUNCHER_DE echo [login] Starting the GoogleFindMy-HA login container...
+if defined LAUNCHER_DE echo [login] Starte den Anmelde-Container von GoogleFindMy-HA ...
 rem Loopback keeps the base image's known fixed password, so print it. On a LAN
 rem bind the per-run password is minted INSIDE the container, so the host cannot
 rem print it: point the user at the container output (both the noVNC-available
 rem line and the [AuthFlow] banner show it as "(password: ...)").
-if defined IS_LOOPBACK echo [login] When it is up, open %NOVNC_SCHEME%://%NOVNC_URL_HOST%:7900 (password: secret)
-if not defined IS_LOOPBACK echo [login] When it is up, open %NOVNC_SCHEME%://%NOVNC_URL_HOST%:7900
-if not defined IS_LOOPBACK echo [login] The per-run noVNC password is printed by the container below,
-if not defined IS_LOOPBACK echo [login] shown as "(password: ...)" in the noVNC-available line and the [AuthFlow] banner.
-echo [login] and log into Google in the browser view.
+if not defined LAUNCHER_DE if defined IS_LOOPBACK echo [login] When it is up, open %NOVNC_SCHEME%://%NOVNC_URL_HOST%:7900 (password: secret)
+if defined LAUNCHER_DE if defined IS_LOOPBACK echo [login] Sobald er laeuft, %NOVNC_SCHEME%://%NOVNC_URL_HOST%:7900 oeffnen (Passwort: secret)
+if not defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] When it is up, open %NOVNC_SCHEME%://%NOVNC_URL_HOST%:7900
+if defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] Sobald er laeuft, %NOVNC_SCHEME%://%NOVNC_URL_HOST%:7900 oeffnen
+if not defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] The per-run noVNC password is printed by the container below,
+if defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] Das noVNC-Passwort dieses Laufs gibt der Container weiter unten aus,
+if not defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] shown as "(password: ...)" in the noVNC-available line and the [AuthFlow] banner.
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE if not defined IS_LOOPBACK echo [login] als "(password: ...)" in der noVNC-Zeile und im [AuthFlow]-Banner.
+if not defined LAUNCHER_DE echo [login] and log into Google in the browser view.
+if defined LAUNCHER_DE echo [login] und dich in der Browseransicht bei Google anmelden.
 
 rem Tell the truth about who can actually reach that address.
 if defined IS_LOOPBACK goto :loopback_hint
-echo [login] WARNING: noVNC is bound to %NOVNC_BIND% and is therefore reachable
-echo [login] beyond this host. For this LAN bind the container replaces the base
-echo [login] image's public password with a per-run password, printed in the
-echo [login] container output below, and encrypts the viewer with a self-signed
-echo [login] certificate: open the https URL above and accept the one-time browser
-echo [login] warning. Use it on a trusted LAN only, and only while logging in.
-if "%NOVNC_BIND%"=="0.0.0.0" echo [login] That bind is a wildcard, so the URL above names just one interface it listens on. Prefer login.cmd --ip ^<ADDRESS^>.
+if not defined LAUNCHER_DE echo [login] WARNING: noVNC is bound to %NOVNC_BIND% and is therefore reachable
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login] WARNUNG: noVNC ist an %NOVNC_BIND% gebunden und damit auch
+if not defined LAUNCHER_DE echo [login] beyond this host. For this LAN bind the container replaces the base
+if defined LAUNCHER_DE echo [login] ausserhalb dieses Hosts erreichbar. Fuer diese LAN-Bindung ersetzt der
+if not defined LAUNCHER_DE echo [login] image's public password with a per-run password, printed in the
+if defined LAUNCHER_DE echo [login] Container das oeffentliche Passwort des Basisabbilds durch eines je Lauf,
+if not defined LAUNCHER_DE echo [login] container output below, and encrypts the viewer with a self-signed
+if defined LAUNCHER_DE echo [login] das weiter unten in der Containerausgabe steht, und verschluesselt den
+if not defined LAUNCHER_DE echo [login] certificate: open the https URL above and accept the one-time browser
+if defined LAUNCHER_DE echo [login] Viewer mit einem selbstsignierten Zertifikat: die https-Adresse oben
+if not defined LAUNCHER_DE echo [login] warning. Use it on a trusted LAN only, and only while logging in.
+if defined LAUNCHER_DE echo [login] oeffnen und die einmalige Browserwarnung bestaetigen. Nur in einem vertrauenswuerdigen LAN und nur waehrend der Anmeldung nutzen.
+if not defined LAUNCHER_DE if "%NOVNC_BIND%"=="0.0.0.0" echo [login] That bind is a wildcard, so the URL above names just one interface it listens on. Prefer login.cmd --ip ^<ADDRESS^>.
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE if "%NOVNC_BIND%"=="0.0.0.0" echo [login] Diese Bindung ist ein Platzhalter, die Adresse oben nennt also nur eine der Schnittstellen, auf denen es lauscht. Besser: login.cmd --ip ^<ADRESSE^>.
 goto :hint_done
 :loopback_hint
-echo [login] noVNC is bound to %NOVNC_BIND%, so only this Docker host reaches it.
-echo [login] From another machine either tunnel it:
+if not defined LAUNCHER_DE echo [login] noVNC is bound to %NOVNC_BIND%, so only this Docker host reaches it.
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login] noVNC ist an %NOVNC_BIND% gebunden, nur dieser Docker-Host erreicht es.
+if not defined LAUNCHER_DE echo [login] From another machine either tunnel it:
+if defined LAUNCHER_DE echo [login] Von einem anderen Rechner aus entweder tunneln:
 echo [login]   ssh -L 7900:127.0.0.1:7900 ^<docker-host^>
-echo [login] or re-run bound to a LAN address: login.cmd --ip ^<ADDRESS^>
+if not defined LAUNCHER_DE echo [login] or re-run bound to a LAN address: login.cmd --ip ^<ADDRESS^>
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login] oder neu starten, an eine LAN-Adresse gebunden: login.cmd --ip ^<ADRESSE^>
 :hint_done
 
 rem Compose files: the base file publishes only noVNC (7900). No other port is
@@ -293,35 +375,54 @@ endlocal
 exit /b 2
 
 :ip_missing
-echo [login] --ip needs an address, e.g. login.cmd --ip 192.168.1.21 1>&2
+if not defined LAUNCHER_DE echo [login] --ip needs an address, e.g. login.cmd --ip 192.168.1.21 1>&2
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login] --ip braucht eine Adresse, z. B. login.cmd --ip 192.168.1.21 1>&2
 popd
 endlocal
 exit /b 2
 
 :ip_invalid
-echo [login] --ip needs an IP address of this Docker host, not a host name. 1>&2
-echo [login] The value becomes a docker port bind. Example: --ip 192.168.1.21 1>&2
+if not defined LAUNCHER_DE echo [login] --ip needs an IP address of this Docker host, not a host name. 1>&2
+if defined LAUNCHER_DE echo [login] --ip braucht eine IP-Adresse dieses Docker-Hosts, keinen Hostnamen. 1>&2
+if not defined LAUNCHER_DE echo [login] The value becomes a docker port bind. Example: --ip 192.168.1.21 1>&2
+if defined LAUNCHER_DE echo [login] Der Wert wird zu einer Docker-Portbindung. Beispiel: --ip 192.168.1.21 1>&2
+popd
+endlocal
+exit /b 2
+
+:lang_missing
+echo [login] --lang needs a language tag, e.g. login.cmd --lang de 1>&2
+echo [login] --lang braucht ein Sprachkuerzel, z. B. login.cmd --lang de 1>&2
 popd
 endlocal
 exit /b 2
 
 :track_missing
-echo [login] --track needs a value: a or b. Example: login.cmd --track a 1>&2
+if not defined LAUNCHER_DE echo [login] --track needs a value: a or b. Example: login.cmd --track a 1>&2
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login] --track braucht einen Wert: a oder b. Beispiel: login.cmd --track a 1>&2
 popd
 endlocal
 exit /b 2
 
 :track_invalid
-echo [login] --track needs a or b. 1>&2
-echo [login]   a = file handoff only (.\data\secrets.json, the default) 1>&2
-echo [login]   b = print the bundle in this terminal instead; the container 1>&2
-echo [login]       deletes the file after printing it 1>&2
+if not defined LAUNCHER_DE echo [login] --track needs a or b. 1>&2
+rem # codespell:ignore-next-line
+if defined LAUNCHER_DE echo [login] --track braucht a oder b. 1>&2
+if not defined LAUNCHER_DE echo [login]   a = file handoff only (.\data\secrets.json, the default) 1>&2
+if defined LAUNCHER_DE echo [login]   a = nur Dateiuebergabe (.\data\secrets.json, die Vorgabe) 1>&2
+if not defined LAUNCHER_DE echo [login]   b = print the bundle in this terminal instead; the container 1>&2
+if defined LAUNCHER_DE echo [login]   b = Buendel STATT der Datei in diesem Terminal ausgeben; der Container 1>&2
+if not defined LAUNCHER_DE echo [login]       deletes the file after printing it 1>&2
+if defined LAUNCHER_DE echo [login]       loescht die Datei nach der Ausgabe 1>&2
 popd
 endlocal
 exit /b 2
 
 :print_usage
-echo Usage: login.cmd [--ip ^<ADDRESS^>] [--track a^|b] [--help]
+if defined LAUNCHER_DE goto :print_usage_de
+echo Usage: login.cmd [--ip ^<ADDRESS^>] [--track a^|b] [--lang ^<TAG^>] [--help]
 echo.
 echo   --ip ^<ADDRESS^>  Bind the noVNC viewer (port 7900) to ^<ADDRESS^> and print
 echo                   that address as the URL to open. Use a concrete LAN
@@ -330,6 +431,10 @@ echo   --track a^|b     Pick how the credentials reach Home Assistant without be
 echo                   asked: a = file only (default), b = print the bundle in
 echo                   this terminal INSTEAD, after which the container deletes
 echo                   the file.
+echo   --lang ^<TAG^>    Language of the sign-in page and of these launcher lines,
+echo                   e.g. --lang de or --lang en. Short name for GFMY_LOCALE;
+echo                   --lang C hands the choice back to Chrome (English here).
+echo                   The noVNC viewer follows your BROWSER's language instead.
 echo   --help          Show this help and exit.
 echo.
 echo Without --track and without GFMY_CLEARTEXT this script asks
@@ -339,10 +444,68 @@ echo Environment (see the comment block at the top of this file):
 echo   GFMY_NOVNC_BIND       host bind for noVNC 7900          (default 127.0.0.1)
 echo   GFMY_NOVNC_URL_HOST   address printed for your browser  (default: the bind)
 echo   GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
-echo   GFMY_LOCALE           language for the sign-in page     (default: your culture,
-echo                         or Chrome's own if PowerShell did not answer)
+echo   GFMY_LOCALE           language of the sign-in page and of these lines
+echo                         (default: your culture, or Chrome's own if
+echo                         PowerShell did not answer)
 echo                         set GFMY_LOCALE=C to hand the choice back to Chrome
 goto :eof
+
+:print_usage_de
+rem German help, ASCII transliteration like every German line in this file.
+rem # codespell:ignore-begin
+echo Aufruf: login.cmd [--ip ^<ADRESSE^>] [--track a^|b] [--lang ^<KUERZEL^>] [--help]
+echo.
+echo   --ip ^<ADRESSE^>  Den noVNC-Viewer (Port 7900) an ^<ADRESSE^> binden und diese
+echo                   Adresse als zu oeffnende URL ausgeben. Eine konkrete LAN-Adresse
+echo                   dieses Docker-Hosts nehmen, z. B. login.cmd --ip 192.168.1.21
+echo   --track a^|b     Ohne Rueckfrage festlegen, wie die Anmeldedaten zu Home
+echo                   Assistant kommen: a = nur Datei (Vorgabe), b = Buendel STATT
+echo                   der Datei in diesem Terminal ausgeben, danach loescht der
+echo                   Container die Datei.
+echo   --lang ^<KUERZEL^> Sprache der Anmeldeseite und dieser Starterzeilen, z. B.
+echo                   --lang de oder --lang en. Kurzname fuer GFMY_LOCALE;
+echo                   --lang C ueberlaesst die Wahl Chrome (dann Englisch).
+echo                   Der noVNC-Viewer folgt dagegen der Sprache deines BROWSERS.
+echo   --help          Diese Hilfe zeigen und beenden.
+echo.
+echo Ohne --track und ohne GFMY_CLEARTEXT fragt dieser Starter nach dem
+echo Uebergabeweg; Enter allein behaelt die bisherige Vorgabe (nur Datei).
+echo.
+echo Umgebung (siehe den Kommentarblock oben in dieser Datei):
+echo   GFMY_NOVNC_BIND       Host-Bindung fuer noVNC 7900       (Vorgabe 127.0.0.1)
+echo   GFMY_NOVNC_URL_HOST   ausgegebene Adresse fuer den Browser (Vorgabe: die Bindung)
+echo   GFMY_CLEARTEXT=1      das Buendel am Ende in diesem Terminal ausgeben
+echo   GFMY_LOCALE           Sprache der Anmeldeseite und dieser Zeilen (Vorgabe:
+echo                         deine Windows-Kultur, sonst die von Chrome, falls
+echo                         PowerShell nicht antwortet)
+echo                         set GFMY_LOCALE=C ueberlaesst die Wahl Chrome
+rem # codespell:ignore-end
+goto :eof
+
+:prescan_lang
+rem Pre-scan for --lang (see the call near the top). Sets GFMY_LOCALE from the
+rem last --lang given and returns 1 when one has no value. `shift` here only
+rem moves this call's own copy of the arguments.
+if "%~1"=="" exit /b 0
+if /i "%~1"=="--lang" goto :prescan_lang_value
+set "_PA=%~1"
+if /i "%_PA:~0,7%"=="--lang=" goto :prescan_lang_inline
+shift
+goto :prescan_lang
+:prescan_lang_value
+if "%~2"=="" exit /b 1
+set "_PV=%~2"
+if "%_PV:~0,1%"=="-" exit /b 1
+set "GFMY_LOCALE=%_PV%"
+shift
+shift
+goto :prescan_lang
+:prescan_lang_inline
+if "%_PA:~7%"=="" exit /b 1
+if "%_PA:~7,1%"=="-" exit /b 1
+set "GFMY_LOCALE=%_PA:~7%"
+shift
+goto :prescan_lang
 
 :set_track
 rem --track a^|b -^> the same switch the menu sets. Track A is not a switch:
