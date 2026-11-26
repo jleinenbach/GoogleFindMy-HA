@@ -234,8 +234,12 @@ fi
 #             which is the documented remedy "if there are still keymapping
 #             problems when using -modtweak by itself".
 #   remap  -- drop the level-3 modifiers entirely ("To disable a keysym [...]
-#             remap it to NoSymbol"). Nothing is lost: the character keysym
-#             already carries the meaning, and no login needs AltGr shortcuts.
+#             remap it to NoSymbol"), and the right Alt with them: on the host,
+#             AltGr arrives as `Alt_R` held down next to the finished `at`, and
+#             Chrome reads Alt+@ as a shortcut. The character keysym already
+#             carries the meaning. The price is the real right Alt key inside
+#             the container; no login needs it, and GFMY_KEYBOARD_FIX=0 brings
+#             it back.
 #
 # Written here, at runtime, rather than baked into the image, so it sits next to
 # every other viewer decision and can be switched off in one place. x11vnc reads
@@ -250,7 +254,7 @@ if [ "${GFMY_KEYBOARD_FIX:-1}" = "1" ]; then
     '# Written by GoogleFindMy-HA docker-login/entrypoint.sh.' \
     '# Disable with GFMY_KEYBOARD_FIX=0.' \
     'xkb' \
-    'remap ISO_Level3_Shift-NoSymbol,Mode_switch-NoSymbol' \
+    'remap ISO_Level3_Shift-NoSymbol,Mode_switch-NoSymbol,Alt_R-NoSymbol' \
     > "${HOME:-/home/seluser}/.x11vncrc" 2>/dev/null; then
     echo "[entrypoint] WARNING: could not write ~/.x11vncrc; AltGr characters" >&2
     echo "[entrypoint] may not reach the browser. Paste them via the noVNC" >&2
