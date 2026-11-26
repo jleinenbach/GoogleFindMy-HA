@@ -15,6 +15,7 @@ price is the real right Alt key inside the container, which no login needs.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from tests.test_docker_login_hardening import (
@@ -93,3 +94,32 @@ def test_opt_out_leaves_no_remap_behind(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert not (home / ".x11vncrc").exists()
+
+
+def _readme_altgr_section() -> str:
+    """Return the README section on AltGr characters, heading to next heading."""
+
+    readme = _read("README.md")
+    heading = '### Typing "@" and other AltGr characters'
+    assert heading in readme, (
+        "README heading renamed; update this test and the troubleshooting "
+        "anchor #typing--and-other-altgr-characters"
+    )
+    start = readme.index(heading)
+    match = re.compile(r"\n#{1,3} ").search(readme, start + len(heading))
+    return readme[start : match.start() if match else len(readme)]
+
+
+def test_readme_names_every_dropped_key_and_the_price(tmp_path: Path) -> None:
+    """The README names each keysym the block drops, the lost key and the opt-out.
+
+    The dropped set comes from the executed block, so a key added to the remap
+    without a README sentence turns this test red.
+    """
+
+    section = _readme_altgr_section()
+    for keysym in sorted(_remapped_to_nosymbol(_run_block(tmp_path, {}))):
+        assert f"`{keysym}`" in section, keysym
+    assert "The price is the right Alt key itself" in section
+    assert "it does nothing" in section
+    assert "`GFMY_KEYBOARD_FIX=0`" in section

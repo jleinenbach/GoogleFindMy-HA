@@ -318,9 +318,13 @@ receive that stray AltGr *around* the character and produce nothing at all —
 which makes the login impossible, since every account name contains an "@".
 
 The container now tells its VNC server to resolve keys through XKEYBOARD and to
-drop the level-3 modifiers (`~/.x11vncrc`, written by `entrypoint.sh`), so the
-character arrives on its own. It is on by default; `GFMY_KEYBOARD_FIX=0`
-restores the base image's behaviour.
+drop the level-3 modifiers together with the right Alt key (`ISO_Level3_Shift`,
+`Mode_switch` and `Alt_R`, in `~/.x11vncrc`, written by `entrypoint.sh`), so the
+character arrives on its own. `Alt_R` is on the list because on some hosts AltGr
+arrives as the right Alt held down next to the finished "@", and Chrome then
+reads Alt+@ as a shortcut. The price is the right Alt key itself: inside the
+container it does nothing, which no login needs. It is on by default;
+`GFMY_KEYBOARD_FIX=0` restores the base image's behaviour, right Alt key included.
 
 Two fallbacks, in the order worth trying:
 
