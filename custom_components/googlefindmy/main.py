@@ -1241,8 +1241,9 @@ def _warn_before_replacing_unconsumed_bundle() -> None:
     plain ``docker compose run`` alike. The file cannot tell whether the import
     happened (Home Assistant cannot delete it from a read-only mount), so the
     warning says "if". It runs before anything is written and before the stop
-    handler of sign-in 1 of 2 is set, so a stop here costs nothing. At an
-    attended terminal it waits for Enter; Ctrl+C or the end of input ends the
+    handler of sign-in 1 of 2 is set, so a stop here costs nothing. When
+    ``auth_flow._stdin_is_attended`` sees someone (a terminal, or an IDE console
+    with ``GOOGLEFINDMY_ASSUME_INTERACTIVE=1``) it waits for Enter; Ctrl+C or the end of input ends the
     run with ``_EXIT_LOGIN_ABORTED`` and leaves the file as it was.
     """
     import json  # noqa: PLC0415
@@ -1266,6 +1267,9 @@ def _warn_before_replacing_unconsumed_bundle() -> None:
     from custom_components.googlefindmy.Auth.aas_token_retrieval import (  # noqa: PLC0415
         _mask_email_for_logs,
     )
+    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+        _stdin_is_attended,
+    )
     from custom_components.googlefindmy.chrome_driver import (  # noqa: PLC0415
         _is_container_login,
     )
@@ -1285,7 +1289,9 @@ def _warn_before_replacing_unconsumed_bundle() -> None:
         file=sys.stderr,
         flush=True,
     )
-    if sys.stdin is None or not sys.stdin.isatty():
+    # The same test as the sign-in prompts: a terminal, or an IDE console that
+    # sets GOOGLEFINDMY_ASSUME_INTERACTIVE=1; a closed stdin counts as nobody.
+    if not _stdin_is_attended():
         return
     try:
         input("Press Enter to continue, or Ctrl+C to stop. ")

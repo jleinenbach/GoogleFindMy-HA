@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy import main as cli_main
+from custom_components.googlefindmy.Auth.auth_flow import _ENV_ASSUME_INTERACTIVE
 from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (
     _ENV_CLI_PROCESS,
 )
@@ -63,6 +64,7 @@ def _prepare(
         monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
     monkeypatch.setattr(cli_main, "_configure_cli_logging", lambda **kw: None)
     monkeypatch.setattr(sys, "stdin", _Terminal("") if terminal else io.StringIO(""))
+    monkeypatch.delenv(_ENV_ASSUME_INTERACTIVE, raising=False)
     return path
 
 
@@ -123,6 +125,52 @@ def test_at_a_terminal_enter_goes_on(
 
     assert prompts == [_PROMPT]
     assert reached == ["sign-in"]
+
+
+def test_an_ide_console_that_says_someone_is_there_is_asked_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same opt-in as the sign-in prompts: a piped console with the switch set."""
+    _prepare(monkeypatch, tmp_path, json.dumps(_BUNDLE))
+    monkeypatch.setenv(_ENV_ASSUME_INTERACTIVE, "1")
+    reached = _stop_at_sign_in(monkeypatch)
+    prompts: list[str] = []
+
+    def _input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr(builtins, "input", _input)
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        cli_main._main(["--reauth"])
+
+    assert prompts == [_PROMPT]
+    assert reached == ["sign-in"]
+
+
+def test_a_closed_input_counts_as_nobody_there(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``isatty`` on a closed stream raises; the run warns and goes on instead."""
+    _prepare(monkeypatch, tmp_path, json.dumps(_BUNDLE))
+    closed = io.StringIO("")
+    closed.close()
+    monkeypatch.setattr(sys, "stdin", closed)
+    reached = _stop_at_sign_in(monkeypatch)
+
+    def _input(prompt: str = "") -> str:
+        raise AssertionError("asked although nobody can answer")
+
+    monkeypatch.setattr(builtins, "input", _input)
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        cli_main._main(["--reauth"])
+
+    assert reached == ["sign-in"]
+    assert _WARNING in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("stop", [KeyboardInterrupt, EOFError])
