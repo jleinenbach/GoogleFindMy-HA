@@ -154,3 +154,126 @@ def test_non_mcu_tracker_gets_no_static_eid() -> None:
             for meta in resolver._lookup_metadata.values()
         )
         assert _resolve(resolver, _advertisement(), at=NOW) == []
+
+
+# ---------------------------------------------------------------------------
+# Stock firmware flags byte (follow-up to BSkando#249)
+#
+# The stock GoogleFindMyTools firmware (ESP32Firmware/main/main.c,
+# ZephyrFirmware/app/src/main.c) sends the hashed-flags byte as a fixed 0x00.
+# XOR-decoding that byte yields the mask itself, i.e. a battery level and a
+# UWT bit that depend only on the key. Inside the counter-0 window a 0x00
+# byte therefore means "no flags", not "flags equal to the mask". Firmware
+# that does send hashed flags keeps decoding
+# (test_mcu_tracker_static_eid_resolves_and_decodes_battery), and trackers
+# outside that window are not affected.
+# ---------------------------------------------------------------------------
+
+
+def _stock_advertisement() -> bytes:
+    """FEAA service data as the stock firmware sends it: flags byte 0x00."""
+    return bytes([0x41]) + _static_eid() + bytes([0x00])
+
+
+def test_stock_firmware_zero_flags_byte_reports_no_battery_or_uwt() -> None:
+    resolver = _new_resolver()
+    _build(resolver, _identity(fast_pair_model_id=mcu_fast_pair_model_id), now=NOW)
+
+    matches = _resolve(resolver, _stock_advertisement(), at=NOW)
+
+    assert [match.device_id for match in matches] == ["reg-mcu"]
+    assert resolver.get_ble_battery_state(CANONICAL_ID) is None
+
+
+def test_non_mcu_tracker_zero_flags_byte_still_decodes_from_mask() -> None:
+    """Protects Google trackers: a 0x00 byte outside the counter-0 window.
+
+    The expectation was measured on the resolver before the follow-up: the
+    byte decodes to the window's mask, as for every rotating tracker.
+    """
+    resolver = _new_resolver()
+    _build(resolver, _identity(fast_pair_model_id=None), now=NOW)
+    eid, metadata = min(
+        (
+            (eid, meta)
+            for eid, meta in resolver._lookup_metadata.items()
+            if len(eid) == 20
+            and isinstance(meta.get("rotation_timestamp"), int)
+            and meta.get("flags_xor_mask") is not None
+        ),
+        key=lambda item: abs(item[1]["rotation_timestamp"] - NOW),
+    )
+    assert MCU_STATIC_TIME_BASIS not in (metadata.get("timestamp_bases") or ())
+    mask = metadata["flags_xor_mask"]
+
+    assert _resolve(resolver, bytes([0x41]) + eid + bytes([0x00]), at=NOW)
+
+    state = resolver.get_ble_battery_state(CANONICAL_ID)
+    assert state is not None
+    assert state.decoded_flags == mask
+    assert state.battery_level == (mask >> 1) & 0x03
+    assert state.uwt_mode is bool(mask & 0x01)
+
+
+def test_stock_zero_flags_byte_stays_unknown_while_lock_window_covers_counter_0() -> (
+    None
+):
+    """Within one rotation period of the first hit the lock window also
+    produces counter 0 and wins the registration, so the entry's
+    ``timestamp_basis`` is ``lock_tracking``; ``timestamp_bases`` still
+    names the counter-0 window.
+    """
+    resolver = _new_resolver()
+    identity = _identity(fast_pair_model_id=mcu_fast_pair_model_id)
+    _build(resolver, identity, now=NOW)
+    assert _resolve(resolver, _stock_advertisement(), at=NOW)
+    resolver._ble_battery_state.clear()
+
+    later = NOW + 60
+    _build(resolver, identity, now=later)
+    metadata = resolver._lookup_metadata[_static_eid()]
+    assert metadata["timestamp_basis"] == "lock_tracking"
+    assert MCU_STATIC_TIME_BASIS in metadata["timestamp_bases"]
+
+    assert _resolve(resolver, _stock_advertisement(), at=later)
+    assert resolver.get_ble_battery_state(CANONICAL_ID) is None
+
+
+def test_static_eid_flags_decode_with_counter_0_mask_long_after_pairing() -> None:
+    """The mask belongs to counter 0, not to the current rotation window.
+
+    The firmware advertises the counter-0 EID, so its hashed flags are XORed
+    with the counter-0 mask however long ago the tracker was paired.
+    """
+    identity = DeviceIdentity(
+        registry_id="reg-mcu",
+        canonical_id=CANONICAL_ID,
+        identity_key=EIK,
+        config_entry_id="entry",
+        pair_date=NOW - 365 * 24 * 60 * 60,
+        device_type=1,
+        fast_pair_model_id=mcu_fast_pair_model_id,
+    )
+    resolver = _new_resolver()
+    _build(resolver, identity, now=NOW)
+    current_mask = min(
+        (
+            meta
+            for meta in resolver._lookup_metadata.values()
+            if meta.get("timestamp_basis") != MCU_STATIC_TIME_BASIS
+            and isinstance(meta.get("rotation_timestamp"), int)
+            and meta.get("flags_xor_mask") is not None
+        ),
+        key=lambda meta: abs(meta["rotation_timestamp"] - NOW),
+    )["flags_xor_mask"]
+    assert current_mask != _flags_mask()  # Otherwise the test cannot tell.
+    decoded = 1 << 1  # Battery level 1, UWT off.
+
+    payload = bytes([0x41]) + _static_eid() + bytes([decoded ^ _flags_mask()])
+    assert _resolve(resolver, payload, at=NOW)
+
+    state = resolver.get_ble_battery_state(CANONICAL_ID)
+    assert state is not None
+    assert state.decoded_flags == decoded
+    assert state.battery_level == 1
+    assert state.uwt_mode is False

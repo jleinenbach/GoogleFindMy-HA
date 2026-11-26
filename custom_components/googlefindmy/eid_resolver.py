@@ -1080,6 +1080,26 @@ class UwtSource(StrEnum):
 FlagsOrigin = Literal["framed", "guessed", "absent"]
 
 
+def _drop_stock_mcu_flags(
+    flags_byte: int | None, flags_origin: FlagsOrigin, metadata: Mapping[str, Any]
+) -> tuple[int | None, FlagsOrigin]:
+    """Treat the stock firmware's fixed 0x00 flags byte as no flags byte.
+
+    Stock GoogleFindMyTools firmware advertises the counter-0 EID with a fixed
+    0x00 hashed-flags byte. Decoding that byte returns the mask itself: a
+    battery level and a UWT bit made of key material alone. Only matches of
+    the counter-0 window qualify, so rotating trackers keep decoding 0x00 as
+    before. ``timestamp_bases`` is checked, not ``timestamp_basis``: for up
+    to one rotation period after the first hit the lock window also yields
+    counter 0 and wins the registration.
+    """
+    if flags_byte == 0x00 and MCU_STATIC_TIME_BASIS in (
+        metadata.get("timestamp_bases") or ()
+    ):
+        return None, "absent"
+    return flags_byte, flags_origin
+
+
 class _FlagsReading(NamedTuple):
     """What the hashed-flags decoder saw for one matched advertisement.
 
@@ -4317,6 +4337,9 @@ class GoogleFindMyEIDResolver:
         else:
             flags_byte = _guess_flags_byte(raw)
             flags_origin = "guessed" if flags_byte is not None else "absent"
+        flags_byte, flags_origin = _drop_stock_mcu_flags(
+            flags_byte, flags_origin, metadata
+        )
         uwt_bit: bool | None = None
         decoded_flags: int | None = None
 
