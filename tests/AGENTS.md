@@ -1227,6 +1227,30 @@ empty file, and the commit identity comes from `GIT_AUTHOR_*` and
 `GIT_COMMITTER_*`. A new test that drives a workflow step with real git should
 build its environment the same way.
 
+### Text guards for a launcher no test can run
+
+`docker-login/login.cmd` never runs here or in CI, so
+`tests/test_login_launcher_lang.py` pins it by its text: `_cmd_code_lines` drops
+blank lines and `rem`/`@rem`/`::` comments, and `_split_cmd_message` splits a
+message line into its conditions, its `echo`/`set /p` command and its redirect.
+Two rules came out of the review rounds of PR #1487:
+
+* **Ask the tool that decides, not a copy of its rules.** The check that
+  `login.cmd` is checked out with CRLF line ends first parsed `.gitattributes`
+  itself and accepted spellings git would treat differently. It now runs the
+  real `git check-attr` in a throwaway repository with its own `HOME`,
+  `GIT_CONFIG_NOSYSTEM=1` and an empty `GIT_CONFIG_GLOBAL`
+  (`test_login_cmd_is_checked_out_with_crlf_line_ends`), so git, not the test,
+  decides.
+* **Compare with the runnable sibling where there is one.** Which language tags
+  count as German is measured by running the real `login.sh --help` in the
+  launcher sandbox (`test_login_cmd_counts_the_same_tags_as_german_as_login_sh`), instead
+  of against a list the test keeps itself.
+
+Limit, stated so it is not mistaken for coverage: a text guard proves the form
+of `login.cmd`, not its behaviour under `cmd.exe`; that last proof is a manual
+run on Windows, which no test here provides.
+
 ## Device registry expectations
 
 The coordinator device-registry tests retain Home Assistant's 2025.10
