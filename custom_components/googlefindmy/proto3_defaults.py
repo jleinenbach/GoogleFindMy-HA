@@ -43,12 +43,22 @@ _BLOB_KEYS: Final[frozenset[str]] = frozenset(
 
 
 def is_unset_number(value: object) -> bool:
-    """Return True for an int (not bool) <= 0, the default of an unset field."""
+    """Return True for an int (not bool) <= 0, the default of an unset field.
+
+    Scope: values read from a parsed protobuf message, where an int32 or int64
+    field is an ``int``. Other forms, such as the text ``"0"`` or a ``bool``,
+    count as set values, because protobuf never yields them for these fields.
+    """
     return isinstance(value, int) and not isinstance(value, bool) and value <= 0
 
 
 def is_unset_blob(value: object) -> bool:
-    """Return True for b"" or "", the default of an unset bytes field."""
+    """Return True for b"" or "", the default of an unset bytes field.
+
+    Scope: a bytes field of a parsed protobuf message (``bytes``) or its hex
+    form (``str``). An empty ``bytearray`` is not covered, because protobuf
+    returns ``bytes`` for these fields.
+    """
     return isinstance(value, (bytes, str)) and len(value) == 0
 
 
@@ -60,7 +70,12 @@ def proto3_number_or_none(value: object) -> int | None:
 
 
 def is_proto3_default(key: str, value: object) -> bool:
-    """Return True if ``value`` is the proto3 default for the field behind ``key``."""
+    """Return True if ``value`` is the proto3 default for the field behind ``key``.
+
+    Only the keys listed in this module are judged, and only in the value forms
+    a parsed protobuf message yields (see ``is_unset_number`` and
+    ``is_unset_blob``). This is no general validator for other inputs.
+    """
     if key in _NUMBER_KEYS:
         return is_unset_number(value)
     if key in _BLOB_KEYS:

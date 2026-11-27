@@ -13,6 +13,7 @@ helper module they protect.
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -162,6 +163,17 @@ def test_nested_default_or_missing_pair_date_keeps_cached_value(
     coordinator._persist_anchor_metadata(_DEVICE, {"deviceRegistration": registration})
 
     assert _row(coordinator).get("pair_date") == 1783203555
+
+
+def test_persist_lifts_nested_pair_date_from_non_dict_mapping() -> None:
+    """A read-only mapping as deviceRegistration is lifted like a dict."""
+    coordinator = _coordinator()
+
+    coordinator._persist_anchor_metadata(
+        _DEVICE, {"deviceRegistration": MappingProxyType({"pairDate": 1700000000})}
+    )
+
+    assert _row(coordinator).get("pair_date") == 1700000000
 
 
 def test_update_nested_pair_date_replaces_cached_value() -> None:

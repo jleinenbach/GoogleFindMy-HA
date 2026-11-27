@@ -989,7 +989,7 @@ class CacheOperations(_MixinBase):
 
         # Handle nested deviceRegistration
         device_reg = payload.get("deviceRegistration")
-        if isinstance(device_reg, dict):
+        if isinstance(device_reg, Mapping):
             nested_pair_date = device_reg.get("pairDate")
             # The new payload decides, not the cache: a flat pair date in the same
             # payload wins; otherwise a set nested value replaces the cached one.
