@@ -335,6 +335,8 @@ async def test_toggle_does_not_reload_entry(
         "_automatic_polling_notice_kind",
         "_async_show_automatic_polling_notice",
         "_dismiss_automatic_polling_notice",
+        "_schedule_automatic_polling_notice",
+        "_automatic_polling_notice_tasks",
     ):
         setattr(
             coordinator,

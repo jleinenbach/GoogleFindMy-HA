@@ -5,12 +5,19 @@ Turning the switch *Automatic location polling* on shows one Home Assistant
 notification that explains what the requests do on the device: a phone listed
 without a canonical ID gets the phone text, a phone listed with a canonical ID
 gets nothing, every other device gets the tracker text. Turning the switch off
-and removing the device remove it. Neither a restart nor the setup of the
-switch creates one: the coordinator's setter is the only place that shows it.
+and removing the device (``purge_device``) remove it, and unloading the entry
+cancels one that is still loading its text. Neither a restart nor the setup of
+the switch creates one: the coordinator's setter is the only place that shows
+it. The static check of that sees the forms listed in ``_is_create``.
 
 ``async_create`` and ``async_dismiss`` are replaced on the module
 ``homeassistant.components.persistent_notification`` itself, so a call from any
 module of the integration is counted, not only one from the coordinator.
+
+One test runs the real translation layer in this process: under
+``use_real_homeassistant_modules`` it imports ``coordinator.main`` freshly,
+so the module binds the real loader, translation helper and notification
+store instead of the stubbed ones.
 
 New names of the feature are looked up with ``getattr`` and a ``pytest.fail``
 instead of an import, so that on the commit before the feature this module is
@@ -21,11 +28,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib
 import json
 import logging
 import re
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -122,7 +131,7 @@ def _english_texts(
         _hass: Any, language: str, category: str, integrations: Any = None
     ) -> dict[str, str]:
         languages.append(language)
-        assert category == "component"
+        assert category == "config"
         assert set(integrations or ()) == {DOMAIN}
         if pending_hook:
             pending_hook.pop()()
@@ -151,15 +160,41 @@ class _Hass:
 
     async def drain(self) -> None:
         """Await the planned tasks; a task that keeps planning new ones fails."""
-        for _ in range(20):
-            if not self.tasks:
-                return
-            pending = list(self.tasks)
-            self.tasks.clear()
-            await asyncio.gather(*pending)
-        for task in self.tasks:
-            task.cancel()
-        pytest.fail("planned tasks keep planning new tasks")
+        await _drain(self.tasks)
+
+
+async def _drain(tasks: list[asyncio.Task[Any]]) -> None:
+    """Await ``tasks``; a cancelled task is fine, any other error is raised."""
+    for _ in range(20):
+        if not tasks:
+            return
+        pending = list(tasks)
+        tasks.clear()
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                raise result
+    for task in tasks:
+        task.cancel()
+    pytest.fail("planned tasks keep planning new tasks")
+
+
+def _plan_on_entry(entry: Any, tasks: list[asyncio.Task[Any]]) -> Any:
+    """Give ``entry`` the core ``async_create_background_task``, kept in ``tasks``."""
+
+    def _create(
+        _hass: Any, coro: Any, name: str, eager_start: bool = True
+    ) -> asyncio.Task[Any]:
+        task = asyncio.Task(
+            coro, loop=asyncio.get_running_loop(), name=name, eager_start=eager_start
+        )
+        tasks.append(task)
+        return task
+
+    entry.async_create_background_task = _create
+    return entry
 
 
 def _bare_coordinator(
@@ -168,8 +203,11 @@ def _bare_coordinator(
     """The production class without ``__init__``, with the fields the notice reads."""
     coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     coord.hass = _Hass()  # type: ignore[assignment]
-    coord.config_entry = make_config_entry(
-        entry_id=_ENTRY_ID, options={_OPT_DISABLED: [], _OPT_ENABLED: []}
+    coord.config_entry = _plan_on_entry(
+        make_config_entry(
+            entry_id=_ENTRY_ID, options={_OPT_DISABLED: [], _OPT_ENABLED: []}
+        ),
+        coord.hass.tasks,  # type: ignore[attr-defined]
     )
     coord.api = SimpleNamespace(has_phone_target=lambda dev: dev in phone_route)
     coord._device_location_data = dict(rows or {})
@@ -310,6 +348,165 @@ async def test_removing_device_dismisses_notice(
     assert notices.created == []
 
 
+@pytest.mark.asyncio
+async def test_removing_device_while_text_loads_leaves_no_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``purge_device`` during the text lookup cancels the planned notice.
+
+    The stored choice stays "on" (``purge_device`` does not clear it), so only
+    the cancelled task keeps the notice away, not the second switch check.
+    """
+    notices = _Notices(monkeypatch)
+    coord = _make_coordinator(monkeypatch, options={}, api=_DispatchingAPI())
+    tasks: list[asyncio.Task[Any]] = []
+    coord.config_entry = _plan_on_entry(
+        make_config_entry(
+            entry_id=_ENTRY_ID, options={_OPT_DISABLED: [], _OPT_ENABLED: []}
+        ),
+        tasks,
+    )
+    coord.hass.config_entries = _CoreLikeConfigEntries()  # type: ignore[attr-defined]
+    coord.hass.config = SimpleNamespace(language="en")  # type: ignore[attr-defined]
+    coord.async_update_listeners = lambda: None  # type: ignore[method-assign]
+    coord.async_set_updated_data = lambda _data: None  # type: ignore[method-assign]
+    coord.data = []
+    _english_texts(monkeypatch, while_loading=lambda: coord.purge_device(_TRACKER))
+
+    coord.async_set_automatic_polling(_TRACKER, True)
+    assert len(tasks) == 1, "the notice task is planned on the config entry"
+    await _drain(tasks)
+
+    assert coord.config_entry.options[_OPT_ENABLED] == [_TRACKER]
+    assert notices.created == []
+    assert notices.dismissed == [_notice_id(_TRACKER)]
+
+
+# ---------------------------------------------------------------------------
+# How the notice task is planned
+# ---------------------------------------------------------------------------
+
+
+def _reduced_double(form: str, tasks: list[asyncio.Task[Any]]) -> Any:
+    """A double of ``async_create_background_task`` in a reduced signature."""
+    loop = asyncio.get_running_loop()
+    if form == "no_eager_start":
+
+        def _without_eager_start(_hass: Any, coro: Any, name: str) -> Any:
+            task = loop.create_task(coro, name=name)
+            tasks.append(task)
+            return task
+
+        return _without_eager_start
+
+    def _coro_only(_hass: Any, coro: Any) -> Any:
+        task = loop.create_task(coro)
+        tasks.append(task)
+        return task
+
+    return _coro_only
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["no_eager_start", "coro_only"])
+async def test_notice_planned_through_a_reduced_task_double(
+    monkeypatch: pytest.MonkeyPatch, form: str
+) -> None:
+    """A double without ``eager_start`` or with only ``(hass, coro)`` still works."""
+    notices = _Notices(monkeypatch)
+    _english_texts(monkeypatch)
+    coord = _bare_coordinator()
+    coord.config_entry.async_create_background_task = _reduced_double(  # type: ignore[union-attr]
+        form,
+        coord.hass.tasks,  # type: ignore[attr-defined]
+    )
+
+    await _set(coord, _TRACKER, True)
+
+    assert [n["notification_id"] for n in notices.created] == [_notice_id(_TRACKER)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["without_helper", "none"])
+async def test_no_background_task_helper_plans_nothing(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Without ``async_create_background_task`` on the entry nothing is planned."""
+    notices = _Notices(monkeypatch)
+    _english_texts(monkeypatch)
+    coord = _bare_coordinator()
+    if entry == "none":
+        coord.config_entry = None  # type: ignore[assignment]
+    else:
+        del coord.config_entry.async_create_background_task  # type: ignore[union-attr]
+
+    _require(coord, "_schedule_automatic_polling_notice")(_TRACKER)
+
+    assert coord.hass.tasks == []  # type: ignore[attr-defined]
+    assert coord._automatic_polling_notice_tasks() == {}
+    assert notices.created == []
+
+
+@pytest.mark.asyncio
+async def test_double_returning_no_task_tracks_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A double that returns no task keeps the coroutine; nothing is tracked."""
+    notices = _Notices(monkeypatch)
+    _english_texts(monkeypatch)
+    coord = _bare_coordinator()
+    kept: list[Any] = []
+
+    def _keep(_hass: Any, coro: Any, name: str, eager_start: bool = True) -> None:
+        kept.append(coro)
+
+    coord.config_entry.async_create_background_task = _keep  # type: ignore[union-attr]
+
+    coord.async_set_automatic_polling(_TRACKER, True)
+    try:
+        assert len(kept) == 1
+        assert coord._automatic_polling_notice_tasks() == {}
+    finally:
+        for coro in kept:
+            coro.close()
+    assert notices.created == []
+
+
+@pytest.mark.asyncio
+async def test_failing_notice_task_logs_only_the_error_class(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A crash of the task writes one WARNING with the error class, not its text."""
+
+    def _fail(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("private detail")
+
+    monkeypatch.setattr(persistent_notification, "async_create", _fail)
+    _english_texts(monkeypatch)
+    coord = _bare_coordinator()
+    caplog.set_level(logging.WARNING)
+
+    coord.async_set_automatic_polling(_TRACKER, True)
+    results = await asyncio.gather(
+        *coord.hass.tasks,  # type: ignore[attr-defined]
+        return_exceptions=True,
+    )
+    await asyncio.sleep(0)
+
+    assert [type(result) for result in results] == [RuntimeError]
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "Automatic polling notice" in record.getMessage()
+    ]
+    assert lines == [
+        f"Automatic polling notice for canonical={_TRACKER} failed (RuntimeError)"
+    ]
+    assert "private detail" not in caplog.text
+    assert coord._automatic_polling_notice_tasks() == {}
+
+
 # ---------------------------------------------------------------------------
 # Only the setter creates a notice
 # ---------------------------------------------------------------------------
@@ -341,7 +538,7 @@ async def test_restart_with_switch_on_creates_no_notice(
     # constructor would die on the missing attribute instead of being counted.
     coord.hass.config = SimpleNamespace(language="en")  # type: ignore[attr-defined]
     await asyncio.sleep(0)
-    coord.config_entry = entry
+    coord.config_entry = _plan_on_entry(entry, hass.tasks)
     entity = switch.GoogleFindMyAutomaticPollingSwitch(
         coord,
         {"id": "dev-on", "name": "Keys"},
@@ -396,8 +593,11 @@ def _calls_with_function(tree: ast.Module) -> list[tuple[ast.Call, str]]:
     return found
 
 
+_CREATE_NAMES = frozenset({"async_create", "create"})
+
+
 def _notification_aliases(tree: ast.Module) -> tuple[set[str], set[str]]:
-    """Names bound to the core module and to its ``async_create``."""
+    """Names bound to the core module and to its ``async_create``/``create``."""
     modules: set[str] = set()
     functions: set[str] = set()
     for node in ast.walk(tree):
@@ -411,7 +611,7 @@ def _notification_aliases(tree: ast.Module) -> tuple[set[str], set[str]]:
                     modules.add(bound)
                 if (
                     node.module == "homeassistant.components.persistent_notification"
-                    and alias.name == "async_create"
+                    and alias.name in _CREATE_NAMES
                 ):
                     functions.add(bound)
         elif isinstance(node, ast.Import):
@@ -429,8 +629,86 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
+def _is_create(call: ast.Call, modules: set[str], functions: set[str]) -> bool:
+    """Whether ``call`` creates a core notification, in one of four forms.
+
+    Seen: ``persistent_notification.async_create``/``create``, an imported
+    ``async_create``/``create``, ``getattr(persistent_notification, "...create")``
+    with a literal name, and the service call ``persistent_notification.create``
+    with domain and service as positional string literals.
+
+    Not seen, so a hit there is not counted:
+
+    * an alias by assignment (``f = pn.async_create; f(...)``);
+    * the function handed over instead of called: ``hass.add_job(pn.create, ...)``,
+      ``hass.async_add_executor_job(pn.create, ...)``, ``functools.partial``;
+    * the service call with ``domain=``/``service=`` as keywords, or with the
+      domain as ``pn.DOMAIN`` or a variable;
+    * ``homeassistant.components.persistent_notification.async_create`` reached
+      through ``import homeassistant.components``;
+    * ``importlib.import_module(...)`` and ``getattr`` with a computed name;
+    * a write into the notification store itself.
+
+    None of these forms occurs in the integration today; a change that adds one
+    needs this detector extended first.
+    """
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        if func.attr in _CREATE_NAMES and _dotted(func.value) in modules:
+            return True
+        if func.attr in ("async_call", "call") and len(call.args) >= 2:
+            domain, service = call.args[0], call.args[1]
+            return (
+                isinstance(domain, ast.Constant)
+                and domain.value == "persistent_notification"
+                and isinstance(service, ast.Constant)
+                and service.value == "create"
+            )
+        return False
+    if isinstance(func, ast.Name):
+        if func.id in functions:
+            return True
+        if func.id == "getattr" and len(call.args) >= 2:
+            owner, attr = call.args[0], call.args[1]
+            return (
+                _dotted(owner) in modules
+                and isinstance(attr, ast.Constant)
+                and attr.value in _CREATE_NAMES
+            )
+    return False
+
+
+def _creates_in(source: str) -> int:
+    tree = ast.parse(source)
+    modules, functions = _notification_aliases(tree)
+    return sum(
+        _is_create(call, modules, functions) for call, _ in _calls_with_function(tree)
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from homeassistant.components import persistent_notification as pn\n"
+        "pn.async_create(hass, 'm')",
+        "from homeassistant.components import persistent_notification\n"
+        "persistent_notification.create(hass, 'm')",
+        "from homeassistant.components.persistent_notification import create as c\n"
+        "c(hass, 'm')",
+        "from homeassistant.components import persistent_notification\n"
+        "getattr(persistent_notification, 'async_create')(hass, 'm')",
+        "hass.services.async_call('persistent_notification', 'create', {})",
+        "hass.services.call('persistent_notification', 'create', {})",
+    ],
+)
+def test_create_detector_sees_every_form(source: str) -> None:
+    """The detector below counts each way to a core notification once."""
+    assert _creates_in(source) == 1
+
+
 def test_notice_created_only_from_the_switch_setter() -> None:
-    """One way to a notice: switch entity -> setter -> show -> core create."""
+    """One way to a notice: switch entity -> setter -> schedule -> show -> create."""
+    schedules: list[tuple[str, str]] = []
     shows: list[tuple[str, str]] = []
     creates: list[tuple[str, str]] = []
     setters: list[tuple[str, str]] = []
@@ -438,18 +716,23 @@ def test_notice_created_only_from_the_switch_setter() -> None:
         modules, functions = _notification_aliases(tree)
         for call, owner in _calls_with_function(tree):
             func = call.func
-            target = _dotted(func)
-            if isinstance(func, ast.Attribute):
-                if func.attr == "_async_show_automatic_polling_notice":
-                    shows.append((relative, owner))
-                if func.attr == "async_set_automatic_polling":
-                    setters.append((relative, owner))
-                if func.attr == "async_create" and _dotted(func.value) in modules:
-                    creates.append((relative, owner))
-            elif isinstance(func, ast.Name) and target in functions:
+            if _is_create(call, modules, functions):
                 creates.append((relative, owner))
+            if not isinstance(func, ast.Attribute):
+                continue
+            if func.attr == "_schedule_automatic_polling_notice":
+                schedules.append((relative, owner))
+            if func.attr == "_async_show_automatic_polling_notice":
+                shows.append((relative, owner))
+            if func.attr == "async_set_automatic_polling":
+                setters.append((relative, owner))
 
-    assert shows == [("coordinator/main.py", "async_set_automatic_polling")], shows
+    assert schedules == [("coordinator/main.py", "async_set_automatic_polling")], (
+        schedules
+    )
+    assert shows == [("coordinator/main.py", "_schedule_automatic_polling_notice")], (
+        shows
+    )
     assert creates == [
         ("coordinator/main.py", "_async_show_automatic_polling_notice")
     ], creates
@@ -479,6 +762,33 @@ async def test_switch_off_before_text_loaded_leaves_no_notice(
     await _set(coord, _TRACKER, True)
 
     assert coord.config_entry.options[_OPT_DISABLED] == [_TRACKER]
+    assert notices.created == []
+
+
+@pytest.mark.asyncio
+async def test_choice_stored_off_elsewhere_while_text_loads_leaves_no_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch is read again after the text loads, not only cancelled.
+
+    The stored choice turns "off" without the setter (an options update of the
+    entry), so no task is cancelled; only the second read keeps the notice away.
+    """
+    notices = _Notices(monkeypatch)
+    coord = _bare_coordinator()
+
+    def _store_off() -> None:
+        coord.hass.config_entries.async_update_entry(  # type: ignore[attr-defined]
+            coord.config_entry,
+            options={_OPT_DISABLED: [_TRACKER], _OPT_ENABLED: []},
+        )
+
+    _english_texts(monkeypatch, while_loading=_store_off)
+
+    await _set(coord, _TRACKER, True)
+
+    assert coord.config_entry.options[_OPT_DISABLED] == [_TRACKER]
+    assert notices.dismissed == []
     assert notices.created == []
 
 
@@ -568,9 +878,166 @@ async def test_failed_text_lookup_shows_nothing_and_keeps_the_switch(
         if r.name.startswith("custom_components.googlefindmy")
     ]
     assert any(
-        "translation lookup failed" in m and "translation cache unavailable" in m
-        for m in messages
+        "translation lookup failed" in m and "RuntimeError" in m for m in messages
     ), messages
+    assert [m for m in messages if "translation cache unavailable" in m] == []
+
+
+# ---------------------------------------------------------------------------
+# The real translation layer, without any test double
+# ---------------------------------------------------------------------------
+
+_PACKAGE = "custom_components.googlefindmy"
+
+
+def _fresh_import(
+    monkeypatch: pytest.MonkeyPatch, name: str, prefix: str
+) -> ModuleType:
+    """Import ``name`` freshly and hand every new ``prefix*`` key to monkeypatch.
+
+    Same helper as in ``tests/test_services_permissions.py``: a key the import
+    creates is popped and set again through ``monkeypatch``, so ``monkeypatch``
+    removes it on teardown; a key that existed before gets its old value back.
+    """
+
+    def _keys() -> set[str]:
+        return {k for k in sys.modules if k == prefix or k.startswith(f"{prefix}.")}
+
+    before = _keys()
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    parent_name, _, child = name.rpartition(".")
+    parent = importlib.import_module(parent_name)
+    monkeypatch.setattr(parent, child, getattr(parent, child, None), raising=False)
+    module = importlib.import_module(name)
+    for key in sorted(_keys() - before):
+        created = sys.modules.pop(key)
+        monkeypatch.setitem(sys.modules, key, created)
+    return module
+
+
+@pytest.fixture
+def real_main(
+    use_real_homeassistant_modules: None, monkeypatch: pytest.MonkeyPatch
+) -> ModuleType:
+    """``coordinator.main`` imported freshly against the real Home Assistant modules.
+
+    The module imported at collection stays bound to the stubbed modules
+    (``tests/AGENTS.md``, fresh import under real Home Assistant modules), so it
+    would not run the real loader and translation helper. The fresh copy binds
+    the real ``translation`` and ``persistent_notification``.
+    """
+    return _fresh_import(monkeypatch, f"{_PACKAGE}.coordinator.main", _PACKAGE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["en", "de"])
+async def test_notice_through_the_real_translation_layer(
+    real_main: ModuleType, language: str
+) -> None:
+    """The shipped texts reach a real notification, in English and German.
+
+    Home Assistant, its loader, the translation helper and the notification
+    store are the real ones, and none of them is replaced; only the config
+    entry, the API and the device name are plain stand-ins. The category, the
+    key path and the files are the ones Home Assistant itself uses, so a wrong
+    category shows no notice here.
+    """
+    from homeassistant import loader  # noqa: PLC0415 - the real module, after the swap
+    from homeassistant.core import HomeAssistant  # noqa: PLC0415
+
+    root = _INTEGRATION_ROOT.parents[1]
+    hass = HomeAssistant(str(root))
+    hass.config.skip_pip = True
+    hass.config.language = language
+    loader.async_setup(hass)
+    try:
+        coord = real_main.GoogleFindMyCoordinator.__new__(
+            real_main.GoogleFindMyCoordinator
+        )
+        coord.hass = hass
+        coord.config_entry = make_config_entry(
+            entry_id="entry-real",
+            options={_OPT_ENABLED: [_TRACKER], _OPT_DISABLED: []},
+        )
+        coord.api = SimpleNamespace(has_phone_target=lambda _dev: False)
+        coord._device_location_data = {}
+        coord.get_device_display_name = lambda _dev: _TRACKER_NAME
+        await coord._async_show_automatic_polling_notice(_TRACKER)
+        store = real_main.persistent_notification._async_get_or_create_notifications(
+            hass
+        )
+        shown = [[n["title"], n["message"]] for n in store.values()]
+    finally:
+        await hass.async_stop(force=True)
+
+    texts = json.loads(
+        (_INTEGRATION_ROOT / "translations" / f"{language}.json").read_text(
+            encoding="utf-8"
+        )
+    )["config"]["progress"]
+    assert shown == [
+        [
+            texts["automatic_polling_notice_title"].replace("{device}", _TRACKER_NAME),
+            texts["automatic_polling_notice_tracker"],
+        ]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unloading_the_entry_cancels_a_notice_still_loading(
+    real_main: ModuleType,
+) -> None:
+    """The task is a background task of a real config entry; unloading cancels it.
+
+    ``_async_process_on_unload`` is what Home Assistant runs when it unloads an
+    entry: it cancels the entry's background tasks and only waits for the
+    others, so a normal entry task would still show the notice.
+    """
+    from homeassistant import loader  # noqa: PLC0415 - the real module, after the swap
+    from homeassistant.config_entries import ConfigEntry  # noqa: PLC0415
+    from homeassistant.core import HomeAssistant  # noqa: PLC0415
+
+    hass = HomeAssistant(str(_INTEGRATION_ROOT.parents[1]))
+    hass.config.skip_pip = True
+    hass.config.language = "en"
+    loader.async_setup(hass)
+    try:
+        entry = ConfigEntry(
+            data={},
+            discovery_keys=MappingProxyType({}),
+            domain=DOMAIN,
+            entry_id=_ENTRY_ID,
+            minor_version=1,
+            options={_OPT_ENABLED: [_TRACKER], _OPT_DISABLED: []},
+            source="user",
+            subentries_data=None,
+            title="Test Account",
+            unique_id=None,
+            version=1,
+        )
+        coord = real_main.GoogleFindMyCoordinator.__new__(
+            real_main.GoogleFindMyCoordinator
+        )
+        coord.hass = hass
+        coord.config_entry = entry
+        coord.api = SimpleNamespace(has_phone_target=lambda _dev: False)
+        coord._device_location_data = {}
+        coord.get_device_display_name = lambda _dev: _TRACKER_NAME
+
+        coord._schedule_automatic_polling_notice(_TRACKER)
+        assert not entry._tasks, "planned as a normal entry task"
+        (task,) = entry._background_tasks
+        await asyncio.sleep(0)  # the task starts loading the texts
+        await entry._async_process_on_unload(hass)
+
+        assert task.cancelled()
+        store = real_main.persistent_notification._async_get_or_create_notifications(
+            hass
+        )
+        assert dict(store) == {}
+        assert coord._automatic_polling_notice_tasks() == {}
+    finally:
+        await hass.async_stop(force=True)
 
 
 def test_readme_names_the_notice_automation() -> None:
