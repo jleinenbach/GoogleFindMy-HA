@@ -3,9 +3,10 @@
 
 proto3 scalar and bytes fields have no presence: an unset int32 reads as 0 and
 an unset bytes field reads as b"". A check such as ``value is not None`` takes
-that default for a real value. This module is the single definition of such
-defaults for the keys that carry time anchors, the owner-key version and key
-blobs, so producers and the location cache agree on what "no value" means.
+that default for a real value. This module defines such defaults for the keys
+that carry time anchors, the owner-key version and key blobs, so producers and
+the location cache agree on what "no value" means. Older local ``> 0`` checks
+elsewhere predate it and treat these fields the same way.
 """
 
 from __future__ import annotations

@@ -1161,8 +1161,9 @@ async def async_retrieve_identity_key(
         _LOGGER.debug("Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc)
 
     # An unset proto3 ownerKeyVersion reads as 0. That is no version and can
-    # never be older than Spot's, so only a set version may clear the owner
-    # key and raise StaleOwnerKeyError below.
+    # never be older than Spot's, so only a set version may take the
+    # version-mismatch branch below (clear the owner key, raise
+    # StaleOwnerKeyError). The blind refresh further down does not depend on it.
     old_ver = proto3_number_or_none(
         getattr(encrypted_user_secrets, "ownerKeyVersion", None)
     )
@@ -1754,7 +1755,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
     raw_encrypted_identity_key = bytes(raw_encrypted_identity_key)
     # An unset proto3 ownerKeyVersion reads as 0, which is no version. Normalize
-    # once at the source so the metadata and every report payload carry None.
+    # once at the source: the metadata then omits the key, and the report
+    # payloads carry None.
     raw_owner_key_version = proto3_number_or_none(
         getattr(encrypted_user_secrets, "ownerKeyVersion", None)
     )

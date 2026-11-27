@@ -26,7 +26,7 @@ When reusing the shared grpclib transport (`SpotGrpcTransport`), keep SSL contex
 
 ### Unset protobuf fields reminder
 
-`proto3_defaults.py` is the only definition of "unset" for anchor dates, the owner-key version and key blobs (proto3 reads an unset int32 as 0 and an unset bytes field as `b""`): new or changed checks in producers (`decoder.py`, `decrypt_locations.py`) and in the location cache go through this module, not through a local `is not None` or `> 0` test. Older local `> 0` checks in `decoder.py` (pair date, creation date) predate the module and treat these fields the same way.
+`proto3_defaults.py` defines "unset" for anchor dates, the owner-key version and key blobs (proto3 reads an unset int32 as 0 and an unset bytes field as `b""`). New or changed checks in producers (`decoder.py`, `decrypt_locations.py`) and in the location cache go through this module, not through a local `is not None` or `> 0` test. Older local `> 0` checks predate the module and treat these fields the same way: in `decoder.py` for the pair date, the creation date and the owner-key version of the candidate union, and `_is_version` in `SpotApi/GetEidInfoForE2eeDevices/get_owner_key.py` for the version Spot serves.
 
 ## Cross-reference index
 
