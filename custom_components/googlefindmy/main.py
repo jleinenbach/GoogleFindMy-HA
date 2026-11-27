@@ -1633,9 +1633,9 @@ def _raise_on_sigterm() -> Iterator[None]:
     default ended the process before the restore could run: ``docker stop``
     left the account signed out. A Python handler that raises unwinds the
     stack instead, through the ``finally`` that quits Chrome, into the restore
-    in ``_main``. The previous handler comes back when the block ends, so a
-    stop during the restore itself meets the default again (the write is
-    atomic either way). Outside the main thread ``signal.signal`` refuses with
+    in ``_main``. The previous handler comes back when the block ends; the
+    restore itself then runs with the stop signals held and dropped
+    (``_hold_stop_signals(deliver=False)``). Outside the main thread ``signal.signal`` refuses with
     ``ValueError``; the block then runs without the handler, as
     ``_cancel_on_sigterm`` does, instead of refusing the sign-in.
     """
@@ -1671,12 +1671,12 @@ def _hold_stop_signals(*, deliver: bool = True) -> Iterator[None]:
     the block runs as it is.
 
     With ``deliver=False`` the pending signals are dropped instead. That is
-    for a block that runs while the run is already ending on a stop, such as
-    the restore in ``_main``: in the container ``Ctrl+C`` arrives twice (the
-    process group and the entrypoint's forward), and the second one must not
-    cut the restore short, nor replace the ending already under way -- a
-    ``KeyboardInterrupt`` raised over ``_LoginTerminated`` would turn status
-    143 into 130 (AP17 review, finding 1).
+    for a block that runs while the run is already ending, such as the restore
+    in ``_main``: in the container ``Ctrl+C`` arrives twice (the process group
+    and the entrypoint's forward), and the second one must not cut the restore
+    short, nor replace the ending already under way -- a ``KeyboardInterrupt``
+    raised over ``_LoginTerminated`` would turn the process's status 143 into
+    130 (AP17 review, finding 1).
     """
     pending: list[int] = []
 
@@ -2014,7 +2014,8 @@ def _main(argv: Sequence[str] | None = None) -> None:
         # paths that reach here most often. The restore runs with the stop
         # signals held and dropped: the second Ctrl+C the container delivers
         # (or a docker stop) would otherwise abort it and leave the account
-        # signed out after all; the run is ending on the first one anyway.
+        # signed out after all. Nothing is lost by dropping them: every path
+        # below ends the run, with ``raise`` or ``_end_process_now``.
         if restore_cleared_tokens is not None:
             with _hold_stop_signals(deliver=False):
                 restore_cleared_tokens()

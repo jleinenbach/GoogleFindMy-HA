@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
 
@@ -370,12 +371,25 @@ class _BrokenStdout(io.StringIO):
         raise BrokenPipeError(32, "Broken pipe")
 
 
+def _closed_stdout() -> io.StringIO:
+    stream = io.StringIO()
+    stream.close()  # print() then raises ValueError, not an OSError
+    return stream
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [_BrokenStdout, _closed_stdout],
+    ids=["broken-pipe", "closed"],
+)
 def test_a_failing_print_after_the_clearing_still_returns_the_restore(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stdout: Callable[[], io.StringIO],
 ) -> None:
     """The tokens are gone once the write is done; the callable must come back."""
     path = _prepare_main(monkeypatch, tmp_path, _CACHED)
-    monkeypatch.setattr(sys, "stdout", _BrokenStdout())
+    monkeypatch.setattr(sys, "stdout", stdout())
 
     restore = cli_main._clear_stale_tokens_for_reauth()
 
