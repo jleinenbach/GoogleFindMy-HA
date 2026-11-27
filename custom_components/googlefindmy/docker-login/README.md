@@ -425,7 +425,7 @@ the user") on every one of them, which is deliberately distinct from the `1`/`2`
 the launcher uses for its own failures, so a script around this can tell "you
 stopped" from "it broke". Running out of time in sign-in 2 of 2 is not one of
 them: it ends with status `1` as a failed key step, and the window is not opened
-again. Its first line says what happened:
+again. The line it prints when the time runs out:
 
 ```
 [AuthFlow] Sign-in 2 of 2 was not finished within 5 minutes. The result of

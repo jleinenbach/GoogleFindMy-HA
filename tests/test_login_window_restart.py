@@ -546,11 +546,12 @@ def test_a_non_driver_failure_in_step_two_is_neither_restarted_nor_closed(
 # README quotes (L-13, CA-N13)
 #
 # The docker-login guide quotes what the terminal prints when a sign-in window
-# is closed, reopened, finished, or cancelled on the Google page. Each quoted
-# block is rendered here through the same chain the tests above drive, and the
-# block must be a run of *whole* output lines of that scenario, directly after
-# its own lead-in. Whole lines, not a substring: a block that quotes half a
-# sentence, or two lines from different places, would otherwise pass.
+# is closed, reopened, finished, cancelled on the Google page, or runs out of
+# time. Each quoted block is rendered here through the same chain the tests
+# above drive, and the block must be a run of *whole* output lines of that
+# scenario, directly after its own lead-in. Whole lines, not a substring: a
+# block that quotes half a sentence, or two lines from different places, would
+# otherwise pass.
 #
 # Measured extent: the blocks listed in ``_README_QUOTES``. Every fenced block
 # in "Browser closed by accident" must be one of them, so a new quote there
@@ -625,6 +626,27 @@ async def _step_two_cancelled_on_page(
     return await _step_two_output(monkeypatch, capsys, [StepTwoDriver([_CLOSE_VIEW])])
 
 
+class _ExpiredSignInWait(FlowWait):
+    """The sign-in wait's own deadline runs out; every other wait is ``FlowWait``'s."""
+
+    def until(self, condition: Any) -> Any:
+        if self.timeout == shared_key_flow.SIGN_IN_TIMEOUT_S:
+            raise TimeoutException("deadline")
+        return super().until(condition)
+
+
+async def _step_two_sign_in_expired(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
+) -> str:
+    started = _step_two(
+        monkeypatch, [StepTwoDriver([_SET_KEYS])], wait=_ExpiredSignInWait
+    )
+    await _run(_CountingCache(_base()))
+    # The guide also says the window is not opened again after the timeout.
+    assert len(started) == 1
+    return _out(capsys)
+
+
 async def _vault_only_closed_three_times(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
 ) -> str:
@@ -666,6 +688,7 @@ _SCENARIOS = {
     "step-two-finished": _step_two_finished,
     "step-two-closed-three-times": _step_two_closed_three_times,
     "step-two-cancelled-on-page": _step_two_cancelled_on_page,
+    "step-two-sign-in-expired": _step_two_sign_in_expired,
     "vault-only-closed-three-times": _vault_only_closed_three_times,
     "partial-bundle-notice": _partial_bundle_notice,
 }
@@ -702,6 +725,11 @@ _README_QUOTES = [
         "Pressing cancel on the Google unlock page during sign-in 2 of 2, which is "
         "not opened again because the page ended the step on purpose:",
         "step-two-cancelled-on-page",
+    ),
+    (
+        _CANCEL_SECTION,
+        "The line it prints when the time runs out:",
+        "step-two-sign-in-expired",
     ),
     (
         _CANCEL_SECTION,
