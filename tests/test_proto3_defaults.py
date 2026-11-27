@@ -3,7 +3,7 @@
 
 The cache tests cover ``drop_proto3_defaults`` through the real merge. These
 tests pin ``proto3_number_or_none``, which producers use to turn an unset int
-field into ``None``, against every input form it can meet.
+field into ``None``, against the input forms listed below.
 """
 
 from __future__ import annotations

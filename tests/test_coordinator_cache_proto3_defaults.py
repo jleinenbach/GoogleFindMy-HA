@@ -151,6 +151,19 @@ def test_nested_pair_date_replaces_cached_value(cached: int) -> None:
     assert _row(coordinator).get("pair_date") == 1783293855
 
 
+@pytest.mark.parametrize("registration", [{"pairDate": 0}, {}])
+def test_nested_default_or_missing_pair_date_keeps_cached_value(
+    registration: dict[str, Any],
+) -> None:
+    """A nested pairDate of 0, or none at all, keeps the cached pair date."""
+    coordinator = _coordinator()
+    coordinator._persist_anchor_metadata(_DEVICE, {"pair_date": 1783203555})
+
+    coordinator._persist_anchor_metadata(_DEVICE, {"deviceRegistration": registration})
+
+    assert _row(coordinator).get("pair_date") == 1783203555
+
+
 def test_update_nested_pair_date_replaces_cached_value() -> None:
     """A set nested pairDate replaces the cached pair date on the merge path."""
     coordinator = _coordinator()
@@ -198,6 +211,18 @@ def test_flat_pair_date_wins_over_nested_in_same_payload() -> None:
     assert _row(coordinator).get("pair_date") == 1700000000
 
 
+def test_update_flat_pair_date_wins_over_nested_in_same_payload() -> None:
+    """On the merge path, too, a flat pair date wins over a nested one."""
+    coordinator = _coordinator()
+
+    coordinator.update_device_cache(
+        _DEVICE,
+        _fix(100, pair_date=1700000000, deviceRegistration={"pairDate": 1800000000}),
+    )
+
+    assert _row(coordinator).get("pair_date") == 1700000000
+
+
 @pytest.mark.parametrize(
     ("path", "key", "old", "new"),
     [
@@ -212,7 +237,7 @@ def test_flat_pair_date_wins_over_nested_in_same_payload() -> None:
 def test_non_default_values_pass_unchanged(
     path: str, key: str, old: object, new: object
 ) -> None:
-    """Every value that is not a default is stored unchanged, type included."""
+    """The listed non-default values are stored unchanged, type included."""
     coordinator = _coordinator()
     if path == "update":
         coordinator._device_location_data[_DEVICE] = _fix(100, **{key: old})
