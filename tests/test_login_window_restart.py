@@ -837,3 +837,150 @@ def test_a_new_sign_in_after_a_restart_asks_again(
 
     assert len(prompts) == 2
     assert capsys.readouterr().out.count("This script will now open Google Chrome") == 2
+
+
+# ---------------------------------------------------------------------------
+# F-H2: a closed sign-in-2 window can report its address as ``None``
+#
+# On the QNAP host (Selenium through the grid), closing the window of sign-in 2
+# did not make the sign-in wait raise: ``driver.current_url`` returned ``None``
+# and ``ec.url_contains`` failed with ``TypeError``, which the flow logged as
+# "terminated unexpectedly" and ended with exit 1 instead of reopening the
+# window. The doubles above raise on the next command, so they never reached the
+# wait's predicate. These tests run the real predicate: the wait double below
+# evaluates it once instead of returning at once.
+# ---------------------------------------------------------------------------
+
+_SIGNED_IN_URL = "https://myaccount.google.com/?pli=1"
+
+
+class _AddressDriver(StepTwoDriver):
+    """A step-two driver that answers ``current_url`` and ``window_handles``."""
+
+    def __init__(
+        self,
+        payloads: list[str] | None = None,
+        *,
+        url: str | None,
+        handles: list[str],
+        async_answer: object = None,
+    ) -> None:
+        super().__init__(payloads, async_answer=async_answer)
+        self._url = url
+        self._handles = handles
+
+    @property
+    def current_url(self) -> str | None:
+        return self._url
+
+    @property
+    def window_handles(self) -> list[str]:
+        return list(self._handles)
+
+
+def _closed_with_none_url() -> _AddressDriver:
+    """The user closed the window; the driver says ``None`` instead of raising."""
+    return _AddressDriver(url=None, handles=[])
+
+
+class _PredicateWait(FlowWait):
+    """Runs the sign-in wait's predicate once; every other wait is ``FlowWait``'s.
+
+    The sign-in waits are the ones with the sign-in timeout; the page-readiness
+    wait of the vault fetch and the 0.5 s alert waits keep resolving at once.
+    """
+
+    def until(self, condition: Any) -> Any:
+        if self.timeout != shared_key_flow.SIGN_IN_TIMEOUT_S:
+            return super().until(condition)
+        result = condition(self.driver)
+        if not result:
+            pytest.fail("the sign-in wait would keep polling forever in this test")
+        return result
+
+
+@pytest.mark.asyncio
+async def test_a_second_window_closed_with_a_none_address_is_reopened_twice(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    started = _step_two(
+        monkeypatch,
+        [_closed_with_none_url() for _ in range(3)],
+        wait=_PredicateWait,
+    )
+
+    code = await _run(_CountingCache(_base()))
+    out = _out(capsys)
+
+    assert code == 130
+    assert len(started) == 3
+    assert out.count(_RESTART_TWO) == 2
+    assert "The sign-in window 2 of 2 was closed before Google sent the key." in out
+    assert "terminated unexpectedly" not in out
+    assert "vault key retrieval failed" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_reopened_window_after_a_none_address_saves_the_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    second = _AddressDriver([_SET_KEYS], url=_SIGNED_IN_URL, handles=["w1"])
+    started = _step_two(
+        monkeypatch, [_closed_with_none_url(), second], wait=_PredicateWait
+    )
+    cache = _CountingCache(_base())
+
+    assert await _run(cache) is None
+    out = _out(capsys)
+
+    assert len(started) == 2
+    assert out.count(_RESTART_TWO) == 1
+    assert cache.data["shared_key"] == bytes(range(32)).hex()
+
+
+@pytest.mark.asyncio
+async def test_path_c_window_closed_with_a_none_address_names_the_window(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = make_vault_world(versions=(1, 2), spot_version=2)
+    started = _step_two(
+        monkeypatch,
+        [_closed_with_none_url() for _ in range(3)],
+        world=world,
+        wait=_PredicateWait,
+    )
+    cache = _CountingCache(_base(world))
+
+    assert await _run(cache) is None
+    out = _out(capsys)
+
+    assert len(started) == 3
+    assert out.count(_RESTART_TWO) == 2
+    assert "cause=window_closed" in out
+    assert "http_status" not in out
+
+
+def _sign_in_predicate() -> Any:
+    # Looked up here, so the red probe against the old code fails in the test.
+    return shared_key_flow._signed_in_or_window_gone
+
+
+def test_the_sign_in_predicate_keeps_waiting_while_a_window_is_open() -> None:
+    driver = _AddressDriver(url=None, handles=["w1"])
+    assert _sign_in_predicate()(driver) is False
+
+
+def test_the_sign_in_predicate_reports_a_window_gone_without_an_address() -> None:
+    with pytest.raises(NoSuchWindowException) as caught:
+        _sign_in_predicate()(_closed_with_none_url())
+    assert auth_flow.describe_lost_session(caught.value) is not None
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [(_SIGNED_IN_URL, True), (_ACCOUNTS_URL, False)],
+    ids=["signed_in", "still_on_the_form"],
+)
+def test_the_sign_in_predicate_reads_the_address(url: str, expected: bool) -> None:
+    driver = _AddressDriver(url=url, handles=["w1"])
+    assert _sign_in_predicate()(driver) is expected
