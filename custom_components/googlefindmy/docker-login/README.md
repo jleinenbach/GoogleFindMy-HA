@@ -371,9 +371,10 @@ The login has two sign-ins, and each opens its own Chrome window. Sign-in 1 of
 2 gets the account token; sign-in 2 of 2 gets the key from the Google unlock page
 and is skipped when `secrets.json` already holds that key. A login can end early
 in four ways that the flow itself names, and the line it prints says which one it
-was. (`Ctrl+C` is a fifth way out. It ends with the same status, but it is the
-one cancellation that still prints a Python `KeyboardInterrupt` traceback instead
-of an `[AuthFlow]` line. A `--reauth` run can also stop with that status before
+was. (`Ctrl+C` is a fifth way out. The container ends it with the same status,
+but it is the one cancellation without an `[AuthFlow]` line: during sign-in 1 of
+2 it prints a Python `KeyboardInterrupt` traceback, during sign-in 2 of 2 just
+`Exiting.`. A `--reauth` run can also stop with that status before
 either window opens, at the question after its overwrite warning; see
 [Forcing a fresh login](#forcing-a-fresh-login).)
 
@@ -840,8 +841,9 @@ there is no separate image to rebuild for code changes.
 - **The run ended with exit status 130:** that is not an error, it is a
   cancellation. The `[AuthFlow]` line above it names which sign-in ended and
   why: a window closed a third time, a wait that ran out, or a cancel on the
-  Google unlock page. A `Ctrl+C` gets the same status but ends in a
-  `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line. A `--reauth`
+  Google unlock page. A `Ctrl+C` gets the same status from the container but
+  no `[AuthFlow]` line: it ends in a `KeyboardInterrupt` traceback during
+  sign-in 1 of 2 and in a plain `Exiting.` during sign-in 2 of 2. A `--reauth`
   run that ends with `Stopped. Nothing was changed.` was stopped at the question
   after its overwrite warning, before any window opened, and left `secrets.json`
   as it was (see [Forcing a fresh login](#forcing-a-fresh-login)). Start the login
