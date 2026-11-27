@@ -62,6 +62,10 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.foreign_
     DeviceKey,
     foreign_device_key,
 )
+from custom_components.googlefindmy.proto3_defaults import (
+    is_unset_number,
+    proto3_number_or_none,
+)
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
     _first_canonic_id,
     parse_device_update_protobuf,
@@ -1744,7 +1748,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         raw_encrypted_identity_key = b""
 
     raw_encrypted_identity_key = bytes(raw_encrypted_identity_key)
-    raw_owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
+    # An unset proto3 ownerKeyVersion reads as 0, which is no version. Normalize
+    # once at the source so the metadata and every report payload carry None.
+    raw_owner_key_version = proto3_number_or_none(
+        getattr(encrypted_user_secrets, "ownerKeyVersion", None)
+    )
 
     # Bug 6 fix: Always generate the full candidate set (MCU flip variants,
     # owner + shared keys) so that foreign/crowdsourced FMDN reports can try
@@ -1844,7 +1852,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # ------------------------------------------------------------------
     if device_registration:
         pair_date_raw = getattr(device_registration, "pairDate", None)
-        if pair_date_raw is not None:
+        # An unset proto3 pairDate reads as 0, which is no pairing date.
+        if pair_date_raw is not None and not is_unset_number(pair_date_raw):
             metadata_update.setdefault("pair_date", pair_date_raw)
             metadata_update.setdefault("pairDate", pair_date_raw)
 
@@ -1866,7 +1875,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         creation = getattr(encrypted_user_secrets, "creationDate", None)
         if creation is not None:
             creation_seconds = getattr(creation, "seconds", None)
-            if creation_seconds is not None:
+            # An unset creationDate message reads as seconds == 0.
+            if creation_seconds is not None and not is_unset_number(creation_seconds):
                 metadata_update.setdefault("secrets_creation_date", creation_seconds)
                 metadata_update.setdefault("secretsCreationDate", creation_seconds)
                 metadata_update.setdefault("creationDate", creation_seconds)
