@@ -21,7 +21,11 @@ from custom_components.googlefindmy.browser_deps import (
 )
 
 try:
-    from selenium.common.exceptions import TimeoutException, WebDriverException
+    from selenium.common.exceptions import (
+        NoSuchWindowException,
+        TimeoutException,
+        WebDriverException,
+    )
     from selenium.webdriver.support import expected_conditions as ec
     from selenium.webdriver.support.ui import WebDriverWait
 except ImportError as _err:  # pragma: no cover - needs a selenium-less environment
@@ -57,7 +61,7 @@ if TYPE_CHECKING:  # pragma: no cover - import-time typing block
 
 LOGGER = logging.getLogger(__name__)
 
-# The interactive sign-in already waits this long (`WebDriverWait(driver, 300)`);
+# The interactive sign-in already waits this long (`SIGN_IN_TIMEOUT_S`);
 # the alert loop gets the same budget instead of waiting forever for a page that
 # never answers. A constant on purpose, not a user setting.
 ALERT_DEADLINE_S: Final = 300
@@ -160,6 +164,33 @@ def fetch_vault_entries(driver: WebDriver) -> VaultFetchResult:
     return result
 
 
+SIGNED_IN_URL_FRAGMENT: Final = "https://myaccount.google.com"
+
+
+def _signed_in_or_window_gone(driver: WebDriver) -> bool:
+    """Wait predicate of the sign-in: True once Google shows the account page.
+
+    A closed window does not always make the next command raise. Through the
+    Selenium grid on the QNAP host, ``current_url`` answered ``None`` after the
+    user closed the window of sign-in 2, and ``ec.url_contains`` then failed
+    with ``TypeError``, which ended the login instead of reopening the window.
+    ``None`` is therefore checked against the open windows: none left raises
+    ``NoSuchWindowException``, which ``until`` passes through unchanged and
+    ``describe_lost_session`` classifies as a closed window; an open window
+    keeps the wait going. If asking for the windows raises a WebDriver error,
+    that error is classified like any other command's, so a crash reported
+    there keeps its traceback. Not measured: whether the grid also answers
+    ``None`` with no windows after Chrome crashed; that case would be reported
+    as a closed window.
+    """
+    url = driver.current_url
+    if url is None:
+        if not driver.window_handles:
+            raise NoSuchWindowException("no such window: the sign-in window was closed")
+        return False
+    return SIGNED_IN_URL_FRAGMENT in url
+
+
 def _failure_cause(exc: BaseException) -> VaultCause:
     """Return `window_closed` for a window the user closed, else `http_status`."""
 
@@ -233,9 +264,7 @@ def _shared_key_flow_once(  # noqa: PLR0912, PLR0915 - the alert loop is one pro
     try:
         driver.get("https://accounts.google.com/")
 
-        WebDriverWait(driver, 300).until(
-            ec.url_contains("https://myaccount.google.com")
-        )
+        WebDriverWait(driver, SIGN_IN_TIMEOUT_S).until(_signed_in_or_window_gone)
         LOGGER.info("Signed in successfully during shared key flow")
 
         if vault_sink is not None:
@@ -393,9 +422,7 @@ def _vault_entries_flow_once(
 
     try:
         driver.get("https://accounts.google.com/")
-        WebDriverWait(driver, SIGN_IN_TIMEOUT_S).until(
-            ec.url_contains("https://myaccount.google.com")
-        )
+        WebDriverWait(driver, SIGN_IN_TIMEOUT_S).until(_signed_in_or_window_gone)
         LOGGER.info("Signed in successfully during vault entries flow")
         return fetch_vault_entries(driver)
     except Exception as exc:
