@@ -957,6 +957,12 @@ class CacheOperations(_MixinBase):
 
         These fields help the EID resolver reason about rotation windows.
 
+        A proto3 default under an anchor key (0 for a date or the owner-key
+        version, b"" for a key blob, see ``proto3_defaults``) is no value and
+        never replaces a cached one. A set ``deviceRegistration.pairDate``
+        replaces the cached pair date unless the same payload carries a flat
+        pair date.
+
         Args:
             device_id: Canonical device identifier.
             payload: Raw location payload containing potential metadata.
@@ -1095,6 +1101,10 @@ class CacheOperations(_MixinBase):
         - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
         - Applies weighted fusion and semantic-anchor protection to stabilize coordinates
           while still updating timestamps and metadata.
+        - Drops proto3 defaults under anchor keys (see ``proto3_defaults``) before
+          the cached values are preserved, so a default never replaces a stored value.
+          A set ``deviceRegistration.pairDate`` replaces the cached pair date unless
+          the same payload carries a flat pair date.
         """
         # Thread safety: marshal to HA loop if needed
         if not self._is_on_hass_loop():
