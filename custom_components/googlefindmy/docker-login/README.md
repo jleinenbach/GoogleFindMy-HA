@@ -263,8 +263,8 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
    The second one prints its own instruction block with the same URL and
    password (`[AuthFlow] Sign-in 2 of 2 needs you in the browser view:`), then
    the terminal stays quiet for up to five minutes while it waits for you in
-   noVNC. That block is also the first thing you see when a login resumes from
-   an incomplete `secrets.json`, which skips sign-in 1 of 2.
+   noVNC. Its lines are also the first `[AuthFlow]` lines a login prints when
+   it resumes from an incomplete `secrets.json`, which skips sign-in 1 of 2.
    Shorter flickers on top of those two are possible as well: when a browser
    cannot be started the usual way, the driver retries with a different strategy
    (the terminal then logs `Trying headless mode...`). The owner-key step needs
