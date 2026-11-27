@@ -862,7 +862,7 @@ class _AddressDriver(StepTwoDriver):
         payloads: list[str] | None = None,
         *,
         url: str | None,
-        handles: list[str],
+        handles: list[str] | None,
         async_answer: object = None,
     ) -> None:
         super().__init__(payloads, async_answer=async_answer)
@@ -874,8 +874,8 @@ class _AddressDriver(StepTwoDriver):
         return self._url
 
     @property
-    def window_handles(self) -> list[str]:
-        return list(self._handles)
+    def window_handles(self) -> list[str] | None:
+        return None if self._handles is None else list(self._handles)
 
 
 def _closed_with_none_url() -> _AddressDriver:
@@ -984,3 +984,26 @@ def test_the_sign_in_predicate_reports_a_window_gone_without_an_address() -> Non
 def test_the_sign_in_predicate_reads_the_address(url: str, expected: bool) -> None:
     driver = _AddressDriver(url=url, handles=["w1"])
     assert _sign_in_predicate()(driver) is expected
+
+
+def test_the_sign_in_predicate_reports_no_window_list_as_window_gone() -> None:
+    driver = _AddressDriver(url=None, handles=None)
+    with pytest.raises(NoSuchWindowException):
+        _sign_in_predicate()(driver)
+
+
+class _CrashedOnHandlesDriver(_AddressDriver):
+    """``None`` address, and asking for the windows reports a crash."""
+
+    @property
+    def window_handles(self) -> list[str]:
+        raise WebDriverException("chrome not reachable")
+
+
+def test_a_crash_while_asking_for_the_windows_keeps_its_traceback_path() -> None:
+    driver = _CrashedOnHandlesDriver(url=None, handles=[])
+    with pytest.raises(WebDriverException) as caught:
+        _sign_in_predicate()(driver)
+    assert not isinstance(caught.value, NoSuchWindowException)
+    assert auth_flow.describe_lost_session(caught.value) is None
+    assert shared_key_flow._failure_cause(caught.value) == "http_status"
