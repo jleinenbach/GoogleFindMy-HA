@@ -841,3 +841,272 @@ def test_alert_deadline_is_not_reached_by_a_quick_answer(
         shared_key_flow.request_shared_key_flow()
     assert "alert_deadline" not in " ".join(caplog.messages)
     assert driver.quit_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# terminal in sign-in 2 of 2: notice before the wait, no traceback for the two
+# known endings (host run 2026-11-27, F-H3 to F-H5)
+# ---------------------------------------------------------------------------
+
+_WAIT_MARK = "<<sign-in wait>>"
+
+
+class _MarkedWait:
+    """Sign-in waits print a marker, then behave as ``sign_in`` says.
+
+    ``sign_in`` is ``"pass"`` (signed in), ``"expire"`` (a new
+    ``TimeoutException`` like Selenium's deadline) or ``"predicate"`` (the
+    predicate runs, so a driver command that times out propagates). Alert waits
+    raise ``alert_error`` when set, else arm the next payload.
+    """
+
+    def __init__(self, sign_in: str = "pass", alert_error: BaseException | None = None):
+        self.sign_in = sign_in
+        self.alert_error = alert_error
+        self.sign_in_waits = 0
+
+    def __call__(self, driver: _FakeDriver, timeout: float) -> _MarkedWait:
+        self._driver = driver
+        self._timeout = timeout
+        return self
+
+    def until(self, condition: Any) -> Any:
+        from selenium.common.exceptions import TimeoutException  # noqa: PLC0415
+
+        if self._timeout == shared_key_flow.SIGN_IN_TIMEOUT_S:
+            self.sign_in_waits += 1
+            print(_WAIT_MARK)
+            if self.sign_in == "expire":
+                raise TimeoutException
+            if self.sign_in == "predicate":
+                return condition(self._driver)
+            return True
+        if self._timeout >= 1:
+            return True
+        if self.alert_error is not None:
+            raise self.alert_error
+        if not self._driver.arm_next_alert():
+            raise _StopFlow
+        return True
+
+
+def _container(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
+    monkeypatch.setenv("GOOGLEFINDMY_NOVNC_URL", "https://192.0.2.7:7900")
+    monkeypatch.setenv("GOOGLEFINDMY_NOVNC_PASSWORD", "pw-of-this-run")
+
+
+def _flow_with_wait(
+    monkeypatch: pytest.MonkeyPatch, driver: _FakeDriver, wait: _MarkedWait
+) -> list[int]:
+    created: list[int] = []
+
+    def _create(**_: Any) -> _FakeDriver:
+        created.append(1)
+        return driver
+
+    _patch_flow(monkeypatch, driver)
+    monkeypatch.setattr(shared_key_flow, "create_driver", _create)
+    monkeypatch.setattr(shared_key_flow, "WebDriverWait", wait)
+    _quitting(monkeypatch)
+    return created
+
+
+def test_step_two_names_viewer_and_password_right_before_its_wait(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-H4/F-H5: a resumed sign-in 2 of 2 must not wait in silence."""
+
+    _container(monkeypatch)
+    _flow_with_wait(monkeypatch, _FakeDriver([_CLOSE_VIEW]), _MarkedWait())
+
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
+
+    out = capsys.readouterr().out
+    notice, mark, _ = out.partition(_WAIT_MARK)
+    assert mark, out
+    assert "[AuthFlow] Sign-in 2 of 2 needs you in the browser view:" in notice
+    assert (
+        "Open https://192.0.2.7:7900 in your browser (password: pw-of-this-run)."
+        in notice
+    )
+    assert "screen lock PIN" in notice
+    assert "stays quiet while the sign-in waits, for up to 5 minutes" in notice
+
+
+def test_step_two_prints_no_notice_outside_the_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Home Assistant never sets the container flag; its log gets no banner."""
+
+    monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
+    _flow_with_wait(monkeypatch, _FakeDriver([_CLOSE_VIEW]), _MarkedWait())
+
+    with pytest.raises(SharedKeyCancelledOnPage):
+        shared_key_flow.request_shared_key_flow()
+
+    assert "[AuthFlow] ====" not in capsys.readouterr().out
+
+
+def test_vault_flow_names_viewer_before_its_wait(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The sign-in-only vault fetch waits just as silently; same notice."""
+
+    _container(monkeypatch)
+    _flow_with_wait(monkeypatch, _FakeDriver(), _MarkedWait(sign_in="expire"))
+
+    result = shared_key_flow._vault_entries_flow_once(
+        chrome_path=None, chrome_version=None
+    )
+
+    assert result.cause is VaultCause.HTTP_STATUS
+    notice, mark, _ = capsys.readouterr().out.partition(_WAIT_MARK)
+    assert mark
+    assert "One more Google sign-in is needed (no PIN this time):" in notice
+    assert "(password: pw-of-this-run)" in notice
+
+
+def test_expired_step_two_sign_in_ends_with_one_line_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """F-H3: running out of time is named, not dumped; the result stays None."""
+
+    driver = _FakeDriver([_CLOSE_VIEW])
+    _flow_with_wait(monkeypatch, driver, _MarkedWait(sign_in="expire"))
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    out = capsys.readouterr().out
+    assert "[AuthFlow] Sign-in 2 of 2 was not finished within 5 minutes." in out
+    assert "run the login again to finish sign-in 2 of 2." in out
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert not [r for r in caplog.records if r.exc_info]
+    assert driver.quit_calls == 1
+
+
+def test_a_driver_command_timing_out_in_the_wait_keeps_its_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Counterpart: only the deadline is the user's; a stalled command is a defect."""
+
+    from selenium.common.exceptions import TimeoutException  # noqa: PLC0415
+
+    class _StalledDriver(_FakeDriver):
+        @property
+        def current_url(self) -> str:
+            raise TimeoutException("timeout: Timed out receiving message from renderer")
+
+    _flow_with_wait(monkeypatch, _StalledDriver(), _MarkedWait(sign_in="predicate"))
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    assert "was not finished within" not in capsys.readouterr().out
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert [r.getMessage() for r in errors] == [
+        "Shared key flow terminated unexpectedly"
+    ]
+    assert errors[0].exc_info is not None
+
+
+def _refused_driver_error() -> BaseException:
+    """The error urllib3 raises after Ctrl+C ended the local ChromeDriver.
+
+    Built from the real urllib3 types in the order urllib3 itself links them:
+    ``MaxRetryError`` from ``NewConnectionError`` from ``ConnectionRefusedError``.
+    """
+
+    from urllib3.exceptions import MaxRetryError, NewConnectionError  # noqa: PLC0415
+
+    try:
+        try:
+            raise ConnectionRefusedError(111, "Connection refused")
+        except ConnectionRefusedError as refused:
+            raise NewConnectionError(
+                None,  # type: ignore[arg-type]
+                "Failed to establish a new connection: [Errno 111] Connection refused",
+            ) from refused
+    except NewConnectionError as wrapped:
+        try:
+            raise MaxRetryError(None, "/session/s/alert/text", wrapped) from wrapped
+        except MaxRetryError as err:
+            return err
+
+
+def test_unreachable_driver_ends_step_two_with_one_line_and_no_restart(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F-H3: Ctrl+C kills ChromeDriver first; the worker must not dump a traceback."""
+
+    import logging  # noqa: PLC0415
+
+    caplog.set_level(logging.WARNING)
+    created = _flow_with_wait(
+        monkeypatch, _FakeDriver(), _MarkedWait(alert_error=_refused_driver_error())
+    )
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    assert len(created) == 1
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    warnings = [r for r in caplog.records if "no longer reachable" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "(MaxRetryError)" in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
+
+
+def test_unreachable_driver_detail_is_kept_for_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The traceback of a driver that died on its own is still there with --debug."""
+
+    import logging  # noqa: PLC0415
+
+    caplog.set_level(logging.DEBUG, logger=shared_key_flow.LOGGER.name)
+    _flow_with_wait(
+        monkeypatch, _FakeDriver(), _MarkedWait(alert_error=_refused_driver_error())
+    )
+
+    shared_key_flow.request_shared_key_flow()
+
+    detail = [
+        r for r in caplog.records if r.getMessage() == "Unreachable driver detail"
+    ]
+    assert len(detail) == 1
+    assert detail[0].levelname == "DEBUG"
+    assert detail[0].exc_info is not None
+
+
+def test_a_failure_without_a_refused_connection_keeps_its_traceback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Counterpart: any other failure in the loop stays on the traceback path."""
+
+    _flow_with_wait(
+        monkeypatch, _FakeDriver(), _MarkedWait(alert_error=RuntimeError("other"))
+    )
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert [r.getMessage() for r in errors] == [
+        "Shared key flow terminated unexpectedly"
+    ]
+    assert errors[0].exc_info is not None
+
+
+def test_driver_unreachable_survives_a_cyclic_exception_chain() -> None:
+    """A chain that loops back on itself ends the walk instead of hanging."""
+
+    first = RuntimeError("a")
+    second = RuntimeError("b")
+    first.__context__ = second
+    second.__context__ = first
+
+    assert shared_key_flow._driver_unreachable(first) is False
+    assert shared_key_flow._driver_unreachable(_refused_driver_error()) is True

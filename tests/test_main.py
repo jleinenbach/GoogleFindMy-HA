@@ -12,6 +12,7 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
@@ -1124,6 +1125,30 @@ class TestBuildCliParser:
 
 class TestConfigureCliLogging:
     """_configure_cli_logging() maps flag/env onto the basicConfig level."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_urllib3_level(self) -> Iterator[None]:
+        # A quiet run lowers this logger for the whole process; put it back so
+        # no other test inherits the setting.
+        logger = logging.getLogger("urllib3.connectionpool")
+        level = logger.level
+        yield
+        logger.setLevel(level)
+
+    def test_quiet_run_hides_urllib3_retry_warnings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F-H3: Ctrl+C left three "Retrying" lines ahead of ``Exiting.``."""
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.NOTSET)
+        self._captured_level(monkeypatch, debug_flag=False, env={})
+        assert logging.getLogger("urllib3.connectionpool").level == logging.ERROR
+
+    def test_debug_run_keeps_urllib3_retry_warnings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.NOTSET)
+        self._captured_level(monkeypatch, debug_flag=True, env={})
+        assert logging.getLogger("urllib3.connectionpool").level == logging.NOTSET
 
     @staticmethod
     def _captured_level(

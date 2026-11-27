@@ -33,7 +33,9 @@ except ImportError as _err:  # pragma: no cover - needs a selenium-less environm
 
 from custom_components.googlefindmy.Auth.auth_flow import (
     LoginWindowClosed,
+    container_sign_in_notice,
     describe_lost_session,
+    in_container_login,
     restart_on_closed_window,
 )
 from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
@@ -84,6 +86,11 @@ WINDOW_CLOSED_MESSAGE: Final = (
     "[AuthFlow] The sign-in window 2 of 2 was closed before Google sent the key. "
     "The result of sign-in 1 of 2 is kept; run the login again to finish "
     "sign-in 2 of 2."
+)
+SIGN_IN_EXPIRED_MESSAGE: Final = (
+    "[AuthFlow] Sign-in 2 of 2 was not finished within "
+    f"{SIGN_IN_TIMEOUT_S // 60} minutes. The result of sign-in 1 of 2 is kept; "
+    "run the login again to finish sign-in 2 of 2."
 )
 CANCELLED_ON_PAGE_MESSAGE: Final = (
     "[AuthFlow] Sign-in 2 of 2 was cancelled on the Google page before it sent "
@@ -191,6 +198,49 @@ def _signed_in_or_window_gone(driver: WebDriver) -> bool:
     return SIGNED_IN_URL_FRAGMENT in url
 
 
+def _driver_unreachable(exc: BaseException) -> bool:
+    """Return True when *exc* says the local ChromeDriver no longer answers.
+
+    Ctrl+C reaches the ChromeDriver child process together with the program,
+    and this step runs in an executor thread that does not see the interrupt.
+    Its next command then fails inside urllib3 (``MaxRetryError`` caused by a
+    refused connection), which is no ``WebDriverException`` and so reached the
+    generic handler with a full traceback ahead of ``Exiting.`` (host run
+    2026-11-27, F-H3). The refused connection is what tells it apart; the chain
+    is walked because urllib3 wraps it twice.
+
+    Limit: a ChromeDriver that died on its own, or a driver endpoint that
+    refuses connections, looks the same and also ends with one warning; its
+    traceback is then only logged at DEBUG. A ``WebDriverException`` is not
+    checked here, because Selenium passes urllib3 errors through unwrapped.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ConnectionRefusedError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _announce_sign_in_wait(*, heading: str, last_step: str) -> None:
+    """Point the user at the noVNC viewer before a silent wait, in the container."""
+    if not in_container_login():
+        return
+    print(
+        container_sign_in_notice(
+            heading=heading,
+            last_step=last_step,
+            notes=(
+                "This terminal stays quiet while the sign-in waits, for up to "
+                f"{SIGN_IN_TIMEOUT_S // 60} minutes.",
+            ),
+        ),
+        flush=True,
+    )
+
+
 def _failure_cause(exc: BaseException) -> VaultCause:
     """Return `window_closed` for a window the user closed, else `http_status`."""
 
@@ -248,6 +298,11 @@ def _shared_key_flow_once(  # noqa: PLR0912, PLR0915 - the alert loop is one pro
     are raised after the driver quit, like the deadline.
     """
 
+    _announce_sign_in_wait(
+        heading="Sign-in 2 of 2 needs you in the browser view:",
+        last_step="Sign in to Google there, then enter the screen lock PIN of "
+        "one of your Android devices when Google asks for it.",
+    )
     driver: WebDriver | None = None
     try:
         driver = create_driver(chrome_path=chrome_path, chrome_version=chrome_version)
@@ -264,7 +319,27 @@ def _shared_key_flow_once(  # noqa: PLR0912, PLR0915 - the alert loop is one pro
     try:
         driver.get("https://accounts.google.com/")
 
-        WebDriverWait(driver, SIGN_IN_TIMEOUT_S).until(_signed_in_or_window_gone)
+        # An expiring wait and a driver command that times out inside the
+        # predicate raise the same type; only the first is the user's deadline.
+        # `until` re-raises a predicate's exception unchanged and builds a new
+        # one when the time is up, so identity tells them apart (as in
+        # sign-in 1 of 2, `Auth/auth_flow.py`).
+        poll_failure: list[TimeoutException] = []
+
+        def _signed_in(d: WebDriver) -> bool:
+            try:
+                return _signed_in_or_window_gone(d)
+            except TimeoutException as exc:
+                poll_failure.append(exc)
+                raise
+
+        try:
+            WebDriverWait(driver, SIGN_IN_TIMEOUT_S).until(_signed_in)
+        except TimeoutException as err:
+            if poll_failure and err is poll_failure[-1]:
+                raise
+            print(SIGN_IN_EXPIRED_MESSAGE, flush=True)
+            return None
         LOGGER.info("Signed in successfully during shared key flow")
 
         if vault_sink is not None:
@@ -357,7 +432,16 @@ def _shared_key_flow_once(  # noqa: PLR0912, PLR0915 - the alert loop is one pro
             LOGGER.exception("Shared key flow terminated unexpectedly")
             return None
         raise LoginWindowClosed(WINDOW_CLOSED_MESSAGE) from err
-    except Exception:
+    except Exception as err:
+        if _driver_unreachable(err):
+            # One line instead of a traceback; the detail stays available
+            # under --debug for a driver that died on its own.
+            LOGGER.warning(
+                "Shared key flow ended: the browser driver is no longer reachable (%s)",
+                type(err).__name__,
+            )
+            LOGGER.debug("Unreachable driver detail", exc_info=True)
+            return None
         LOGGER.exception("Shared key flow terminated unexpectedly")
         return None
     finally:
@@ -406,6 +490,10 @@ def _vault_entries_flow_once(
     finish in time, `http_status`. Never raises otherwise.
     """
 
+    _announce_sign_in_wait(
+        heading="One more Google sign-in is needed (no PIN this time):",
+        last_step="Sign in to Google there; the window closes by itself afterwards.",
+    )
     driver: WebDriver | None = None
     try:
         driver = create_driver(chrome_path=chrome_path, chrome_version=chrome_version)
