@@ -273,6 +273,47 @@ def test_a_value_that_cannot_be_compared_still_writes(
     assert calls == [["a", "blob"]]
 
 
+def test_a_second_ctrl_c_during_the_one_write_waits_until_it_is_done(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The container delivers Ctrl+C twice; the second one meets the collected write.
+
+    In sign-in 2 of 2 asyncio's handler raises ``KeyboardInterrupt`` on the
+    second SIGINT wherever it lands; ``default_int_handler`` raises the same in
+    this test. It has to arrive after the write, not instead of it.
+    """
+    import signal
+
+    from custom_components.googlefindmy import main as cli_main
+
+    cache, path, writes = _bootstrap_world(monkeypatch, tmp_path, {"a": 1})
+    counting_write = cli_main._atomic_write_json
+
+    def _interrupted_write(target: Path, data: dict[str, Any]) -> None:
+        signal.raise_signal(signal.SIGINT)
+        counting_write(target, data)
+
+    monkeypatch.setattr(cli_main, "_atomic_write_json", _interrupted_write)
+    before_int = signal.signal(signal.SIGINT, signal.default_int_handler)
+    outcome: BaseException | None = None
+    try:
+        with cache.deferred_writes():
+            cache.sync_set("shared_key", "aa" * 32)
+            cache.sync_set("fcm_credentials", _STORED_PUSH_DATA)
+    except BaseException as err:  # noqa: BLE001 - must not reach pytest itself
+        outcome = err
+    finally:
+        signal.signal(signal.SIGINT, before_int)
+
+    assert isinstance(outcome, KeyboardInterrupt), repr(outcome)
+    assert len(writes) == 1
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "a": 1,
+        "shared_key": "aa" * 32,
+        "fcm_credentials": _STORED_PUSH_DATA,
+    }
+
+
 def test_a_cache_without_the_block_is_left_as_it_is() -> None:
     """Other caches get a no-op block instead of an AttributeError."""
     from custom_components.googlefindmy import main as cli_main

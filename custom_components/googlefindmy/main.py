@@ -410,7 +410,13 @@ def _register_file_cache(entry_id: str = "") -> object:
                     self._dirty = False
                     after = self._snapshot()
                     if before is None or after is None or after != before:
-                        self._write_now()
+                        # Everything the block collected hangs on this one
+                        # write. A second Ctrl+C (the container delivers two)
+                        # raises ``KeyboardInterrupt`` from asyncio's handler
+                        # wherever it lands, so it waits until the write is
+                        # done (AP17 review, finding 2).
+                        with _hold_stop_signals():
+                            self._write_now()
 
         # --- async interface expected by nbe_list_devices / nova_request ---
 
@@ -1363,9 +1369,14 @@ def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
     removed = {k: data.pop(k) for k in keys_to_remove}
     _atomic_write_json(secrets_path, data)
 
-    print(
-        f"Cleared {len(keys_to_remove)} cached token(s). Re-authentication required.\n"
-    )
+    # The tokens are gone from the file now. A failing print (closed stdout,
+    # ``BrokenPipeError``) must not keep the caller from getting the callable
+    # that puts them back (AP17 review, finding 5).
+    with contextlib.suppress(OSError, ValueError):
+        print(
+            f"Cleared {len(keys_to_remove)} cached token(s). "
+            "Re-authentication required.\n"
+        )
 
     def _restore_cleared_tokens() -> None:
         """Put the cleared tokens back after a login that produced none."""
@@ -1644,7 +1655,7 @@ def _raise_on_sigterm() -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _hold_stop_signals() -> Iterator[None]:
+def _hold_stop_signals(*, deliver: bool = True) -> Iterator[None]:
     """Hold SIGTERM and SIGINT back while the block runs, then deliver them.
 
     ``--reauth`` clears the cached tokens, and only then does ``_main`` hold
@@ -1658,6 +1669,14 @@ def _hold_stop_signals() -> Iterator[None]:
     signal too. An exception from the block wins over a pending signal; the
     run ends on it either way. Outside the main thread nothing can be held, and
     the block runs as it is.
+
+    With ``deliver=False`` the pending signals are dropped instead. That is
+    for a block that runs while the run is already ending on a stop, such as
+    the restore in ``_main``: in the container ``Ctrl+C`` arrives twice (the
+    process group and the entrypoint's forward), and the second one must not
+    cut the restore short, nor replace the ending already under way -- a
+    ``KeyboardInterrupt`` raised over ``_LoginTerminated`` would turn status
+    143 into 130 (AP17 review, finding 1).
     """
     pending: list[int] = []
 
@@ -1676,6 +1695,8 @@ def _hold_stop_signals() -> Iterator[None]:
     finally:
         for restored, handler in previous.items():
             signal.signal(restored, handler)
+    if not deliver:
+        return
     for held in pending:
         signal.raise_signal(held)
 
@@ -1714,12 +1735,16 @@ async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
         # Eagerly obtain both vault keys (shared + owner); a vault failure exits
         # cleanly without deleting the durable AAS/oauth tokens. The AAS token
         # above stays outside the block: it is written at once so a later
-        # failure cannot lose it. Everything below lands in one write, so Home
-        # Assistant never sees a bundle that has keys but no push credentials.
-        # The push data are created by a task of the receiver, so the block
-        # waits for them before it ends.
+        # failure cannot lose it. Everything below lands in one write, so a
+        # login that runs to the end never shows Home Assistant a bundle with
+        # keys but no push credentials. The push data are created by a task of
+        # the receiver, so the block waits for them before it ends.
         # A SIGTERM (docker stop) inside the block cancels it; the block then
-        # writes what it holds and the run ends with status 143.
+        # writes what it holds and the run ends with status 143. That write
+        # can be exactly such a bundle -- ``shared_key`` read, push data not
+        # yet there -- and because it has ``shared_key``, the entrypoint's
+        # note about an incomplete file stays silent. Keeping what was read is
+        # deliberate; the stop message says so (AP17 review, finding 4).
         with _cancel_on_sigterm() as stop:
             try:
                 with _deferred_writes(file_cache):
@@ -1986,9 +2011,13 @@ def _main(argv: Sequence[str] | None = None) -> None:
         # -- and --reauth has already taken the old ones away. Put them back,
         # so stopping the login costs the user nothing. BaseException is
         # deliberate: SystemExit and KeyboardInterrupt are exactly the two
-        # paths that reach here most often.
+        # paths that reach here most often. The restore runs with the stop
+        # signals held and dropped: the second Ctrl+C the container delivers
+        # (or a docker stop) would otherwise abort it and leave the account
+        # signed out after all; the run is ending on the first one anyway.
         if restore_cleared_tokens is not None:
-            restore_cleared_tokens()
+            with _hold_stop_signals(deliver=False):
+                restore_cleared_tokens()
         if isinstance(err, _LoginTerminated):
             # The restore has said what it did on stdout; flush that first so
             # the two lines arrive in order.
