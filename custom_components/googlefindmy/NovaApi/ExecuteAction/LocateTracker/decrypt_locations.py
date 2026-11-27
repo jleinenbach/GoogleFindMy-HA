@@ -1160,7 +1160,12 @@ async def async_retrieve_identity_key(
         # user-facing WARNING.
         _LOGGER.debug("Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc)
 
-    old_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
+    # An unset proto3 ownerKeyVersion reads as 0. That is no version and can
+    # never be older than Spot's, so only a set version may clear the owner
+    # key and raise StaleOwnerKeyError below.
+    old_ver = proto3_number_or_none(
+        getattr(encrypted_user_secrets, "ownerKeyVersion", None)
+    )
     last_exc = decrypt_errors[-1] if decrypt_errors else None
     if (
         current_owner_key_version is not None

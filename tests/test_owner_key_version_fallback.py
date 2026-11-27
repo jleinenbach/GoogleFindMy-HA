@@ -240,6 +240,22 @@ async def test_tracker_older_than_spot_keeps_stale_owner_key_error(
         )
 
 
+async def test_unset_tracker_version_keeps_owner_key_and_decrypts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset ownerKeyVersion (proto3 reads 0) is no stale version."""
+    world = make_vault_world(versions=(2,), spot_version=2)
+    _install(monkeypatch, world)
+    cache = _seeded_cache(world, None)
+    registration = world.tracker_registration(2)
+    registration.encryptedUserSecrets.ClearField("ownerKeyVersion")
+
+    candidates = await _dl.async_retrieve_identity_key(registration, cache=cache)
+
+    assert candidates
+    assert cache.key_clears == []
+
+
 async def test_version_unavailable_error_never_drives_account_reauth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
