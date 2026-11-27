@@ -22,6 +22,7 @@ def _build_device_with_registration(
     set_creation_date: bool,
     creation_seconds: int | None,
     creation_nanos: int | None = None,
+    owner_key_version: int | None = 1,
 ) -> DeviceUpdate_pb2.DevicesList:
     devices_list = DeviceUpdate_pb2.DevicesList()
     device = devices_list.deviceMetadata.add()
@@ -35,7 +36,9 @@ def _build_device_with_registration(
 
     # Ensure the secrets container exists / is considered meaningful.
     secrets.encryptedIdentityKey = b"\x01\x02\x03"
-    secrets.ownerKeyVersion = 1
+    # Proto3 scalar: an unset ownerKeyVersion reads as 0.
+    if owner_key_version is not None:
+        secrets.ownerKeyVersion = owner_key_version
 
     # Proto3 scalar: absent looks like 0. We only set it if asked.
     if pair_date is not None:
@@ -123,3 +126,50 @@ def test_decoder_emits_secrets_creation_date_when_set_to_real_timestamp() -> Non
 
     assert row["pair_date"] == 1_749_216_525
     assert row["secrets_creation_date"] == 1_764_960_360
+
+
+def test_decoder_leaves_owner_key_version_unset_when_field_is_absent() -> None:
+    """An unset ownerKeyVersion (proto3 default 0) must not reach the row as 0."""
+    devices_list = _build_device_with_registration(
+        canonic_id="device-no-owner-key-version",
+        pair_date=1_749_216_525,
+        set_creation_date=False,
+        creation_seconds=None,
+        owner_key_version=None,
+    )
+
+    rows = get_devices_with_location(devices_list, cache=None)
+
+    assert len(rows) == 1
+    assert rows[0]["owner_key_version"] is None
+
+
+def test_decoder_passes_set_owner_key_version() -> None:
+    """Positive control: a set ownerKeyVersion is passed through unchanged."""
+    devices_list = _build_device_with_registration(
+        canonic_id="device-owner-key-version-3",
+        pair_date=1_749_216_525,
+        set_creation_date=False,
+        creation_seconds=None,
+        owner_key_version=3,
+    )
+
+    rows = get_devices_with_location(devices_list, cache=None)
+
+    assert len(rows) == 1
+    assert rows[0]["owner_key_version"] == 3
+
+
+def test_decoder_leaves_pair_date_unset_when_field_is_absent() -> None:
+    """An unset pairDate (proto3 default 0) must not reach the row as 0."""
+    devices_list = _build_device_with_registration(
+        canonic_id="device-no-pair-date",
+        pair_date=None,
+        set_creation_date=False,
+        creation_seconds=None,
+    )
+
+    rows = get_devices_with_location(devices_list, cache=None)
+
+    assert len(rows) == 1
+    assert rows[0].get("pair_date") is None

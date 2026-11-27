@@ -31,6 +31,7 @@ from custom_components.googlefindmy.const import PHONE_ID_PREFIX
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaProtobufDecodeError,
 )
+from custom_components.googlefindmy.proto3_defaults import proto3_number_or_none
 from custom_components.googlefindmy.ProtoDecoders import (
     Common_pb2,
     DeviceUpdate_pb2,
@@ -1604,7 +1605,11 @@ def get_devices_with_location(
 
             # NOTE: In Proto3, non-optional scalar fields (int32) do not support
             # HasField(). Accessing them directly returns 0 if unset.
-            owner_key_version = encrypted_user_secrets.ownerKeyVersion
+            # The default 0 means "unset" and becomes None, as the
+            # candidate union above already does.
+            owner_key_version = proto3_number_or_none(
+                encrypted_user_secrets.ownerKeyVersion
+            )
 
             if registration.HasField("deviceTypeInformation"):
                 device_type = registration.deviceTypeInformation.deviceType
