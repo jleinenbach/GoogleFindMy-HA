@@ -542,6 +542,37 @@ async def test_notice_id_and_log_carry_no_device_name(
     assert [r.getMessage() for r in ours if _TRACKER_NAME in r.getMessage()] == []
 
 
+@pytest.mark.asyncio
+async def test_failed_text_lookup_shows_nothing_and_keeps_the_switch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failing translation lookup writes a DEBUG line and shows no notice.
+
+    The error stays inside the notice task: the switch is still stored as on.
+    """
+    notices = _Notices(monkeypatch)
+    coord = _bare_coordinator()
+    caplog.set_level(logging.DEBUG, logger="custom_components.googlefindmy")
+
+    async def _broken_lookup(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        raise RuntimeError("translation cache unavailable")
+
+    monkeypatch.setattr(translation, "async_get_translations", _broken_lookup)
+    await _set(coord, _TRACKER, True)
+
+    assert notices.created == []
+    assert _TRACKER in coord.config_entry.options[_OPT_ENABLED]
+    messages = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("custom_components.googlefindmy")
+    ]
+    assert any(
+        "translation lookup failed" in m and "translation cache unavailable" in m
+        for m in messages
+    ), messages
+
+
 def test_readme_names_the_notice_automation() -> None:
     """README: the notice is not sent to a phone; an automation can forward it."""
     text = _README.read_text(encoding="utf-8")
