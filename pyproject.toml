@@ -371,7 +371,7 @@ source = [
     "custom_components/googlefindmy",
 ]
 omit = [
-    "custom_components/googlefindmy/ProtoDecoders/*",
+    "custom_components/googlefindmy/ProtoDecoders/*_pb2.py",
     # Only generated protobuf bindings are omitted. The FCM transport modules
     # (fcmpushclient.py, fcmregister.py) originate from sdb9696/firebase-messaging
     # (MIT) but are forked and maintained in-repo with integration-specific
