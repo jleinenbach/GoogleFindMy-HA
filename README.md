@@ -297,11 +297,11 @@ lists with a canonical ID gets no notification when Google marks it as a phone,
 by its device type or by a locate action for phones; a device with a canonical
 ID without that mark (a tablet, for example) gets the tracker text. Turning the
 switch off, deleting the device in Home Assistant, or Google no longer listing
-it removes the notification; after removing the whole integration entry it
-stays until it is dismissed or Home Assistant restarts. A restart or reload
-never creates one. The integration does not send it to a phone: to get it
-there, create an automation with a `persistent_notification` trigger and a
-`notify.mobile_app_<device>` action.
+it removes the notification. After removing the whole integration entry, or
+one of its subentries, it stays until it is dismissed or Home Assistant
+restarts. A restart or reload never creates one. The integration does not send
+it to a phone: to get it there, create an automation with a
+`persistent_notification` trigger and a `notify.mobile_app_<device>` action.
 
 Every choice is stored: turning a tracker on puts it into
 `automatic_polling_enabled`, turning it off puts it into

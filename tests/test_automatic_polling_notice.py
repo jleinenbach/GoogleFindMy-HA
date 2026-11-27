@@ -11,8 +11,11 @@ the switch creates one: the coordinator's setter is the only place that shows
 it. The static check of that sees the forms listed in ``_is_create``.
 
 ``async_create`` and ``async_dismiss`` are replaced on the module
-``homeassistant.components.persistent_notification`` itself, so a call from any
-module of the integration is counted, not only one from the coordinator.
+``homeassistant.components.persistent_notification`` itself, so a call through
+that module's attribute is counted from any module of the integration, not only
+from the coordinator. A name bound at import time (``from ... import
+async_create``) keeps the original function and is not counted here; only the
+static check sees that form.
 
 One test runs the real translation layer in this process: under
 ``use_real_homeassistant_modules`` it imports ``coordinator.main`` freshly,
@@ -512,6 +515,108 @@ async def test_failing_notice_task_logs_only_the_error_class(
 # ---------------------------------------------------------------------------
 
 
+def _texts_held_until(
+    monkeypatch: pytest.MonkeyPatch, release: asyncio.Event
+) -> list[str]:
+    """Serve the English texts once ``release`` is set; record each lookup."""
+    started: list[str] = []
+
+    async def _lookup(
+        _hass: Any, language: str, category: str, integrations: Any = None
+    ) -> dict[str, str]:
+        started.append(language)
+        await release.wait()
+        return {
+            f"component.{DOMAIN}.config.progress.{key}": value
+            for key, value in _EN.items()
+        }
+
+    monkeypatch.setattr(translation, "async_get_translations", _lookup)
+    return started
+
+
+@pytest.mark.asyncio
+async def test_switch_on_again_while_the_first_notice_loads_keeps_the_new_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On, off and on again within one lookup: the second task stays tracked.
+
+    The end of the first task must not drop the second one, so removing the
+    device afterwards (the dismiss that ``purge_device`` runs) still cancels it.
+    The stored choice is "on", so only that cancellation keeps the notice away.
+    """
+    notices = _Notices(monkeypatch)
+    coord = _bare_coordinator()
+    release = asyncio.Event()
+    started = _texts_held_until(monkeypatch, release)
+    setter = _require(coord, "async_set_automatic_polling")
+    pending = _require(coord, "_automatic_polling_notice_tasks")
+    tasks = coord.hass.tasks  # type: ignore[attr-defined]
+
+    setter(_TRACKER, True)
+    await asyncio.sleep(0)
+    assert started == ["en"], "the first task is loading its texts"
+    setter(_TRACKER, False)
+    setter(_TRACKER, True)
+    first, second = tasks
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert first.cancelled()
+    assert started == ["en", "en"], "the second task is loading its texts"
+    assert pending() == {_TRACKER: second}
+
+    _require(coord, "_dismiss_automatic_polling_notice")(_TRACKER)
+    release.set()
+    await _drain(tasks)
+
+    assert second.cancelled()
+    assert coord.config_entry.options[_OPT_ENABLED] == [_TRACKER]
+    assert notices.created == []
+    assert pending() == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_notice_task_ends_without_an_error_report(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A notice cancelled while it loads ends quietly: no loop error, no warning.
+
+    The done callback must not ask a cancelled task for its exception: that
+    raises inside the callback, and asyncio hands it to the loop's exception
+    handler.
+    """
+    notices = _Notices(monkeypatch)
+    coord = _bare_coordinator()
+    release = asyncio.Event()
+    started = _texts_held_until(monkeypatch, release)
+    setter = _require(coord, "async_set_automatic_polling")
+    loop = asyncio.get_running_loop()
+    reported: list[dict[str, Any]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        with caplog.at_level(logging.WARNING):
+            setter(_TRACKER, True)
+            (task,) = coord.hass.tasks  # type: ignore[attr-defined]
+            await asyncio.sleep(0)
+            assert started == ["en"], "the task is loading its texts"
+            setter(_TRACKER, False)
+            await _drain(coord.hass.tasks)  # type: ignore[attr-defined]
+            for _ in range(3):
+                await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert task.cancelled()
+    assert reported == []
+    assert [
+        record
+        for record in caplog.records
+        if record.name.startswith("custom_components.googlefindmy")
+    ] == []
+    assert notices.created == []
+
+
 @pytest.mark.asyncio
 async def test_restart_with_switch_on_creates_no_notice(
     monkeypatch: pytest.MonkeyPatch,
@@ -639,13 +744,17 @@ def _is_create(call: ast.Call, modules: set[str], functions: set[str]) -> bool:
 
     Not seen, so a hit there is not counted:
 
-    * an alias by assignment (``f = pn.async_create; f(...)``);
+    * an alias by assignment (``f = pn.async_create; f(...)``), also as an
+      assignment expression (``(f := pn.async_create)(...)``);
+    * a call through ``__call__`` (``pn.async_create.__call__(...)``);
     * the function handed over instead of called: ``hass.add_job(pn.create, ...)``,
       ``hass.async_add_executor_job(pn.create, ...)``, ``functools.partial``;
     * the service call with ``domain=``/``service=`` as keywords, or with the
-      domain as ``pn.DOMAIN`` or a variable;
+      domain as ``pn.DOMAIN`` or a variable, or with the service name as a
+      variable;
     * ``homeassistant.components.persistent_notification.async_create`` reached
-      through ``import homeassistant.components``;
+      through ``import homeassistant.components`` or
+      ``from homeassistant import components``;
     * ``importlib.import_module(...)`` and ``getattr`` with a computed name;
     * a write into the notification store itself.
 
@@ -1027,7 +1136,7 @@ async def test_unloading_the_entry_cancels_a_notice_still_loading(
         coord._schedule_automatic_polling_notice(_TRACKER)
         assert not entry._tasks, "planned as a normal entry task"
         (task,) = entry._background_tasks
-        await asyncio.sleep(0)  # the task starts loading the texts
+        await asyncio.sleep(0)  # one loop step; that loading began is not checked
         await entry._async_process_on_unload(hass)
 
         assert task.cancelled()
