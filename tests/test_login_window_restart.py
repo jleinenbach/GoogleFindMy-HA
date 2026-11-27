@@ -17,6 +17,7 @@ code fails on an assertion, not on an import.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -546,11 +547,12 @@ def test_a_non_driver_failure_in_step_two_is_neither_restarted_nor_closed(
 # README quotes (L-13, CA-N13)
 #
 # The docker-login guide quotes what the terminal prints when a sign-in window
-# is closed, reopened, finished, or cancelled on the Google page. Each quoted
-# block is rendered here through the same chain the tests above drive, and the
-# block must be a run of *whole* output lines of that scenario, directly after
-# its own lead-in. Whole lines, not a substring: a block that quotes half a
-# sentence, or two lines from different places, would otherwise pass.
+# is closed, reopened, finished, cancelled on the Google page, or runs out of
+# time. Each quoted block is rendered here through the same chain the tests
+# above drive, and the block must be a run of *whole* output lines of that
+# scenario, directly after its own lead-in. Whole lines, not a substring: a
+# block that quotes half a sentence, or two lines from different places, would
+# otherwise pass.
 #
 # Measured extent: the blocks listed in ``_README_QUOTES``. Every fenced block
 # in "Browser closed by accident" must be one of them, so a new quote there
@@ -561,7 +563,10 @@ def test_a_non_driver_failure_in_step_two_is_neither_restarted_nor_closed(
 
 from pathlib import Path  # noqa: E402
 
-from tests.test_auth_flow import _documented_quotes  # noqa: E402
+from tests.test_auth_flow import (  # noqa: E402
+    _DOCKER_LOGIN_README,
+    _documented_quotes,
+)
 from tests.test_docker_login_partial_bundle_notice import _notice  # noqa: E402
 
 _CLOSED_SECTION = "Browser closed by accident"
@@ -625,6 +630,27 @@ async def _step_two_cancelled_on_page(
     return await _step_two_output(monkeypatch, capsys, [StepTwoDriver([_CLOSE_VIEW])])
 
 
+class _ExpiredSignInWait(FlowWait):
+    """The sign-in wait's own deadline runs out; every other wait is ``FlowWait``'s."""
+
+    def until(self, condition: Any) -> Any:
+        if self.timeout == shared_key_flow.SIGN_IN_TIMEOUT_S:
+            raise TimeoutException("deadline")
+        return super().until(condition)
+
+
+async def _step_two_sign_in_expired(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
+) -> str:
+    started = _step_two(
+        monkeypatch, [StepTwoDriver([_SET_KEYS])], wait=_ExpiredSignInWait
+    )
+    await _run(_CountingCache(_base()))
+    # The guide also says the window is not opened again after the timeout.
+    assert len(started) == 1
+    return _out(capsys)
+
+
 async def _vault_only_closed_three_times(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _tmp: Path
 ) -> str:
@@ -666,6 +692,7 @@ _SCENARIOS = {
     "step-two-finished": _step_two_finished,
     "step-two-closed-three-times": _step_two_closed_three_times,
     "step-two-cancelled-on-page": _step_two_cancelled_on_page,
+    "step-two-sign-in-expired": _step_two_sign_in_expired,
     "vault-only-closed-three-times": _vault_only_closed_three_times,
     "partial-bundle-notice": _partial_bundle_notice,
 }
@@ -702,6 +729,11 @@ _README_QUOTES = [
         "Pressing cancel on the Google unlock page during sign-in 2 of 2, which is "
         "not opened again because the page ended the step on purpose:",
         "step-two-cancelled-on-page",
+    ),
+    (
+        _CANCEL_SECTION,
+        "The line it prints when the time runs out:",
+        "step-two-sign-in-expired",
     ),
     (
         _CANCEL_SECTION,
@@ -769,6 +801,101 @@ def test_every_quote_in_the_closed_window_section_is_guarded() -> None:
         if not any(prose.endswith(lead) for lead in guarded)
     ]
     assert not unguarded, f"fenced blocks without a rendering scenario: {unguarded}"
+
+
+_FIRST_RUN_SECTION = "First run (Google login required)"
+# Words, not digits: the guide spells the wait out, the notice prints a number.
+_MINUTES_IN_WORDS = {5: "five"}
+
+
+def _guide_paragraph(heading: str, anchor: str) -> str:
+    """Return the one blank-line-separated paragraph of ``heading`` holding ``anchor``.
+
+    Whitespace-collapsed, so the guide may wrap however it likes. Exactly one
+    paragraph must match: two would let a quote pass under the wrong sign-in.
+    """
+    text = _DOCKER_LOGIN_README.read_text(encoding="utf-8")
+    marker = f"\n## {heading}\n"
+    assert marker in text, f"the guide no longer has a '## {heading}' section"
+    body = text[text.index(marker) + len(marker) :]
+    end = body.find("\n## ")
+    section = body if end == -1 else body[:end]
+    paragraphs = [" ".join(chunk.split()) for chunk in re.split(r"\n\s*\n", section)]
+    hits = [paragraph for paragraph in paragraphs if anchor in paragraph]
+    assert len(hits) == 1, f"expected one paragraph with {anchor!r}, found {len(hits)}"
+    return hits[0]
+
+
+def _auth_lines(output: str) -> list[str]:
+    lines = (" ".join(line.split()) for line in output.splitlines())
+    return [line for line in lines if line.startswith("[AuthFlow]")]
+
+
+@pytest.mark.asyncio
+async def test_the_guide_names_the_sign_in_two_notice_where_it_describes_it(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The inline quote of the sign-in 2 of 2 notice, and the paragraph's claims.
+
+    The paragraph under step 6 of the first run quotes the notice's heading
+    inline and claims four things about it: it is the second sign-in's own
+    block, it carries the same viewer URL and password as the first one, the
+    terminal then stays quiet for up to five minutes, and its lines are the
+    first ``[AuthFlow]`` lines of a login that resumes without sign-in 1 of 2.
+    Each is rendered through the real flows here. A LAN address and a per-run
+    password stand in for the defaults, so "same URL and password" cannot pass
+    on two notices that merely both fell back to ``localhost`` and ``secret``.
+
+    Reach: the resume claim is checked on sign-in 2 of 2 run on its own, which
+    is what a resumed login runs; it does not drive ``main._main``, whose
+    ``Retrieving encryption key ...`` line comes before the block and is not
+    an ``[AuthFlow]`` line.
+    """
+    monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
+    monkeypatch.setenv("GOOGLEFINDMY_NOVNC_URL", "https://192.0.2.10:7900")
+    monkeypatch.setenv("GOOGLEFINDMY_NOVNC_PASSWORD", "pw-of-this-run")
+    step_one = _auth_lines(_step_one_restart_then_finish(monkeypatch, capsys))
+    step_two = _auth_lines(await _step_two_finished(monkeypatch, capsys, tmp_path))
+
+    paragraph = _guide_paragraph(
+        _FIRST_RUN_SECTION, "The second one prints its own instruction block"
+    )
+    quotes = re.findall(r"`(\[AuthFlow\] [^`]+)`", paragraph)
+    assert len(quotes) == 1, quotes
+    quote = " ".join(quotes[0].split())
+
+    # Claim 1: a whole line of sign-in 2 of 2, and not one sign-in 1 of 2 prints.
+    assert quote in step_two, (quote, step_two)
+    assert quote not in step_one, (quote, step_one)
+
+    # Claim 2: the viewer line is the same in both blocks, with this run's values.
+    viewers = [
+        [line for line in lines if "in your browser (password:" in line]
+        for lines in (step_one, step_two)
+    ]
+    # The scenario reopens sign-in 1 of 2 once, so its block is printed twice.
+    assert viewers[0], step_one
+    assert len(viewers[1]) == 1, step_two
+    assert set(viewers[0]) == set(viewers[1]), viewers
+    assert "https://192.0.2.10:7900" in viewers[0][0]
+    assert "pw-of-this-run" in viewers[0][0]
+    assert "with the same URL and password" in paragraph, paragraph
+
+    # Claim 3: the wait the guide spells out is the one the notice prints.
+    minutes = shared_key_flow.SIGN_IN_TIMEOUT_S // 60
+    assert f"for up to {minutes} minutes" in " ".join(step_two), step_two
+    assert minutes in _MINUTES_IN_WORDS, (
+        f"SIGN_IN_TIMEOUT_S is now {minutes} minutes; update the guide's wording "
+        "and _MINUTES_IN_WORDS together"
+    )
+    assert f"for up to {_MINUTES_IN_WORDS[minutes]} minutes" in paragraph
+
+    # Claim 4: run on its own, sign-in 2 of 2 opens with this block. The rule
+    # line comes first, the quoted heading right after it.
+    assert step_two.index(quote) == 1, step_two
+    assert "first `[AuthFlow]` lines" in paragraph, paragraph
 
 
 def _desktop(monkeypatch: pytest.MonkeyPatch) -> list[str]:

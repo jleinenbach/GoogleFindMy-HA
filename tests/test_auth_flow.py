@@ -1327,3 +1327,60 @@ def test_the_typed_abort_does_not_depend_on_the_message(
         request_oauth_account_token_flow(headless=True)
 
     assert driver.quit_calls == 1
+
+
+_SIGN_IN_ONE_NOTICE = """\
+[AuthFlow] ==================================================
+[AuthFlow] Action required to sign in to Google:
+[AuthFlow]   1. Open {url} in your browser (password: {password}).
+[AuthFlow]   2. Chrome opens by itself in that view within a few seconds.
+[AuthFlow]   3. Sign in to Google there, then come back to this terminal.
+[AuthFlow] --------------------------------------------------
+[AuthFlow] If a character will not type (the '@' of your address is
+[AuthFlow] the usual one), paste it instead: open the panel on the left
+[AuthFlow] edge of the viewer, put the text in the Clipboard box, then
+[AuthFlow] press Ctrl+V in the browser field.
+[AuthFlow] =================================================="""
+
+
+@pytest.mark.parametrize(
+    ("url", "password", "shown_url", "shown_password"),
+    [
+        (None, None, "http://localhost:7900", "secret"),
+        (
+            "http://192.0.2.10:7900",
+            "s3cr3t-run",
+            "http://192.0.2.10:7900",
+            "s3cr3t-run",
+        ),
+        ("", None, "http://localhost:7900", "secret"),
+    ],
+)
+def test_sign_in_one_notice_keeps_its_exact_text(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str | None,
+    password: str | None,
+    shown_url: str,
+    shown_password: str,
+) -> None:
+    """The shared notice builder prints sign-in 1 of 2 exactly as before.
+
+    The block moved into ``container_sign_in_notice`` so that sign-in 2 of 2
+    can reuse it; a fixed expected text pins every line, indent and rule.
+    """
+
+    for name, value in (
+        ("GOOGLEFINDMY_NOVNC_URL", url),
+        ("GOOGLEFINDMY_NOVNC_PASSWORD", password),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    notice = auth_flow.container_sign_in_notice(
+        heading="Action required to sign in to Google:",
+        last_step="Sign in to Google there, then come back to this terminal.",
+    )
+
+    assert notice == _SIGN_IN_ONE_NOTICE.format(url=shown_url, password=shown_password)

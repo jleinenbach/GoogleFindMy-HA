@@ -137,6 +137,50 @@ _WINDOW_GONE_MARKERS = (
 )
 
 
+def in_container_login() -> bool:
+    """Return True inside the docker-login container.
+
+    The entrypoint sets ``GOOGLEFINDMY_CONTAINER_LOGIN=1`` there. Chrome then
+    runs in the container and is driven through the noVNC viewer, so the
+    terminal has to say where to look; Home Assistant never sets the variable.
+    """
+    return os.environ.get("GOOGLEFINDMY_CONTAINER_LOGIN") == "1"
+
+
+def container_sign_in_notice(
+    *, heading: str, last_step: str, notes: tuple[str, ...] = ()
+) -> str:
+    """Return the block that sends the user to the noVNC viewer.
+
+    One text for both sign-ins, so the viewer address and its password stand
+    directly above every wait, not only above the first one: a sign-in 2 of 2
+    that resumes from an incomplete file has no sign-in 1 of 2 before it, and
+    otherwise prints nothing while it waits up to five minutes (host run
+    2026-11-27, F-H4), and even after sign-in 1 of 2 the password line had
+    scrolled 22 to 94 lines up by then (F-H5).
+    """
+    url = os.environ.get("GOOGLEFINDMY_NOVNC_URL") or "http://localhost:7900"
+    # The entrypoint mints a per-run password and exports it here for a
+    # LAN-hardened bind; on the loopback default it stays unset and the
+    # base image's fixed "secret" is what the viewer actually accepts.
+    password = os.environ.get("GOOGLEFINDMY_NOVNC_PASSWORD", "secret")
+    lines = [
+        "==================================================",
+        heading,
+        f"  1. Open {url} in your browser (password: {password}).",
+        "  2. Chrome opens by itself in that view within a few seconds.",
+        f"  3. {last_step}",
+        *notes,
+        "--------------------------------------------------",
+        "If a character will not type (the '@' of your address is",
+        "the usual one), paste it instead: open the panel on the left",
+        "edge of the viewer, put the text in the Clipboard box, then",
+        "press Ctrl+V in the browser field.",
+        "==================================================",
+    ]
+    return "\n".join(f"[AuthFlow] {line}" for line in lines)
+
+
 def _describe_lost_session(err: WebDriverException) -> str | None:
     """Return an abort reason when *err* means "the browser window is gone".
 
@@ -247,35 +291,16 @@ def _announce_and_gate(*, headless: bool) -> None:
     # entrypoint sets GOOGLEFINDMY_CONTAINER_LOGIN=1 there, so without this signal
     # the user would be told to "install Chrome on your system" -- wrong for the
     # container, where they must open the noVNC URL.
-    is_container = os.environ.get("GOOGLEFINDMY_CONTAINER_LOGIN") == "1"
+    is_container = in_container_login()
 
     if not headless:
         if is_container:
-            novnc_url = (
-                os.environ.get("GOOGLEFINDMY_NOVNC_URL") or "http://localhost:7900"
-            )
-            # The entrypoint mints a per-run password and exports it here for a
-            # LAN-hardened bind; on the loopback default it stays unset and the
-            # base image's fixed "secret" is what the viewer actually accepts.
-            novnc_password = os.environ.get("GOOGLEFINDMY_NOVNC_PASSWORD", "secret")
             print(
-                "[AuthFlow] ==================================================\n"
-                "[AuthFlow] Action required to sign in to Google:\n"
-                f"[AuthFlow]   1. Open {novnc_url} in your browser "
-                f"(password: {novnc_password}).\n"
-                "[AuthFlow]   2. Chrome opens by itself in that view within a "
-                "few seconds.\n"
-                "[AuthFlow]   3. Sign in to Google there, then come back to "
-                "this terminal.\n"
-                "[AuthFlow] --------------------------------------------------\n"
-                "[AuthFlow] If a character will not type (the '@' of your "
-                "address is\n"
-                "[AuthFlow] the usual one), paste it instead: open the panel on "
-                "the left\n"
-                "[AuthFlow] edge of the viewer, put the text in the Clipboard "
-                "box, then\n"
-                "[AuthFlow] press Ctrl+V in the browser field.\n"
-                "[AuthFlow] =================================================="
+                container_sign_in_notice(
+                    heading="Action required to sign in to Google:",
+                    last_step="Sign in to Google there, then come back to this "
+                    "terminal.",
+                )
             )
             # No stdin gate in the container: Chrome runs *inside* the container
             # and the user drives it through noVNC. Blocking on input() here

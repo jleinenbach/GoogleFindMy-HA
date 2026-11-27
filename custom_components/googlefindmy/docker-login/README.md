@@ -260,6 +260,11 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
 
    Chrome may close and reopen once or twice along the way. That is expected:
    the sign-in and the encryption-key retrieval are separate browser sessions.
+   The second one prints its own instruction block with the same URL and
+   password (`[AuthFlow] Sign-in 2 of 2 needs you in the browser view:`), then
+   the terminal stays quiet for up to five minutes while it waits for you in
+   noVNC. Its lines are also the first `[AuthFlow]` lines a login prints when
+   it resumes from an incomplete `secrets.json`, which skips sign-in 1 of 2.
    Shorter flickers on top of those two are possible as well: when a browser
    cannot be started the usual way, the driver retries with a different strategy
    (the terminal then logs `Trying headless mode...`). The owner-key step needs
@@ -373,8 +378,10 @@ and is skipped when `secrets.json` already holds that key. A login can end early
 in four ways that the flow itself names, and the line it prints says which one it
 was. (`Ctrl+C` is a fifth way out. The container ends it with the same status,
 but it is the one cancellation without an `[AuthFlow]` line: during sign-in 1 of
-2 it prints a Python `KeyboardInterrupt` traceback, during sign-in 2 of 2 just
-`Exiting.`. A `--reauth` run can also stop with that status before
+2 it prints a Python `KeyboardInterrupt` traceback, during sign-in 2 of 2
+`Exiting.`, often next to one warning that the browser driver is no longer
+reachable (the two come from different threads, so their order can vary). A
+`--reauth` run can also stop with that status before
 either window opens, at the question after its overwrite warning; see
 [Forcing a fresh login](#forcing-a-fresh-login).)
 
@@ -418,7 +425,12 @@ the user") on every one of them, which is deliberately distinct from the `1`/`2`
 the launcher uses for its own failures, so a script around this can tell "you
 stopped" from "it broke". Running out of time in sign-in 2 of 2 is not one of
 them: it ends with status `1` as a failed key step, and the window is not opened
-again.
+again. The line it prints when the time runs out:
+
+```
+[AuthFlow] Sign-in 2 of 2 was not finished within 5 minutes. The result of
+sign-in 1 of 2 is kept; run the login again to finish sign-in 2 of 2.
+```
 
 A cancelled sign-in 1 of 2 stores nothing. A cancelled sign-in 2 of 2 keeps what
 sign-in 1 of 2 stored, so `secrets.json` then holds the tokens without the key.
@@ -843,7 +855,8 @@ there is no separate image to rebuild for code changes.
   why: a window closed a third time, a wait that ran out, or a cancel on the
   Google unlock page. A `Ctrl+C` gets the same status from the container but
   no `[AuthFlow]` line: it ends in a `KeyboardInterrupt` traceback during
-  sign-in 1 of 2 and in a plain `Exiting.` during sign-in 2 of 2. A `--reauth`
+  sign-in 1 of 2, and during sign-in 2 of 2 in `Exiting.`, often next to one
+  warning that the browser driver is no longer reachable. A `--reauth`
   run that ends with `Stopped. Nothing was changed.` was stopped at the question
   after its overwrite warning, before any window opened, and left `secrets.json`
   as it was (see [Forcing a fresh login](#forcing-a-fresh-login)). Start the login

@@ -1952,6 +1952,13 @@ def _configure_cli_logging(*, debug_flag: bool, env: Mapping[str, str]) -> None:
         level=logging.DEBUG if debug_enabled else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if not debug_enabled:
+        # Selenium talks to the local ChromeDriver through urllib3, which warns
+        # once per retry when that process is gone. Ctrl+C ends it together
+        # with the program, so a cancelled sign-in printed three "Retrying"
+        # lines ahead of "Exiting." (host run 2026-11-27, F-H3). The failure
+        # itself still surfaces as a single line; --debug shows the retries.
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 
 def _main(argv: Sequence[str] | None = None) -> None:
