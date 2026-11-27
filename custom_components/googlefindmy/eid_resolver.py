@@ -1096,7 +1096,7 @@ def _withhold_if_static(text: str, metadata: Mapping[str, Any]) -> str:
 
     For log fields that print a device's hashed flags. The mask of a rotating
     tracker changes with its EID; the mask of the counter-0 EID never changes,
-    and INFO lines get pasted into public issues. The frame type is clear text
+    and log lines, DEBUG included, get pasted into public issues. The frame type is clear text
     and the reserved flag bits are zero, so a capture of the advertisement
     already gives every mask bit except the two battery bits; the mask, the
     decoded byte or the battery level in such a line would supply the rest for
@@ -4548,14 +4548,19 @@ class GoogleFindMyEIDResolver:
                     )
                     self._flags_logged_devices.add(storage_key)
                 elif prev is not None and prev.battery_level != battery_raw:
-                    # Battery level changed → DEBUG log
+                    # Battery level changed → DEBUG log; withheld for a static
+                    # EID like the INFO lines: DEBUG logs reach issues too.
                     _LOGGER.debug(
-                        "BLE battery changed device=%s %s(%d)→%s(%d)",
+                        "BLE battery changed device=%s %s→%s",
                         storage_key,
-                        battery_labels.get(prev.battery_level, "?"),
-                        prev.battery_level,
-                        battery_label,
-                        battery_raw,
+                        _withhold_if_static(
+                            f"{battery_labels.get(prev.battery_level, '?')}"
+                            f"({prev.battery_level})",
+                            metadata,
+                        ),
+                        _withhold_if_static(
+                            f"{battery_label}({battery_raw})", metadata
+                        ),
                     )
         elif "component" not in metadata:
             # Cannot decode — log once per device at INFO for diagnostics. A

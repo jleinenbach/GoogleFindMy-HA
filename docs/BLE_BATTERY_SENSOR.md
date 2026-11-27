@@ -249,8 +249,8 @@ probe appears in the full log.
 
 For a tracker with a static EID (the fixed counter-0 EID of DIY
 microcontroller trackers, window `mcu_static`) the probe, the first
-`FMDN_FLAGS_CONFLICT` line and `FMDN_UWT_TRANSITION` keep their level but
-write `withheld` instead of the flags byte, the XOR mask, the decoded byte
+`FMDN_FLAGS_CONFLICT` line, `FMDN_UWT_TRANSITION` and the DEBUG line
+`BLE battery changed` keep their level but write `withheld` instead of the flags byte, the XOR mask, the decoded byte
 and the battery level. The mask of a rotating tracker changes with its EID;
 the counter-0 mask never does, and log lines get pasted into public issues.
 The frame type is clear text and the reserved flag bits are zero, so a

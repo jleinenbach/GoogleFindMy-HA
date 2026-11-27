@@ -46,6 +46,8 @@ CANONICAL_ID = "can-mcu"
 # FMDN hashed flags: battery level in bits 1-2, UWT mode in bit 0.
 BATTERY_LOW = 2
 DECODED_FLAGS = (BATTERY_LOW << 1) | 0x01
+BATTERY_NORMAL = 1
+DECODED_FLAGS_NORMAL = (BATTERY_NORMAL << 1) | 0x01
 
 
 def _identity(*, fast_pair_model_id: str | None) -> DeviceIdentity:
@@ -287,7 +289,12 @@ def test_static_eid_flags_decode_with_counter_0_mask_long_after_pairing() -> Non
 
 
 # Log lines that print the decoded hashed flags of a device.
-_FLAG_LOG_MARKERS = ("FMDN_FLAGS_PROBE", "FMDN_FLAGS_CONFLICT", "FMDN_UWT_TRANSITION")
+_FLAG_LOG_MARKERS = (
+    "FMDN_FLAGS_PROBE",
+    "FMDN_FLAGS_CONFLICT",
+    "FMDN_UWT_TRANSITION",
+    "BLE battery changed",
+)
 
 
 def _new_resolver_with_hass() -> GoogleFindMyEIDResolver:
@@ -300,10 +307,15 @@ def _new_resolver_with_hass() -> GoogleFindMyEIDResolver:
 def _feed_flag_logs(
     resolver: GoogleFindMyEIDResolver, eid: bytes, mask: int, *, at: int
 ) -> None:
-    """Frame and bit agree (probe, mode change), then they disagree (conflict)."""
+    """Frame and bit agree (probe, mode change), then they disagree (conflict).
+
+    A last advertisement moves the battery from LOW to NORMAL (DEBUG line).
+    """
     flags = DECODED_FLAGS ^ mask
     assert _resolve(resolver, bytes([0x41]) + eid + bytes([flags]), at=at)
     assert _resolve(resolver, bytes([0x40]) + eid + bytes([flags]), at=at + 1)
+    normal = DECODED_FLAGS_NORMAL ^ mask
+    assert _resolve(resolver, bytes([0x41]) + eid + bytes([normal]), at=at + 2)
 
 
 def _flag_lines(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
@@ -325,13 +337,14 @@ def _forget_logged_devices(resolver: GoogleFindMyEIDResolver) -> None:
 def test_static_eid_keeps_flags_mask_out_of_info_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The counter-0 mask never changes, and INFO lines end up in issues.
+    """The counter-0 mask never changes, and log lines end up in issues.
 
     The frame type is clear text and the reserved bits are zero, so a capture
     of the advertisement already gives every mask bit except the two battery
     bits. No line may carry the mask, the decoded byte or the battery level.
-    The lines themselves stay at INFO with ``withheld`` in those fields, so a
-    reporter still sees the probe (docs/BLE_BATTERY_SENSOR.md, section 6.2).
+    The lines keep their level (INFO; DEBUG for the battery change) with
+    ``withheld`` in those fields, so a reporter still sees the probe
+    (docs/BLE_BATTERY_SENSOR.md, section 6.2).
     Checked again in the lock window (``timestamp_basis`` ``lock_tracking``),
     which also produces counter 0.
     """
@@ -365,8 +378,20 @@ def test_static_eid_keeps_flags_mask_out_of_info_log(
                 marker,
                 info,
             )
-        for line in info + _flag_lines(caplog, logging.DEBUG):
-            for field in ("flags_byte=0x", "xor_mask=0x", "decoded=0x", "LOW"):
+        debug = _flag_lines(caplog, logging.DEBUG)
+        assert f"BLE battery changed device={CANONICAL_ID} withheld→withheld" in (
+            debug
+        ), debug
+        for line in info + debug:
+            for field in (
+                "flags_byte=0x",
+                "xor_mask=0x",
+                "decoded=0x",
+                "LOW",
+                "NORMAL",
+                "(1)",
+                "(2)",
+            ):
                 assert field not in line, line
             assert f"0x{mask:02x}" not in line, line
 
@@ -409,3 +434,5 @@ def test_rotating_tracker_flags_log_lines_unchanged(
     assert any(
         line.startswith("FMDN_UWT_TRANSITION") and decoded in line for line in info
     ), info
+    debug = _flag_lines(caplog, logging.DEBUG)
+    assert f"BLE battery changed device={CANONICAL_ID} LOW(2)→NORMAL(1)" in debug, debug
