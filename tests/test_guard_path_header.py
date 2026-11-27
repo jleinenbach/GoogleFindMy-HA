@@ -44,6 +44,7 @@ NEW_PRODUCTION_MODULES: set[str] = {
     "custom_components/googlefindmy/entry_self_write.py",
     "custom_components/googlefindmy/location_row_markers.py",
     "custom_components/googlefindmy/phone_identity.py",
+    "custom_components/googlefindmy/proto3_defaults.py",
 }
 
 # Pre-existing test files that predate this guard and still lack the path header.

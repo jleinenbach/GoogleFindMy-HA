@@ -38,6 +38,7 @@ from ..const import (
     ROUND_TRIP_ANCHOR_RADIUS_M,
     ROUND_TRIP_TTL_S,
 )
+from ..proto3_defaults import drop_proto3_defaults, is_proto3_default
 from ._mixin_typing import _MixinBase
 from .helpers.cache import (
     merge_cache_row as _merge_cache_row_impl,
@@ -956,6 +957,12 @@ class CacheOperations(_MixinBase):
 
         These fields help the EID resolver reason about rotation windows.
 
+        A proto3 default under an anchor key (0 for a date or the owner-key
+        version, b"" for a key blob, see ``proto3_defaults``) is no value and
+        never replaces a cached one. A set ``deviceRegistration.pairDate``
+        replaces the cached pair date unless the same payload carries a flat
+        pair date.
+
         Args:
             device_id: Canonical device identifier.
             payload: Raw location payload containing potential metadata.
@@ -966,6 +973,10 @@ class CacheOperations(_MixinBase):
         if not payload:
             return
 
+        # Direct callers (the poll cycle in polling.py) bypass
+        # update_device_cache, so proto3 defaults are dropped here too.
+        payload = drop_proto3_defaults(payload)
+
         # Use module-level constant for metadata keys
         metadata_keys = set(_METADATA_KEYS)
 
@@ -973,7 +984,8 @@ class CacheOperations(_MixinBase):
         if not isinstance(existing, dict):
             existing = {}
 
-        updated = dict(existing)
+        # A default already in the cache is no value either; clean it on the way.
+        updated = drop_proto3_defaults(existing)
 
         # Extract metadata from payload
         for key in metadata_keys:
@@ -983,10 +995,17 @@ class CacheOperations(_MixinBase):
 
         # Handle nested deviceRegistration
         device_reg = payload.get("deviceRegistration")
-        if isinstance(device_reg, dict):
-            pair_date = device_reg.get("pairDate")
-            if pair_date is not None and updated.get("pair_date") is None:
-                updated["pair_date"] = pair_date
+        if isinstance(device_reg, Mapping):
+            nested_pair_date = device_reg.get("pairDate")
+            # The new payload decides, not the cache: a flat pair date in the same
+            # payload wins; otherwise a set nested value replaces the cached one.
+            if (
+                nested_pair_date is not None
+                and not is_proto3_default("pairDate", nested_pair_date)
+                and payload.get("pair_date") is None
+                and payload.get("pairDate") is None
+            ):
+                updated["pair_date"] = nested_pair_date
 
         # Clear metadata_only flag when we have real coordinates
         if clear_metadata_only and _should_clear_metadata_only_flag_impl(
@@ -1082,6 +1101,10 @@ class CacheOperations(_MixinBase):
         - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
         - Applies weighted fusion and semantic-anchor protection to stabilize coordinates
           while still updating timestamps and metadata.
+        - Drops proto3 defaults under anchor keys (see ``proto3_defaults``) before
+          the cached values are preserved, so a default never replaces a stored value.
+          A set ``deviceRegistration.pairDate`` replaces the cached pair date unless
+          the same payload carries a flat pair date.
         """
         # Thread safety: marshal to HA loop if needed
         if not self._is_on_hass_loop():
@@ -1099,7 +1122,22 @@ class CacheOperations(_MixinBase):
 
         # Normalize fields
         slot = _normalize_location_fields_impl(slot)
+        # An unset proto3 field reads as 0 or b"" and is no value: drop it before
+        # the keys are normalized (a default must not shadow a set camelCase twin)
+        # and before the preservation loop, so that loop restores the cached value
+        # and the merge below cannot overwrite it.
+        slot = drop_proto3_defaults(slot)
         slot = _normalize_metadata_keys(slot)
+        # A set deviceRegistration.pairDate is a new pairing date. Lift it before
+        # the preservation loop, which would otherwise restore the cached one; a
+        # flat pair date in the same payload still wins.
+        nested_registration = slot.get("deviceRegistration")
+        if isinstance(nested_registration, Mapping) and slot.get("pair_date") is None:
+            nested_pair_date = nested_registration.get("pairDate")
+            if nested_pair_date is not None and not is_proto3_default(
+                "pairDate", nested_pair_date
+            ):
+                slot["pair_date"] = nested_pair_date
 
         previous_cached = self._device_location_data.get(device_id)
         if not isinstance(previous_cached, Mapping):
@@ -1111,7 +1149,11 @@ class CacheOperations(_MixinBase):
             for metadata_key in _METADATA_KEYS:
                 cached_value = previous_cached.get(metadata_key)
                 incoming_value = slot.get(metadata_key)
-                if cached_value is None or incoming_value is not None:
+                if (
+                    cached_value is None
+                    or incoming_value is not None
+                    or is_proto3_default(metadata_key, cached_value)
+                ):
                     continue
                 if isinstance(cached_value, dict):
                     slot[metadata_key] = dict(cached_value)

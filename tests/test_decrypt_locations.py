@@ -206,6 +206,129 @@ async def test_async_decrypt_location_response_locations_returns_metadata_when_e
     assert secrets_meta.get("creationDate") == int(base_now - 60)
 
 
+_UNSET_ANCHOR_KEYS = (
+    "pair_date",
+    "pairDate",
+    "secrets_creation_date",
+    "secretsCreationDate",
+    "creationDate",
+    "creation_date",
+    "owner_key_version",
+    "ownerKeyVersion",
+)
+
+
+def _owner_report_update(
+    monkeypatch: pytest.MonkeyPatch, base_now: float
+) -> DeviceUpdate_pb2.DeviceUpdate:
+    """Return an update with one decryptable own report and an empty registration."""
+
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    location_proto = DeviceUpdate_pb2.Location()
+    location_proto.latitude = int(52.0 * 1e7)
+    location_proto.longitude = int(13.0 * 1e7)
+    location_proto.altitude = ALTITUDE_METERS
+    location_bytes = location_proto.SerializeToString()
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload(*_args: object, **_kwargs: object) -> bytes:
+        return location_bytes
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    reports = update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
+    reports.recentLocationTimestamp.seconds = int(base_now - 30)
+    recent = reports.recentLocation
+    recent.status = Common_pb2.Status.LAST_KNOWN
+    recent.geoLocation.accuracy = ACCURACY_METERS
+    encrypted_report = recent.geoLocation.encryptedReport
+    encrypted_report.publicKeyRandom = b""
+    encrypted_report.encryptedLocation = b"ignored"
+    encrypted_report.isOwnReport = True
+    return update
+
+
+async def test_unset_proto3_fields_leave_metadata_without_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset pairDate, creationDate and ownerKeyVersion are not emitted as 0."""
+
+    base_now = 1_700_100_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x41" * 32]
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.encryptedUserSecrets.encryptedIdentityKey = b"\x00" * 32
+
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry.get("metadata_only") is True
+    for key in _UNSET_ANCHOR_KEYS:
+        assert entry.get(key) is None, key
+
+
+async def test_unset_owner_key_version_leaves_report_payload_without_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report from a tracker without ownerKeyVersion carries None, not 0."""
+
+    update = _owner_report_update(monkeypatch, 1_700_000_000.0)
+
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["is_own_report"] is True
+    assert "owner_key_version" in entry
+    assert entry["owner_key_version"] is None
+
+
+async def test_set_proto3_fields_pass_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Set anchor values reach the metadata and the report payload literally."""
+
+    update = _owner_report_update(monkeypatch, 1_700_100_000.0)
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.pairDate = 1_700_000_000
+    registration.encryptedUserSecrets.creationDate.seconds = 1_700_000_000
+    registration.encryptedUserSecrets.ownerKeyVersion = 3
+    registration.encryptedUserSecrets.encryptedIdentityKey = b"\x00" * 32
+
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["is_own_report"] is True
+    assert entry["owner_key_version"] == 3
+    assert entry["pair_date"] == 1_700_000_000
+    assert entry["secrets_creation_date"] == 1_700_000_000
+    assert entry["ownerKeyVersion"] == 3
+
+
 async def test_async_decrypt_location_response_unwraps_60_byte_eik(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -24,6 +24,10 @@ The frame byte does not carry the EID length. Per the [Find Hub Network Accessor
 
 When reusing the shared grpclib transport (`SpotGrpcTransport`), keep SSL context creation lazy and ensure ALPN includes `h2`. The transport helper already sets the protocol list and should be closed on unload so new channels negotiate HTTP/2 cleanly. Its `Channel` subclass overrides grpclib's private `_create_connection` to add Happy Eyeballs; `tests/test_spot_grpc_happy_eyeballs.py` fails when the upstream method body changes, and a change belongs in both the subclass and that test's literal.
 
+### Unset protobuf fields reminder
+
+`proto3_defaults.py` defines "unset" for anchor dates, the owner-key version and key blobs (proto3 reads an unset int32 as 0 and an unset bytes field as `b""`). New or changed checks in producers (`decoder.py`, `decrypt_locations.py`) and in the location cache go through this module, not through a local `is not None` or `> 0` test. Older local `> 0` checks predate the module and treat these fields the same way: in `decoder.py` for the pair date, the creation date and the owner-key version of the candidate union, and `_is_version` in `SpotApi/GetEidInfoForE2eeDevices/get_owner_key.py` for the version Spot serves.
+
 ## Cross-reference index
 
 * [`tests/AGENTS.md`](../../tests/AGENTS.md) — Discovery and reconfigure test stubs, including the lightweight `ConfigEntry` doubles referenced across the topical guides above.
