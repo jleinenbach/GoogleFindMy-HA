@@ -19,6 +19,9 @@ Design notes
   only reloads on changed credentials.
 * The entity logs nothing. The coordinator writes the INFO line
   ``AUTOMATIC_POLLING_CHANGE`` for every stored change, without the name.
+* Turning the switch on shows a Home Assistant notification about the
+  effect of the requests on the device; turning it off removes it. The
+  coordinator's setter creates it, never the entity, a restart or the setup.
 * Availability is not tied to presence: the switch stays usable while the
   tracker is absent from the latest Google list, as long as it is known in the
   subentry snapshot.

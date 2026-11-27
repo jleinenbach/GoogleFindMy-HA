@@ -114,7 +114,10 @@
     },
     "progress": {
       "discovery_secrets_new": "Fichier Auth/secrets.json détecté pour {email}",
-      "discovery_secrets_update": "Nouvelles informations d'identification détectées pour {email}"
+      "discovery_secrets_update": "Nouvelles informations d'identification détectées pour {email}",
+      "automatic_polling_notice_title": "Interrogation automatique de position activée pour {device}",
+      "automatic_polling_notice_phone": "Via le compte Google associé, ce téléphone ne peut être trouvé qu’en le localisant à nouveau. À chaque fois, le téléphone lui-même affiche un message indiquant qu’il a été trouvé, lors des interrogations automatiques comme avec « Localiser maintenant ». Tant que l’interrogation automatique de position est activée, ce message apparaîtra donc régulièrement sur le téléphone. Si vous ne le souhaitez pas, désactivez-la ; « Localiser maintenant » reste disponible.",
+      "automatic_polling_notice_tracker": "Les traceurs servent à retrouver des objets perdus, et non à suivre des personnes à leur insu. Google et Apple protègent contre cela avec des alertes de traceurs inconnus : si un traceur se déplace un certain temps avec une autre personne sans son propriétaire, le téléphone de cette personne l’avertit, et le traceur peut émettre un son. Pour lutter contre les abus, Google analyse entre autres le moment où vous demandez la position de vos objets. On ne sait pas si des interrogations automatiques fréquentes déclenchent une telle alerte ; on ne peut pas l’exclure, même si l’objet n’est pas perdu. N’interrogez la position que lorsque vous en avez réellement besoin et ne localisez que vos propres objets. Vous pouvez désactiver l’interrogation automatique de position à tout moment."
     }
   },
   "config_subentries": {
