@@ -356,6 +356,14 @@ reads Alt+@ as a shortcut. The price is the right Alt key itself: inside the
 container it does nothing, which no login needs. It is on by default;
 `GFMY_KEYBOARD_FIX=0` restores the base image's behaviour, right Alt key included.
 
+The same line also maps the digits of the numeric keypad (`KP_0` to `KP_9`) to
+the ordinary digits `0` to `9`. noVNC sends a keypad digit as a keypad key of
+its own, and since Num Lock is off inside the container, that key used to arrive
+as a navigation key (Insert, End, an arrow and so on) and typed nothing, while
+`+`, `-` and Enter on the keypad already worked. With Num Lock off on your own
+keyboard, the keypad keys still move the cursor as before. `GFMY_KEYBOARD_FIX=0`
+switches this mapping off together with the rest.
+
 Two fallbacks, in the order worth trying:
 
 1. **Paste instead of type.** Open the panel on the left edge of the noVNC

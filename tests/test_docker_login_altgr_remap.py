@@ -11,6 +11,12 @@ Why ``Alt_R`` is on the list: on the host, AltGr+Q arrives at the VNC level as
 ``ISO_Level3_Shift`` and ``Mode_switch`` left ``Alt_R`` injected around the
 character, and Chrome read Alt+@ as a shortcut instead of the character. The
 price is the real right Alt key inside the container, which no login needs.
+
+Why the keypad digits are on the same line: noVNC sends a keypad digit as its
+own keysym (``KP_0`` and so on), and with Num Lock off in Xvfb x11vnc delivered
+the key's navigation level (``KP_Insert``), so no digit appeared. Mapping
+``KP_n`` to ``n`` keeps the keypad navigation keys (``KP_End`` and friends,
+sent when Num Lock is off on the host) untouched.
 """
 
 from __future__ import annotations
@@ -53,19 +59,38 @@ def _run_block(tmp_path: Path, env: dict[str, str]) -> Path:
     return home / ".x11vncrc"
 
 
-def _remapped_to_nosymbol(rc_file: Path) -> set[str]:
+def _remap_pairs(rc_file: Path) -> dict[str, str]:
+    """Return the single ``remap`` line of ``rc_file`` as source -> target."""
+
     lines = [
         line
         for line in rc_file.read_text(encoding="utf-8").splitlines()
         if line.startswith("remap ")
     ]
     assert len(lines) == 1, lines
-    pairs = lines[0].removeprefix("remap ").split(",")
+    pairs = [p.partition("-") for p in lines[0].removeprefix("remap ").split(",")]
+    sources = [source for source, _, _ in pairs]
+    assert len(sources) == len(set(sources)), sources
+    return {source: target for source, _, target in pairs}
+
+
+def _remapped_to_nosymbol(rc_file: Path) -> set[str]:
     return {
         source
-        for source, _, target in (p.partition("-") for p in pairs)
+        for source, target in _remap_pairs(rc_file).items()
         if target == "NoSymbol"
     }
+
+
+def _remapped_to_a_keysym(rc_file: Path) -> dict[str, str]:
+    return {
+        source: target
+        for source, target in _remap_pairs(rc_file).items()
+        if target != "NoSymbol"
+    }
+
+
+_KEYPAD_DIGITS = {f"KP_{digit}": str(digit) for digit in range(10)}
 
 
 def test_default_run_drops_right_alt_with_the_level3_modifiers(
@@ -76,6 +101,13 @@ def test_default_run_drops_right_alt_with_the_level3_modifiers(
     rc_file = _run_block(tmp_path, {})
     assert _remapped_to_nosymbol(rc_file) == _DROPPED
     assert "xkb" in rc_file.read_text(encoding="utf-8").splitlines()
+
+
+def test_default_run_maps_every_keypad_digit_to_its_digit(tmp_path: Path) -> None:
+    """``KP_0`` .. ``KP_9`` become ``0`` .. ``9``, and nothing else is remapped."""
+
+    rc_file = _run_block(tmp_path, {})
+    assert _remapped_to_a_keysym(rc_file) == _KEYPAD_DIGITS
 
 
 def test_opt_out_leaves_no_remap_behind(tmp_path: Path) -> None:
@@ -123,3 +155,21 @@ def test_readme_names_every_dropped_key_and_the_price(tmp_path: Path) -> None:
     assert "The price is the right Alt key itself" in section
     assert "it does nothing" in section
     assert "`GFMY_KEYBOARD_FIX=0`" in section
+
+
+def test_readme_names_the_keypad_digit_mapping(tmp_path: Path) -> None:
+    """The README names the keypad mapping the block writes and what stays as it was.
+
+    The range comes from the executed block: a keypad key added to or dropped
+    from the remap without a README change turns this test red.
+    """
+
+    mapped = _remapped_to_a_keysym(_run_block(tmp_path, {}))
+    assert mapped == _KEYPAD_DIGITS
+    first, last = min(mapped), max(mapped)
+    section = " ".join(_readme_altgr_section().split())
+    assert f"(`{first}` to `{last}`)" in section
+    assert f"`{mapped[first]}` to `{mapped[last]}`" in section
+    assert "Num Lock is off inside the container" in section
+    assert "the keypad keys still move the cursor as before" in section
+    assert "switches this mapping off" in section

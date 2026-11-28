@@ -240,6 +240,14 @@ fi
 #             carries the meaning. The price is the real right Alt key inside
 #             the container; no login needs it, and GFMY_KEYBOARD_FIX=0 brings
 #             it back.
+#           The same line maps the keypad digits `KP_0`..`KP_9` to the digits
+#           `0`..`9`. noVNC sends a keypad digit as its own keysym
+#           (core/input/domkeytable.js), x11vnc does not set Num Lock for it,
+#           and Num Lock is off in Xvfb, so the key landed on its navigation
+#           level (`KP_Insert`, `KP_Begin`, ...) and typed nothing. With Num
+#           Lock off on the host, noVNC sends `KP_End` and friends instead of
+#           digits, so those keys still navigate. Switching Num Lock on inside
+#           the container was rejected: it turns `KP_End` into "1".
 #
 # Written here, at runtime, rather than baked into the image, so it sits next to
 # every other viewer decision and can be switched off in one place. x11vnc reads
@@ -254,11 +262,12 @@ if [ "${GFMY_KEYBOARD_FIX:-1}" = "1" ]; then
     '# Written by GoogleFindMy-HA docker-login/entrypoint.sh.' \
     '# Disable with GFMY_KEYBOARD_FIX=0.' \
     'xkb' \
-    'remap ISO_Level3_Shift-NoSymbol,Mode_switch-NoSymbol,Alt_R-NoSymbol' \
+    'remap ISO_Level3_Shift-NoSymbol,Mode_switch-NoSymbol,Alt_R-NoSymbol,KP_0-0,KP_1-1,KP_2-2,KP_3-3,KP_4-4,KP_5-5,KP_6-6,KP_7-7,KP_8-8,KP_9-9' \
     > "${HOME:-/home/seluser}/.x11vncrc" 2>/dev/null; then
     echo "[entrypoint] WARNING: could not write ~/.x11vncrc; AltGr characters" >&2
     echo "[entrypoint] may not reach the browser. Paste them via the noVNC" >&2
-    echo "[entrypoint] clipboard panel instead." >&2
+    echo "[entrypoint] clipboard panel instead. Keypad digits may type nothing" >&2
+    echo "[entrypoint] either; use the digit row above the letters." >&2
   fi
 else
   # An explicit opt-out must also undo a file left by an earlier run, or the
