@@ -25,6 +25,8 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+from homeassistant.components import zone as ha_zone
+
 from ..const import (
     _EID_REFRESH_DEBOUNCE_S,
     DATA_EID_RESOLVER,
@@ -384,11 +386,8 @@ def _zone_verdict(
     """Return the entity id of the zone Home Assistant would put this fix in.
 
     Same call the device tracker makes (``zone.async_in_zones``), first element
-    of the pair. Imported locally: the module is only needed on the event loop,
-    and a module-level import would bind whatever a test stubbed at import time.
+    of the pair.
     """
-    from homeassistant.components import zone as ha_zone
-
     active, _zones = ha_zone.async_in_zones(hass, latitude, longitude, accuracy)
     return active.entity_id if active is not None else None
 
@@ -397,9 +396,9 @@ def _carry_unconfirmed_last_seen(previous: Mapping[str, Any] | None) -> Any:
     """Return the ``last_seen`` of a published row that is still unconfirmed.
 
     A new hold replaces the device's entry, and the entry is also where the
-    "published unconfirmed" note lives (AE-4). Carrying that ``last_seen`` into
+    "published unconfirmed" note lives. Carrying that ``last_seen`` into
     the new entry keeps the note, so the overlap branch still does not fuse with
-    an unconfirmed row while the next report is held (F21).
+    an unconfirmed row while the next report is held.
     """
     if not previous:
         return None
@@ -449,10 +448,10 @@ def _outlier_hold_intercepts(
     hass = getattr(coord, "hass", None)
     if hass is None:
         return False
-    # Coordinates of the raw report first (F2): a report without its own
+    # Coordinates of the raw report first: a report without its own
     # coordinates, or one that only carries the predecessor's coordinates on
     # (semantic poll, should_preserve_previous_coordinates), neither resolves
-    # nor ends a hold and is never held (V-A5 (b)).
+    # nor ends a hold and is never held.
     n_lat = _coerce_float_impl(raw.get("latitude"))
     n_lon = _coerce_float_impl(raw.get("longitude"))
     e_lat = _coerce_float_impl(existing.get("latitude"))
@@ -469,11 +468,10 @@ def _outlier_hold_intercepts(
     if _is_repeat_of_held_report(entry, report_id, seen):
         _LOGGER.debug("Outlier hold: repeat of the held report for %s", device_id)
         return True
-    # (AP4 inserts the resolution of an open hold here.)
     if raw.get("_accuracy_substituted"):
         return False
     if raw.get("location_type") == "trusted":
-        return False  # configured radius, not a measurement (V-A6)
+        return False  # configured radius, not a measurement
     if bool(raw.get("is_own_report")) and not bool(raw.get("is_network_report")):
         return False
     # The predecessor must be a reliable and fresh fix, judged exactly as the
@@ -496,8 +494,8 @@ def _outlier_hold_intercepts(
         or existing_age > resolve_stale_threshold(coord)
     ):
         return False
-    # A stamp the significance gate drops by itself stays its drop (Amendment 2
-    # (c)): holding it would count a hold for a report that could never commit.
+    # A stamp the significance gate drops by itself stays its drop: holding
+    # it would count a hold for a report that could never commit.
     if _stamp_verdict(coord, device_id, raw).rejected_downstream:
         return False
     distance = _haversine_distance_impl(e_lat, e_lon, n_lat, n_lon)
@@ -505,14 +503,14 @@ def _outlier_hold_intercepts(
         new_acc=n_acc, existing_acc=e_acc, distance_m=distance
     ):
         return False
-    # Pure number criteria above run before the zone check (F10): a MagicMock
+    # Pure number criteria above run before the zone check: a MagicMock
     # hass in the legacy suites never reaches async_in_zones for a fix that
     # cannot be held anyway. The wrapper calls this function inside
-    # try/except Exception -> False (fail-open of the whole step, L6).
+    # try/except Exception and publishes the report if it raises (fail-open).
     try:
         zone_before = _zone_verdict(hass, e_lat, e_lon, e_acc)
         zone_after = _zone_verdict(hass, n_lat, n_lon, n_acc)
-    except Exception as err:  # fail-open by contract (L6)
+    except Exception as err:  # fail-open by contract
         _LOGGER.debug(
             "Outlier hold skipped for %s: zone check failed (%s)",
             device_id,
@@ -528,7 +526,7 @@ def _outlier_hold_intercepts(
         "_round_trip_anchor_seed",
         "_round_trip_anchor_consume",
     ):
-        row.pop(key, None)  # a held report has no anchor contact (L15)
+        row.pop(key, None)  # a held report has no anchor contact
     if store is None:
         store = {}
         coord._device_outlier_hold = store
@@ -538,7 +536,7 @@ def _outlier_hold_intercepts(
         "zone": zone_before,
         "held_at": time.time(),
         "last_seen": seen,
-        # keep the L5 lock of a still unconfirmed published row (F21)
+        # keep the no-fusion note of a still unconfirmed published row
         "unconfirmed_last_seen": _carry_unconfirmed_last_seen(entry),
     }
     coord.increment_stat("outlier_holds")
@@ -1961,7 +1959,7 @@ class CacheOperations(_MixinBase):
            back to the anchor instead of drifting.
         4. Standard sensor fixes are fused with inverse-square weighting when
            their accuracy circles overlap; clear jumps simply pass through.
-        5. Last of all, the outlier hold (part A) may hold a report every gate
+        5. Last of all, the outlier hold may hold a report every gate
            accepted; see ``_outlier_hold_intercepts``.
 
         Returns True when the caller should continue processing the payload.
@@ -1975,7 +1973,7 @@ class CacheOperations(_MixinBase):
             return False
         try:
             held = _outlier_hold_intercepts(self, device_id, new_data, raw, existing)
-        except Exception as err:  # fail-open of the whole step (L6)
+        except Exception as err:  # fail-open of the whole step
             _LOGGER.debug(
                 "Outlier hold skipped for %s: %s", device_id, type(err).__name__
             )

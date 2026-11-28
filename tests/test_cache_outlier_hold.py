@@ -1,10 +1,11 @@
 # tests/test_cache_outlier_hold.py
-"""Outlier hold (part A): a single coarse foreign report leaving a zone is held.
+"""Outlier hold: a single coarse foreign report leaving a zone is held.
 
 Geometry is SHIFTED on purpose (public repository): every point is an east/north
 offset in metres from a fictitious zone centre in the open Atlantic. Distances,
 accuracies and time offsets are those of two observed incidents (no calendar
-dates in the public repository, G12); the 25th is reconstructed from measured distances only.
+dates in the public repository); the earlier incident is reconstructed from
+measured distances only.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import math
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,14 +32,14 @@ ZONE_ID = "zone.test_zone"
 T0 = 1_800_000_000.0
 _EARTH_RADIUS_M = 6_371_008.8
 
-# Offsets (east_m, north_m) computed once from the incident probe, see plan AP1.
+# Offsets (east_m, north_m) computed once from the measured incident distances.
 A_26 = (15.7, -60.1)
 B2_26 = (167.0, -144.7)
 C2_26 = (1.4, -98.0)
 A_25 = (15.7, -60.1)
 B_25 = (517.7, -562.1)  # 710 m south-east of A
 C_25 = (-24.3, -60.1)  # 40 m west of A
-# Independent 1/acc**2 means, not the integration's code; B2+C2 is read by AP7.
+# Independent 1/acc**2 means, not the integration's code.
 FUSED_A_C2 = (44.999444639, -29.999808257)
 FUSED_B2_C2 = (44.999022183, -29.999498346)
 
@@ -179,7 +181,7 @@ async def test_incident_26_11_follow_up_fuses_with_predecessor_only(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """C2 fuses with A, not with the held B2 (Fit L3)."""
+    """C2 fuses with A, not with the held B2."""
     _coord, (_after_a, _after_b2, after_c2) = await _run_26_11(hass, freezer)
 
     published = (after_c2["latitude"], after_c2["longitude"])
@@ -219,7 +221,7 @@ async def test_incident_25_11_reconstructed_held_and_discarded(
 
 
 # ---------------------------------------------------------------------------
-# AP2: the fail-open arms, the order against the gates and the entry paths.
+# The fail-open arms, the order against the gates and the entry paths.
 # ---------------------------------------------------------------------------
 
 _MANIFEST = (
@@ -261,7 +263,7 @@ async def test_trusted_semantic_report_is_never_held(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """A trusted row carries a configured radius, not a measurement (V-A6)."""
+    """A trusted row carries a configured radius, not a measurement."""
     coord, after = await _a_then(hass, freezer, _b2(location_type="trusted"))
 
     assert after["last_seen"] == T0 + 1149
@@ -275,7 +277,7 @@ async def test_own_report_is_never_held(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """The device's own report is its own position; it is published (L6)."""
+    """The device's own report is its own position; it is published."""
     coord, after = await _a_then(
         hass, freezer, _b2(is_own_report=True, is_network_report=False)
     )
@@ -290,7 +292,7 @@ async def test_no_hass_means_no_hold(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """Without hass there is no zone judgement, so nothing is held (L6)."""
+    """Without hass there is no zone judgement, so nothing is held."""
     await _setup_zone(hass)
     coord = _coordinator(hass)
     _push(coord, freezer, T0 + 172, _foreign(A_26, 13.53, T0))
@@ -307,7 +309,7 @@ async def test_no_zones_loaded_means_no_hold(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """Zone tracking set up but no zone defined: A is in no zone (L6)."""
+    """Zone tracking set up but no zone defined: A is in no zone."""
     from homeassistant.components import zone
 
     zone.async_setup_track_zone_entity_ids(hass)
@@ -323,7 +325,7 @@ async def test_substituted_accuracy_is_never_held(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """A radius the Google Home filter substituted is not a measurement (L6)."""
+    """A radius the Google Home filter substituted is not a measurement."""
     coord, after = await _a_then(hass, freezer, _b2(_accuracy_substituted=True))
 
     assert after["last_seen"] == T0 + 1149
@@ -339,7 +341,7 @@ async def test_zone_check_error_means_no_hold_and_logs_no_coordinates(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A failing zone lookup publishes the report and logs only the error type."""
-    from homeassistant.components import zone
+    from custom_components.googlefindmy.coordinator import cache as cache_module
 
     def _boom(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("zone lookup failed")
@@ -347,7 +349,9 @@ async def test_zone_check_error_means_no_hold_and_logs_no_coordinates(
     await _setup_zone(hass)
     coord = _coordinator(hass)
     _push(coord, freezer, T0 + 172, _foreign(A_26, 13.53, T0))
-    monkeypatch.setattr(zone, "async_in_zones", _boom)
+    # Patch the name the hold calls: the fixture above reloads the Home Assistant
+    # modules, so the module object in sys.modules is not the one cache.py bound.
+    monkeypatch.setattr(cache_module, "ha_zone", SimpleNamespace(async_in_zones=_boom))
     caplog.set_level(logging.DEBUG, logger="custom_components.googlefindmy")
     after = _push(coord, freezer, T0 + 1172, _b2())
 
@@ -360,7 +364,7 @@ async def test_zone_check_error_means_no_hold_and_logs_no_coordinates(
 
 
 def test_manifest_lists_zone_after_dependency() -> None:
-    """The hold reads ``zone.async_in_zones``; zone loads first when present (E6)."""
+    """The hold reads ``zone.async_in_zones``; zone loads first when present."""
     manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
 
     assert "zone" in manifest["after_dependencies"]
@@ -372,7 +376,7 @@ async def test_report_inside_the_zone_is_not_held(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """Coarse, much coarser and near, but still in the zone: published (L1 b)."""
+    """Coarse, much coarser and near, but still in the zone: published."""
     inside = _foreign((0.0, -40.0), 100.0, T0 + 1149)
     assert _active_zone(hass, inside) is None  # no zone loaded yet
     coord, after = await _a_then(hass, freezer, inside)
@@ -389,7 +393,7 @@ async def test_accuracy_gate_rejection_still_belongs_to_216(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """A fix #216 rejects is rejected by #216, not held (L7, TA-7).
+    """A fix #216 rejects is rejected by #216, not held.
 
     5,000 m away with 1,600 m: outside the zone, at most ten radii away and
     four times coarser than A, so the hold would take it if it ran first.
@@ -413,7 +417,7 @@ async def test_speed_gate_rejection_leaves_hold_untouched(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """With B2 held, an impossible jump is the speed gate's; the hold stays (L7).
+    """With B2 held, an impossible jump is the speed gate's; the hold stays.
 
     50 km in 100 s against A is 500 m/s, above the 400 m/s cap; 150 m keeps it
     below #216, which would otherwise reject it first.
@@ -437,7 +441,7 @@ async def test_held_report_neither_seeds_nor_consumes_an_anchor(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """A held report has no anchor contact (L15), in both directions."""
+    """A held report has no anchor contact, in both directions."""
     # Seed: at the base B2 passed the speed gate and seeded an anchor at A.
     coord, _after = await _a_then(hass, freezer, _b2())
     assert coord._round_trip_anchors == {}
@@ -475,7 +479,7 @@ async def test_repeat_of_held_report_is_swallowed_without_resolution(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """B2 delivered again stays held, is not counted again (Amendment 2 (b))."""
+    """B2 delivered again stays held, is not counted again."""
     coord, _after = await _a_then(hass, freezer, _b2())
     held = _hold_store(coord)
 
@@ -492,7 +496,7 @@ async def test_regressed_stamp_is_left_to_the_significance_gate(
     use_real_homeassistant_modules: None,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """A stamp older than the published row is dropped, not held (Amendment 2 (c))."""
+    """A stamp older than the published row is dropped, not held."""
     coord, after = await _a_then(hass, freezer, _foreign(B2_26, 116.0, T0 - 100))
 
     assert after["last_seen"] == T0
@@ -533,7 +537,7 @@ async def test_entry_paths_hold_alike(
 
 
 def test_hold_counters_are_in_the_stats_table() -> None:
-    """The four hold counters are declared where ``increment_stat`` looks (L9)."""
+    """The four hold counters are declared where ``increment_stat`` looks."""
     src = inspect.getsource(GoogleFindMyCoordinator.__init__)
 
     for key in (
