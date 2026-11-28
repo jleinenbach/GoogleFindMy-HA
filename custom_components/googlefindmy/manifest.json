@@ -3,7 +3,8 @@
   "name": "Google Find My Device",
   "after_dependencies": [
     "bluetooth",
-    "recorder"
+    "recorder",
+    "zone"
   ],
   "codeowners": [
     "@BSkando"

@@ -367,7 +367,7 @@ second time and move the published position towards the raw fix without a new lo
 same report: the normalised `last_seen`, the raw latitude and longitude, the accuracy if it is valid, whether that accuracy is only the fallback estimate and whether the
 report arrives as a trusted anchor (a semantic mapping writes the configured geometry, so an ordinary stampless report can match it), as an 8-byte digest. It
 is not `_tally_identity`, which keys on the timestamp alone and would merge two different reports of one second. The identity is
-formed at the entry of `_apply_weighted_location_fusion`, before any branch rewrites the coordinates, travels as the transient
+formed at the entry of `_fuse_and_gate` (the fusion body, which `_apply_weighted_location_fusion` calls before the outlier hold), before any branch rewrites the coordinates, travels as the transient
 marker `_fusion_report_id` (popped in `update_device_cache` before sanitize, stripped by prefix in the fallbacks) and is booked
 into a per-device ring of `_FUSED_REPORT_MEMORY` identities only AFTER the row is committed - for every committed row, fused or
 taken over as a clear jump, and only when it is not in the ring yet, so the repeats of one report cannot evict another report of
