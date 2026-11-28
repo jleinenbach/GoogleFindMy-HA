@@ -808,6 +808,10 @@ class GoogleFindMyCoordinator(
         self._round_trip_anchors: dict[
             str, dict[str, Any]
         ] = {}  # device_id -> {"lat": float, "lon": float, "ts": float}
+        # Outlier hold (part A): per device at most one held report, or the note
+        # that the published row was released unconfirmed. RAM-only on purpose:
+        # a restart drops a held report without publishing it.
+        self._device_outlier_hold: dict[str, dict[str, Any]] = {}
         self._device_names: dict[str, str] = {}  # device_id -> human name
         self._device_caps: dict[
             str, dict[str, Any]
@@ -963,6 +967,12 @@ class GoogleFindMyCoordinator(
             # cold start, an unreliable cached fix or a stale one - those are
             # accepted, because a coarse position still beats none at all.
             "accuracy_gate_rejects": 0,
+            # Outlier hold (part A): a coarse foreign report leaving a zone was
+            # held, and how each hold ended (confirmed, discarded, timed out).
+            "outlier_holds": 0,
+            "outlier_hold_confirms": 0,
+            "outlier_hold_discards": 0,
+            "outlier_hold_timeouts": 0,
             # Canonicless drops on the last main poll (transition-independent
             # diagnostics aggregate). Absolute per-poll values, not increments;
             # listed here so the restore path (iterates self.stats.keys()) and the

@@ -91,6 +91,34 @@ ACCURACY_GATE_MIN_M = 200.0  # 200 meters
 # 18.3 km jump) sits at ratio 4.3 - factor 4 catches it, factor 6 does not.
 ACCURACY_GATE_RATIO = 4.0
 
+# Outlier hold (part A). A single foreign report that is coarse, much coarser than
+# the reliable fix before it and would take the tracker out of the zone that fix
+# is in is held instead of published. 75 m: the requirement says "over 75 m".
+OUTLIER_HOLD_MIN_ACCURACY_M = 75.0
+# Hold only while the jump is at most this many radii long: measured outliers sat
+# at 1.5-7.1 radii, real far departures at 25 or more (decision E9, small n).
+OUTLIER_HOLD_MAX_DISTANCE_FACTOR = 10.0
+# Wall-clock time after which an unresolved hold is published unconfirmed (E3).
+OUTLIER_HOLD_TIMEOUT_S = 1800.0
+# Entity-facing hold states, single source for the coordinator and the sensor.
+OUTLIER_HOLD_STATES: tuple[str, ...] = ("none", "held", "unconfirmed")
+
+
+def outlier_hold_criteria_met(
+    *, new_acc: float, existing_acc: float, distance_m: float
+) -> bool:
+    """Return the numeric half of the hold rule (L1 c to e).
+
+    Pure on purpose: the boundaries (75.0 against 75.1 m, factor 3.99 against
+    4.0, 10.0 against 10.01 radii) are tested on exact numbers here, which a
+    geometry built from coordinates cannot hit.
+    """
+    return (
+        new_acc > OUTLIER_HOLD_MIN_ACCURACY_M
+        and new_acc >= ACCURACY_GATE_RATIO * existing_acc
+        and distance_m <= OUTLIER_HOLD_MAX_DISTANCE_FACTOR * new_acc
+    )
+
 
 # ---------------------------------------------------------------------------
 # Accuracy classification (privacy-hardened) and its counter names

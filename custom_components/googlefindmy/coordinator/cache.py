@@ -12,6 +12,7 @@ Methods moved here:
 - _merge_with_existing_cache_row: Merge new data with existing cache
 - _haversine_distance: Calculate distance between two coordinates
 - _apply_weighted_location_fusion: Apply weighted location fusion
+- _fuse_and_gate: Fusion and gates without the outlier hold
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ from .helpers.geo import (
     MIN_PHYSICAL_ACCURACY_M,
     is_reliable_fix,
     location_age_seconds,
+    outlier_hold_criteria_met,
     resolve_stale_threshold,
     select_display_row,
 )
@@ -369,6 +371,178 @@ def _accuracy_gate_rejects(
         existing_age,
         threshold,
     )
+    return True
+
+
+_HOLD_HELD = "held"
+_HOLD_UNCONFIRMED = "unconfirmed"
+
+
+def _zone_verdict(
+    hass: Any, latitude: float, longitude: float, accuracy: float
+) -> str | None:
+    """Return the entity id of the zone Home Assistant would put this fix in.
+
+    Same call the device tracker makes (``zone.async_in_zones``), first element
+    of the pair. Imported locally: the module is only needed on the event loop,
+    and a module-level import would bind whatever a test stubbed at import time.
+    """
+    from homeassistant.components import zone as ha_zone
+
+    active, _zones = ha_zone.async_in_zones(hass, latitude, longitude, accuracy)
+    return active.entity_id if active is not None else None
+
+
+def _carry_unconfirmed_last_seen(previous: Mapping[str, Any] | None) -> Any:
+    """Return the ``last_seen`` of a published row that is still unconfirmed.
+
+    A new hold replaces the device's entry, and the entry is also where the
+    "published unconfirmed" note lives (AE-4). Carrying that ``last_seen`` into
+    the new entry keeps the note, so the overlap branch still does not fuse with
+    an unconfirmed row while the next report is held (F21).
+    """
+    if not previous:
+        return None
+    if previous.get("state") == _HOLD_UNCONFIRMED:
+        return previous.get("last_seen")
+    return previous.get("unconfirmed_last_seen")
+
+
+def _is_repeat_of_held_report(
+    entry: Mapping[str, Any] | None, report_id: Any, seen: float | None
+) -> bool:
+    """Return True when the report is the held one delivered again.
+
+    Same fusion identity, or the same normalised ``last_seen``; a ``None`` on
+    either side never matches, so a stampless report is not taken for a repeat.
+    """
+    if not entry or entry.get("state") != _HOLD_HELD:
+        return False
+    held_id = (entry.get("row") or {}).get("_fusion_report_id")
+    if report_id is not None and held_id is not None and report_id == held_id:
+        return True
+    held_seen = entry.get("last_seen")
+    return seen is not None and held_seen is not None and seen == held_seen
+
+
+def _outlier_hold_intercepts(
+    coord: Any,
+    device_id: str,
+    new_data: dict[str, Any],
+    raw: Mapping[str, Any],
+    existing: Mapping[str, Any] | None,
+) -> bool:
+    """Return True when the report is held (or is a repeat of the held one).
+
+    Runs after every gate of the fusion has accepted the report, so the accuracy
+    gate (#216) and the speed gate keep every report they reject. A module
+    function for the reason ``_accuracy_gate_rejects`` gives. Fail-open in every
+    doubtful case: no hass, no zone, an error in the zone check, an own report,
+    a substituted radius. ``raw`` is the report as it arrived, before the
+    overlap branch rewrote its coordinates.
+    """
+    if not existing or existing.get("latitude") is None:
+        return False
+    report_id = new_data.get("_fusion_report_id")
+    if _is_fused_report(coord, device_id, report_id):
+        return False
+    hass = getattr(coord, "hass", None)
+    if hass is None:
+        return False
+    # Coordinates of the raw report first (F2): a report without its own
+    # coordinates, or one that only carries the predecessor's coordinates on
+    # (semantic poll, should_preserve_previous_coordinates), neither resolves
+    # nor ends a hold and is never held (V-A5 (b)).
+    n_lat = _coerce_float_impl(raw.get("latitude"))
+    n_lon = _coerce_float_impl(raw.get("longitude"))
+    e_lat = _coerce_float_impl(existing.get("latitude"))
+    e_lon = _coerce_float_impl(existing.get("longitude"))
+    if n_lat is None or n_lon is None or e_lat is None or e_lon is None:
+        return False
+    if (n_lat, n_lon) == (e_lat, e_lon):
+        return False
+    store = getattr(coord, "_device_outlier_hold", None)
+    entry = store.get(device_id) if store else None
+    seen = _normalize_epoch_seconds(raw.get("last_seen"))
+    # The held report delivered again (next poll, manual locate, push) stays
+    # held: it is swallowed without a counter and resolves nothing.
+    if _is_repeat_of_held_report(entry, report_id, seen):
+        _LOGGER.debug("Outlier hold: repeat of the held report for %s", device_id)
+        return True
+    # (AP4 inserts the resolution of an open hold here.)
+    if raw.get("_accuracy_substituted"):
+        return False
+    if raw.get("location_type") == "trusted":
+        return False  # configured radius, not a measurement (V-A6)
+    if bool(raw.get("is_own_report")) and not bool(raw.get("is_network_report")):
+        return False
+    # The predecessor must be a reliable and fresh fix, judged exactly as the
+    # accuracy gate (#216) judges it, and the report must carry a measured
+    # radius: an estimated one is not a reason to hold anything.
+    n_acc = _coerce_float_impl(raw.get("accuracy"))
+    e_acc = _coerce_float_impl(existing.get("accuracy"))
+    if (
+        n_acc is None
+        or not math.isfinite(n_acc)
+        or n_acc < MIN_PHYSICAL_ACCURACY_M
+        or e_acc is None
+        or not is_reliable_fix(existing)
+    ):
+        return False
+    existing_age = location_age_seconds(existing, time.time())
+    if (
+        existing_age is None
+        or existing_age < 0
+        or existing_age > resolve_stale_threshold(coord)
+    ):
+        return False
+    # A stamp the significance gate drops by itself stays its drop (Amendment 2
+    # (c)): holding it would count a hold for a report that could never commit.
+    if _stamp_verdict(coord, device_id, raw).rejected_downstream:
+        return False
+    distance = _haversine_distance_impl(e_lat, e_lon, n_lat, n_lon)
+    if not outlier_hold_criteria_met(
+        new_acc=n_acc, existing_acc=e_acc, distance_m=distance
+    ):
+        return False
+    # Pure number criteria above run before the zone check (F10): a MagicMock
+    # hass in the legacy suites never reaches async_in_zones for a fix that
+    # cannot be held anyway. The wrapper calls this function inside
+    # try/except Exception -> False (fail-open of the whole step, L6).
+    try:
+        zone_before = _zone_verdict(hass, e_lat, e_lon, e_acc)
+        zone_after = _zone_verdict(hass, n_lat, n_lon, n_acc)
+    except Exception as err:  # fail-open by contract (L6)
+        _LOGGER.debug(
+            "Outlier hold skipped for %s: zone check failed (%s)",
+            device_id,
+            type(err).__name__,
+        )
+        return False
+    if zone_before is None or zone_after == zone_before:
+        return False
+    row = dict(raw)
+    row["_fusion_report_id"] = report_id
+    for key in (
+        "_supersede_round_trip_anchor",
+        "_round_trip_anchor_seed",
+        "_round_trip_anchor_consume",
+    ):
+        row.pop(key, None)  # a held report has no anchor contact (L15)
+    if store is None:
+        store = {}
+        coord._device_outlier_hold = store
+    store[device_id] = {
+        "state": _HOLD_HELD,
+        "row": row,
+        "zone": zone_before,
+        "held_at": time.time(),
+        "last_seen": seen,
+        # keep the L5 lock of a still unconfirmed published row (F21)
+        "unconfirmed_last_seen": _carry_unconfirmed_last_seen(entry),
+    }
+    coord.increment_stat("outlier_holds")
+    _LOGGER.debug("Outlier hold: held a coarse report for %s", device_id)
     return True
 
 
@@ -1787,9 +1961,33 @@ class CacheOperations(_MixinBase):
            back to the anchor instead of drifting.
         4. Standard sensor fixes are fused with inverse-square weighting when
            their accuracy circles overlap; clear jumps simply pass through.
+        5. Last of all, the outlier hold (part A) may hold a report every gate
+           accepted; see ``_outlier_hold_intercepts``.
 
         Returns True when the caller should continue processing the payload.
         """
+        raw = dict(new_data)
+        existing = self._device_location_data.get(device_id)
+        # Called through the class, not ``self``: the fusion suites pass a
+        # ``MagicMock(spec=CacheOperations)`` as self, and a method looked up there
+        # would be a truthy Mock instead of the fusion.
+        if not CacheOperations._fuse_and_gate(self, device_id, new_data):
+            return False
+        try:
+            held = _outlier_hold_intercepts(self, device_id, new_data, raw, existing)
+        except Exception as err:  # fail-open of the whole step (L6)
+            _LOGGER.debug(
+                "Outlier hold skipped for %s: %s", device_id, type(err).__name__
+            )
+            return True
+        return not held
+
+    def _fuse_and_gate(
+        self,
+        device_id: str,
+        new_data: dict[str, Any],
+    ) -> bool:
+        """Fusion and gates without the outlier hold; see the public caller."""
         # Identify the report as it arrived, before any branch below rewrites its
         # coordinates in place. Set on every path, cold start included, because
         # every committed report is remembered (see ``update_device_cache``).
