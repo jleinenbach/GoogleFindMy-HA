@@ -288,6 +288,21 @@ Turning the switch on or off does not reload the integration. Each change
 writes one INFO line `AUTOMATIC_POLLING_CHANGE canonical=<id> new=<on|off>
 changed=<UTC>` without the device name.
 
+Turning the switch on shows a Home Assistant notification for that device,
+which explains what the automatic requests do on it. A phone that Google lists
+without a canonical ID shows a message on the phone each time it is located.
+For a tracker, it is not known whether frequent requests trigger Google's
+warning about unknown trackers, and it cannot be ruled out. A phone that Google
+lists with a canonical ID gets no notification when Google marks it as a phone,
+by its device type or by a locate action for phones; a device with a canonical
+ID without that mark (a tablet, for example) gets the tracker text. Turning the
+switch off, deleting the device in Home Assistant, or Google no longer listing
+it removes the notification. After removing the whole integration entry, or
+one of its subentries, it stays until it is dismissed or Home Assistant
+restarts. A restart or reload never creates one. The integration does not send
+it to a phone: to get it there, create an automation with a
+`persistent_notification` trigger and a `notify.mobile_app_<device>` action.
+
 Every choice is stored: turning a tracker on puts it into
 `automatic_polling_enabled`, turning it off puts it into
 `automatic_polling_disabled`, and a tracker is never in both. A tracker in

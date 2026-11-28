@@ -34,6 +34,9 @@ NEW_KEYS: tuple[str, ...] = (
     "issues.automatic_polling_default_off.fix_flow.step.confirm.description",
     "issues.automatic_polling_default_off.fix_flow.step.confirm.submit",
     "config.flow_title",
+    "config.progress.automatic_polling_notice_title",
+    "config.progress.automatic_polling_notice_phone",
+    "config.progress.automatic_polling_notice_tracker",
 )
 
 # The discovery card title is the account address alone; there is no word to

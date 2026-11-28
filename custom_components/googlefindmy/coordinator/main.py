@@ -130,11 +130,13 @@ else:  # pragma: no cover - typing fallback for runtime imports
     Event = Any
     GoogleHomeFilterProtocol = Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import (
     ConfigEntry,
 )
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers import translation
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
 
@@ -168,6 +170,7 @@ from ..const import (
 )
 from ..ha_typing import DataUpdateCoordinator, callback
 from ..NovaApi.ExecuteAction.LocatePhone.phone_status import PhoneStatus
+from ..phone_identity import is_phone_id
 from ..ProtoDecoders import decoder
 
 _LOGGER = logging.getLogger(__name__)
@@ -1856,6 +1859,11 @@ class GoogleFindMyCoordinator(
         that is already stored writes and logs nothing. A stored change writes one INFO line with the
         canonical id (the same id as ``canonical=`` in ``FMDN_UWT_TRANSITION``)
         and never the device name.
+
+        A stored change to "on" also shows a notification that explains what
+        the requests do on the device; a stored change to "off" removes it.
+        This setter is the only place that shows it, so neither a restart nor
+        the setup of the switch creates one.
         """
         entry = getattr(self, "config_entry", None)
         if entry is None or not isinstance(device_id, str) or not device_id:
@@ -1892,6 +1900,151 @@ class GoogleFindMyCoordinator(
                 "on" if enabled else "off",
                 changed,
             )
+            if enabled:
+                self._schedule_automatic_polling_notice(device_id)
+            else:
+                self._dismiss_automatic_polling_notice(device_id)
+
+    def _schedule_automatic_polling_notice(self, device_id: str) -> None:
+        """Plan the notification task for ``device_id`` as a background task.
+
+        It is a background task of the config entry, so Home Assistant cancels
+        it when the entry unloads; a normal entry task would only be awaited.
+        One task per device is kept, so turning the switch off or removing the
+        device cancels a task that is still loading the text.
+
+        Test doubles of ``async_create_background_task`` may take no
+        ``eager_start`` or only ``(hass, coro)``; each form is tried in turn. A
+        double that returns no task keeps the coroutine, and nothing is tracked.
+        Without the method on the entry nothing is planned.
+        """
+        entry = getattr(self, "config_entry", None)
+        create_task = getattr(entry, "async_create_background_task", None)
+        if not callable(create_task):
+            return
+        show = self._async_show_automatic_polling_notice(device_id)
+        name = f"{DOMAIN}_automatic_polling_notice"
+        try:
+            # Not started eagerly: the task is registered before its first step,
+            # so a removal at any point after this call finds and cancels it.
+            task = create_task(self.hass, show, name=name, eager_start=False)
+        except TypeError:
+            try:
+                task = create_task(self.hass, show, name=name)
+            except TypeError:
+                task = create_task(self.hass, show)
+        if not isinstance(task, asyncio.Task):
+            return
+        tasks = self._automatic_polling_notice_tasks()
+        tasks[device_id] = task
+
+        def _done(done: asyncio.Task[None]) -> None:
+            if tasks.get(device_id) is done:
+                del tasks[device_id]
+            if done.cancelled():
+                return
+            err = done.exception()
+            if err is not None:
+                _LOGGER.warning(
+                    "Automatic polling notice for canonical=%s failed (%s)",
+                    device_id,
+                    type(err).__name__,
+                )
+
+        task.add_done_callback(_done)
+
+    def _automatic_polling_notice_tasks(self) -> dict[str, asyncio.Task[None]]:
+        """Return the pending notification tasks by device id."""
+        tasks = getattr(self, "_automatic_polling_notice_pending", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._automatic_polling_notice_pending = tasks
+        return tasks
+
+    def _automatic_polling_notice_id(self, device_id: str) -> str | None:
+        """Return the notification id for ``device_id``, one per entry and device.
+
+        The id carries no device name, so the same device always replaces its
+        own notification instead of adding a second one.
+        """
+        entry_id = getattr(getattr(self, "config_entry", None), "entry_id", None)
+        if not isinstance(entry_id, str) or not entry_id:
+            return None
+        return f"{DOMAIN}_automatic_polling_{entry_id}_{device_id}"
+
+    def _automatic_polling_notice_kind(self, device_id: str) -> str | None:
+        """Return which notice text fits ``device_id``, or None for no notice.
+
+        ``"phone"``: a phone listed without a canonical ID. It can only be found
+        with a fresh locate, and every locate shows "Device found" on it.
+        ``None``: a phone listed with a canonical ID; it is located without a
+        message on the phone. ``"tracker"``: every other device.
+        """
+        if is_phone_id(device_id):
+            return "phone"
+        if self.is_on_phone_route(device_id):
+            return None
+        slots = getattr(self, "_device_location_data", None) or {}
+        slot = slots.get(device_id) or {}
+        if slot.get("device_type") == _DEVICE_TYPE_PHONE:
+            return None
+        return "tracker"
+
+    async def _async_show_automatic_polling_notice(self, device_id: str) -> None:
+        """Show the notification for a device whose switch was just turned on.
+
+        The text is loaded in the system language. The switch is read again
+        after loading, because it may have been turned off in the meantime.
+        A missing text writes a DEBUG line and shows nothing.
+        """
+        kind = self._automatic_polling_notice_kind(device_id)
+        notification_id = self._automatic_polling_notice_id(device_id)
+        if kind is None or notification_id is None:
+            return
+        language = getattr(self.hass.config, "language", None) or "en"
+        try:
+            resources = await translation.async_get_translations(
+                self.hass, language, "config", integrations={DOMAIN}
+            )
+        except Exception as err:  # noqa: BLE001 - a missing text must not break the switch
+            _LOGGER.debug(
+                "Automatic polling notice: translation lookup failed (%s)",
+                type(err).__name__,
+            )
+            resources = {}
+        prefix = f"component.{DOMAIN}.config.progress.automatic_polling_notice"
+        title = resources.get(f"{prefix}_title")
+        message = resources.get(f"{prefix}_{kind}")
+        if not isinstance(title, str) or not isinstance(message, str):
+            _LOGGER.debug(
+                "Automatic polling notice: no text for canonical=%s kind=%s",
+                device_id,
+                kind,
+            )
+            return
+        if not self.is_automatic_polling_enabled(device_id):
+            return
+        name = self.get_device_display_name(device_id) or device_id
+        persistent_notification.async_create(
+            self.hass,
+            message,
+            title=title.replace("{device}", name),
+            notification_id=notification_id,
+        )
+
+    def _dismiss_automatic_polling_notice(self, device_id: str) -> None:
+        """Remove the notification of ``device_id`` and cancel a pending one."""
+        pending = self._automatic_polling_notice_tasks().pop(device_id, None)
+        if pending is not None:
+            # The setter and ``purge_device`` are synchronous, so the task is
+            # not awaited here. It holds nothing to clean up, and the done
+            # callback set when it was planned consumes the cancellation.
+            pending.cancel()
+        notification_id = self._automatic_polling_notice_id(device_id)
+        hass = getattr(self, "hass", None)
+        if notification_id is None or hass is None:
+            return
+        persistent_notification.async_dismiss(hass, notification_id)
 
     # ---------------------------- Metrics & errors helpers ------------------
     def safe_update_metric(self, key: str, value: float) -> None:
@@ -2872,6 +3025,8 @@ class GoogleFindMyCoordinator(
             return
 
         self._device_location_data.pop(device_id, None)
+        # A removed device keeps no notification about its automatic requests.
+        self._dismiss_automatic_polling_notice(device_id)
         # A phone's battery level and Wi-Fi name share the lifecycle of its row.
         phone_status = getattr(self, "_phone_status", None)
         if isinstance(phone_status, dict):

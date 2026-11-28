@@ -114,7 +114,10 @@
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json detectado para {email}",
-      "discovery_secrets_update": "Novas credenciais detectadas para {email}"
+      "discovery_secrets_update": "Novas credenciais detectadas para {email}",
+      "automatic_polling_notice_title": "Pesquisa automática de localização ativada para {device}",
+      "automatic_polling_notice_phone": "Pela conta do Google vinculada, este telefone só pode ser encontrado localizando-o novamente. A cada vez, o próprio telefone mostra uma mensagem de que foi encontrado, tanto nas pesquisas automáticas quanto com “Localize agora”. Enquanto a pesquisa automática de localização estiver ativada, essa mensagem vai, por isso, aparecer regularmente no telefone. Se você não quiser isso, desative-a novamente; “Localize agora” continua disponível.",
+      "automatic_polling_notice_tracker": "Os rastreadores servem para ajudar a encontrar objetos perdidos, e não para seguir pessoas em segredo. O Google e a Apple protegem contra isso com alertas de rastreadores desconhecidos: se um rastreador se move por um tempo com outra pessoa sem o seu dono, o telefone dessa pessoa a avisa, e o rastreador pode tocar um som. Para proteger contra abusos, o Google analisa, entre outras coisas, quando você consulta a localização dos seus objetos. Não se sabe se pesquisas automáticas frequentes acionam esse tipo de alerta; não dá para descartar, mesmo que o objeto não esteja perdido. Consulte a localização apenas com a frequência de que você realmente precisa e localize somente os seus próprios objetos. Você pode desativar novamente a pesquisa automática de localização a qualquer momento."
     }
   },
   "config_subentries": {

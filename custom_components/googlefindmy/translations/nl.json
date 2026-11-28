@@ -114,7 +114,10 @@
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json gedetecteerd voor {email}",
-      "discovery_secrets_update": "Nieuwe inloggegevens gedetecteerd voor {email}"
+      "discovery_secrets_update": "Nieuwe inloggegevens gedetecteerd voor {email}",
+      "automatic_polling_notice_title": "Automatische locatie-polling ingeschakeld voor {device}",
+      "automatic_polling_notice_phone": "Via het gekoppelde Google-account kan deze telefoon alleen worden gevonden door hem opnieuw te lokaliseren. Elke keer toont de telefoon zelf een melding dat hij is gevonden, bij de automatische polling net zo goed als bij \"Nu lokaliseren\". Zolang automatische locatie-polling is ingeschakeld, verschijnt die melding daarom regelmatig op de telefoon. Wil je dat niet, schakel het dan weer uit; \"Nu lokaliseren\" blijft mogelijk.",
+      "automatic_polling_notice_tracker": "Trackers zijn bedoeld om verloren voorwerpen terug te vinden, niet om mensen heimelijk te volgen. Google en Apple beschermen hiertegen met waarschuwingen voor onbekende trackers: beweegt een tracker zich een tijdje zonder zijn eigenaar met een andere persoon mee, dan waarschuwt de telefoon van die persoon, en de tracker kan een geluid afspelen. Ter bescherming tegen misbruik kijkt Google onder meer naar wanneer je de locatie van je voorwerpen opvraagt. Of frequente automatische polling zo'n waarschuwing activeert, is niet bekend; uitsluiten kan niet, ook als het voorwerp niet verloren is. Vraag de locatie alleen zo vaak op als je echt nodig hebt, en lokaliseer alleen je eigen voorwerpen. Je kunt automatische locatie-polling op elk moment weer uitschakelen."
     }
   },
   "config_subentries": {

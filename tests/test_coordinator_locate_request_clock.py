@@ -81,6 +81,7 @@ class _DummyHass:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
         self.bus = _DummyBus()
+        self.data: dict[str, Any] = {}
 
     def async_create_task(self, coro: Any, *, name: str | None = None) -> Any:
         return self.loop.create_task(coro, name=name)

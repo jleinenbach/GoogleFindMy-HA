@@ -114,7 +114,10 @@
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json detected for {email}",
-      "discovery_secrets_update": "New credentials detected for {email}"
+      "discovery_secrets_update": "New credentials detected for {email}",
+      "automatic_polling_notice_title": "Automatic location polling turned on for {device}",
+      "automatic_polling_notice_phone": "Through the linked Google account, this phone can only be found by locating it again. Each time, the phone itself shows a message that it has been found, for the automatic polls just as for \"Locate now\". While automatic location polling is on, this message will therefore appear on the phone regularly. If you do not want this, turn it off again; \"Locate now\" remains available.",
+      "automatic_polling_notice_tracker": "Trackers are meant to help you find lost items, not to follow people secretly. Google and Apple protect against this with unknown tracker alerts: if a tracker moves with another person for a while without its owner, that person's phone warns them, and the tracker can play a sound. To protect against misuse, Google evaluates, among other things, when you request the location of your items. Whether frequent automatic polls trigger such an alert is not known; it cannot be ruled out, even if the item is not lost. Only poll as often as you really need to, and only locate your own items. You can turn automatic location polling off again at any time."
     }
   },
   "config_subentries": {

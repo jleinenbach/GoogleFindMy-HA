@@ -114,7 +114,10 @@
     },
     "progress": {
       "discovery_secrets_new": "Wykryto Auth/secrets.json dla {email}",
-      "discovery_secrets_update": "Wykryto nowe dane logowania dla {email}"
+      "discovery_secrets_update": "Wykryto nowe dane logowania dla {email}",
+      "automatic_polling_notice_title": "Automatyczne odpytywanie lokalizacji włączone dla {device}",
+      "automatic_polling_notice_phone": "Przez połączone konto Google ten telefon można znaleźć tylko poprzez ponowne zlokalizowanie. Za każdym razem telefon sam wyświetla komunikat, że został znaleziony, zarówno przy automatycznym odpytywaniu, jak i przy „Zlokalizuj teraz”. Dopóki automatyczne odpytywanie lokalizacji jest włączone, ten komunikat będzie więc regularnie pojawiał się na telefonie. Jeśli tego nie chcesz, wyłącz je ponownie; „Zlokalizuj teraz” pozostaje dostępne.",
+      "automatic_polling_notice_tracker": "Lokalizatory mają pomagać w odnajdywaniu zgubionych przedmiotów, a nie służyć do potajemnego śledzenia ludzi. Google i Apple chronią przed tym ostrzeżeniami o nieznanych lokalizatorach: jeśli lokalizator przez jakiś czas przemieszcza się z inną osobą bez swojego właściciela, telefon tej osoby ją ostrzega, a lokalizator może odtworzyć dźwięk. W celu ochrony przed nadużyciami Google analizuje między innymi, kiedy sprawdzasz lokalizację swoich przedmiotów. Nie wiadomo, czy częste automatyczne odpytywanie wywołuje takie ostrzeżenie; nie można tego wykluczyć, nawet jeśli przedmiot nie zaginął. Sprawdzaj lokalizację tylko tak często, jak naprawdę potrzebujesz, i lokalizuj tylko własne przedmioty. Automatyczne odpytywanie lokalizacji możesz w każdej chwili ponownie wyłączyć."
     }
   },
   "config_subentries": {

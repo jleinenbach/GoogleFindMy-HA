@@ -114,7 +114,10 @@
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json rilevato per {email}",
-      "discovery_secrets_update": "Nuove credenziali rilevate per {email}"
+      "discovery_secrets_update": "Nuove credenziali rilevate per {email}",
+      "automatic_polling_notice_title": "Polling automatico della posizione attivato per {device}",
+      "automatic_polling_notice_phone": "Tramite l’account Google collegato, questo telefono può essere trovato solo localizzandolo di nuovo. Ogni volta il telefono stesso mostra un messaggio che indica che è stato trovato, sia durante il polling automatico sia con \"Localizza ora\". Finché il polling automatico della posizione è attivo, questo messaggio comparirà quindi regolarmente sul telefono. Se non lo vuoi, disattivalo di nuovo; \"Localizza ora\" resta disponibile.",
+      "automatic_polling_notice_tracker": "I tracker servono a ritrovare oggetti smarriti, non a seguire le persone di nascosto. Google e Apple proteggono da questo con gli avvisi sui tracker sconosciuti: se un tracker si sposta per un po’ con un’altra persona senza il suo proprietario, il telefono di quella persona la avvisa e il tracker può riprodurre un suono. Per proteggere dagli abusi, Google valuta, tra le altre cose, quando richiedi la posizione dei tuoi oggetti. Non è noto se un polling automatico frequente faccia scattare un avviso di questo tipo; non si può escludere, anche se l’oggetto non è smarrito. Richiedi la posizione solo con la frequenza di cui hai davvero bisogno e localizza solo i tuoi oggetti. Puoi disattivare di nuovo il polling automatico della posizione in qualsiasi momento."
     }
   },
   "config_subentries": {

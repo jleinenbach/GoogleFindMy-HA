@@ -114,7 +114,10 @@
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json für {email} erkannt",
-      "discovery_secrets_update": "Neue Anmeldedaten für {email} erkannt"
+      "discovery_secrets_update": "Neue Anmeldedaten für {email} erkannt",
+      "automatic_polling_notice_title": "Automatische Standortabfragen für {device} eingeschaltet",
+      "automatic_polling_notice_phone": "Über das verbundene Google-Konto lässt sich dieses Telefon nur finden, indem es neu geortet wird. Dabei zeigt es jedes Mal „Gerät gefunden“ von „Mein Gerät finden“ an, bei den automatischen Abfragen genauso wie bei „Jetzt orten“. Solange die automatischen Abfragen eingeschaltet sind, erscheint „Gerät gefunden“ deshalb regelmäßig auf dem Telefon. Willst du das nicht, schalte sie wieder aus; „Jetzt orten“ bleibt möglich.",
+      "automatic_polling_notice_tracker": "Tracker sollen helfen, verlorene Gegenstände wiederzufinden, und nicht dazu dienen, Personen heimlich zu verfolgen. Dagegen schützen Google und Apple mit Warnungen vor unbekannten Trackern: Bewegt sich ein Tracker eine Weile ohne seinen Besitzer mit einer anderen Person, warnt deren Telefon, und der Tracker kann einen Ton abspielen. Google wertet zum Schutz vor Missbrauch unter anderem aus, wann du den Standort deiner Gegenstände abfragst. Ob häufige automatische Abfragen dabei eine solche Warnung auslösen, ist nicht bekannt; ausschließen lässt es sich nicht, auch wenn der Gegenstand nicht verloren ist. Frag nur so oft ab, wie du es wirklich brauchst, und orte nur deine eigenen Gegenstände. Du kannst die automatischen Abfragen jederzeit wieder ausschalten."
     }
   },
   "config_subentries": {
