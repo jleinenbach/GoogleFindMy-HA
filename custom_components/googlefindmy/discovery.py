@@ -1545,10 +1545,12 @@ class SecretsJSONWatcher:
             or translation.LOCALE_EN
         )
         try:
+            # The keys live under ``config.progress``; Home Assistant serves
+            # them through the category "config", not "component".
             resources = await translation.async_get_translations(
                 self._hass,
                 language,
-                "component",
+                "config",
                 integrations={DOMAIN},
             )
         except Exception as err:  # noqa: BLE001 - translation backend optional
